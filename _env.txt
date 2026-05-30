@@ -1,5 +1,0 @@
-TARGETS: x86_64-pc-windows-msvc
-SSH: C:\WINDOWS\System32\OpenSSH\ssh.exe
-PLINK: 
-PSCP: 
-PING: True
