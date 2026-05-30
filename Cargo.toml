@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = ["crates/crater-core", "crates/crater-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/your-org/crater"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process"] }
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+clap = { version = "4", features = ["derive"] }
+
+# --- Deferred deps (uncomment as each feature lands) ---
+# reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }  # M1: OnlineSource downloads
+# russh = "0.45"            # M1: SSH executor
+# russh-sftp = "2"          # M1: file upload to target
+# sha2 = "0.10"             # M1: checksum verification
+# indicatif = "0.17"        # M1: progress bars
+# oci-client = "0.12"       # M2: offline OCI bundle
+# zstd = "0.13"             # M2: bundle compression

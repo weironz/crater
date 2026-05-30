@@ -1,0 +1,14 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# Crater artifacts
+*.bundle
+/dist
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

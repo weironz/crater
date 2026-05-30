@@ -1,0 +1,17 @@
+[package]
+name = "crater-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "crater"
+path = "src/main.rs"
+
+[dependencies]
+crater-core = { path = "../crater-core" }
+anyhow.workspace = true
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

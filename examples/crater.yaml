@@ -1,0 +1,15 @@
+# Example declarative spec. Run: crater apply -f examples/crater.yaml
+inventory:
+  hosts:
+    - name: node1
+      address: 10.0.0.11
+      user: root
+      port: 22
+      roles: [docker]
+
+components:
+  - name: docker
+    version: "24.0.9"
+
+# Reserved (M2/M4+); ignored in M1.
+offline: false

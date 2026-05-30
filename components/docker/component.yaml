@@ -1,0 +1,36 @@
+# Docker (static binaries) — first built-in component (M1 MVP / D-005).
+# Enums are internally tagged: each step has a `check:` or `action:` key.
+name: docker
+version_default: "24.0.9"
+supported_os: [ubuntu, debian, rhel, centos, rocky]
+
+preflight:
+  - check: port_free
+    port: 2375
+  - check: kernel_min
+    version: "3.10"
+  - check: disk_free
+    path: /var/lib/docker
+    min_gb: 10
+
+install:
+  - action: pkg_install
+    packages:
+      debian: [ca-certificates, iptables]
+      rhel: [iptables, container-selinux]
+  - action: download
+    url_tmpl: "https://download.docker.com/linux/static/stable/x86_64/docker-{{version}}.tgz"
+    sha256: ""
+  - action: extract
+    to: /usr/bin
+  - action: render_template
+    src: daemon.json.tmpl
+    dst: /etc/docker/daemon.json
+  - action: systemd_unit
+    name: docker
+    enable: true
+    start: true
+
+verify:
+  - action: run_cmd
+    cmd: "docker info"
