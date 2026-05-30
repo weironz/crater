@@ -447,11 +447,17 @@ async fn build_bundle(spec_file: &Path, out: &Path) -> Result<()> {
             if !seen.insert(raw_url.clone()) {
                 continue;
             }
-            let fetch_url = online.rewrite(&raw_url);
-            println!("  fetch {fetch_url}");
-            let data = source::fetch(&fetch_url)
+            // raw_url is the non-rewritten URL (offline ctx). For non-GitHub
+            // hosts, apply registry mirror rewrite; fetch_best tries direct
+            // then CN GitHub mirrors with fallback.
+            let primary = online.rewrite(&raw_url);
+            println!("  fetch {raw_url}");
+            let (data, used) = source::fetch_best(&primary)
                 .await
-                .map_err(|e| anyhow!("fetch {fetch_url}: {e}"))?;
+                .map_err(|e| anyhow!("fetch {raw_url}: {e}"))?;
+            if used != primary {
+                println!("    (via {used})");
+            }
             let entry = stage.store_blob(&raw_url, &data)?;
             println!("    -> {} bytes, sha256={}", entry.size, &entry.sha256[..16]);
             blobs.push(entry);

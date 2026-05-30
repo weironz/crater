@@ -1,0 +1,41 @@
+   Compiling crater-core v0.1.0 (D:\codes\crater\crates\crater-core)
+   Compiling crater-cli v0.1.0 (D:\codes\crater\crates\crater-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.66s
+     Running unittests src\main.rs (target\debug\deps\crater-21479655f3685fde.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\crater_core-2952583d5444d0c7.exe)
+
+running 20 tests
+test ai::tests::extracts_bare_yaml ... ok
+test bundle::tests::sha256_known_vector ... ok
+test diagnose::tests::detects_network_and_disk_together ... ok
+test dag::tests::detects_missing_dep ... ok
+test ai::tests::extracts_fenced_yaml ... ok
+test dag::tests::independent_sorted_alphabetically ... ok
+test dag::tests::linear_chain ... ok
+test diagnose::tests::clean_log_no_findings ... ok
+test diagnose::tests::has_rules ... ok
+test os::tests::detects_ubuntu ... ok
+test source::tests::github_fetch_candidates_include_mirrors ... ok
+test source::tests::passthrough_unmatched ... ok
+test source::tests::rewrites_registry_k8s ... ok
+test diagnose::tests::detects_apt_missing_package ... ok
+test os::tests::detects_rocky ... ok
+test source::tests::nongithub_has_single_candidate ... ok
+test dag::tests::detects_cycle ... ok
+test ai::tests::nl_to_spec_validates_components ... ok
+test ai::tests::validates_into_spec ... ok
+test bundle::tests::pack_unpack_roundtrip ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+   Doc-tests crater_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

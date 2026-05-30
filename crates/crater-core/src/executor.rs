@@ -132,6 +132,51 @@ impl SshExecutor {
 
 #[async_trait]
 impl Executor for SshExecutor {
+    /// Override the default base64-in-one-shot writer: large blobs (e.g. a
+    /// 10 MB offline artifact) produce a command too big for a single SSH exec
+    /// (the channel returns no exit status -> code -1). Stream the base64 text
+    /// in chunks appended to a temp file, then decode once on the target.
+    async fn write_file(&self, path: &str, content: &[u8]) -> crate::Result<()> {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(content);
+        let tmp = format!("{path}.crater-b64");
+
+        // Ensure parent dir exists and start a fresh temp file.
+        let prep = format!("mkdir -p \"$(dirname '{path}')\" && : > '{tmp}'");
+        let out = self.run(&prep).await?;
+        if !out.ok() {
+            anyhow::bail!("prepare {tmp} failed (code {}): {}", out.code, out.stderr.trim());
+        }
+
+        // Append base64 in chunks. The chunk travels as a single shell
+        // argument, so it must stay under Linux MAX_ARG_STRLEN (~128 KB).
+        // 60 KB is safely below that.
+        const CHUNK: usize = 60_000; // base64 chars per round trip
+        let bytes = b64.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let end = (i + CHUNK).min(bytes.len());
+            let chunk = &b64[i..end];
+            let cmd = format!("printf %s '{chunk}' >> '{tmp}'");
+            let out = self.run(&cmd).await?;
+            if !out.ok() {
+                anyhow::bail!(
+                    "append chunk to {tmp} failed (code {}): {}",
+                    out.code,
+                    out.stderr.trim()
+                );
+            }
+            i = end;
+        }
+
+        // Decode once, then clean up the temp file.
+        let fin = format!("base64 -d '{tmp}' > '{path}' && rm -f '{tmp}'");
+        let out = self.run(&fin).await?;
+        if !out.ok() {
+            anyhow::bail!("decode {path} failed (code {}): {}", out.code, out.stderr.trim());
+        }
+        Ok(())
+    }
+
     async fn run(&self, cmd: &str) -> crate::Result<CmdOutput> {
         let mut channel = self.handle.channel_open_session().await?;
         channel.exec(true, cmd).await?;
