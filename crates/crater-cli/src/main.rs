@@ -106,6 +106,26 @@ enum Cmd {
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
     },
+    /// Copy a local file to a target over SSH (chunked base64, no scp needed).
+    Push {
+        #[arg(long)]
+        host: String,
+        #[arg(long, default_value = "root")]
+        user: String,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long, default_value_t = 22)]
+        port: u16,
+        /// Local source file.
+        #[arg(long)]
+        src: PathBuf,
+        /// Remote destination path.
+        #[arg(long)]
+        dst: String,
+        /// chmod the remote file (e.g. 755) after upload.
+        #[arg(long)]
+        chmod: Option<String>,
+    },
     /// Internal: self-bootstrap agent mode running on the target node.
     Agent {
         #[arg(long)]
@@ -134,6 +154,15 @@ async fn main() -> Result<()> {
             port,
             apply,
         } => deploy_bundle(&bundle, host, &user, password, port, apply).await,
+        Cmd::Push {
+            host,
+            user,
+            password,
+            port,
+            src,
+            dst,
+            chmod,
+        } => push_file(&host, &user, password, port, &src, &dst, chmod).await,
         Cmd::Ai { request, output } => ai_generate(&request.join(" "), output).await,
         Cmd::Doctor {
             file,
@@ -243,6 +272,41 @@ async fn run_adhoc(
     }
     println!("--- exit {} ---", out.code);
     std::process::exit(if out.ok() { 0 } else { out.code });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn push_file(
+    host: &str,
+    user: &str,
+    password: Option<String>,
+    port: u16,
+    src: &Path,
+    dst: &str,
+    chmod: Option<String>,
+) -> Result<()> {
+    let pw = password
+        .or_else(|| std::env::var("CRATER_SSH_PASSWORD").ok())
+        .ok_or_else(|| anyhow!("--password (or CRATER_SSH_PASSWORD) required"))?;
+    let data = std::fs::read(src).map_err(|e| anyhow!("read {}: {e}", src.display()))?;
+    println!(
+        "Pushing {} ({} bytes) -> {user}@{host}:{dst} ...",
+        src.display(),
+        data.len()
+    );
+    let exec = SshExecutor::connect(host, port, user, &pw).await?;
+    exec.write_file(dst, &data).await?;
+    if let Some(mode) = chmod {
+        let out = exec.run(&format!("chmod {mode} '{dst}'")).await?;
+        if !out.ok() {
+            anyhow::bail!("chmod {mode} {dst} failed: {}", out.stderr.trim());
+        }
+    }
+    // Confirm via sha256 on the remote side.
+    let out = exec.run(&format!("sha256sum '{dst}' | cut -d' ' -f1")).await?;
+    println!("remote sha256: {}", out.stdout.trim());
+    println!("local  sha256: {}", crater_core::bundle::sha256_hex(&data));
+    println!("Done.");
+    Ok(())
 }
 
 /// Map user-friendly aliases to actual component directory names, so the

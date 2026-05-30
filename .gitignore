@@ -7,6 +7,13 @@
 *.bundle
 /dist
 
+# scratch / debug logs
+buildcheck.*
+build.log
+test.log
+_*.txt
+_*.log
+
 # Editors / OS
 .idea/
 .vscode/
