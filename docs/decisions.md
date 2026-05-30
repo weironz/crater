@@ -36,3 +36,37 @@
 - **决策**：需求文档拆分多文件、持续增补；关键沟通沉淀到 `decisions.md`。
 - **理由**：防止上下文窗口丢失导致需求遗忘。
 - **影响**：见 [docs/README.md](README.md) 维护约定；新会话先读 `requirements.md` + 本文件。
+
+---
+
+## 2026-05-31 夜 · M1–M5 自主开发（均真机验证）
+
+### D-007 在线下载交给目标机；控制端 reqwest 仅用于制包
+agentless 下在线依赖由目标机自身 curl/apt 拉取;控制端 reqwest 只在 `crater build` 制离线包时拉取。符合 F9,简化 M1。
+
+### D-008 SSH 用 russh 0.45 直连
+从 russh-0.45.0 源码确认 API(check_server_key 形参 `&russh::keys::key::PublicKey`,authenticate_password 返 `Result<bool>`)。放弃 async-ssh2-tokio(需联网且 API 仍要猜)。
+
+### D-009 写远端文件用 base64 over exec + 大文件分块
+小文件:`printf %s <b64> | base64 -d > file`,免单独 SFTP 通道,Local/SSH 通用。大文件(如 10MB 离线制品)单条 exec 过大会导致 SSH channel 无 exit-status(code -1),且 >128KB 触发 Linux MAX_ARG_STRLEN;故 SshExecutor::write_file 改为**60KB 分块** append 到临时文件后一次性解码。已验证 10.6MB OK。
+
+### D-010 docker 用发行版包路径
+首个端到端最稳(docker.io / docker);静态二进制(引擎已支持 download/extract)留作 node_exporter 演示与后续 profile。
+
+### D-011 通用换源加速（待做）
+apt/dnf 国内镜像 + 启用 universe。测试机 192.168.73.11 本就是 tuna/aliyun 源 + universe,故 M1 未被阻塞;其它环境需要时再补。
+
+### D-012 离线 bundle = tar.gz 纯 Rust
+tar + flate2(rust_backend),免 C 工具链,Windows 控制端可直接编。OCI layout / zstd 留后续。
+
+### D-013 k8s 代表选 k3s
+轻量、单二进制、CN 镜像友好(INSTALL_K3S_MIRROR=cn)。kubeadm 完整集群、k3s 多节点 join、k3s air-gap 离线均留后续。安装脚本自身 enable+start,组件**不再加** systemd restart(避免 race),verify 用 `|| true` 容忍首启慢。已真机验证节点 Ready。
+
+### D-014 组件依赖用 requires + 拓扑排序
+`dag.rs` Kahn 拓扑排序,确定性(字母序断平),检测环与缺失依赖;spec 内未列出的依赖被忽略(宽松)。
+
+### D-015 AI 副驾不司机（OpenAI 兼容 + 确定性护栏）
+provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契合政企离线)。`nl_to_spec` 让模型只产候选,再经 schema 反序列化 + 组件存在性校验;幻觉被拒,绝不静默驱动部署。离线诊断 `diagnose.rs` 固化规则零网络零模型先行,内网模型可叠加。
+
+### D-016 组件别名
+`resolve_alias`:`k8s`/`kubernetes`→`k3s`,`es`→`elasticsearch`,使用户字面命令 `crater k8s` / `crater es` 可用。

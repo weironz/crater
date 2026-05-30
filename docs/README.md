@@ -7,7 +7,8 @@
 | 文件 | 内容 | 状态 |
 |------|------|------|
 | [requirements.md](requirements.md) | 需求基线总览（定位、功能、AI、非功能、CLI、OS、路线） | v0.2 |
-| [decisions.md](decisions.md) | 关键决策 / 沟通记录（ADR 风格，按时间追加） | 持续 |
+| [decisions.md](decisions.md) | 关键决策 / 沟通记录（ADR 风格，D-001~D-016） | 持续 |
+| [progress.md](progress.md) | 开发进展日志（M1–M5 已完成并真机验证；含工具链纪律） | 持续 |
 
 ## 规划中的文档（按需新增）
 
