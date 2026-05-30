@@ -1,3 +1,0 @@
-inactive
-bash: line 1: k3s: command not found
---- exit 127 ---

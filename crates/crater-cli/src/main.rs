@@ -245,9 +245,21 @@ async fn run_adhoc(
     std::process::exit(if out.ok() { 0 } else { out.code });
 }
 
+/// Map user-friendly aliases to actual component directory names, so the
+/// literal examples `crater k8s` / `crater es` work even though the components
+/// are `k3s` / `elasticsearch`.
+fn resolve_alias(name: &str) -> &str {
+    match name {
+        "k8s" | "kubernetes" => "k3s",
+        "es" => "elasticsearch",
+        other => other,
+    }
+}
+
 async fn deploy_shortcut(args: Vec<String>) -> Result<()> {
     let mut it = args.into_iter();
-    let name = it.next().ok_or_else(|| anyhow!("missing component name"))?;
+    let raw = it.next().ok_or_else(|| anyhow!("missing component name"))?;
+    let name = resolve_alias(&raw).to_string();
     let rest: Vec<String> = it.collect();
     let f = parse_flags(&rest)?;
 

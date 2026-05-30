@@ -1,0 +1,65 @@
+# elasticsearch (es) — single-node search engine (user's named target: `crater es`).
+# Static tarball install (JVM bundled in the ES tarball), single-node, xpack
+# security disabled for a frictionless demo. Runs as a dedicated non-root user.
+# Via `crater build` the tarball is pre-fetched into an offline bundle and pushed
+# (reusing the chunked SSH upload).
+#
+# NOTE: ES wants ~2GB+ RAM. Heap pinned to a modest 512m for small demo boxes.
+name: elasticsearch
+version_default: "8.15.0"
+supported_os: [ubuntu, debian, rhel, centos, rocky]
+
+preflight:
+  - check: port_free
+    port: 9200
+  - check: disk_free
+    path: /opt
+    min_gb: 3
+
+install:
+  - action: run_cmd
+    cmd: "sysctl -w vm.max_map_count=262144; grep -q vm.max_map_count /etc/sysctl.conf || echo 'vm.max_map_count=262144' >> /etc/sysctl.conf"
+  - action: run_cmd
+    cmd: "id elasticsearch >/dev/null 2>&1 || useradd -r -m -d /opt/elasticsearch-home elasticsearch"
+  - action: download
+    url_tmpl: "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-{{version}}-linux-x86_64.tar.gz"
+  - action: extract
+    to: /opt/elasticsearch
+    strip: 1
+  - action: write_file
+    dst: /opt/elasticsearch/config/elasticsearch.yml
+    content: |
+      cluster.name: crater-es
+      node.name: node-1
+      network.host: 0.0.0.0
+      discovery.type: single-node
+      xpack.security.enabled: false
+  - action: run_cmd
+    cmd: "chown -R elasticsearch:elasticsearch /opt/elasticsearch"
+  - action: write_file
+    dst: /etc/systemd/system/elasticsearch.service
+    content: |
+      [Unit]
+      Description=Elasticsearch (crater)
+      After=network.target
+
+      [Service]
+      User=elasticsearch
+      Group=elasticsearch
+      Environment=ES_JAVA_OPTS=-Xms512m -Xmx512m
+      ExecStart=/opt/elasticsearch/bin/elasticsearch
+      LimitNOFILE=65535
+      LimitMEMLOCK=infinity
+      Restart=always
+      TimeoutStartSec=180
+
+      [Install]
+      WantedBy=multi-user.target
+  - action: systemd_unit
+    name: elasticsearch
+    enable: true
+    start: true
+
+verify:
+  - action: run_cmd
+    cmd: "for i in $(seq 1 60); do curl -s http://localhost:9200 >/dev/null 2>&1 && break; sleep 3; done; curl -s http://localhost:9200 2>&1 | head -20 || true"
