@@ -1,0 +1,9 @@
+   Compiling crater-core v0.1.0 (D:\codes\crater\crates\crater-core)
+error[E0425]: cannot find type `PublicKey` in crate `russh::keys`
+  --> crates\crater-core\src\executor.rs:93:43
+   |
+93 |         _server_public_key: &russh::keys::PublicKey,
+   |                                           ^^^^^^^^^ not found in `russh::keys`
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `crater-core` (lib) due to 1 previous error

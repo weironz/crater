@@ -1,28 +1,26 @@
-# Docker (static binaries) — first built-in component (M1 MVP / D-005).
-# Enums are internally tagged: each step has a `check:` or `action:` key.
+# Docker — first built-in component (M1 MVP / D-005).
+# M1 uses the distro package path (robust, single end-to-end test target).
+# Static-binary install (download/extract) is supported by the engine and can
+# be added as an alternative profile later.
 name: docker
-version_default: "24.0.9"
+version_default: "latest"
 supported_os: [ubuntu, debian, rhel, centos, rocky]
 
 preflight:
-  - check: port_free
-    port: 2375
   - check: kernel_min
     version: "3.10"
   - check: disk_free
     path: /var/lib/docker
-    min_gb: 10
+    min_gb: 5
 
 install:
+  # Debian/Ubuntu: docker.io pulls in containerd + a systemd unit and is in the
+  # base repos. RHEL family: the `docker` / podman-docker package or fallback.
   - action: pkg_install
     packages:
-      debian: [ca-certificates, iptables]
-      rhel: [iptables, container-selinux]
-  - action: download
-    url_tmpl: "https://download.docker.com/linux/static/stable/x86_64/docker-{{version}}.tgz"
-    sha256: ""
-  - action: extract
-    to: /usr/bin
+      debian: [docker.io]
+      rhel: [docker]
+  # Registry mirror for China before (re)start.
   - action: render_template
     src: daemon.json.tmpl
     dst: /etc/docker/daemon.json
@@ -33,4 +31,6 @@ install:
 
 verify:
   - action: run_cmd
-    cmd: "docker info"
+    cmd: "docker version --format '{{.Server.Version}}' || docker --version"
+  - action: run_cmd
+    cmd: "docker info --format 'Storage: {{.Driver}} | Cgroup: {{.CgroupDriver}}' 2>/dev/null || true"

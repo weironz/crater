@@ -37,10 +37,21 @@ impl OsFamily {
     pub fn install_cmd(&self, packages: &[String]) -> String {
         let pkgs = packages.join(" ");
         match self {
-            OsFamily::Debian => format!("apt-get install -y {pkgs}"),
-            OsFamily::Rhel => format!("dnf install -y {pkgs}"),
-            OsFamily::Unknown => format!("# unknown OS family: cannot install {pkgs}"),
+            OsFamily::Debian => format!(
+                "apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y {pkgs}"
+            ),
+            OsFamily::Rhel => format!("dnf install -y {pkgs} || yum install -y {pkgs}"),
+            OsFamily::Unknown => format!("echo 'unknown OS family: cannot install {pkgs}'; exit 1"),
         }
+    }
+}
+
+/// Detect a target's OS family by reading `/etc/os-release` through an executor
+/// (works over SSH against a remote node).
+pub async fn detect_via(exec: &dyn crate::executor::Executor) -> OsFamily {
+    match exec.run("cat /etc/os-release").await {
+        Ok(o) if o.ok() => family_from_os_release(&o.stdout),
+        _ => OsFamily::Unknown,
     }
 }
 

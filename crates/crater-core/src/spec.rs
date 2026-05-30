@@ -39,6 +39,9 @@ pub struct Host {
     pub user: String,
     #[serde(default = "default_ssh_port")]
     pub port: u16,
+    /// SSH password (M1). Key-based auth + secret store come later.
+    #[serde(default)]
+    pub password: Option<String>,
     #[serde(default)]
     pub roles: Vec<String>,
 }

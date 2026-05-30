@@ -66,6 +66,9 @@ pub enum Action {
         to: PathBuf,
         #[serde(default)]
         from: Option<PathBuf>,
+        /// tar --strip-components value.
+        #[serde(default)]
+        strip: u32,
     },
     RenderTemplate {
         src: String,

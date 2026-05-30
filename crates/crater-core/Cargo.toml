@@ -10,3 +10,6 @@ serde_yaml.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
+tracing.workspace = true
+russh.workspace = true
+base64.workspace = true
