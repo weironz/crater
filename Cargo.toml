@@ -19,10 +19,13 @@ tracing-subscriber = "0.3"
 clap = { version = "4", features = ["derive"] }
 russh = "0.45"             # M1: SSH executor (pure Rust; API pinned to 0.45.x)
 base64 = "0.22"            # M1: push rendered files to target via base64
+# M2: offline bundle build/deploy + M4 AI (reqwest shared)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tar = "0.4"                # bundle packing (tar layer)
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }  # pure-Rust gzip, no C toolchain
+sha2 = "0.10"             # checksum verification
 
 # --- Deferred deps (uncomment as each feature lands) ---
-# reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }  # M2: control-plane bundle building
-# sha2 = "0.10"             # M2: checksum verification
 # indicatif = "0.17"        # progress bars
-# oci-client = "0.12"       # M2: offline OCI bundle
-# zstd = "0.13"             # M2: bundle compression
+# oci-client = "0.12"       # OCI image bundles (later)
+# zstd = "0.13"             # zstd compression (later; needs C toolchain)

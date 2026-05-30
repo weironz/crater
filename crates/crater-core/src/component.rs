@@ -19,6 +19,9 @@ pub struct ComponentDescriptor {
     pub version_default: Option<String>,
     #[serde(default)]
     pub supported_os: Vec<String>,
+    /// Other components that must be deployed before this one (M3 DAG).
+    #[serde(default)]
+    pub requires: Vec<String>,
     #[serde(default)]
     pub preflight: Vec<Check>,
     #[serde(default)]
@@ -88,7 +91,7 @@ pub enum Action {
     RunCmd {
         cmd: String,
     },
-    /// Reserved for offline image loading (M2).
+    /// Reserved for offline image loading (M2+).
     LoadImage {
         reference: String,
     },

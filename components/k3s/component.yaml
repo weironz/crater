@@ -1,0 +1,33 @@
+# k3s — lightweight Kubernetes (M3 k8s representative / D-013).
+# Single-binary k8s distribution; ideal for crater's offline/CN philosophy.
+# This profile is the ONLINE install via the official script with the China
+# mirror (INSTALL_K3S_MIRROR=cn pulls binary+images from rancher's CN mirror).
+#
+# Offline/air-gap k3s (k3s binary + k3s-airgap-images preloaded into containerd)
+# is a larger follow-up — see docs/progress.md.
+name: k3s
+version_default: "v1.30.5+k3s1"
+supported_os: [ubuntu, debian, rhel, centos, rocky]
+
+preflight:
+  - check: port_free
+    port: 6443
+  - check: disk_free
+    path: /var/lib/rancher
+    min_gb: 5
+
+install:
+  - action: run_cmd
+    cmd: "curl -sfL https://rancher-mirror.rancher.cn/k3s/k3s-install.sh -o /tmp/k3s-install.sh"
+  - action: run_cmd
+    cmd: "INSTALL_K3S_MIRROR=cn INSTALL_K3S_VERSION={{version}} sh /tmp/k3s-install.sh"
+  - action: systemd_unit
+    name: k3s
+    enable: true
+    start: true
+
+verify:
+  - action: run_cmd
+    cmd: "k3s --version 2>&1 | head -1"
+  - action: run_cmd
+    cmd: "for i in $(seq 1 30); do k3s kubectl get nodes 2>/dev/null && break; sleep 2; done"

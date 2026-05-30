@@ -3,20 +3,26 @@
 //! Forms:
 //!   crater <component> [--host H --user U --password P --port N] [--version X] [--os debian|rhel] [--apply]
 //!   crater apply -f crater.yaml [--apply]
-//!   crater agent --task ...            (internal, on the node)
-//!
-//! Without --host the target is the local machine. With --host the control
-//! plane drives the remote node over SSH (agentless).
+//!   crater build -f spec.yaml -o x.bundle                              (online: make offline bundle)
+//!   crater deploy --bundle x.bundle --host H --password P [--apply]    (offline)
+//!   crater ai "<request>" [-o crater.yaml]                             (M4)
+//!   crater doctor --file log.txt | --host H --password P [--ai]        (M5)
+//!   crater run --host H --password P -- <cmd>                          (ad-hoc, ansible -m shell)
+//!   crater agent --task ...                                            (internal, on the node)
 
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 
+use crater_core::bundle::{self, BundleStage, Manifest, ManifestComponent, BUNDLE_FORMAT_VERSION};
 use crater_core::component::ComponentDescriptor;
-use crater_core::engine::{self, build_plan, Op, PlanContext};
+use crater_core::dag::{self, DepNode};
+use crater_core::engine::{self, build_plan, collect_downloads, Op, PlanContext};
 use crater_core::executor::{Executor, LocalExecutor, SshExecutor};
 use crater_core::os::{self, OsFamily};
+use crater_core::source::{self, OnlineSource};
 use crater_core::spec::CraterSpec;
 
 #[derive(Parser)]
@@ -36,9 +42,69 @@ enum Cmd {
     Apply {
         #[arg(short, long)]
         file: PathBuf,
-        /// Actually execute (default is dry-run).
         #[arg(long)]
         apply: bool,
+    },
+    /// Build an offline bundle from a spec (run on an online control machine).
+    Build {
+        #[arg(short, long)]
+        file: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Deploy an offline bundle to a target (zero network on the target).
+    Deploy {
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long, default_value = "root")]
+        user: String,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long, default_value_t = 22)]
+        port: u16,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// AI copilot: natural language -> validated crater.yaml (M4).
+    /// Configure via CRATER_AI_ENDPOINT / CRATER_AI_KEY / CRATER_AI_MODEL.
+    Ai {
+        #[arg(trailing_var_arg = true, required = true)]
+        request: Vec<String>,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Diagnose failures with built-in offline rules (+ optional AI) (M5).
+    Doctor {
+        /// Analyze this local log/error file (fully offline, no SSH).
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Or collect diagnostics from this host over SSH.
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long, default_value = "root")]
+        user: String,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long, default_value_t = 22)]
+        port: u16,
+        /// Also ask the configured AI endpoint for deeper analysis, if set.
+        #[arg(long)]
+        ai: bool,
+    },
+    /// Run an ad-hoc command on a target over SSH (ansible -m shell style).
+    Run {
+        #[arg(long)]
+        host: String,
+        #[arg(long, default_value = "root")]
+        user: String,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long, default_value_t = 22)]
+        port: u16,
+        #[arg(trailing_var_arg = true, required = true)]
+        cmd: Vec<String>,
     },
     /// Internal: self-bootstrap agent mode running on the target node.
     Agent {
@@ -59,6 +125,31 @@ async fn main() -> Result<()> {
 
     match Cli::parse().cmd {
         Cmd::Apply { file, apply } => apply_spec(&file, apply).await,
+        Cmd::Build { file, output } => build_bundle(&file, &output).await,
+        Cmd::Deploy {
+            bundle,
+            host,
+            user,
+            password,
+            port,
+            apply,
+        } => deploy_bundle(&bundle, host, &user, password, port, apply).await,
+        Cmd::Ai { request, output } => ai_generate(&request.join(" "), output).await,
+        Cmd::Doctor {
+            file,
+            host,
+            user,
+            password,
+            port,
+            ai,
+        } => doctor(file, host, &user, password, port, ai).await,
+        Cmd::Run {
+            host,
+            user,
+            password,
+            port,
+            cmd,
+        } => run_adhoc(&host, &user, password, port, &cmd.join(" ")).await,
         Cmd::Agent { task } => {
             println!("[agent] self-bootstrap mode (TODO M3+). task={task:?}");
             Ok(())
@@ -134,6 +225,26 @@ fn parse_flags(rest: &[String]) -> Result<ShortcutFlags> {
     Ok(f)
 }
 
+async fn run_adhoc(
+    host: &str,
+    user: &str,
+    password: Option<String>,
+    port: u16,
+    cmd: &str,
+) -> Result<()> {
+    let pw = password
+        .or_else(|| std::env::var("CRATER_SSH_PASSWORD").ok())
+        .ok_or_else(|| anyhow!("--password (or CRATER_SSH_PASSWORD) required"))?;
+    let exec = SshExecutor::connect(host, port, user, &pw).await?;
+    let out = exec.run(cmd).await?;
+    print!("{}", out.stdout);
+    if !out.stderr.trim().is_empty() {
+        eprintln!("--- stderr ---\n{}", out.stderr);
+    }
+    println!("--- exit {} ---", out.code);
+    std::process::exit(if out.ok() { 0 } else { out.code });
+}
+
 async fn deploy_shortcut(args: Vec<String>) -> Result<()> {
     let mut it = args.into_iter();
     let name = it.next().ok_or_else(|| anyhow!("missing component name"))?;
@@ -144,7 +255,6 @@ async fn deploy_shortcut(args: Vec<String>) -> Result<()> {
     let desc = ComponentDescriptor::from_yaml_file(&component_dir.join("component.yaml"))
         .map_err(|e| anyhow!("failed to load component '{name}': {e}"))?;
 
-    // Build the target executor.
     let exec: Box<dyn Executor> = match &f.host {
         Some(host) => {
             let pw = f
@@ -157,7 +267,6 @@ async fn deploy_shortcut(args: Vec<String>) -> Result<()> {
         None => Box::new(LocalExecutor),
     };
 
-    // Resolve OS family.
     let osf = match &f.os_override {
         Some(s) => OsFamily::from_name(s),
         None => {
@@ -182,10 +291,7 @@ async fn deploy_shortcut(args: Vec<String>) -> Result<()> {
     println!("Version   : {ver}");
     println!("Target    : {}", exec.label());
     println!("OS family : {}", osf.as_str());
-    println!(
-        "Mode      : {}",
-        if f.do_apply { "APPLY" } else { "DRY-RUN" }
-    );
+    println!("Mode      : {}", if f.do_apply { "APPLY" } else { "DRY-RUN" });
     println!("Steps     : {}", plan.len());
     println!("------------------------------------------");
     print_plan(&plan);
@@ -199,22 +305,47 @@ async fn deploy_shortcut(args: Vec<String>) -> Result<()> {
     }
 }
 
-async fn apply_spec(file: &std::path::Path, do_apply: bool) -> Result<()> {
+/// Order selected components by their `requires` DAG (deps first). Edges to
+/// components not in this spec are ignored (lenient); cycles error out.
+fn order_components(spec: &CraterSpec, components_dir: &Path) -> Result<Vec<String>> {
+    let selected: BTreeSet<String> = spec.components.iter().map(|c| c.name.clone()).collect();
+    let mut nodes = Vec::new();
+    for cref in &spec.components {
+        let desc = ComponentDescriptor::from_yaml_file(
+            &components_dir.join(&cref.name).join("component.yaml"),
+        )?;
+        let requires = desc
+            .requires
+            .into_iter()
+            .filter(|r| selected.contains(r))
+            .collect();
+        nodes.push(DepNode {
+            name: cref.name.clone(),
+            requires,
+        });
+    }
+    dag::topo_sort(&nodes)
+}
+
+async fn apply_spec(file: &Path, do_apply: bool) -> Result<()> {
     let spec = CraterSpec::from_yaml_file(file)?;
     let components_dir = PathBuf::from("components");
+    let ordered = order_components(&spec, &components_dir)?;
+    let by_name: BTreeMap<String, &crater_core::spec::ComponentRef> =
+        spec.components.iter().map(|c| (c.name.clone(), c)).collect();
     println!(
-        "Spec: {} host(s), {} component(s), mode={}",
+        "Spec: {} host(s), {} component(s), order=[{}], mode={}",
         spec.inventory.hosts.len(),
         spec.components.len(),
+        ordered.join(" -> "),
         if do_apply { "APPLY" } else { "DRY-RUN" }
     );
 
     if spec.inventory.hosts.is_empty() {
-        // No hosts: just print plans locally (dry-run aid).
-        for cref in &spec.components {
+        for cname in &ordered {
+            let cref = by_name[cname];
             let component_dir = components_dir.join(&cref.name);
-            let desc =
-                ComponentDescriptor::from_yaml_file(&component_dir.join("component.yaml"))?;
+            let desc = ComponentDescriptor::from_yaml_file(&component_dir.join("component.yaml"))?;
             let ver = cref
                 .version
                 .clone()
@@ -234,7 +365,6 @@ async fn apply_spec(file: &std::path::Path, do_apply: bool) -> Result<()> {
             let pw = host
                 .password
                 .as_deref()
-                .or_else(|| Some(""))
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| anyhow!("host {} has no password (M1 requires one)", host.name))?;
             Box::new(SshExecutor::connect(&host.address, host.port, &host.user, pw).await?)
@@ -248,14 +378,13 @@ async fn apply_spec(file: &std::path::Path, do_apply: bool) -> Result<()> {
             OsFamily::Unknown
         };
 
-        for cref in &spec.components {
-            // role filter: if host declares roles, only run matching components
+        for cname in &ordered {
+            let cref = by_name[cname];
             if !host.roles.is_empty() && !host.roles.contains(&cref.name) {
                 continue;
             }
             let component_dir = components_dir.join(&cref.name);
-            let desc =
-                ComponentDescriptor::from_yaml_file(&component_dir.join("component.yaml"))?;
+            let desc = ComponentDescriptor::from_yaml_file(&component_dir.join("component.yaml"))?;
             let ver = cref
                 .version
                 .clone()
@@ -272,6 +401,300 @@ async fn apply_spec(file: &std::path::Path, do_apply: bool) -> Result<()> {
     }
     if !do_apply {
         println!("\n(dry-run; re-run with --apply to execute over SSH.)");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// M2: offline bundle build / deploy
+// ---------------------------------------------------------------------------
+
+async fn build_bundle(spec_file: &Path, out: &Path) -> Result<()> {
+    let spec = CraterSpec::from_yaml_file(spec_file)?;
+    let components_dir = PathBuf::from("components");
+
+    let stage_root = std::env::temp_dir().join(format!("crater-build-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&stage_root);
+    let stage = BundleStage::new(stage_root.clone())?;
+
+    let online = OnlineSource::with_default_mirrors();
+    let mut manifest_components = Vec::new();
+    let mut blobs = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+
+    println!("Building bundle from {} ...", spec_file.display());
+    for cref in &spec.components {
+        let cdir = components_dir.join(&cref.name);
+        let desc = ComponentDescriptor::from_yaml_file(&cdir.join("component.yaml"))?;
+        let ver = cref
+            .version
+            .clone()
+            .or_else(|| desc.version_default.clone())
+            .unwrap_or_else(|| "latest".into());
+
+        copy_dir_all(&cdir, &stage.components_dir().join(&cref.name))?;
+        manifest_components.push(ManifestComponent {
+            name: cref.name.clone(),
+            version: ver.clone(),
+        });
+
+        // Offline ctx so rendered_url() yields RAW urls (the manifest keys).
+        let mut ctx = PlanContext::new(OsFamily::Unknown, ver.clone(), cdir.clone());
+        ctx.offline_blobs = Some(BTreeMap::new());
+        let downloads = collect_downloads(&desc, &ctx);
+
+        for (raw_url, _dest) in downloads {
+            if !seen.insert(raw_url.clone()) {
+                continue;
+            }
+            let fetch_url = online.rewrite(&raw_url);
+            println!("  fetch {fetch_url}");
+            let data = source::fetch(&fetch_url)
+                .await
+                .map_err(|e| anyhow!("fetch {fetch_url}: {e}"))?;
+            let entry = stage.store_blob(&raw_url, &data)?;
+            println!("    -> {} bytes, sha256={}", entry.size, &entry.sha256[..16]);
+            blobs.push(entry);
+        }
+    }
+
+    let name = spec
+        .components
+        .first()
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| "bundle".into());
+    let manifest = Manifest {
+        format_version: BUNDLE_FORMAT_VERSION,
+        name,
+        components: manifest_components,
+        blobs,
+    };
+    stage.write_manifest(&manifest)?;
+    stage.verify(&manifest)?;
+
+    bundle::pack(&stage_root, out)?;
+    let _ = std::fs::remove_dir_all(&stage_root);
+    let size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "Wrote {} ({} component(s), {} blob(s), {} bytes).",
+        out.display(),
+        manifest.components.len(),
+        manifest.blobs.len(),
+        size
+    );
+    Ok(())
+}
+
+async fn deploy_bundle(
+    bundle_file: &Path,
+    host: Option<String>,
+    user: &str,
+    password: Option<String>,
+    port: u16,
+    do_apply: bool,
+) -> Result<()> {
+    let dest_root = std::env::temp_dir().join(format!("crater-deploy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest_root);
+    let stage = bundle::unpack(bundle_file, &dest_root)?;
+    let manifest = stage.read_manifest()?;
+    stage.verify(&manifest)?; // checksum every blob before touching the target
+    println!(
+        "Bundle: {} — {} component(s), {} blob(s), checksums OK",
+        manifest.name,
+        manifest.components.len(),
+        manifest.blobs.len()
+    );
+
+    let mut blobmap: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for b in &manifest.blobs {
+        blobmap.insert(b.source_url.clone(), stage.blob_path(&b.sha256));
+    }
+
+    let exec: Box<dyn Executor> = match &host {
+        Some(h) => {
+            let pw = password
+                .as_deref()
+                .ok_or_else(|| anyhow!("--password required for --host"))?;
+            println!("Connecting to {user}@{h}:{port} ...");
+            Box::new(SshExecutor::connect(h, port, user, pw).await?)
+        }
+        None => Box::new(LocalExecutor),
+    };
+    let osf = if do_apply && host.is_some() {
+        os::detect_via(exec.as_ref()).await
+    } else {
+        OsFamily::Unknown
+    };
+
+    for mc in &manifest.components {
+        let cdir = stage.components_dir().join(&mc.name);
+        let desc = ComponentDescriptor::from_yaml_file(&cdir.join("component.yaml"))?;
+        let ctx = PlanContext::new(osf, mc.version.clone(), cdir).with_offline(blobmap.clone());
+        let plan = build_plan(&desc, &ctx)?;
+        println!(
+            "\n--- component {} (v{}) — {} steps [{}] ---",
+            mc.name,
+            mc.version,
+            plan.len(),
+            if do_apply { "APPLY" } else { "DRY-RUN" }
+        );
+        print_plan(&plan);
+        if do_apply {
+            engine::execute(&plan, exec.as_ref()).await?;
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dest_root);
+    if !do_apply {
+        println!("\n(dry-run; re-run with --apply to execute.)");
+    }
+    Ok(())
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// M4: AI copilot — natural language -> validated crater.yaml
+// ---------------------------------------------------------------------------
+
+/// List component names available under `components/`.
+fn list_components(components_dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(components_dir) {
+        for e in rd.flatten() {
+            if e.path().join("component.yaml").is_file() {
+                if let Some(name) = e.file_name().to_str() {
+                    out.push(name.to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+async fn ai_generate(request: &str, output: Option<PathBuf>) -> Result<()> {
+    use crater_core::ai::{self, AiSettings, OpenAiCompatProvider};
+
+    let components_dir = PathBuf::from("components");
+    let available = list_components(&components_dir);
+    if available.is_empty() {
+        return Err(anyhow!("no components found under {}", components_dir.display()));
+    }
+
+    let settings = AiSettings::from_env().ok_or_else(|| {
+        anyhow!(
+            "AI not configured. Set CRATER_AI_ENDPOINT and CRATER_AI_MODEL (and \
+             CRATER_AI_KEY if your endpoint needs one). Works with OpenAI, DeepSeek, \
+             Qwen, or an on-prem OpenAI-compatible endpoint."
+        )
+    })?;
+    println!(
+        "AI: model={} endpoint={} | components: {}",
+        settings.model,
+        settings.endpoint,
+        available.join(", ")
+    );
+
+    let provider = OpenAiCompatProvider::new(settings);
+    let (yaml, spec) = ai::nl_to_spec(&provider, &available, request).await?;
+
+    println!("\n# ---- generated & validated crater.yaml ----");
+    println!("{yaml}");
+    println!(
+        "# ---- valid: {} host(s), {} component(s) ----",
+        spec.inventory.hosts.len(),
+        spec.components.len()
+    );
+
+    if let Some(out) = output {
+        std::fs::write(&out, &yaml)?;
+        println!("Wrote {}", out.display());
+        println!("Next: crater apply -f {} (dry-run) then add --apply", out.display());
+    } else {
+        println!("(Tip: -o crater.yaml to save, then `crater apply -f crater.yaml`.)");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// M5: doctor — offline rule-based diagnosis (+ optional AI)
+// ---------------------------------------------------------------------------
+
+async fn doctor(
+    file: Option<PathBuf>,
+    host: Option<String>,
+    user: &str,
+    password: Option<String>,
+    port: u16,
+    use_ai: bool,
+) -> Result<()> {
+    use crater_core::diagnose;
+
+    // Gather the text to analyze: a local file, or collected from a host.
+    let text = if let Some(f) = &file {
+        std::fs::read_to_string(f).map_err(|e| anyhow!("read {}: {e}", f.display()))?
+    } else if let Some(h) = &host {
+        let pw = password
+            .clone()
+            .or_else(|| std::env::var("CRATER_SSH_PASSWORD").ok())
+            .ok_or_else(|| anyhow!("--password required for --host"))?;
+        let exec = SshExecutor::connect(h, port, user, &pw).await?;
+        // Collect common failure signals from the box.
+        let probe = "echo '== journal: docker =='; journalctl -u docker --no-pager -n 50 2>/dev/null; \
+                     echo '== journal: k3s =='; journalctl -u k3s --no-pager -n 50 2>/dev/null; \
+                     echo '== disk =='; df -h 2>/dev/null; \
+                     echo '== apt =='; tail -n 50 /var/log/apt/term.log 2>/dev/null";
+        exec.run(probe).await?.stdout
+    } else {
+        return Err(anyhow!("provide --file <log> or --host <ip> to diagnose"));
+    };
+
+    let findings = diagnose::diagnose(&text);
+    println!(
+        "crater doctor — {} built-in rules, {} finding(s)\n",
+        diagnose::rule_count(),
+        findings.len()
+    );
+    if findings.is_empty() {
+        println!("No known issue signatures matched.");
+    } else {
+        for (i, f) in findings.iter().enumerate() {
+            println!("{}. [{}] {}", i + 1, f.category, f.cause);
+            println!("   fix: {}\n", f.fix);
+        }
+    }
+
+    if use_ai {
+        match crater_core::ai::AiSettings::from_env() {
+            Some(settings) => {
+                use crater_core::ai::{AiProvider, OpenAiCompatProvider};
+                println!("--- AI deeper analysis ({}) ---", settings.model);
+                let provider = OpenAiCompatProvider::new(settings);
+                let sys = "You are an SRE assistant. Given logs, identify the root cause \
+                           and give concrete shell commands to fix it. Be concise.";
+                // Cap the log size we send.
+                let snippet: String = text.chars().take(6000).collect();
+                match provider.complete(sys, &snippet).await {
+                    Ok(ans) => println!("{ans}"),
+                    Err(e) => println!("(AI analysis unavailable: {e})"),
+                }
+            }
+            None => println!("(--ai requested but CRATER_AI_* not configured; rules above stand alone.)"),
+        }
     }
     Ok(())
 }

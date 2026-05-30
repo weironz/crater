@@ -3,12 +3,20 @@
 //! Layers:
 //! - [`spec`]      : `crater.yaml` (inventory + components + reserved AI/offline fields)
 //! - [`component`] : declarative component descriptor schema + loader
-//! - [`engine`]    : turns a descriptor into an ordered execution plan
+//! - [`dag`]       : component dependency ordering (M3)
+//! - [`engine`]    : turns a descriptor into an ordered execution plan + runs it
 //! - [`os`]        : OS family abstraction (Debian vs RHEL)
-//! - [`source`]    : artifact source abstraction (Online now; Offline in M2)
-//! - [`executor`]  : runs commands on a target (Local now; SSH next)
+//! - [`source`]    : artifact source (online mirror rewrite + control-plane fetch)
+//! - [`executor`]  : runs commands on a target (Local / SSH)
+//! - [`bundle`]    : offline bundle build/deploy (M2)
+//! - [`ai`]        : AI copilot, NL -> validated spec (M4)
+//! - [`diagnose`]  : offline rule-based failure diagnosis (M5)
 
+pub mod ai;
+pub mod bundle;
 pub mod component;
+pub mod dag;
+pub mod diagnose;
 pub mod engine;
 pub mod executor;
 pub mod os;

@@ -3,6 +3,9 @@
 //! `build_plan` lowers a [`ComponentDescriptor`] into an ordered list of [`Op`]s
 //! for a given OS family / version / params. `execute` runs them against any
 //! [`Executor`] (local or SSH). The same ops drive dry-run printing.
+//!
+//! Offline mode: when [`PlanContext::offline_blobs`] is set, `download` actions
+//! become [`Op::PushFile`] (push a pre-fetched blob) instead of `curl`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -38,24 +41,36 @@ pub enum Op {
         path: String,
         content: String,
     },
+    /// Push a pre-fetched local blob (offline bundle) to the target.
+    PushFile {
+        phase: Phase,
+        describe: String,
+        local_path: PathBuf,
+        dest: String,
+    },
 }
 
 impl Op {
     pub fn phase(&self) -> Phase {
         match self {
-            Op::Shell { phase, .. } | Op::WriteFile { phase, .. } => *phase,
+            Op::Shell { phase, .. } | Op::WriteFile { phase, .. } | Op::PushFile { phase, .. } => {
+                *phase
+            }
         }
     }
     pub fn describe(&self) -> &str {
         match self {
-            Op::Shell { describe, .. } | Op::WriteFile { describe, .. } => describe,
+            Op::Shell { describe, .. }
+            | Op::WriteFile { describe, .. }
+            | Op::PushFile { describe, .. } => describe,
         }
     }
-    /// Shell command preview for dry-run, if any.
+    /// Shell command / path preview for dry-run, if any.
     pub fn preview(&self) -> Option<&str> {
         match self {
             Op::Shell { cmd, .. } => Some(cmd),
             Op::WriteFile { path, .. } => Some(path),
+            Op::PushFile { dest, .. } => Some(dest),
         }
     }
 }
@@ -69,6 +84,8 @@ pub struct PlanContext {
     pub vars: BTreeMap<String, String>,
     /// Mirror rewriter for download URLs (online mode, China-friendly).
     pub source: OnlineSource,
+    /// Offline mode: maps a rendered download URL -> local pre-fetched blob.
+    pub offline_blobs: Option<BTreeMap<String, PathBuf>>,
 }
 
 impl PlanContext {
@@ -81,8 +98,43 @@ impl PlanContext {
             component_dir,
             vars,
             source: OnlineSource::with_default_mirrors(),
+            offline_blobs: None,
         }
     }
+
+    /// Switch this context into offline mode with a blob map.
+    pub fn with_offline(mut self, blobs: BTreeMap<String, PathBuf>) -> Self {
+        self.offline_blobs = Some(blobs);
+        self
+    }
+
+    /// The rendered download URL for an action.
+    /// Offline mode skips mirror rewrite (the raw URL is the manifest key).
+    pub fn rendered_url(&self, url_tmpl: &str) -> String {
+        let raw = render(url_tmpl, &self.vars);
+        if self.offline_blobs.is_some() {
+            raw
+        } else {
+            self.source.rewrite(&raw)
+        }
+    }
+}
+
+/// Collect every (rendered_url, dest_path) a component would download.
+/// Used by `crater build` to know what to fetch into the bundle.
+pub fn collect_downloads(desc: &ComponentDescriptor, ctx: &PlanContext) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for a in desc.install.iter().chain(desc.verify.iter()) {
+        if let Action::Download { url_tmpl, dest, .. } = a {
+            let url = ctx.rendered_url(url_tmpl);
+            let dest = dest
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "/tmp/crater-dl".to_string());
+            out.push((url, dest));
+        }
+    }
+    out
 }
 
 pub fn build_plan(desc: &ComponentDescriptor, ctx: &PlanContext) -> crate::Result<Vec<Op>> {
@@ -132,36 +184,51 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 soft_fail: false,
             }
         }
-        Action::Download {
-            url_tmpl, dest, ..
-        } => {
-            let url = ctx.source.rewrite(&render(url_tmpl, &ctx.vars));
+        Action::Download { url_tmpl, dest, .. } => {
+            let url = ctx.rendered_url(url_tmpl);
             let dest = dest
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "/tmp/crater-dl".to_string());
+            if let Some(blobs) = &ctx.offline_blobs {
+                let local = blobs
+                    .get(&url)
+                    .ok_or_else(|| anyhow::anyhow!("offline bundle missing blob for {url}"))?;
+                Op::PushFile {
+                    phase,
+                    describe: format!("push (offline) -> {dest}"),
+                    local_path: local.clone(),
+                    dest,
+                }
+            } else {
+                Op::Shell {
+                    phase,
+                    describe: format!("download {url}"),
+                    cmd: format!("curl -fL --retry 3 -o '{dest}' '{url}'"),
+                    soft_fail: false,
+                }
+            }
+        }
+        Action::Extract { to, from, strip } => {
+            let src = from
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "/tmp/crater-dl".to_string());
             Op::Shell {
                 phase,
-                describe: format!("download {url}"),
-                cmd: format!("curl -fL --retry 3 -o '{dest}' '{url}'"),
+                describe: format!("extract {src} -> {}", to.display()),
+                cmd: format!(
+                    "mkdir -p '{to}' && tar -xf '{src}' --strip-components={strip} -C '{to}'",
+                    to = to.display(),
+                    strip = strip
+                ),
                 soft_fail: false,
             }
         }
-        Action::Extract { to, strip, .. } => Op::Shell {
-            phase,
-            describe: format!("extract -> {}", to.display()),
-            cmd: format!(
-                "mkdir -p '{to}' && tar -xf /tmp/crater-dl --strip-components={strip} -C '{to}'",
-                to = to.display(),
-                strip = strip
-            ),
-            soft_fail: false,
-        },
         Action::RenderTemplate { src, dst } => {
             let tpl_path = ctx.component_dir.join("templates").join(src);
-            let raw = std::fs::read_to_string(&tpl_path).map_err(|e| {
-                anyhow::anyhow!("read template {}: {e}", tpl_path.display())
-            })?;
+            let raw = std::fs::read_to_string(&tpl_path)
+                .map_err(|e| anyhow::anyhow!("read template {}: {e}", tpl_path.display()))?;
             Op::WriteFile {
                 phase,
                 describe: format!("render {} -> {}", src, dst.display()),
@@ -185,7 +252,6 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 cmds.push(format!("systemctl enable {name}"));
             }
             if *start {
-                // restart is idempotent: starts if stopped, reloads new config if running
                 cmds.push(format!("systemctl restart {name}"));
             }
             Op::Shell {
@@ -204,7 +270,6 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
         Action::LoadImage { reference } => Op::Shell {
             phase,
             describe: format!("load image {reference}"),
-            // M2: load from offline bundle. For now, pull online.
             cmd: format!("docker pull '{reference}' || ctr image pull '{reference}'"),
             soft_fail: false,
         },
@@ -237,9 +302,7 @@ pub async fn execute(ops: &[Op], exec: &dyn Executor) -> crate::Result<()> {
         let n = i + 1;
         println!("[{n}/{total}] {:?} {}", op.phase(), op.describe());
         match op {
-            Op::Shell {
-                cmd, soft_fail, ..
-            } => {
+            Op::Shell { cmd, soft_fail, .. } => {
                 let out = exec.run(cmd).await?;
                 let so = out.stdout.trim();
                 if !so.is_empty() {
@@ -262,6 +325,14 @@ pub async fn execute(ops: &[Op], exec: &dyn Executor) -> crate::Result<()> {
             Op::WriteFile { path, content, .. } => {
                 exec.write_file(path, content.as_bytes()).await?;
                 println!("      | wrote {} bytes", content.len());
+            }
+            Op::PushFile {
+                local_path, dest, ..
+            } => {
+                let data = std::fs::read(local_path)
+                    .map_err(|e| anyhow::anyhow!("read local blob {}: {e}", local_path.display()))?;
+                exec.write_file(dest, &data).await?;
+                println!("      | pushed {} bytes -> {dest}", data.len());
             }
         }
     }
