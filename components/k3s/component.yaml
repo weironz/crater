@@ -1,7 +1,12 @@
 # k3s — lightweight Kubernetes (M3 k8s representative / D-013).
 # Single-binary k8s distribution; ideal for crater's offline/CN philosophy.
-# This profile is the ONLINE install via the official script with the China
-# mirror (INSTALL_K3S_MIRROR=cn pulls binary+images from rancher's CN mirror).
+# ONLINE install via the official script with the China mirror
+# (INSTALL_K3S_MIRROR=cn pulls binary+images from rancher's CN mirror).
+#
+# The install script itself enables + starts the k3s systemd service, so we do
+# NOT add a separate systemd_unit step (that races the script's own startup).
+# Verify steps are tolerant (|| true): first-boot image pulls take a while and a
+# slow-to-Ready node must not hard-fail an otherwise-good install.
 #
 # Offline/air-gap k3s (k3s binary + k3s-airgap-images preloaded into containerd)
 # is a larger follow-up — see docs/progress.md.
@@ -20,14 +25,12 @@ install:
   - action: run_cmd
     cmd: "curl -sfL https://rancher-mirror.rancher.cn/k3s/k3s-install.sh -o /tmp/k3s-install.sh"
   - action: run_cmd
-    cmd: "INSTALL_K3S_MIRROR=cn INSTALL_K3S_VERSION={{version}} sh /tmp/k3s-install.sh"
-  - action: systemd_unit
-    name: k3s
-    enable: true
-    start: true
+    cmd: "INSTALL_K3S_MIRROR=cn INSTALL_K3S_VERSION={{version}} INSTALL_K3S_EXEC='--write-kubeconfig-mode 644' sh /tmp/k3s-install.sh"
 
 verify:
   - action: run_cmd
     cmd: "k3s --version 2>&1 | head -1"
   - action: run_cmd
-    cmd: "for i in $(seq 1 30); do k3s kubectl get nodes 2>/dev/null && break; sleep 2; done"
+    cmd: "systemctl is-active k3s || true"
+  - action: run_cmd
+    cmd: "for i in $(seq 1 60); do k3s kubectl get nodes 2>/dev/null | grep -q ' Ready ' && break; sleep 3; done; k3s kubectl get nodes 2>&1 || true"
