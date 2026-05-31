@@ -26,6 +26,7 @@ use crater_core::executor::{Executor, LocalExecutor, SshExecutor};
 use crater_core::os::{self, OsFamily};
 use crater_core::source::{self, OnlineSource};
 use crater_core::spec::CraterSpec;
+use crater_core::store::ImageStore;
 
 #[derive(Parser)]
 #[command(
@@ -136,7 +137,7 @@ enum Cmd {
         cmd: Vec<String>,
     },
     /// Copy a local file to a target over SSH (chunked base64, no scp needed).
-    Push {
+    Cp {
         #[arg(long)]
         host: String,
         #[arg(long, default_value = "root")]
@@ -155,6 +156,22 @@ enum Cmd {
         #[arg(long)]
         chmod: Option<String>,
     },
+    /// List images in the local store (~/.crater/store).
+    Images,
+    /// Pull an image from a registry into the local store.
+    Pull {
+        /// e.g. docker.io/library/busybox:latest
+        reference: String,
+    },
+    /// Push a stored image to a registry.
+    Push {
+        reference: String,
+    },
+    /// Registry credentials.
+    Registry {
+        #[command(subcommand)]
+        cmd: RegistryCmd,
+    },
     /// Internal: self-bootstrap agent. Runs ON the target node, executing a
     /// lowered plan locally (pushed here by the control machine). D-019.
     Agent {
@@ -165,6 +182,19 @@ enum Cmd {
     /// Shortcut: `crater <component> [flags]`.
     #[command(external_subcommand)]
     Component(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum RegistryCmd {
+    /// Store credentials for a registry (used by pull/push).
+    Login {
+        /// Registry host, e.g. docker.io or registry.example.com:5000
+        registry: String,
+        #[arg(short, long)]
+        username: String,
+        #[arg(short, long)]
+        password: String,
+    },
 }
 
 /// Compact wall-clock timer (`HH:MM:SS`, UTC) — dependency-free, keeps log
@@ -240,7 +270,7 @@ async fn main() -> Result<()> {
             port,
             dry_run,
         } => deploy_bundle(&bundle, host, &user, password, port, !dry_run).await,
-        Cmd::Push {
+        Cmd::Cp {
             host,
             user,
             password,
@@ -249,6 +279,20 @@ async fn main() -> Result<()> {
             dst,
             chmod,
         } => push_file(&host, &user, password, port, &src, &dst, chmod).await,
+        Cmd::Images => list_images().await,
+        Cmd::Pull { reference } => pull_image(&reference).await,
+        Cmd::Push { reference } => push_image(&reference).await,
+        Cmd::Registry { cmd } => match cmd {
+            RegistryCmd::Login {
+                registry,
+                username,
+                password,
+            } => {
+                crater_core::store::save_login(&registry, &username, &password)?;
+                info!("saved credentials for {registry}");
+                Ok(())
+            }
+        },
         Cmd::Ai { request, output } => ai_generate(&request.join(" "), output).await,
         Cmd::Doctor {
             file,
@@ -737,6 +781,12 @@ async fn apply_source(
         // Online: declarative spec (inventory inside).
         info!("apply: {src} → online (spec)");
         return apply_spec(&path, !dry_run, shell).await;
+    }
+    // Image reference (registry/store): has a registry path or a tag, not a file.
+    if src.contains('/') || src.contains(':') {
+        info!("apply: {src} → image (local store / registry)");
+        let hosts = inventory_hosts(inventory.as_deref(), host, &user, password, port)?;
+        return apply_image_ref(&src, hosts, !dry_run).await;
     }
     // Online: bare component name → shortcut (build its flag args).
     info!("apply: {src} → online (component)");
@@ -1436,6 +1486,110 @@ fn single_host(
         password,
         roles: vec![],
     }
+}
+
+// ---------------------------------------------------------------------------
+// Image management: images / pull / push / apply <ref>
+// ---------------------------------------------------------------------------
+
+async fn list_images() -> Result<()> {
+    let store = ImageStore::open()?;
+    let imgs = store.list()?;
+    if imgs.is_empty() {
+        info!("no images in local store ({})", store.root.display());
+        return Ok(());
+    }
+    println!("{:<48} {:<20} {}", "REFERENCE", "DIGEST", "SIZE");
+    for i in imgs {
+        let short = i.digest.trim_start_matches("sha256:").chars().take(12).collect::<String>();
+        println!("{:<48} {:<20} {}", i.reference, short, i.size);
+    }
+    Ok(())
+}
+
+async fn pull_image(reference: &str) -> Result<()> {
+    let store = ImageStore::open()?;
+    info!("pulling {reference} → local store ...");
+    store.pull(reference).await?;
+    info!("pulled {reference}");
+    Ok(())
+}
+
+async fn push_image(reference: &str) -> Result<()> {
+    let store = ImageStore::open()?;
+    if !store.has(reference) {
+        anyhow::bail!("{reference} not in local store (pull or build it first)");
+    }
+    info!("pushing {reference} → registry ...");
+    store.push(reference).await?;
+    info!("pushed {reference}");
+    Ok(())
+}
+
+/// `crater apply <image-ref>`: resolve from the local store (pull on miss), then
+/// install its rootfs on each host by extracting every layer to `/` — crater's
+/// own load, no container runtime. Hosts run in parallel (`CRATER_FORKS`).
+async fn apply_image_ref(
+    reference: &str,
+    hosts: Vec<crater_core::spec::Host>,
+    do_apply: bool,
+) -> Result<()> {
+    let store = ImageStore::open()?;
+    if !store.has(reference) {
+        info!("{reference} not in local store → pulling");
+        store.pull(reference).await?;
+    }
+    let layers = store.resolve_layers(reference)?;
+    info!("image {reference}: {} layer(s), {} host(s)", layers.len(), hosts.len());
+    if !do_apply {
+        info!("dry-run; omit --dry-run to install (extract layers to / on each host)");
+        return Ok(());
+    }
+    let forks = forks_limit();
+    let results: Vec<Result<()>> = futures::stream::iter(
+        hosts.iter().map(|h| install_image_on_host(h, &layers, reference)),
+    )
+    .buffer_unordered(forks)
+    .collect()
+    .await;
+    for r in results {
+        r?;
+    }
+    Ok(())
+}
+
+async fn install_image_on_host(
+    host: &crater_core::spec::Host,
+    layers: &[PathBuf],
+    reference: &str,
+) -> Result<()> {
+    let pw = host
+        .password
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("host {} has no password", host.name))?;
+    let exec = SshExecutor::connect(&host.address, host.port, &host.user, pw).await?;
+    info!("▶ host {} ({}) ← {reference}", host.name, host.address);
+    for (i, layer) in layers.iter().enumerate() {
+        let data = bundle::read_file(layer)?;
+        let remote = format!("/tmp/crater-layer-{i}.tar");
+        exec.write_file(&remote, &data).await?;
+        let out = exec
+            .run(&format!("tar -xpf {remote} -C / && rm -f {remote}"))
+            .await?;
+        if !out.ok() {
+            anyhow::bail!(
+                "[{}] extract layer {}/{} failed (exit {}): {}",
+                host.name,
+                i + 1,
+                layers.len(),
+                out.code,
+                out.stderr.trim()
+            );
+        }
+        info!("[{}] extracted layer {}/{}", host.name, i + 1, layers.len());
+    }
+    Ok(())
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {

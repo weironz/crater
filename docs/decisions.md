@@ -304,3 +304,13 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - 离线 inventory 由 CLI 提供：`crater apply x.oci -i inv.yaml`(多主机) / `--host`(单)。`apply_oci_bundle` 解包→合成 spec(components 来自 manifest)→run_pipeline。`deploy_bundle` 成单主机包装。
 - **真机(两台)**:`crater apply yq.oci -i two-hosts.yaml` → `▷ group [] — 2 hosts in parallel` → 两台并发 push 层+extract+chmod+verify yq v4.53.2、各 changed=3 ok=1。**离线获得了与在线相同的多主机/并发/register/幂等/tracing**。
 - **意义**:在线/离线真正只剩"制品从哪来"一处差异（design.md §3 的"双形态单管线"从设计变为实现）。
+
+---
+
+## 2026-05-31 · 镜像管理（images/pull/push/login + apply <ref>）
+
+### D-018 增量：本地镜像库 + registry 客户端 + apply 直接吃镜像地址
+- **背景**:用户要 `crater images`/`registry login`/`pull`/`push`，且 `crater apply` 支持直接跟镜像地址（registry 或本地）。
+- **决策/实现**:`store.rs` —— 本地 OCI 镜像库 `~/.crater/store`（累积 OCI layout，index.json 每 tag 一条）；registry I/O 用 `oci-client`（rustls，纯 Rust）；凭据 `~/.crater/auth.json`（按 registry）。命令：`images`（列库）/`pull <ref>`（registry→库）/`push <ref>`（库→registry）/`registry login`（存凭据）。`apply <ref>`：识别镜像地址（含 `/` 或 `:` 且非文件）→ 库命中即用、否则 pull → 把镜像**所有 rootfs 层展开到 `/`** 安装（多主机并发，crater 自解包、零运行时）。原 SSH 拷文件 `crater push` **更名 `crater cp`**（push 让给镜像）。
+- **真机(192.168.73.12)**:`registry login` 写 auth.json（并实际影响 pull 认证）;匿名 `pull hello-world`→库;`images` 列出;`apply docker.io/library/hello-world:latest --host .12`→库命中→展开→目标机 `/hello`(ELF) 落地。
+- **边界**:`push` 已实现(oci-client client.push) 但无可写 registry **未 live 验证**;`apply <ref>` 是 rootfs 覆盖语义(适合 crater/sealos 式镜像);manifest-list 平台选择/签名/库 GC 后续。

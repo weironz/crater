@@ -15,6 +15,7 @@
 | 自举 agent（默认执行模型） | [self-bootstrap-agent.md](self-bootstrap-agent.md) | D-019/026/027 |
 | 多节点 + 跨节点 fact + k3s 集群 + 并发 | [multi-node-and-cluster.md](multi-node-and-cluster.md) | D-030/D-031 |
 | 离线 OCI（build/save/load/pull） | [offline-oci.md](offline-oci.md) | D-018 |
+| 镜像管理（images/pull/push/login + apply &lt;ref&gt;） | [images-registry.md](images-registry.md) | D-018 |
 | 在线部署（以 yq 为例，最小可复现） | [../../examples/yq/demo-online-yq.md](../../examples/yq/demo-online-yq.md) | — |
 
 ## 约定

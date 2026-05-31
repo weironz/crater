@@ -22,11 +22,11 @@ crater 控制端 → 目标机的**唯一通道**，也是几乎所有功能的�
 crater run --host <host> --password <pw> -- "uname -a && uptime"
 ```
 
-**推文件**（分块 base64 over SSH，无需 scp）：
+**拷文件**（分块 base64 over SSH，无需 scp）：
 ```bash
-crater push --host <host> --password <pw> --src ./local.bin --dst /usr/local/bin/tool --chmod 755
+crater cp --host <host> --password <pw> --src ./local.bin --dst /usr/local/bin/tool --chmod 755
 ```
-`push` 推完会回显远端/本地 sha256 比对，确认一致。
+`cp` 推完会回显远端/本地 sha256 比对，确认一致。（原名 `crater push`，已更名为 `cp`——`push` 让给镜像推送，见 [images-registry.md](images-registry.md)。）
 
 凭据也可用环境变量免传 `--password`：
 ```bash
