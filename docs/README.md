@@ -7,6 +7,7 @@
 | 文件 | 内容 | 状态 |
 |------|------|------|
 | [design.md](design.md) | **设计方向（北极星）**：引擎铁律(D-017) + 在线/离线单管线 + OCI 离线 + 自举 agent + ansible 化路线 | 持续 |
+| [features/](features/README.md) | **功能文档目录**：每个功能一份（介绍 + demo + 验证），见其 README 索引 | 持续 |
 | [offline-format.md](offline-format.md) | 离线包格式（OCI 镜像方案）详细设计 | 持续 |
 | [../examples/yq/demo-online-yq.md](../examples/yq/demo-online-yq.md) | 在线部署 demo（以 yq 为例，最小可复现） | 持续 |
 | [requirements.md](requirements.md) | 需求基线总览（定位、功能、AI、非功能、CLI、OS、路线） | v0.3 |
@@ -24,5 +25,6 @@
 ## 维护约定
 
 1. **关键沟通后必记**：每次会话有新决策或需求变化，追加到 `decisions.md`（带日期），必要时回写 `requirements.md`。
-2. **新主题独立成文**：某块需求展开到一定篇幅，从 `requirements.md` 拆出独立文件，在本索引登记。
-3. **新会话先读文档**：上下文窗口可能丢失，新会话先读 `design.md`（设计方向）+ `requirements.md` + `decisions.md` 恢复全部背景。
+2. **每实现一个功能必配文档**：在 `features/` 下加一份（功能介绍 + 基本 demo + 验证结果 + 关联 ADR），与实现**同一提交**；篇幅大可在 `features/` 下建子文件夹分文档。改行为时同步更新。
+3. **新主题独立成文**：某块需求展开到一定篇幅，从 `requirements.md` 拆出独立文件，在本索引登记。
+4. **新会话先读文档**：上下文窗口可能丢失，新会话先读 `design.md`（设计方向）+ `requirements.md` + `decisions.md` 恢复全部背景。
