@@ -125,6 +125,8 @@ crater apply examples/install-yq.yaml -i inventory.yaml                 # 层3 i
 - 引擎条件过滤生效:声明 3 个 action,目标非 rhel → `rhel_only` 被滤,plan 实际 2 步(`[Install] place` → `[Verify] verify`)。
 - `needs` 排序、`{{version}}` 取值正确。
 
+**真实 daemon 服务**(`crater apply docker --host <h>` → `tasks/docker.yaml`):`pkg_install` 装 docker.io + `write_file` daemon.json(CN mirror,`notify` 重启 handler)+ `service` started/enabled + verify。真机 n11:docker v29 active、mirror `docker.m.daocloud.io` 生效、cgroup=systemd;再跑 `changed=0 ok=4`、daemon 未变 → handler **不**触发。整套经自举 agent 在目标本地执行。
+
 ## 边界 / 后续(D-037-b)
 
 - 本期:`actions` + `needs` + `phase` + `when_os/when_offline` + materials + 三层 targeting。

@@ -1,0 +1,39 @@
+# docker(task 形态):装包 + 写 daemon.json(CN 镜像)+ 起服务。
+# daemon.json 变更 → notify 重启 handler(ansible 经典模式)。走自举 agent。
+name: docker
+hosts: all
+actions:
+  - id: install
+    action: pkg_install
+    packages:
+      debian: [docker.io]
+      rhel: [docker]
+  - id: daemon
+    action: write_file
+    dst: /etc/docker/daemon.json
+    content: |
+      {
+        "registry-mirrors": ["https://docker.m.daocloud.io"],
+        "exec-opts": ["native.cgroupdriver=systemd"],
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "100m", "max-file": "3" },
+        "storage-driver": "overlay2"
+      }
+    needs: [install]
+    notify: [restart_docker]
+  - id: svc
+    action: service
+    name: docker
+    state: started
+    enabled: true
+    needs: [daemon]
+  - id: verify
+    action: run_cmd
+    phase: verify
+    cmd: "docker version --format '{{.Server.Version}}' || docker --version"
+    needs: [svc]
+handlers:
+  - id: restart_docker
+    action: service
+    name: docker
+    state: restarted
