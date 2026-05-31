@@ -19,7 +19,6 @@ use futures::StreamExt;
 use tracing::info;
 
 use crater_core::bundle;
-use crater_core::component::ComponentDescriptor;
 use crater_core::engine::{self, Op, PlanContext};
 use crater_core::executor::{Executor, LocalExecutor, SshExecutor};
 use crater_core::os::{self, OsFamily};
@@ -1353,19 +1352,27 @@ async fn install_image_on_host(
 // M4: AI copilot — natural language -> validated crater.yaml
 // ---------------------------------------------------------------------------
 
-/// All systemd unit names declared across every component under `components/`.
-/// `doctor` probes these instead of hardcoding any product's units: the names
-/// live in component data, so a new component is diagnosable without code edits.
-fn known_systemd_units(components_dir: &Path) -> Vec<String> {
+/// systemd unit names mentioned by tasks under `tasks/` (their `service` /
+/// `systemd_unit` actions). `doctor` derives per-unit journal probes from this
+/// data, never hardcoded.
+fn known_systemd_units(tasks_dir: &Path) -> Vec<String> {
+    use crater_core::component::Action;
     let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(components_dir) {
+    if let Ok(rd) = std::fs::read_dir(tasks_dir) {
         for e in rd.flatten() {
-            let yaml = e.path().join("component.yaml");
-            if !yaml.is_file() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("yaml") {
                 continue;
             }
-            if let Ok(desc) = ComponentDescriptor::from_yaml_file(&yaml) {
-                out.extend(desc.systemd_units());
+            if let Ok(t) = crater_core::task::TaskFile::from_yaml_file(&p) {
+                for step in &t.actions {
+                    match &step.action {
+                        Action::Service { name, .. } | Action::SystemdUnit { name, .. } => {
+                            out.push(name.clone())
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
     }
@@ -1374,30 +1381,8 @@ fn known_systemd_units(components_dir: &Path) -> Vec<String> {
     out
 }
 
-/// List component names available under `components/`.
-fn list_components(components_dir: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(components_dir) {
-        for e in rd.flatten() {
-            if e.path().join("component.yaml").is_file() {
-                if let Some(name) = e.file_name().to_str() {
-                    out.push(name.to_string());
-                }
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
 async fn ai_generate(request: &str, output: Option<PathBuf>) -> Result<()> {
     use crater_core::ai::{self, AiSettings, OpenAiCompatProvider};
-
-    let components_dir = PathBuf::from("components");
-    let available = list_components(&components_dir);
-    if available.is_empty() {
-        return Err(anyhow!("no components found under {}", components_dir.display()));
-    }
 
     let settings = AiSettings::from_env().ok_or_else(|| {
         anyhow!(
@@ -1406,30 +1391,25 @@ async fn ai_generate(request: &str, output: Option<PathBuf>) -> Result<()> {
              Qwen, or an on-prem OpenAI-compatible endpoint."
         )
     })?;
-    println!(
-        "AI: model={} endpoint={} | components: {}",
-        settings.model,
-        settings.endpoint,
-        available.join(", ")
-    );
+    println!("AI: model={} endpoint={}", settings.model, settings.endpoint);
 
     let provider = OpenAiCompatProvider::new(settings);
-    let (yaml, spec) = ai::nl_to_spec(&provider, &available, request).await?;
+    let (yaml, task) = ai::nl_to_task(&provider, request).await?;
 
-    println!("\n# ---- generated & validated crater.yaml ----");
+    println!("\n# ---- generated & validated task ----");
     println!("{yaml}");
     println!(
-        "# ---- valid: {} host(s), {} component(s) ----",
-        spec.inventory.hosts.len(),
-        spec.components.len()
+        "# ---- valid task '{}': {} action(s) ----",
+        task.name,
+        task.actions.len()
     );
 
     if let Some(out) = output {
         std::fs::write(&out, &yaml)?;
         println!("Wrote {}", out.display());
-        println!("Next: crater apply -f {} (add --dry-run to preview first)", out.display());
+        println!("Next: crater apply {} (add --dry-run to preview first)", out.display());
     } else {
-        println!("(Tip: -o crater.yaml to save, then `crater apply -f crater.yaml`.)");
+        println!("(Tip: -o task.yaml to save, then `crater apply task.yaml`.)");
     }
     Ok(())
 }
@@ -1460,7 +1440,7 @@ async fn doctor(
         // Collect failure signals. Per-unit journals are derived from component
         // data (no hardcoded service names); the rest is product-agnostic.
         let mut probe = String::new();
-        for unit in known_systemd_units(&PathBuf::from("components")) {
+        for unit in known_systemd_units(&PathBuf::from("tasks")) {
             probe.push_str(&format!(
                 "echo '== journal: {unit} =='; journalctl -u {unit} --no-pager -n 50 2>/dev/null; "
             ));

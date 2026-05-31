@@ -17,7 +17,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::spec::CraterSpec;
+use crate::task::TaskFile;
 
 #[derive(Debug, Clone)]
 pub struct AiSettings {
@@ -126,36 +126,37 @@ impl AiProvider for OpenAiCompatProvider {
     }
 }
 
-/// Build the system prompt grounding the model in crater's schema + the
-/// components actually available in this install.
-pub fn system_prompt(available_components: &[String]) -> String {
-    format!(
-        r#"You are crater's deployment planner. Convert the user's request into a
-crater.yaml spec. Output ONLY the YAML (optionally in a ```yaml code block),
-no prose.
+/// Build the system prompt grounding the model in crater's TASK schema.
+pub fn system_prompt() -> String {
+    r#"You are crater's deployment planner. Convert the user's request into a
+crater TASK yaml. Output ONLY the YAML (optionally in a ```yaml block), no prose.
 
 Schema:
-  inventory:
-    hosts:
-      - name: <str>
-        address: <ip-or-host>
-        user: <str, default root>
-        port: <int, default 22>
-        password: <str, optional>
-        roles: [<component names this host runs>]
-  components:
-    - name: <one of the available components>
-      version: <str, optional>
-  offline: <bool, optional>
+  name: <task name>
+  hosts: all                      # or an inventory group name
+  vars: { <key>: <value> }        # optional; used as {{ key }} (plain substitution)
+  materials:                      # optional; things to fetch/pack
+    - { name: <id>, kind: binary, url_tmpl: <url, may contain {{version}}> }
+  actions:
+    - id: <id>
+      action: <primitive>
+      <params...>
+      needs: [<id>...]            # ordering (the engine topo-sorts)
+      when_os: [debian|rhel]      # optional closed-enum condition
+      phase: install|verify       # optional
+
+Action primitives (use ONLY these):
+  pkg_install(packages:{debian:[..],rhel:[..]}), place(material,dest,mode),
+  download(url_tmpl,dest), extract(to,from,strip), write_file(dst,content),
+  render_template(src,dst), run_cmd(cmd,check), file(path,state,mode),
+  copy(src,dest,mode), service(name,state,enabled), lineinfile(path,line,regexp),
+  user(name,...), group(name,...), systemd_unit(name,enable,start), module(uses,with).
 
 Rules:
-- Use ONLY these available components: {components}.
-- If the user names hosts/IPs, put them in inventory with matching roles.
-- If the user gives no hosts, emit components with an empty inventory.
-- Prefer explicit versions only if the user asked; otherwise omit version.
-- Never invent components that are not in the available list."#,
-        components = available_components.join(", ")
-    )
+- NO logic in YAML: no when-expressions, loops, or computation. Use `needs` for
+  ordering, `when_os` for OS branches, and `{{ var }}` only for plain substitution.
+- Prefer `place` (a declared material) for binaries; `pkg_install` for OS packages."#
+        .to_string()
 }
 
 /// Extract a YAML document from a model response that may wrap it in a
@@ -175,29 +176,19 @@ pub fn extract_yaml(response: &str) -> String {
     text.to_string()
 }
 
-/// Turn a natural-language request into a validated [`CraterSpec`].
-/// The validation step (YAML -> CraterSpec) is the deterministic guard rail.
-pub async fn nl_to_spec(
+/// Turn a natural-language request into a validated [`TaskFile`]. The validation
+/// (YAML -> TaskFile, which fails on unknown action primitives) is the
+/// deterministic guard rail — a hallucinated task is rejected, never run.
+pub async fn nl_to_task(
     provider: &dyn AiProvider,
-    available_components: &[String],
     request: &str,
-) -> crate::Result<(String, CraterSpec)> {
-    let system = system_prompt(available_components);
+) -> crate::Result<(String, TaskFile)> {
+    let system = system_prompt();
     let raw = provider.complete(&system, request).await?;
     let yaml = extract_yaml(&raw);
-    let spec: CraterSpec = serde_yaml::from_str(&yaml)
-        .map_err(|e| anyhow::anyhow!("AI produced invalid crater.yaml: {e}\n---\n{yaml}"))?;
-
-    for c in &spec.components {
-        if !available_components.contains(&c.name) {
-            anyhow::bail!(
-                "AI referenced unknown component '{}' (available: {})",
-                c.name,
-                available_components.join(", ")
-            );
-        }
-    }
-    Ok((yaml, spec))
+    let task: TaskFile = serde_yaml::from_str(&yaml)
+        .map_err(|e| anyhow::anyhow!("AI produced invalid task yaml: {e}\n---\n{yaml}"))?;
+    Ok((yaml, task))
 }
 
 #[cfg(test)]
@@ -206,26 +197,18 @@ mod tests {
 
     #[test]
     fn extracts_fenced_yaml() {
-        let resp = "Here you go:\n```yaml\ncomponents:\n  - name: docker\n```\nEnjoy!";
+        let resp = "Here you go:\n```yaml\nname: t\nactions: []\n```\nEnjoy!";
         let y = extract_yaml(resp);
-        assert!(y.starts_with("components:"));
+        assert!(y.starts_with("name:"));
         assert!(!y.contains("```"));
         assert!(!y.contains("Enjoy"));
     }
 
     #[test]
     fn extracts_bare_yaml() {
-        let resp = "components:\n  - name: docker\n";
+        let resp = "name: t\nactions: []\n";
         let y = extract_yaml(resp);
-        assert!(y.starts_with("components:"));
-    }
-
-    #[test]
-    fn validates_into_spec() {
-        let y = extract_yaml("```yaml\ncomponents:\n  - name: docker\noffline: false\n```");
-        let spec: CraterSpec = serde_yaml::from_str(&y).unwrap();
-        assert_eq!(spec.components.len(), 1);
-        assert_eq!(spec.components[0].name, "docker");
+        assert!(y.starts_with("name:"));
     }
 
     struct FakeProvider(String);
@@ -237,13 +220,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nl_to_spec_validates_components() {
-        let avail = vec!["docker".to_string(), "yq".to_string()];
-        let p = FakeProvider("```yaml\ncomponents:\n  - name: yq\n```".into());
-        let (_y, spec) = nl_to_spec(&p, &avail, "give me yq").await.unwrap();
-        assert_eq!(spec.components[0].name, "yq");
+    async fn nl_to_task_parses_and_rejects_bad() {
+        let p = FakeProvider(
+            "```yaml\nname: yq\nactions:\n  - {action: run_cmd, cmd: \"yq --version\"}\n```".into(),
+        );
+        let (_y, task) = nl_to_task(&p, "install yq").await.unwrap();
+        assert_eq!(task.name, "yq");
+        assert_eq!(task.actions.len(), 1);
 
-        let p2 = FakeProvider("```yaml\ncomponents:\n  - name: not_a_component\n```".into());
-        assert!(nl_to_spec(&p2, &avail, "x").await.is_err());
+        // Unknown primitive → TaskFile parse fails → rejected (guard rail).
+        let bad = FakeProvider("```yaml\nname: x\nactions:\n  - {action: nonsense}\n```".into());
+        assert!(nl_to_task(&bad, "x").await.is_err());
     }
 }

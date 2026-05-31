@@ -1,10 +1,11 @@
 //! Plan builder + executor.
 //!
-//! `build_plan` lowers a [`ComponentDescriptor`] into an ordered list of [`Op`]s
-//! for a given OS family / version / params. `execute` runs them against any
-//! [`Executor`] (local or SSH). The same ops drive dry-run printing.
+//! `plan_from_task` lowers a task's `actions` into an ordered list of [`Op`]s
+//! (control flow — when-filter, needs-ordering — all in Rust, D-036). `execute`
+//! / `execute_task` run them against any [`Executor`] (local or SSH); the agent
+//! runs the same ops on the target.
 //!
-//! Offline mode: when [`PlanContext::offline_blobs`] is set, `download` actions
+//! Offline mode: when [`PlanContext::offline_blobs`] is set, `place` actions
 //! become [`Op::PushFile`] (push a pre-fetched blob) instead of `curl`.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,7 +13,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::component::{Action, Check, ComponentDescriptor};
+use crate::component::Action;
 use crate::executor::Executor;
 use crate::os::OsFamily;
 use crate::source::OnlineSource;
@@ -172,51 +173,8 @@ impl PlanContext {
     }
 }
 
-/// Collect every (rendered_url, dest_path) a component would download.
-/// Used by `crater build` to know what to fetch into the bundle.
-pub fn collect_downloads(
-    desc: &ComponentDescriptor,
-    ctx: &PlanContext,
-) -> crate::Result<Vec<(String, String)>> {
-    let mut out = Vec::new();
-    for a in desc.install.iter().chain(desc.verify.iter()) {
-        if let Action::Download { url_tmpl, dest, .. } = a {
-            let url = ctx.rendered_url(url_tmpl)?;
-            let dest = dest
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "/tmp/crater-dl".to_string());
-            out.push((url, dest));
-        }
-    }
-    Ok(out)
-}
 
-pub fn build_plan(desc: &ComponentDescriptor, ctx: &PlanContext) -> crate::Result<Vec<Op>> {
-    // Make the declared materials (D-034) resolvable by `place` actions.
-    let mut ctx = ctx.clone();
-    for m in &desc.materials {
-        ctx.materials.insert(m.name.clone(), m.clone());
-    }
-    let ctx = &ctx;
 
-    let mut ops = Vec::new();
-    for c in &desc.preflight {
-        ops.push(check_op(c));
-    }
-    for a in &desc.install {
-        ops.push(action_op(Phase::Install, a, ctx)?);
-    }
-    for a in &desc.verify {
-        ops.push(action_op(Phase::Verify, a, ctx)?);
-    }
-    Ok(ops)
-}
-
-/// Build an executable plan from a task's `actions` (D-037). **All control flow
-/// lives here in Rust** (D-036): `when_os`/`when_offline` filter steps, `needs`
-/// topologically orders them; the YAML only declared primitives + data. The
-/// caller must have populated `ctx.materials` (for `place`) and `ctx.os`.
 /// A lowered task step: the Op plus its run policy (D-037-b). Serializable so the
 /// whole task plan can be shipped to the self-bootstrap agent (D-044).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,6 +213,9 @@ pub fn task_plan_from_yaml(text: &str) -> crate::Result<TaskPlan> {
     Ok(serde_yaml::from_str(text)?)
 }
 
+/// Build an executable plan from a task's `actions` (D-037). **All control flow
+/// lives here in Rust** (D-036): `when_os`/`when_offline` filter steps, `needs`
+/// topologically orders them; the YAML only declared primitives + data.
 pub fn plan_from_task(
     actions: &[crate::task::ActionStep],
     ctx: &PlanContext,
@@ -436,47 +397,7 @@ pub async fn execute_task(
     Ok(())
 }
 
-/// Collect every binary material a component declares (D-034), as
-/// `(material_name, rendered_url)` — what `crate build` fetches and packs,
-/// keyed by material name (the same key `place` resolves against offline).
-pub fn collect_materials(
-    desc: &ComponentDescriptor,
-    ctx: &PlanContext,
-) -> crate::Result<Vec<(String, String)>> {
-    use crate::component::MaterialKind;
-    let mut out = Vec::new();
-    for m in &desc.materials {
-        if m.kind == MaterialKind::Binary {
-            if let Some(tmpl) = &m.url_tmpl {
-                out.push((m.name.clone(), ctx.rendered_url(tmpl)?));
-            }
-        }
-    }
-    Ok(out)
-}
 
-fn check_op(c: &Check) -> Op {
-    let (describe, cmd) = match c {
-        Check::PortFree { port } => (
-            format!("port {port} is free"),
-            format!("if ss -ltn 2>/dev/null | grep -q ':{port} '; then echo 'PORT {port} IN USE'; exit 1; fi"),
-        ),
-        Check::KernelMin { version } => {
-            (format!("kernel >= {version}"), "uname -r".to_string())
-        }
-        Check::DiskFree { path, min_gb } => (
-            format!("{path} has >= {min_gb}GB free"),
-            format!("df -BG {path} 2>/dev/null | tail -1 || df -BG / | tail -1"),
-        ),
-    };
-    Op::Shell {
-        phase: Phase::Preflight,
-        describe,
-        cmd,
-        soft_fail: true,
-        check: None,
-    }
-}
 
 fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
     let op = match a {

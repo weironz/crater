@@ -526,3 +526,17 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **守 D-036/D-034**:materials 按名打包/取用;recipe 是声明数据。
 - **真机**:`build -f tasks/yq.yaml -t <zot>/yqtask:1.0`(recipe=task,含 actions/place)→ `push` → 清库 → `apply <ref>`(pull→recipe-replay→place offline)→ n12 yq v4.53.2;`save -o yq.oci` → `apply yq.oci`(offline task artifact)→ n12 yq。33 tests 绿。
 - **意义**:补上 task 模型最后短板(离线),为把 component 模型收敛到 task 扫清前提。
+
+---
+
+## 2026-06-01 · component 模型彻底收敛到 task
+
+### D-046 删除 component 模型,统一为 task(2a–2d)
+- **背景**:task 模型功能已 ≥ component(D-037~D-045:actions/needs/phase/when、materials/place、register/hostvars、retries/ignore_errors、handlers/notify、hosts 组过滤、命名库、嵌套 groups、自举 agent、离线打包、16 原语),component 模型冗余。
+- **2a**:迁 mysql/zot → `tasks/`,删 elasticsearch/node_exporter。
+- **2b**:`crater <name>` + 裸名 `apply` 统一路由命名 task `tasks/<name>.yaml`;删 `deploy_shortcut`/`parse_flags`/`ShortcutFlags`/`resolve_component`/component-fleet。
+- **2c**:删 component 执行路径(`run_pipeline`/`run_host`/`build_image_bundle`/`build_bundle`/`apply_spec`/`Artifacts`/`order_components`/`resolve_descriptor`/`execute_plan`/`run_via_agent`);`apply`/`build` 全归 task;删 spec examples。
+- **2d**:core 删 `ComponentDescriptor`/`Check`/`build_plan`/`check_op`/`collect_*`;`CraterSpec` 精简为仅 inventory;删 `ComponentRef`/`to_inline_descriptor`/`AiConfig`;**AI 改生成 task**(`nl_to_task`);`doctor` 改扫 `tasks/` 的 service/systemd_unit;删 `components/` 目录 + materials-preview。
+- **结果**:单一 task 模型。`crater apply`(本机/`--host`/`-i`)、命名 task、镜像、离线 artifact 全归 task;自举 agent 贯穿;`Action` 16 原语保留。
+- **残留**(后续):`bundle.rs` legacy(`Manifest`/`store_blob`/`store_rootfs_layer` 等,仅 bundle 单测用);`README`/`docs/features` 历史 component 描述待刷新。
+- **真机**:2a–2c 各步已真机验证;2d 后命名 task agent 冒烟通过。33 tests 绿,0 警告。
