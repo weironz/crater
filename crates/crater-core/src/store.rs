@@ -230,10 +230,14 @@ impl ImageStore {
     }
 
     /// Import an oci-archive file (e.g. `crater build --image` output) into the
-    /// store under `as_ref`: copy its image's manifest/config/layer blobs in and
-    /// tag them. Picks the archive manifest carrying an `image.ref.name` (the
-    /// rootfs image), not crater's own bundle manifest.
-    pub fn import_oci_archive(&self, archive: &std::path::Path, as_ref: &str) -> crate::Result<()> {
+    /// store and tag it. `as_ref` overrides the tag; when `None`, the archive's
+    /// own embedded `image.ref.name` is used (so `build -t <ref>` flows straight
+    /// to `load` with no repeated reference). Returns the reference actually used.
+    pub fn import_oci_archive(
+        &self,
+        archive: &std::path::Path,
+        as_ref: Option<&str>,
+    ) -> crate::Result<String> {
         let tmp = std::env::temp_dir().join(format!("crater-import-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         crate::bundle::unpack(archive, &tmp)?;
@@ -242,6 +246,14 @@ impl ImageStore {
             .as_array()
             .and_then(|a| a.iter().find(|m| m["annotations"][ANN_REF].as_str().is_some()))
             .ok_or_else(|| anyhow::anyhow!("{}: no image manifest (ref.name) in archive", archive.display()))?;
+        // The tag: explicit --as wins, else the archive's embedded ref.name.
+        let reference = match as_ref {
+            Some(r) => r.to_string(),
+            None => entry["annotations"][ANN_REF]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{}: archive has no ref.name; pass --as <ref>", archive.display()))?
+                .to_string(),
+        };
         let mdig = entry["digest"].as_str().unwrap_or("").to_string();
         let mdig = strip(&mdig);
         let src_blob = |d: &str| tmp.join("blobs").join("sha256").join(strip(d));
@@ -264,9 +276,9 @@ impl ImageStore {
             }
         }
         let msize = entry["size"].as_u64().unwrap_or(0);
-        self.tag(as_ref, mdig, msize)?;
+        self.tag(&reference, mdig, msize)?;
         let _ = std::fs::remove_dir_all(&tmp);
-        Ok(())
+        Ok(reference)
     }
 
     /// The parsed OCI manifest of a stored image (to detect crater artifacts).

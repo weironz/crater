@@ -186,9 +186,10 @@ enum Cmd {
     Load {
         /// Path to the .oci archive.
         file: PathBuf,
-        /// Tag to store it under, e.g. 192.168.73.5:5000/yq:4.53.2
+        /// Tag to store it under (default: the archive's embedded ref.name, e.g.
+        /// from `build -t`), e.g. 192.168.73.5:5000/yq:4.53.2
         #[arg(long = "as")]
-        as_ref: String,
+        as_ref: Option<String>,
     },
     /// Add a new reference (alias) to a stored image, like `docker tag`.
     Tag {
@@ -346,8 +347,8 @@ async fn main() -> Result<()> {
         Cmd::Pull { reference } => pull_image(&reference).await,
         Cmd::Push { reference } => push_image(&reference).await,
         Cmd::Load { file, as_ref } => {
-            ImageStore::open()?.import_oci_archive(&file, &as_ref)?;
-            info!("loaded {} → {as_ref}", file.display());
+            let r = ImageStore::open()?.import_oci_archive(&file, as_ref.as_deref())?;
+            info!("loaded {} → {r}", file.display());
             Ok(())
         }
         Cmd::Tag { source, target } => {
