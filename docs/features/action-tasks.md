@@ -68,6 +68,9 @@ action 项字段(全是引擎读得懂的封闭词汇,**无需执行即可静态
 | `file` | `path` + `state: directory\|absent\|touch` + `mode/owner/group` | `mkdir -p`/`rm -rf`/`touch`;探针 `test -d`/`test ! -e`/`test -e` |
 | `copy` | `src`(控制端,相对 task 目录) + `dest` + `mode` | 读控制端文件**内联进 plan**(agent 也能写),sha256 幂等 + chmod;文本 only(二进制走 `place`) |
 | `service` | `name` + `state: started\|stopped\|restarted` + `enabled` | systemd start/stop/restart + enable/disable;started/stopped 探针 `is-active` |
+| `lineinfile` | `path` + `line` + `regexp?` + `state` + `create` | present 时(有 regexp)删匹配行 + append(即替换);探针 `grep -qxF` |
+| `user` | `name` + `state` + `system/shell/home/groups` | `useradd`/`userdel`;探针 `id` |
+| `group` | `name` + `state` + `system` | `groupadd`/`groupdel`;探针 `getent group` |
 
 `copy` 复用增强后的 `Op::WriteFile`(加 `mode` + sha256 幂等),`render_template`/`write_file` 也因此变幂等(内容不变报 ok)。
 
@@ -88,7 +91,7 @@ crater apply examples/install-yq.yaml -i inventory.yaml                 # 层3 i
 - 本期:`actions` + `needs` + `phase` + `when_os/when_offline` + materials + 三层 targeting。
 - `retries`/`ignore_errors` 字段已解析,**运行时行为**后续。
 - `hosts` 本期支持 `all`;**组过滤**后续。
-- 原语已补 **file/copy/service**(D-039);lineinfile/user/group 后续。
+- 原语已补 **file/copy/service**(D-039)、**lineinfile/user/group**(D-040)。
 - handlers/notify、register/hostvars 在 task 模型下、`retries/ignore_errors` 运行时、`hosts` 组过滤后续。
 - 命名 task 库(裸名 `crater apply <task>` 解析新 actions 格式)后续;现阶段裸名仍解析 `components/`(旧格式兼容)。
 

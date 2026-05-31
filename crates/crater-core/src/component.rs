@@ -242,6 +242,41 @@ pub enum Action {
         #[serde(default)]
         enabled: Option<bool>,
     },
+    /// Ensure a single line is present/absent in a file (D-037-b). Idempotent in
+    /// the engine via a grep probe. `regexp` (if set) matches the line to
+    /// replace; `create` makes the file if missing.
+    Lineinfile {
+        path: PathBuf,
+        line: String,
+        #[serde(default)]
+        regexp: Option<String>,
+        #[serde(default)]
+        state: Presence,
+        #[serde(default)]
+        create: bool,
+    },
+    /// Ensure a system user exists/absent (D-037-b). Idempotent (`id` probe).
+    User {
+        name: String,
+        #[serde(default)]
+        state: Presence,
+        #[serde(default)]
+        system: bool,
+        #[serde(default)]
+        shell: Option<String>,
+        #[serde(default)]
+        home: Option<String>,
+        #[serde(default)]
+        groups: Vec<String>,
+    },
+    /// Ensure a system group exists/absent (D-037-b). Idempotent (`getent`).
+    Group {
+        name: String,
+        #[serde(default)]
+        state: Presence,
+        #[serde(default)]
+        system: bool,
+    },
 }
 
 /// Desired state for the `file` primitive.
@@ -263,6 +298,15 @@ pub enum ServiceState {
     Started,
     Stopped,
     Restarted,
+}
+
+/// Present/absent state, shared by `lineinfile`/`user`/`group` (default present).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Presence {
+    #[default]
+    Present,
+    Absent,
 }
 
 impl Action {
@@ -297,6 +341,9 @@ impl Action {
             Action::File { .. } => "file",
             Action::Copy { .. } => "copy",
             Action::Service { .. } => "service",
+            Action::Lineinfile { .. } => "lineinfile",
+            Action::User { .. } => "user",
+            Action::Group { .. } => "group",
         }
     }
 }

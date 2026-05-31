@@ -635,6 +635,123 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 check,
             }
         }
+        Action::Lineinfile {
+            path,
+            line,
+            regexp,
+            state,
+            create,
+        } => {
+            use crate::component::Presence;
+            let p = path.display().to_string();
+            // line/regexp enter the shell single-quoted (assumed no `'`).
+            match state {
+                Presence::Present => {
+                    let pre = if *create {
+                        format!("mkdir -p \"$(dirname '{p}')\" && touch '{p}'; ")
+                    } else {
+                        String::new()
+                    };
+                    // On a check miss: drop any regexp-matching line, then append.
+                    let cmd = match regexp {
+                        Some(re) => format!(
+                            "{pre}sed -i -E '\\|{re}|d' '{p}' 2>/dev/null; printf '%s\\n' '{line}' >> '{p}'"
+                        ),
+                        None => format!("{pre}printf '%s\\n' '{line}' >> '{p}'"),
+                    };
+                    Op::Shell {
+                        phase,
+                        describe: format!("lineinfile {p}"),
+                        cmd,
+                        soft_fail: false,
+                        check: Some(format!("grep -qxF '{line}' '{p}' 2>/dev/null")),
+                    }
+                }
+                Presence::Absent => {
+                    let (cmd, check) = match regexp {
+                        Some(re) => (
+                            format!("sed -i -E '\\|{re}|d' '{p}' 2>/dev/null || true"),
+                            format!("! grep -qE '{re}' '{p}' 2>/dev/null"),
+                        ),
+                        None => (
+                            format!("grep -vxF '{line}' '{p}' > '{p}.crater.tmp' 2>/dev/null && mv '{p}.crater.tmp' '{p}' || true"),
+                            format!("! grep -qxF '{line}' '{p}' 2>/dev/null"),
+                        ),
+                    };
+                    Op::Shell {
+                        phase,
+                        describe: format!("lineinfile -{p}"),
+                        cmd,
+                        soft_fail: false,
+                        check: Some(check),
+                    }
+                }
+            }
+        }
+        Action::User {
+            name,
+            state,
+            system,
+            shell,
+            home,
+            groups,
+        } => {
+            use crate::component::Presence;
+            match state {
+                Presence::Present => {
+                    let mut opts = String::new();
+                    if *system {
+                        opts.push_str(" -r");
+                    }
+                    if let Some(s) = shell {
+                        opts.push_str(&format!(" -s '{s}'"));
+                    }
+                    if let Some(h) = home {
+                        opts.push_str(&format!(" -d '{h}' -m"));
+                    }
+                    if !groups.is_empty() {
+                        opts.push_str(&format!(" -G '{}'", groups.join(",")));
+                    }
+                    Op::Shell {
+                        phase,
+                        describe: format!("user {name}"),
+                        cmd: format!("useradd{opts} '{name}'"),
+                        soft_fail: false,
+                        check: Some(format!("id '{name}' >/dev/null 2>&1")),
+                    }
+                }
+                Presence::Absent => Op::Shell {
+                    phase,
+                    describe: format!("user -{name}"),
+                    cmd: format!("userdel -r '{name}' 2>/dev/null || userdel '{name}'"),
+                    soft_fail: false,
+                    check: Some(format!("! id '{name}' >/dev/null 2>&1")),
+                },
+            }
+        }
+        Action::Group {
+            name,
+            state,
+            system,
+        } => {
+            use crate::component::Presence;
+            match state {
+                Presence::Present => Op::Shell {
+                    phase,
+                    describe: format!("group {name}"),
+                    cmd: format!("groupadd{} '{name}'", if *system { " -r" } else { "" }),
+                    soft_fail: false,
+                    check: Some(format!("getent group '{name}' >/dev/null 2>&1")),
+                },
+                Presence::Absent => Op::Shell {
+                    phase,
+                    describe: format!("group -{name}"),
+                    cmd: format!("groupdel '{name}'"),
+                    soft_fail: false,
+                    check: Some(format!("! getent group '{name}' >/dev/null 2>&1")),
+                },
+            }
+        }
     };
     Ok(op)
 }

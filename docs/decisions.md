@@ -451,3 +451,14 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **实现**:`Op::WriteFile` 加 `mode` + sha256 幂等(`copy` 复用;`render_template`/`write_file` 同获幂等)。三原语全是 Shell/WriteFile 这类既有 Op,旧 agent 也能执行(mode 经新逻辑 shell/local 通道 chmod)。
 - **守 D-036**:全声明式数据,幂等/排序/条件由引擎,YAML 只声明原语 + 参数。
 - **真机**:本机 + n11 `--shell` 跑 `examples/fcs-demo.yaml`:`file` 建 `/etc/crater-demo`(755)、`copy` 推 `app.conf`(644+内容)、`service ssh` 幂等 ok、`needs` 排序正确;再跑 `changed=0`。33 tests 绿。
+
+---
+
+## 2026-06-01 · action 原语补齐(D-037-b 第二批)
+
+### D-040 lineinfile / user / group 原语
+- **lineinfile**:`state: present|absent`(共享 `Presence` 枚举)+ 可选 `regexp` + `create`。present 时(有 regexp)`sed` 删匹配行再 append(实现"替换为 line"),幂等探针 `grep -qxF '<line>'`;absent 删行,探针 `! grep`。line/regexp 单引号入 shell(假定不含 `'`)。
+- **user**:`useradd`(`-r/-s/-d -m/-G`)/`userdel -r`;幂等探针 `id`。
+- **group**:`groupadd`(`-r`)/`groupdel`;幂等探针 `getent group`。
+- **守 D-036**:全声明式,幂等/排序由引擎。
+- **真机本机**(`examples/lug-demo.yaml`):`group craterdemo` + `user crateruser`(附加组生效)+ `lineinfile` 把预置的 `max_connections=50` 经 regexp 替换为 `=100`(仅 1 行);`needs` 排序(group→user);再跑 `changed=0`。33 tests 绿。
