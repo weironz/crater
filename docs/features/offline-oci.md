@@ -17,6 +17,27 @@
 - **制品/文件型**（yq、二进制）：`--image` 封装 rootfs 镜像 → load 时展开到 `/`。
 - **daemon 型**（node_exporter 等需 systemd）：recipe-replay（download→push-blob、systemd_unit 等照常执行）。
 
+## 构建逻辑：vs Dockerfile
+
+crater 构建 OCI 镜像**不用 Dockerfile，也不起容器**。它的"Dockerfile"就是组件的 `component.yaml`（声明式 actions），逻辑是**「声明式 → 文件树 → 一个层」**，纯 Rust（download + tar + json），两端零运行时。
+
+| | Docker | crater（`build --image`） |
+|---|---|---|
+| 构建配方 | Dockerfile（FROM / RUN / COPY） | component.yaml（声明式 actions） |
+| 怎么产生层 | 每条指令一层；`RUN` 在**容器沙箱执行命令**、快照 fs diff 成层 | **不执行命令、不起容器**；把**文件类动作**的产物物化成 rootfs 文件树 → 一个层 |
+| 依赖 | dockerd / buildkit + 容器运行时 | 纯 Rust，零运行时 |
+| base | `FROM <base>` | 无（相当于 `FROM scratch`，层里只有制品文件） |
+
+构建步骤（yq 为例）：
+1. 读组件动作，挑**文件类**的：`download→dest`、`write_file`、`render_template`。
+2. 物化进 rootfs 树：`(usr/local/bin/yq, <字节>, 0755)`。
+3. tar 成一个层（含权限位）。
+4. 手写 OCI config（rootfs.diff_ids）+ manifest（config+layer）→ 标准 OCI Image Layout。
+
+**关键边界（这解释了为何分两条路径）**：因为 crater 不在沙箱里执行命令再快照，它只能把**文件类动作**烤进层；**命令式动作**（`run_cmd`/`pkg_install`/`systemd_unit`）没法变成一个 fs diff（那需要容器沙箱执行+快照）。所以纯文件型 → 烤进 rootfs 镜像；daemon/复杂型 → 留给 deploy 时 recipe-replay。这是**有意不引入构建期容器运行时**的取舍（契合纯 Rust / CN / air-gap）。Docker 的 `RUN` 烤层能力，本质是用容器换来的。
+
+后续可补（都无需容器 builder）：`from: <base>` + COPY 式叠加（已能 `pull` 基镜像 blob，纯层组合即可，是 Dockerfile `FROM`+`COPY` 子集）。
+
 ## 基本 demo
 
 **把 yq 封装成 OCI 镜像 → 离线安装**：
