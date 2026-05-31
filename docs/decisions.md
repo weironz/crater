@@ -217,3 +217,14 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **决策**:借鉴 ansible，按复杂度/通用度分**四层** module（详见 [design.md §6.1](design.md)）：① 内置类型化(Rust enum，core) ② 数据定义(`modules/<name>.yaml` 的 params+check+act 模板) ③ 外部 module(脚本/静态二进制 + JSON 契约，agent 送达) ④ `run_cmd`+`check` 逃生口。**统一契约 = `check→act→StepStatus`(B1)**;第 1/2 层 lower 成 `Op::Shell{check,cmd}`(shell 模式可用)，第 3 层需 agent(优先静态二进制/纯 shell，守目标机零依赖)。
 - **理由**:复用已造零件(StepStatus=结果契约、agent=送达、数据驱动=放目录即加载);避免"每加 module 就改 Rust+fork";与 D-017(产品=数据、原语=代码)、D-027(agent 默认) 自洽。
 - **影响（本批做的地基）**:新增 `Action::Module{uses, with}` + `module.rs`(ModuleDescriptor: params/check/act) + `PlanContext.modules_dir`;`module` action 解析 `modules/<uses>.yaml`、用 `with`(+vars) 渲染 check/act → `Op::Shell{check,cmd}`，直接吃 B1 幂等回显。缺参报错。第 2 层(数据定义)即可用、零代码扩;内置集扩充(B3)与外部 JSON 协议后续。
+
+---
+
+## 2026-05-31 · 跨节点 fact 传递（真集群钥匙）
+
+### D-030 register/hostvars：跨节点 fact 传递
+- **背景**:基础多节点(fan-out)已验证，但无跨节点协调——k3s server 的 join token 没法传给 agent 节点。真集群缺这一环。
+- **决策**:组件可声明 `register: [{name, cmd}]`;某组件在某 host 装完后，**控制端**经该 host 的 executor 跑 `cmd`、捕获 stdout、存入 `hostvars[host][name]`。其它 host 的组件用 `{{ hostvars.<host>.<name> }}` 引用(渲染时注入为扁平 var)。主机按 inventory 顺序处理(leader 在前→先 register)。
+- **理由**:控制端捕获最简单可靠，agent/shell 模式都适用(register 是一条直连 SSH exec，不走 agent plan);复用现有 render + vars 机制(扩 `{{ key }}` 空格 + 点号键)。这是 ansible `register`/`hostvars`/`run_once` 的最小子集。
+- **影响**:`ComponentDescriptor.register` + `RegisterSpec` + `ComponentRef` 内联同字段;`apply_spec` 维护 `hostvars` 跨主机、注入 `hostvars.<h>.<k>`、装后捕获;`engine::render` 转 pub 且支持空格/点号键。**describe 仍显示模板原文(不泄漏 token 等敏感值到日志)**，实际执行渲染后命令。真机验证(192.168.73.11→.12):leader register token-from-ubuntu → follower 经 `{{hostvars.leader.token}}` 收到。+1 单测(共 31)。
+- **已知边界/后续**:register 为**组件级**(非步骤级);跨主机顺序靠 inventory 顺序(未按 role 自动排);敏感值未标 `no_log`(目前靠 describe 不渲染规避);真 k3s 多节点 join 待用此机制落地;并发(F17)正交待加。

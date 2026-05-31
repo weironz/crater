@@ -699,6 +699,10 @@ async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
         return Ok(());
     }
 
+    // Cross-node facts (D-030): hostvars[host][name], populated by `register:`
+    // and injected as `hostvars.<host>.<name>` template vars for later hosts.
+    let mut hostvars: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+
     for host in &spec.inventory.hosts {
         info!("▶ host {} ({})", host.name, host.address);
         let exec: Box<dyn Executor> = if do_apply {
@@ -729,12 +733,37 @@ async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
                 .clone()
                 .or_else(|| desc.version_default.clone())
                 .unwrap_or_else(|| "latest".into());
-            let ctx = PlanContext::new(osf, ver.clone(), component_dir);
+            let mut ctx = PlanContext::new(osf, ver.clone(), component_dir);
+            // Make every other host's registered facts available as template vars.
+            for (h, kv) in &hostvars {
+                for (k, v) in kv {
+                    ctx.vars.insert(format!("hostvars.{h}.{k}"), v.clone());
+                }
+            }
             let plan = build_plan(&desc, &ctx)?;
             info!("{} v{ver} — {} steps", cref.name, plan.len());
             if do_apply {
                 // Agent by default (D-027); --shell forces the shell executor.
                 execute_plan(&plan, exec.as_ref(), do_shell, None).await?;
+                // Capture this component's facts on this host for later hosts.
+                for reg in &desc.register {
+                    let out = exec.run(&engine::render(&reg.cmd, &ctx.vars)).await?;
+                    if !out.ok() {
+                        anyhow::bail!(
+                            "register '{}' on {} failed (exit {}): {}",
+                            reg.name,
+                            host.name,
+                            out.code,
+                            out.stderr.trim()
+                        );
+                    }
+                    let val = out.stdout.trim().to_string();
+                    info!("registered {}.{} ({} bytes)", host.name, reg.name, val.len());
+                    hostvars
+                        .entry(host.name.clone())
+                        .or_default()
+                        .insert(reg.name.clone(), val);
+                }
             } else {
                 print_plan(&plan);
             }

@@ -78,7 +78,8 @@ examples/    crater.yaml node_exporter.yaml
 ### 2026-05-31 续10（多节点实测 + 跨节点 register/hostvars 起步）
 - **多节点实测（两台真机）**：`examples/multi-node.yaml` 把 yq 铺到 192.168.73.11 + 192.168.73.12，逐主机独立幂等（n11 ok、n12 changed），各自走 agent。**基础多节点（fan-out 相同/不同组件到多台）已验证**。
 - **已知缺口**：跨节点 fact 传递（k3s join token 等真集群）、并发（F17，现串行）、主机分组/`--limit`、跨主机容错。
-- 下一步：跨节点 **register/hostvars**（真集群钥匙）→ k3s 多节点 join → 并发。
+- 跨节点 **register/hostvars 已实现 + 真机验证**（D-030）：组件 `register: [{name,cmd}]` → 控制端经该 host executor 捕获 stdout → `hostvars[host][name]`；其它 host 用 `{{ hostvars.<host>.<name> }}`（主机按 inventory 顺序，leader 先 register）。真机 `examples/cross-node.yaml`：leader register `token-from-ubuntu` → follower 收到。`engine::render` 转 pub + 支持空格/点号键；describe 不渲染（不泄漏敏感值）。+1 单测（共 31）。
+- 下一步：用此机制做 **k3s 多节点 join**（server 装好 register node-token → agent `K3S_URL`/`K3S_TOKEN` join）→ 并发（F17）。
 
 ### 2026-05-31 续9（module 契约地基 D-029）
 - 四层 module 模型记入 design.md §6.1 + ADR D-029。**契约地基已做**：

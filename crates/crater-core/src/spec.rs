@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::component::{Action, Check, ComponentDescriptor};
+use crate::component::{Action, Check, ComponentDescriptor, RegisterSpec};
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CraterSpec {
@@ -78,6 +78,8 @@ pub struct ComponentRef {
     pub install: Vec<Action>,
     #[serde(default)]
     pub verify: Vec<Action>,
+    #[serde(default)]
+    pub register: Vec<RegisterSpec>,
 }
 
 impl ComponentRef {
@@ -98,6 +100,7 @@ impl ComponentRef {
             preflight: self.preflight.clone(),
             install: self.install.clone(),
             verify: self.verify.clone(),
+            register: self.register.clone(),
             offline: None,
         }
     }

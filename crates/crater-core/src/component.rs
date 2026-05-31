@@ -33,9 +33,21 @@ pub struct ComponentDescriptor {
     pub install: Vec<Action>,
     #[serde(default)]
     pub verify: Vec<Action>,
+    /// Facts to capture on the host after install and expose to other hosts as
+    /// `hostvars.<host>.<name>` (D-030) — the basis for cluster join tokens etc.
+    #[serde(default)]
+    pub register: Vec<RegisterSpec>,
     /// Reserved for offline artifact manifest (M2). Opaque for now.
     #[serde(default)]
     pub offline: Option<serde_yaml::Value>,
+}
+
+/// A fact to capture after a component installs on a host: run `cmd`, store its
+/// stdout as `hostvars.<host>.<name>` for other hosts to reference (D-030).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RegisterSpec {
+    pub name: String,
+    pub cmd: String,
 }
 
 impl ComponentDescriptor {

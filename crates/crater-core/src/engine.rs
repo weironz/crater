@@ -378,11 +378,14 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
     Ok(op)
 }
 
-/// Minimal `{{var}}` substitution. Tera/minijinja can replace this later.
-fn render(tpl: &str, vars: &BTreeMap<String, String>) -> String {
+/// Minimal `{{var}}` substitution (accepts `{{key}}` and `{{ key }}`). Keys can
+/// be dotted, e.g. `hostvars.server.token` (D-030). Tera/minijinja can replace
+/// this later.
+pub fn render(tpl: &str, vars: &BTreeMap<String, String>) -> String {
     let mut out = tpl.to_string();
     for (k, v) in vars {
-        out = out.replace(&format!("{{{{{k}}}}}"), v);
+        out = out.replace(&format!("{{{{{k}}}}}"), v); // {{key}}
+        out = out.replace(&format!("{{{{ {k} }}}}"), v); // {{ key }}
     }
     out
 }
@@ -611,6 +614,14 @@ mod tests {
         .unwrap();
         assert_eq!(shell_check(&v), None);
         assert_eq!(v.phase(), Phase::Verify);
+    }
+
+    #[test]
+    fn render_supports_dotted_and_spaced_keys() {
+        let mut vars = BTreeMap::new();
+        vars.insert("hostvars.leader.token".to_string(), "T".to_string());
+        assert_eq!(render("x={{hostvars.leader.token}}", &vars), "x=T");
+        assert_eq!(render("x={{ hostvars.leader.token }}", &vars), "x=T");
     }
 
     #[test]
