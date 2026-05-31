@@ -426,3 +426,16 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - **本期(D-037-a)**：`TaskFile` schema(`name/hosts/vars/materials/actions[]`,action 项含 `id/needs/phase/when_os/when_offline/retries/ignore_errors` + 原语)+ 引擎 `plan_from_task`(when 过滤 → needs 拓扑 → 生成 plan)+ apply 识别 task 文件 + 三层 targeting 执行 + 真机 yq task 验证。`retries/ignore_errors` 字段已解析,**运行时行为下期**;`hosts` 本期支持 `all`(组过滤下期)。
   - **后期(D-037-b)**：handlers/notify、retries/ignore_errors 运行时、`hosts` group 过滤、原语补齐(file/copy/service/lineinfile/user/group)、register/hostvars 在 task 模型下打通。
 - **守 D-036**：实现中任何"想给 YAML 加条件/循环/表达式"的冲动 → 停 → 挪进 Rust。
+
+---
+
+## 2026-06-01 · build → 本地库 / save → 文件(docker 式分工)
+
+### D-038 去掉 build 的 --image/-o;build 进本地库,新增 save 导出文件
+- **背景**:`crater build --image -f spec -o x.oci` 把"构建"和"出文件"耦合,且 `--image` 是历史开关(B 类 artifact 已是唯一形态,D-033)。对齐 docker 心智:build 产物进库,save 导出文件。
+- **决策**:
+  - **`crater build -f spec [-t ref]`**:总是构建 B 类 OCI artifact 进**本地库** `~/.crater/store`(去掉 `--image` 和 `-o`)。`-t` 指定引用(默认 `crater/<name>:<ver>`)。实现:复用 build_image_bundle 产临时 .oci → `ImageStore::import_all` 导入库。
+  - **`crater save <ref> -o x.oci`**:从库导出 oci-archive 文件(`ImageStore::export_oci_archive`,import 的逆;保留 index 上的 `artifactType` 使文件可被 load/apply 识别)。`-o` 归 save。
+  - 分工:**build→库 / save→文件 / load←文件 / push·pull↔registry / apply←库·registry**(docker 同构)。
+  - legacy tar-bundle `build_bundle`(crater-manifest 格式)不再被任何命令调用,标 `#[allow(dead_code)]` 保留(apply/deploy 仍能读老包)。
+- **真机**:`build -t .../yq:built`→库;`crater images` 见;`save -o /tmp/saved.oci`(13MB);清库→`load`(包内 ref)→`apply` recipe-replay 装 yq v4.53.2;`build` 无 -t → `crater/yq:4.53.2`;`save` 不存在 ref 报错。33 tests 绿。

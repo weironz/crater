@@ -80,21 +80,23 @@ enum Cmd {
         #[arg(long)]
         shell: bool,
     },
-    /// Build an offline bundle from a spec (run on an online control machine).
+    /// Build a B 类 OCI artifact from a spec into the local store (like
+    /// `docker build`). Export to a file with `crater save`.
     Build {
         #[arg(short, long)]
         file: PathBuf,
-        #[arg(short, long)]
-        output: PathBuf,
-        /// Wrap the component's files into an OCI rootfs image (crater build);
-        /// deploy installs it by extracting the layer — no container runtime.
-        #[arg(long)]
-        image: bool,
-        /// Reference (tag) for the built artifact, e.g. `192.168.1.5:5000/yq:1.0`.
-        /// Defaults to `crater/<name>:<version>`. Only valid with --image, and
-        /// only for a single-component spec.
+        /// Reference (tag) for the artifact, e.g. `192.168.1.5:5000/yq:1.0`.
+        /// Defaults to `crater/<name>:<version>`; single-component specs only.
         #[arg(short = 't', long)]
         tag: Option<String>,
+    },
+    /// Export a stored artifact/image to an oci-archive file (like `docker save`).
+    Save {
+        /// Reference in the local store (`crater images` to list).
+        reference: String,
+        /// Output file, e.g. yq.oci
+        #[arg(short, long)]
+        output: PathBuf,
     },
     /// Deploy an offline bundle to a target (zero network on the target).
     Deploy {
@@ -311,20 +313,11 @@ async fn main() -> Result<()> {
             apply_source(name, source, file, inventory, host, user, password, key, port, dry_run, shell)
                 .await
         }
-        Cmd::Build {
-            file,
-            output,
-            image,
-            tag,
-        } => {
-            if image {
-                build_image_bundle(&file, &output, tag).await
-            } else {
-                if tag.is_some() {
-                    anyhow::bail!("-t/--tag only applies to `--image` builds");
-                }
-                build_bundle(&file, &output).await
-            }
+        Cmd::Build { file, tag } => build_to_store(&file, tag).await,
+        Cmd::Save { reference, output } => {
+            ImageStore::open()?.export_oci_archive(&reference, &output)?;
+            info!("saved {reference} → {}", output.display());
+            Ok(())
         }
         Cmd::Deploy {
             bundle,
@@ -1352,9 +1345,28 @@ async fn run_host(
 }
 
 // ---------------------------------------------------------------------------
-// M2: offline bundle build / deploy
+// build (→ local store) / save (→ oci file) / deploy
 // ---------------------------------------------------------------------------
 
+/// `crater build -f spec [-t ref]`: build the B 类 artifact(s) and store them in
+/// the local store (~/.crater/store), like `docker build`. Export with `save`.
+async fn build_to_store(file: &Path, tag: Option<String>) -> Result<()> {
+    let tmp = std::env::temp_dir().join(format!("crater-build-{}.oci", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    build_image_bundle(file, &tmp, tag).await?;
+    let store = ImageStore::open()?;
+    let refs = store.import_all(&tmp)?;
+    let _ = std::fs::remove_file(&tmp);
+    for r in &refs {
+        info!("built {r} → 本地库(~/.crater/store)");
+    }
+    Ok(())
+}
+
+/// Legacy tar-bundle build (pre-artifact, crater-manifest format). Superseded by
+/// the B 类 artifact build (D-033); kept so `apply`/`deploy` can still read old
+/// bundles. Not wired to any CLI command.
+#[allow(dead_code)]
 async fn build_bundle(spec_file: &Path, out: &Path) -> Result<()> {
     let spec = CraterSpec::from_yaml_file(spec_file)?;
     let components_dir = PathBuf::from("components");
@@ -1543,8 +1555,9 @@ async fn build_image_bundle(spec_file: &Path, out: &Path, tag: Option<String>) -
     bundle::pack(&stage_root, out)?;
     let _ = std::fs::remove_dir_all(&stage_root);
     let size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
-    info!(
-        "wrote {} ({} component artifact(s), {} bytes) — OCI artifact ({})",
+    // Internal step now (build → store / save → file); keep at debug.
+    tracing::debug!(
+        "staged {} ({} artifact(s), {} bytes, {})",
         out.display(),
         artifacts.len(),
         size,

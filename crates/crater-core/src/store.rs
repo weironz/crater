@@ -229,40 +229,29 @@ impl ImageStore {
         Ok(std::fs::read(self.blob_path(strip(&md)))?)
     }
 
-    /// Import an oci-archive file (e.g. `crater build --image` output) into the
-    /// store and tag it. `as_ref` overrides the tag; when `None`, the archive's
-    /// own embedded `image.ref.name` is used (so `build -t <ref>` flows straight
-    /// to `load` with no repeated reference). Returns the reference actually used.
-    pub fn import_oci_archive(
+    /// Import one unpacked index entry: copy its manifest/config/layer blobs in
+    /// and tag it. Tag = `override_ref` if given, else the entry's `ref.name`.
+    fn import_entry(
         &self,
-        archive: &std::path::Path,
-        as_ref: Option<&str>,
+        tmp: &std::path::Path,
+        entry: &serde_json::Value,
+        override_ref: Option<&str>,
     ) -> crate::Result<String> {
-        let tmp = std::env::temp_dir().join(format!("crater-import-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        crate::bundle::unpack(archive, &tmp)?;
-        let index: serde_json::Value = serde_json::from_slice(&std::fs::read(tmp.join("index.json"))?)?;
-        let entry = index["manifests"]
-            .as_array()
-            .and_then(|a| a.iter().find(|m| m["annotations"][ANN_REF].as_str().is_some()))
-            .ok_or_else(|| anyhow::anyhow!("{}: no image manifest (ref.name) in archive", archive.display()))?;
-        // The tag: explicit --as wins, else the archive's embedded ref.name.
-        let reference = match as_ref {
+        let reference = match override_ref {
             Some(r) => r.to_string(),
             None => entry["annotations"][ANN_REF]
                 .as_str()
-                .ok_or_else(|| anyhow::anyhow!("{}: archive has no ref.name; pass --as <ref>", archive.display()))?
+                .ok_or_else(|| anyhow::anyhow!("archive manifest has no ref.name; pass a tag"))?
                 .to_string(),
         };
-        let mdig = entry["digest"].as_str().unwrap_or("").to_string();
-        let mdig = strip(&mdig);
+        let mdig_full = entry["digest"].as_str().unwrap_or("").to_string();
+        let mdig = strip(&mdig_full);
         let src_blob = |d: &str| tmp.join("blobs").join("sha256").join(strip(d));
         let copy_in = |d: &str| -> crate::Result<()> {
             let data = std::fs::read(src_blob(d))?;
             self.store_raw(&data)?;
             Ok(())
         };
-        // manifest + config + layers.
         let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(src_blob(mdig))?)?;
         copy_in(mdig)?;
         if let Some(c) = manifest["config"]["digest"].as_str() {
@@ -277,8 +266,102 @@ impl ImageStore {
         }
         let msize = entry["size"].as_u64().unwrap_or(0);
         self.tag(&reference, mdig, msize)?;
+        Ok(reference)
+    }
+
+    /// Import an oci-archive (e.g. `crater save` / `build` output) into the store
+    /// and tag it. `as_ref` overrides the tag; `None` uses the archive's embedded
+    /// `image.ref.name`. Returns the reference used.
+    pub fn import_oci_archive(
+        &self,
+        archive: &std::path::Path,
+        as_ref: Option<&str>,
+    ) -> crate::Result<String> {
+        let tmp = std::env::temp_dir().join(format!("crater-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        crate::bundle::unpack(archive, &tmp)?;
+        let index: serde_json::Value = serde_json::from_slice(&std::fs::read(tmp.join("index.json"))?)?;
+        let entry = index["manifests"]
+            .as_array()
+            .and_then(|a| a.iter().find(|m| m["annotations"][ANN_REF].as_str().is_some()))
+            .ok_or_else(|| anyhow::anyhow!("{}: no image manifest (ref.name) in archive", archive.display()))?;
+        let reference = self.import_entry(&tmp, entry, as_ref)?;
         let _ = std::fs::remove_dir_all(&tmp);
         Ok(reference)
+    }
+
+    /// Import EVERY tagged manifest from an oci-archive (a `crater build` output
+    /// may carry multiple component artifacts). Returns all references imported.
+    pub fn import_all(&self, archive: &std::path::Path) -> crate::Result<Vec<String>> {
+        let tmp = std::env::temp_dir().join(format!("crater-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        crate::bundle::unpack(archive, &tmp)?;
+        let index: serde_json::Value = serde_json::from_slice(&std::fs::read(tmp.join("index.json"))?)?;
+        let mut refs = Vec::new();
+        if let Some(ms) = index["manifests"].as_array() {
+            for entry in ms.iter().filter(|m| m["annotations"][ANN_REF].as_str().is_some()) {
+                refs.push(self.import_entry(&tmp, entry, None)?);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+        if refs.is_empty() {
+            anyhow::bail!("{}: no tagged manifest in archive", archive.display());
+        }
+        Ok(refs)
+    }
+
+    /// Export a stored image/artifact to an oci-archive file (`crater save`):
+    /// the inverse of `import`. Preserves `artifactType` on the index entry so
+    /// the file round-trips through `load`/`apply <file>`.
+    pub fn export_oci_archive(&self, reference: &str, out: &std::path::Path) -> crate::Result<()> {
+        let idx = self.read_index()?;
+        let entry = idx["manifests"]
+            .as_array()
+            .and_then(|a| a.iter().find(|m| m["annotations"][ANN_REF].as_str() == Some(reference)))
+            .ok_or_else(|| anyhow::anyhow!("image '{reference}' not in local store"))?;
+        let mdig_full = entry["digest"].as_str().unwrap_or("").to_string();
+        let msize = entry["size"].as_u64().unwrap_or(0);
+        let mdig = strip(&mdig_full);
+        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(self.blob_path(mdig))?)?;
+
+        let tmp = std::env::temp_dir().join(format!("crater-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let blobs = tmp.join("blobs").join("sha256");
+        std::fs::create_dir_all(&blobs)?;
+        std::fs::write(tmp.join("oci-layout"), br#"{"imageLayoutVersion":"1.0.0"}"#)?;
+        let copy = |d: &str| -> crate::Result<()> {
+            std::fs::copy(self.blob_path(strip(d)), blobs.join(strip(d)))?;
+            Ok(())
+        };
+        copy(mdig)?;
+        if let Some(c) = manifest["config"]["digest"].as_str() {
+            copy(c)?;
+        }
+        if let Some(ls) = manifest["layers"].as_array() {
+            for l in ls {
+                if let Some(d) = l["digest"].as_str() {
+                    copy(d)?;
+                }
+            }
+        }
+        let mut m_entry = json!({
+            "mediaType": MT_MANIFEST,
+            "digest": mdig_full,
+            "size": msize,
+            "annotations": { ANN_REF: reference }
+        });
+        if let Some(at) = manifest["artifactType"].as_str() {
+            m_entry["artifactType"] = json!(at);
+        }
+        let index = json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [m_entry]
+        });
+        std::fs::write(tmp.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
+        crate::bundle::pack(&tmp, out)?;
+        let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
     }
 
     /// The parsed OCI manifest of a stored image (to detect crater artifacts).

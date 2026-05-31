@@ -56,11 +56,51 @@ crater apply yq --host 192.168.73.11 --user root --password 123456 或者 --key 
 
 ## 指定inventory
 
+创建inventory
+
+```
+root@node5:/data/codes/crater# cat inventory.yaml 
+# crater inventory —— 部署目标主机清单。
+# 用法:crater apply <动作> -i <此文件>(大量机器、每台各自凭据)。
+#
+# 每台主机至少 name + address;认证用 password 或 key(二选一,key 优先)。
+# user 默认 root,port 默认 22。roles 可选(组件/task 按 role 选主机)。
+inventory:
+  hosts:
+    # ① 密码认证
+    - name: web1
+      address: 192.168.73.11
+      user: root
+      port: 22
+      password: "123456"
+      # roles: [web]
+
+    # ② SSH 私钥认证(适合禁用密码登录的机群;~ 会自动展开为 $HOME)
+    - name: web2
+      address: 192.168.73.12
+      user: root
+      port: 22
+      password: "123456"
+      # roles: [web]
+```
+
+运行
+
 ```
 crater apply yq -i inventory.yaml
 ```
 
 ## 镜像操作
+
+构建镜像
+
+```
+crater build -f examples/yq.yaml -t docker.io/library/yq:v4.53.2
+```
+
+
+
+
 
 ```
 crater apply docker.io/library/yq:v1.0

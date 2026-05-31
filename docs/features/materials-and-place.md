@@ -51,11 +51,11 @@ crater yq --host <host> --password <pw>     # 再跑：place → ok, changed=0�
 ### 离线（B 类 artifact，build 从 materials 抓料）
 
 ```bash
-crater build --image -f examples/yq/yq.yaml -o /tmp/yq.oci
+crater build -f examples/yq/yq.yaml          # → 本地库 crater/yq:4.53.2
 #   fetch material yq-bin <- https://.../yq_linux_amd64      ← 读的是 materials 段
 #   yq → artifact crater/yq:4.53.2: recipe + 1 material(s)
 
-crater load /tmp/yq.oci --as <registry>/yq:4.53.2
+crater tag crater/yq:4.53.2 <registry>/yq:4.53.2
 CRATER_INSECURE_REGISTRIES=<registry> crater push <registry>/yq:4.53.2
 
 # 另一台（或清空 ~/.crater/store 后）：

@@ -6,16 +6,19 @@
 
 离线包 = **合规 OCI Image Layout**（`oci-layout` + `index.json` + `blobs/sha256/<digest>`，内容寻址，digest 即校验）。crater **自备** build/save/load——目标机**零容器运行时**（不靠 ctr/docker）。
 
+crater 走 docker 式分工:**build → 本地库**,**save → 文件**,**load ← 文件**,**push/pull ↔ registry**。
+
 | 能力 | 命令 | 说明 |
 |---|---|---|
-| **build** | `crater build --image -f spec -o x.oci [-t ref]` | 制离线包；`--image` 把组件封成 **B 类 OCI artifact**；`-t/--tag` 指定引用(默认 `crater/<name>:<ver>`，D-033) |
-| **save** | （build 产物） | oci-archive（纯 tar），skopeo/oras 可读 |
-| **load+install** | `crater apply x.oci --host <host>`（= `crater deploy --bundle`） | crater 自己解包：识别 `artifactType` → **recipe-replay** |
-| **pull** | （build 时，组件 `images:`） | `oci-client` 从 registry 拉容器镜像 blob 进包（rustls 纯 Rust） |
+| **build** | `crater build -f spec [-t ref]` | 构建 **B 类 OCI artifact** 进**本地库** `~/.crater/store`(像 `docker build`);`-t/--tag` 指定引用(默认 `crater/<name>:<ver>`，D-033) |
+| **save** | `crater save <ref> -o x.oci` | 从库导出 oci-archive 文件(离线分发;纯 tar,skopeo/oras 可读) |
+| **load** | `crater load x.oci [--as ref]` | 导入文件到库(省略 `--as` 用包内 ref.name) |
+| **apply** | `crater apply <ref> --host <host>` | 从库/registry 取 → 识别 `artifactType` → **recipe-replay** |
+| **push/pull** | `crater push/pull <ref>` | 本地库 ⇄ registry(`oci-client`,rustls 纯 Rust) |
 
 ## 构建逻辑：B 类 OCI artifact（D-032/D-033），不是伪容器镜像
 
-crater 构建 OCI **不用 Dockerfile、不起容器**。`build --image` 把一个组件封成一个
+crater 构建 OCI **不用 Dockerfile、不起容器**。`crater build` 把一个组件封成一个
 **B 类 OCI artifact**——一种"落地宿主机的物料包"，而**不是**被 containerd run 的容器镜像：
 
 | 层 / 字段 | mediaType / 值 | 内容 |
@@ -55,21 +58,21 @@ artifactType 与 recipe/material 层在 registry 往返后仍在。
 
 ## 基本 demo
 
-**把 yq 封装成 B 类 artifact → 离线安装**：
+**离线文件分发**（build → 库 → save → 文件 → 拷贝 → load → apply）：
 ```bash
-crater build --image -f examples/yq/yq.yaml -o /tmp/yq.oci   # → crater/yq:4.53.2（B 类 artifact）
-# 直接指定引用(便于 push 到指定 registry):
-crater build --image -f examples/yq/yq.yaml -o /tmp/yq.oci -t 192.168.73.5:5000/yq:1.0
-# 分发 yq.oci 到离线机器，然后（在线/离线同一条 apply，D-020）：
-crater apply /tmp/yq.oci --host <host> --password <pw>       # 识别 artifactType → recipe-replay
+crater build -f examples/yq/yq.yaml -t 192.168.73.5:5000/yq:1.0   # → 本地库
+crater save 192.168.73.5:5000/yq:1.0 -o /tmp/yq.oci              # → 离线文件
+# 把 /tmp/yq.oci 拷到离线机器,然后:
+crater load /tmp/yq.oci                                          # → 库(用包内 ref.name)
+crater apply 192.168.73.5:5000/yq:1.0 --host <host> --password <pw>
 ```
 期望：`crater component artifact → recipe-replay` → `place (offline) yq-bin -> /usr/local/bin/yq` → `yq --version` v4.53.2。
 
 **经 registry 分发**（build → push → 另一台 pull/apply，见 [images-registry.md](images-registry.md)）：
 ```bash
-crater load /tmp/yq.oci --as <registry>/yq:4.53.2
-CRATER_INSECURE_REGISTRIES=<registry> crater push <registry>/yq:4.53.2
-CRATER_INSECURE_REGISTRIES=<registry> crater apply <registry>/yq:4.53.2 --host <host> --password <pw>
+crater build -f examples/yq/yq.yaml -t <registry>/yq:1.0        # → 本地库
+CRATER_INSECURE_REGISTRIES=<registry> crater push <registry>/yq:1.0
+CRATER_INSECURE_REGISTRIES=<registry> crater apply <registry>/yq:1.0 --host <host> --password <pw>
 ```
 
 **查看包结构**（验证 OCI 合规 + artifactType）：

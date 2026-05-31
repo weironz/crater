@@ -4,7 +4,7 @@
 
 ## 这是什么
 
-crater 自带一个**本地 OCI 镜像库** + **纯 Rust registry 客户端**（oci-client，rustls，无 Docker）。它既分发 **crater B 类 artifact**（`build --image` 产物，apply 时 recipe-replay，D-033），也能搬运**普通容器镜像**（A 类，apply 时展开层）；目标机零容器运行时。
+crater 自带一个**本地 OCI 镜像库** + **纯 Rust registry 客户端**（oci-client，rustls，无 Docker）。它既分发 **crater B 类 artifact**（`crater build` 产物，apply 时 recipe-replay，D-033），也能搬运**普通容器镜像**（A 类，apply 时展开层）；目标机零容器运行时。
 
 - **本地库**：`~/.crater/store`（`$CRATER_HOME` 可改），一个累积的 OCI Image Layout（`oci-layout` + `index.json` 每个 tag 一条 + `blobs/sha256/`）。
 - **凭据**：`~/.crater/auth.json`（按 registry 存 user/pass），pull/push 自动用。
@@ -45,8 +45,7 @@ crater apply docker.io/library/hello-world:latest --host <host> --password <pw>
 ```bash
 crater zot                                            # 本机装 zot registry（systemd，:5000）
 export CRATER_INSECURE_REGISTRIES=192.168.73.5:5000   # zot 走 http
-crater build --image -f examples/yq/yq.yaml -o /tmp/yq.oci -t 192.168.73.5:5000/yq:4.53.2
-crater load /tmp/yq.oci                                # 无 --as:用包内 ref.name(build -t 定的)
+crater build -f examples/yq/yq.yaml -t 192.168.73.5:5000/yq:4.53.2   # → 本地库(无需文件)
 crater tag 192.168.73.5:5000/yq:4.53.2 192.168.73.5:5000/yq:stable   # 起别名（零拷贝，同 digest）
 crater push 192.168.73.5:5000/yq:4.53.2               # → zot；curl .../v2/_catalog 见 {"repositories":["yq"]}
 rm -rf ~/.crater/store                                # 清本地库，强制从 zot 拉
