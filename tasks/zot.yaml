@@ -1,0 +1,62 @@
+# zot(task):OCI registry。place 二进制 + 建目录 + 写 config/unit + 起服务。
+# config 变更 → notify 重启 handler。
+name: zot
+hosts: all
+vars:
+  version: "2.1.17"
+materials:
+  - name: zot-bin
+    kind: binary
+    url_tmpl: "https://github.com/project-zot/zot/releases/download/v{{version}}/zot-linux-amd64"
+actions:
+  - id: bin
+    action: place
+    material: zot-bin
+    dest: /usr/local/bin/zot
+    mode: "0755"
+  - id: dir
+    action: file
+    path: /var/lib/zot
+    state: directory
+  - id: config
+    action: write_file
+    dst: /etc/zot/config.json
+    content: |
+      {
+        "storage": { "rootDirectory": "/var/lib/zot" },
+        "http": { "address": "0.0.0.0", "port": "5000" },
+        "log": { "level": "info" }
+      }
+    notify: [restart_zot]
+  - id: unit
+    action: write_file
+    dst: /etc/systemd/system/zot.service
+    content: |
+      [Unit]
+      Description=zot OCI registry
+      After=network.target
+
+      [Service]
+      ExecStart=/usr/local/bin/zot serve /etc/zot/config.json
+      Restart=always
+      User=root
+
+      [Install]
+      WantedBy=multi-user.target
+    needs: [bin, dir, config]
+  - id: svc
+    action: service
+    name: zot
+    state: started
+    enabled: true
+    needs: [unit]
+  - id: verify
+    action: run_cmd
+    phase: verify
+    cmd: "for i in $(seq 1 15); do curl -sf http://localhost:5000/v2/ -o /dev/null && break; sleep 1; done; curl -s -o /dev/null -w 'zot /v2/ -> %{http_code}\\n' http://localhost:5000/v2/"
+    needs: [svc]
+handlers:
+  - id: restart_zot
+    action: service
+    name: zot
+    state: restarted

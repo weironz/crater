@@ -531,8 +531,8 @@ async fn push_file(
 /// Resolve a user-typed name (which may be an alias) to a real component dir
 /// name. The engine holds ZERO product knowledge: aliases are declared in each
 /// component's `aliases:` field (data), and we build the map by scanning
-/// `components/`. `crater es` works because `elasticsearch/component.yaml`
-/// declares `es` as an alias, not because the code knows what `es` is.
+/// `components/`. A short alias works because some component's `aliases:` field
+/// declares it (data) — not because the engine hardcodes any product name.
 fn resolve_component(name: &str, components_dir: &Path) -> String {
     // Exact directory match wins — no scan needed.
     if components_dir.join(name).join("component.yaml").is_file() {

@@ -16,7 +16,7 @@ use std::path::PathBuf;
 pub struct ComponentDescriptor {
     pub name: String,
     /// User-friendly aliases that resolve to this component (a short name → the
-    /// canonical one, e.g. `es` -> `elasticsearch`).
+    /// canonical one). Data, never engine code.
     /// Lives in data, never in engine code: adding an alias means editing this
     /// descriptor, not recompiling crater.
     #[serde(default)]
