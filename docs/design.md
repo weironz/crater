@@ -124,16 +124,16 @@ bundle.oci  (tar of an OCI layout)
 
 ---
 
-## 5. 执行模型：agentless shell + 自举 agent
+## 5. 执行模型：自举 agent（默认）+ agentless shell（逃生/引导）
 
-crater 有两种把动作落到目标机的方式，**互补共存**：
+crater 有两种把动作落到目标机的方式。**agent 是默认执行模型（D-027）**，shell 是它的引导层与逃生口——用户默认不用选。
 
-### 5.1 agentless shell 推送（现状，已验证）
-控制端经 SSH（russh）把每个 Op 翻成 shell 命令执行；写文件用分块 base64（D-009）。目标机**零安装**，只需 SSH + shell。优点：极致 agentless，适合在线、适合简单步骤。
+### 5.1 agentless shell 推送（逃生口 / 引导层）
+控制端经 SSH（russh）把每个 Op 翻成 shell 命令执行；写文件用分块 base64（D-009）。目标机**零安装**，只需 SSH + shell——这是最纯粹的 agentless，能跑在任何 Linux 上。`--shell` 强制走它（目标机无法运行 crater 二进制时的逃生口）；推 agent 二进制本身也走这个通道（引导层）。
 
-### 5.2 自举 agent（`crater agent`）—— ✅ 在线已实现（D-026）
-把 **crater 二进制本身**推送到目标机，在目标机上以 `crater agent` 模式运行，由它在**本地**执行计划。F16 的核心能力。
-**现状**：`--agent` 模式已实现并真机验证——控制端探 OS、lower 出计划、推二进制+计划、一条 exec 跑 `crater agent --plan`（目标机用 LocalExecutor 本地执行，幂等回显照旧）、清理临时文件。离线 `PushFile`（blob 随计划 ship）并入 OCI 离线时补；异构目标用 `--agent-bin` 指 musl 静态构建。
+### 5.2 自举 agent（`crater agent`）—— ✅ 默认执行模型（D-026/D-027）
+把 **crater 二进制本身**推送到目标机，在目标机上以 `crater agent` 模式运行，由它在**本地**执行计划。F16 的核心能力，**现为默认**。
+**现状**：控制端探 OS + 目标 arch（`uname -m`）、lower 出计划、**自动选二进制**（`--agent-bin` > 匹配 arch 的 bundled musl 静态 `dist/crater-linux-<arch>` > 同 arch 的 control 二进制）、推送（按 sha256 **缓存**在 `/var/lib/crater/crater` —— 就是同一个完整 crater 二进制，跑其 `agent` 子命令）、一条 exec 执行（LocalExecutor，幂等回显照旧）、清理瞬时 plan。无可用二进制则报错提示 `scripts/build-musl.sh <arch>` / `--agent-bin` / `--shell`。已验证 x86_64 自动选 musl 静态；aarch64 待装 target 验证。离线 `PushFile`（blob 随计划 ship）并入 OCI 离线时补。
 
 **为什么需要它（不止是优化）**：
 - **OCI 离线落地**：目标机解包 OCI Layout、digest 自校验、`image import`/推临时 registry —— 这些用一段段 shell 片段拼极脆弱；用推过去的同一个二进制在本地做，干净、可测、可复用引擎代码。**§4 的离线 deploy 第 2–4 步本质上就该由 agent 执行。**
@@ -142,7 +142,21 @@ crater 有两种把动作落到目标机的方式，**互补共存**：
 
 **形态**：控制端推送二进制（musl 静态单文件，N1）+ 一份计划/包 → 远端 `crater agent --plan <…>`（或 `--bundle x.oci`）→ agent 本地执行并回传结构化结果。控制端与 agent 复用**同一套引擎代码**，只是 Executor 换成 LocalExecutor。
 
-> 设计要点：agent 不是常驻守护进程（仍 agentless 精神），是**一次性自举**——用完即走，目标机不留常驻服务。
+> 设计要点：agent 不是常驻守护进程（仍 agentless 精神），是**一次性自举**——跑完即退，目标机无常驻进程/端口/服务（二进制按 sha256 缓存为惰性文件，供下次复用，D-027）。
+
+### 5.3 控制端如何与 agent 通信（无常驻、无端口）
+通信方式与二进制是否静态**无关**（静态只是链接方式）；相关的是进程模型——agent 是**一次性进程**，全程靠 **SSH 一发一收**：
+
+```
+控制机 ──SSH 写文件──▶ /var/lib/crater/agent(二进制) + /tmp/crater-plan.yaml(自包含输入)
+控制机 ──SSH exec───▶ `agent --plan …`  →  目标机起一次性进程，本地执行
+控制机 ◀─stdout/err─  顺同一 exec 通道流回进度/结果  →  进程退出，exec 结束，无残留
+```
+
+- **不存在"连到一个在跑的 agent"**：agent 不监听端口、不常驻。控制机是"推入参→触发一次→收输出"，本质同 ansible。
+- **计划自包含**：agent 干活要的一切（步骤、将来离线 OCI 的 blob）都**事先作为文件推过去**，运行时无需中途回头要数据。
+- **静态二进制照样这么通信**：它的 stdin/stdout/exit code 经 SSH 流转，与动态二进制无异。
+- **将来更丰富（结构化结果/流式进度/多轮编排）仍守此模型**：控制机是大脑、agent 是无状态执行器，每"批"一次 SSH exec，结构化结果走 stdout（JSON/JSONL）；**绝不退化成常驻 agent + RPC 端口**（那会破坏 agentless、要开端口/防火墙/管生命周期）。
 
 ---
 

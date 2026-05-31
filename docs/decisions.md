@@ -175,3 +175,21 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **真机验证(192.168.73.11)**:推 9.8MB release 二进制 + 计划，目标机本地执行;清空后首跑 `changed=2 ok=1`、再跑 `changed=0 ok=3`(幂等贯穿 agent 路径)。`Done on local` 证实是 LocalExecutor 在目标机跑。+1 round-trip 单测(共 26)。
 - **二进制兼容**:demo 用 glibc release(控制端与目标同为 Ubuntu 24.04/glibc 2.39);异构目标用 `--agent-bin` 指 musl 静态构建(N1/N2)。
 - **已知边界(后续)**:仅在线计划(Shell/WriteFile);**离线 `PushFile` 未支持**(blob 在控制端，需随计划一并 ship——并入 OCI 离线 D-018 时做);agent 暂不回传结构化结果(只流 stdout)。详见 [design.md §5.2](design.md)。
+
+---
+
+## 2026-05-31 · agent 成为默认执行模型
+
+### D-027 agent 是默认执行模型（强制默认 + `--shell` 逃生，取代 D-026 的"用完即走"）
+- **背景**:用户指出"agent/非 agent 两种模式按情况选"增加心智负担，要求 agent 作底层默认。讨论确认:agent 需目标机能跑 crater 二进制(arch+libc)，shell 仅需 SSH+shell 是最纯 agentless 兼引导层。用户选**强制默认 + `--shell` 逃生**(不做兼容探测/自动兜底)。
+- **决策**:
+  - **默认 = agent**(快捷式与 `apply -f` 统一);`--shell` 强制 agentless shell 执行(逃生口);本地目标(无 `--host`)天然走本地执行;`--agent` 保留为 no-op(向后兼容)。
+  - **二进制按 sha256 缓存**在目标机 `/var/lib/crater/agent`:命中则跳过推送(推一次/版本)，仅 plan 文件(`/tmp/crater-plan.yaml`)瞬时。**取代 D-026 的"用完即走"**——缓存换"每次少推 ~10MB"。
+  - 二进制无法执行(exit 126/127)时**报错并提示** `--shell` 或 `--agent-bin <musl>`(不自动兜底，符合用户选择)。
+- **理由**:消除"选模式"的心智负担(默认即最强模型)，缓存让代价可接受;异构目标用 `--shell`/`--agent-bin` 兜。
+- **真机验证(192.168.73.11)**:`crater yq --host ..`(无 flag)首跑 `Mode: APPLY (agent)`、推 9.9MB、`changed=2 ok=1`;再跑"binary cached, reusing"、`changed=0 ok=3`;`--shell` → `Mode: APPLY (shell)`、`Done on root@host`(逐步 SSH)。26 tests 绿。
+- **后续**:异构全覆盖需备 musl 多架构二进制(N1/N2) + 控制端按目标 arch 选二进制;真正的自动兼容探测+兜底(用户当前选了不做)。
+- **更新(musl 可移植二进制已就绪)**:`scripts/build-musl.sh`(musl-tools + `CC_x86_64_unknown_linux_musl=musl-gcc cargo build --target x86_64-unknown-linux-musl`)产出 `dist/crater-linux-x86_64`(`ldd`→statically linked，9.3M)。真机验证:`--agent-bin dist/crater-linux-x86_64` 推送后目标机 `file` 确认 `static-pie linked`、本地执行 `changed=2 ok=1`。这是真正"放之四海"的 agent 二进制(不挑 glibc);aarch64 同法(`scripts/build-musl.sh aarch64`，待装 target)。**控制端按目标 arch 自动选/内置 musl 二进制**仍待做(当前需手动 `--agent-bin`)。
+- **通信模型澄清**:控制↔agent 全靠 SSH 一发一收(写文件+一次性 exec+收 stdout)，无常驻进程/端口/RPC;静态与否不影响通信(仅链接方式)。详见 [design.md §5.3](design.md)。
+- **更新(arch 自动选已实现，x86_64)**:`select_agent_binary` 探测目标 `uname -m` → 优先用匹配 arch 的 bundled musl 静态(`dist/crater-linux-<arch>`，也顺带规避同 arch 的 glibc 偏差) → 否则 arch 与控制端相同则回退 `current_exe` → 都不行报错提示 `scripts/build-musl.sh <arch>` / `--agent-bin` / `--shell`。优先级:`--agent-bin` > bundled musl > current_exe(同 arch)。候选目录:`$CRATER_AGENT_DIR`、控制二进制旁(+`dist/`)、`./dist/`。真机验证:glibc debug 控制端也**自动选了 dist 的 musl 静态**推送(`bundled musl static for x86_64`)。**aarch64 仍需装 target + 真机验证**。
+- **目标机二进制更名**:缓存路径 `/var/lib/crater/agent` → **`/var/lib/crater/crater`**(它就是同一个完整 crater 二进制，只是跑 `agent` 子命令;旧名易误解为"另一个 agent 程序")。

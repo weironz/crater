@@ -8,7 +8,7 @@
 //!   crater ai "<request>" [-o crater.yaml]                             (M4)
 //!   crater doctor --file log.txt | --host H --password P [--ai]        (M5)
 //!   crater run --host H --password P -- <cmd>                          (ad-hoc, ansible -m shell)
-//!   crater agent --task ...                                            (internal, on the node)
+//!   crater agent --plan <file>                                         (internal, runs on the node)
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -38,14 +38,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Apply a declarative spec file (crater.yaml). Executes by default;
-    /// pass --dry-run to only print the plan.
+    /// Apply a declarative spec file (crater.yaml). Executes by default (via the
+    /// self-bootstrap agent); --dry-run prints the plan, --shell forces the
+    /// agentless shell executor.
     Apply {
         #[arg(short, long)]
         file: PathBuf,
         /// Print the plan without executing.
         #[arg(long)]
         dry_run: bool,
+        /// Force the agentless shell executor instead of the default agent.
+        #[arg(long)]
+        shell: bool,
     },
     /// Build an offline bundle from a spec (run on an online control machine).
     Build {
@@ -149,7 +153,11 @@ async fn main() -> Result<()> {
         .init();
 
     match Cli::parse().cmd {
-        Cmd::Apply { file, dry_run } => apply_spec(&file, !dry_run).await,
+        Cmd::Apply {
+            file,
+            dry_run,
+            shell,
+        } => apply_spec(&file, !dry_run, shell).await,
         Cmd::Build { file, output } => build_bundle(&file, &output).await,
         Cmd::Deploy {
             bundle,
@@ -199,8 +207,9 @@ struct ShortcutFlags {
     password: Option<String>,
     components_dir: PathBuf,
     do_apply: bool,
-    /// Execute via the self-bootstrap agent (push binary + plan, run on target).
-    agent: bool,
+    /// Escape hatch: force the agentless shell executor instead of the default
+    /// self-bootstrap agent (use when the target can't run the crater binary).
+    shell: bool,
     /// Override the binary shipped in agent mode (e.g. a musl static build).
     agent_bin: Option<PathBuf>,
 }
@@ -255,8 +264,13 @@ fn parse_flags(rest: &[String]) -> Result<ShortcutFlags> {
                 f.do_apply = false;
                 i += 1;
             }
+            "--shell" => {
+                f.shell = true;
+                i += 1;
+            }
             "--agent" => {
-                f.agent = true;
+                // Agent is now the default; accept the flag as a no-op for
+                // back-compat.
                 i += 1;
             }
             "--agent-bin" => {
@@ -394,12 +408,16 @@ async fn deploy_shortcut(args: Vec<String>) -> Result<()> {
     let ctx = PlanContext::new(osf, ver.clone(), component_dir);
     let plan = build_plan(&desc, &ctx)?;
 
+    // Agent is the default execution model (D-027); --shell forces the
+    // agentless shell executor. A local target (no --host) always runs locally.
+    let is_remote = f.host.is_some();
+    let use_shell = f.shell || !is_remote;
     let mode = if !f.do_apply {
         "DRY-RUN"
-    } else if f.agent {
-        "APPLY (self-bootstrap agent)"
+    } else if use_shell {
+        "APPLY (shell)"
     } else {
-        "APPLY"
+        "APPLY (agent)"
     };
     println!("Component : {}", desc.name);
     println!("Version   : {ver}");
@@ -413,40 +431,121 @@ async fn deploy_shortcut(args: Vec<String>) -> Result<()> {
 
     if !f.do_apply {
         println!("Dry-run only (--dry-run). Omit it to execute.");
-        Ok(())
-    } else if f.agent {
-        run_via_agent(exec.as_ref(), &plan, f.agent_bin.as_deref()).await
+        return Ok(());
+    }
+    execute_plan(&plan, exec.as_ref(), use_shell, f.agent_bin.as_deref()).await
+}
+
+/// Dispatch a plan to the chosen executor. Default is the self-bootstrap agent
+/// (D-027); `use_shell` falls back to the agentless shell executor.
+async fn execute_plan(
+    plan: &[Op],
+    exec: &dyn Executor,
+    use_shell: bool,
+    agent_bin: Option<&Path>,
+) -> Result<()> {
+    if use_shell {
+        engine::execute(plan, exec).await
     } else {
-        engine::execute(&plan, exec.as_ref()).await
+        run_via_agent(exec, plan, agent_bin).await
     }
 }
 
-/// Self-bootstrap agent mode (D-019): push the crater binary + the lowered plan
-/// to the target, then run `crater agent --plan` THERE so the plan executes
-/// locally in one shot — fewer SSH round-trips, and the foundation for OCI
-/// unpack / richer local logic. A one-shot bootstrap: nothing is left running.
+/// Normalize `uname -m` output to crater's arch naming (matches dist/ names).
+fn norm_arch(uname_m: &str) -> String {
+    match uname_m.trim() {
+        "x86_64" | "amd64" => "x86_64",
+        "aarch64" | "arm64" => "aarch64",
+        other => other,
+    }
+    .to_string()
+}
+
+/// Where to look for a bundled musl static binary `crater-linux-<arch>`:
+/// `$CRATER_AGENT_DIR`, beside the control binary (+ its `dist/`), and `./dist/`.
+fn musl_candidates(arch: &str) -> Vec<PathBuf> {
+    let name = format!("crater-linux-{arch}");
+    let mut v = Vec::new();
+    if let Ok(d) = std::env::var("CRATER_AGENT_DIR") {
+        v.push(PathBuf::from(d).join(&name));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            v.push(dir.join(&name));
+            v.push(dir.join("dist").join(&name));
+            if let Some(parent) = dir.parent() {
+                v.push(parent.join("dist").join(&name));
+            }
+        }
+    }
+    v.push(PathBuf::from("dist").join(&name));
+    v
+}
+
+/// Choose the agent binary to ship to `exec`'s target. Order:
+/// 1. explicit `--agent-bin`; 2. a bundled musl static for the target's arch
+/// (portable, also dodges glibc skew on the same arch); 3. the control binary
+/// iff the target arch matches; else error with guidance.
+async fn select_agent_binary(
+    exec: &dyn Executor,
+    agent_bin: Option<&Path>,
+) -> Result<(PathBuf, String)> {
+    if let Some(p) = agent_bin {
+        return Ok((p.to_path_buf(), "explicit --agent-bin".into()));
+    }
+    let target_arch = norm_arch(&exec.run("uname -m").await?.stdout);
+    for cand in musl_candidates(&target_arch) {
+        if cand.is_file() {
+            return Ok((cand, format!("bundled musl static for {target_arch}")));
+        }
+    }
+    if target_arch == std::env::consts::ARCH {
+        let exe = std::env::current_exe()
+            .map_err(|e| anyhow!("cannot locate current crater binary: {e}"))?;
+        return Ok((exe, format!("control binary (same arch {target_arch})")));
+    }
+    anyhow::bail!(
+        "no agent binary for target arch '{target_arch}' (control is '{}'). Build one with \
+         `scripts/build-musl.sh {target_arch}` and pass --agent-bin, or run with --shell.",
+        std::env::consts::ARCH
+    )
+}
+
+/// Self-bootstrap agent mode (D-019/D-027, the default): push the crater binary
+/// + the lowered plan to the target, then run `crater agent --plan` THERE so the
+/// plan executes locally in one shot — fewer SSH round-trips, and the foundation
+/// for OCI unpack / richer local logic. The binary is cached on the target (by
+/// sha256), so it's pushed once per version; only the plan file is transient.
 async fn run_via_agent(exec: &dyn Executor, plan: &[Op], agent_bin: Option<&Path>) -> Result<()> {
-    // Which binary to ship. Default: the running control binary (works when
-    // control and target share OS/arch/libc); override with --agent-bin (e.g. a
-    // musl static build) for heterogeneous targets.
-    let bin_path = match agent_bin {
-        Some(p) => p.to_path_buf(),
-        None => std::env::current_exe()
-            .map_err(|e| anyhow!("cannot locate current crater binary: {e}"))?,
-    };
+    // Pick the binary to ship: explicit override > a bundled musl static
+    // matching the target's arch > the control binary (only if same arch).
+    let (bin_path, how) = select_agent_binary(exec, agent_bin).await?;
+    println!("Agent on {}: using {} ({how})", exec.label(), bin_path.display());
     let bytes = std::fs::read(&bin_path)
         .map_err(|e| anyhow!("read agent binary {}: {e}", bin_path.display()))?;
+    let want = crater_core::bundle::sha256_hex(&bytes);
 
-    let remote_bin = "/tmp/crater-agent";
+    // Same crater binary, cached on the target as `crater` (it's the exact same
+    // executable as the control side; we just invoke its `agent` subcommand).
+    let remote_bin = "/var/lib/crater/crater";
     let remote_plan = "/tmp/crater-plan.yaml";
-    println!(
-        "Bootstrapping agent on {}: pushing binary ({} bytes from {}) + plan ...",
-        exec.label(),
-        bytes.len(),
-        bin_path.display()
-    );
-    exec.write_file(remote_bin, &bytes).await?;
-    exec.run(&format!("chmod +x {remote_bin}")).await?;
+
+    // Push the binary only if the target doesn't already have this exact version.
+    let cached = exec
+        .run(&format!("sha256sum {remote_bin} 2>/dev/null | cut -d' ' -f1"))
+        .await?;
+    if cached.ok() && cached.stdout.trim() == want {
+        println!("Agent on {}: binary cached (sha256 match), reusing.", exec.label());
+    } else {
+        println!(
+            "Agent on {}: pushing binary ({} bytes) ...",
+            exec.label(),
+            bytes.len()
+        );
+        exec.run("mkdir -p /var/lib/crater").await?;
+        exec.write_file(remote_bin, &bytes).await?;
+        exec.run(&format!("chmod +x {remote_bin}")).await?;
+    }
     exec.write_file(remote_plan, engine::plan_to_yaml(plan)?.as_bytes())
         .await?;
 
@@ -458,11 +557,17 @@ async fn run_via_agent(exec: &dyn Executor, plan: &[Op], agent_bin: Option<&Path
     if !out.stderr.trim().is_empty() {
         eprintln!("{}", out.stderr.trim());
     }
-    // Clean up the bootstrap artifacts — one-shot, nothing left behind.
-    let _ = exec
-        .run(&format!("rm -f {remote_bin} {remote_plan}"))
-        .await;
+    // Plan is transient; the cached binary stays for reuse.
+    let _ = exec.run(&format!("rm -f {remote_plan}")).await;
     if !out.ok() {
+        if out.code == 126 || out.code == 127 {
+            anyhow::bail!(
+                "agent binary failed to execute on target (exit {}; likely arch/libc \
+                 mismatch). Re-run with --shell for the agentless shell executor, or pass \
+                 --agent-bin <musl-static-build>.",
+                out.code
+            );
+        }
         anyhow::bail!("agent exited with code {}", out.code);
     }
     Ok(())
@@ -525,7 +630,7 @@ fn order_components(spec: &CraterSpec, components_dir: &Path) -> Result<Vec<Stri
     dag::topo_sort(&nodes)
 }
 
-async fn apply_spec(file: &Path, do_apply: bool) -> Result<()> {
+async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
     let spec = CraterSpec::from_yaml_file(file)?;
     let components_dir = PathBuf::from("components");
     // Inline recipes' relative template paths resolve against the spec's dir.
@@ -593,7 +698,8 @@ async fn apply_spec(file: &Path, do_apply: bool) -> Result<()> {
             println!("\n--- component {} (v{ver}) — {} steps ---", cref.name, plan.len());
             print_plan(&plan);
             if do_apply {
-                engine::execute(&plan, exec.as_ref()).await?;
+                // Agent by default (D-027); --shell forces the shell executor.
+                execute_plan(&plan, exec.as_ref(), do_shell, None).await?;
             }
         }
     }
@@ -947,5 +1053,26 @@ fn print_plan(plan: &[Op]) {
             let oneline: String = p.lines().next().unwrap_or("").chars().take(120).collect();
             println!("      $ {oneline}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn norm_arch_maps_common_aliases() {
+        assert_eq!(norm_arch("x86_64\n"), "x86_64");
+        assert_eq!(norm_arch("amd64"), "x86_64");
+        assert_eq!(norm_arch("aarch64"), "aarch64");
+        assert_eq!(norm_arch("arm64"), "aarch64");
+        assert_eq!(norm_arch("riscv64"), "riscv64"); // passthrough
+    }
+
+    #[test]
+    fn musl_candidates_use_arch_specific_name() {
+        let c = musl_candidates("aarch64");
+        assert!(c.iter().all(|p| p.ends_with("crater-linux-aarch64")));
+        assert!(c.iter().any(|p| p == &PathBuf::from("dist/crater-linux-aarch64")));
     }
 }

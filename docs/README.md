@@ -8,8 +8,9 @@
 |------|------|------|
 | [design.md](design.md) | **设计方向（北极星）**：引擎铁律(D-017) + 在线/离线单管线 + OCI 离线 + 自举 agent + ansible 化路线 | 持续 |
 | [offline-format.md](offline-format.md) | 离线包格式（OCI 镜像方案）详细设计 | 持续 |
+| [../examples/yq/demo-online-yq.md](../examples/yq/demo-online-yq.md) | 在线部署 demo（以 yq 为例，最小可复现） | 持续 |
 | [requirements.md](requirements.md) | 需求基线总览（定位、功能、AI、非功能、CLI、OS、路线） | v0.3 |
-| [decisions.md](decisions.md) | 关键决策 / 沟通记录（ADR 风格，D-001~D-026） | 持续 |
+| [decisions.md](decisions.md) | 关键决策 / 沟通记录（ADR 风格，D-001~D-027） | 持续 |
 | [progress.md](progress.md) | 开发进展日志（M1–M5 真机验证 + 还债 A 批；含工具链纪律） | 持续 |
 
 ## 规划中的文档（按需新增）

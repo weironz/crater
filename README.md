@@ -13,7 +13,7 @@ crater es         # 别名 → elasticsearch
 
 🚀 **M1–M5 已完成，并在真机（Ubuntu @ 192.168.73.11）端到端验证通过**。`cargo build` 0 错 0 警，`cargo test` 26 passed。
 
-> **进行中**：按 [docs/design.md](docs/design.md) 重整设计方向——已完成「引擎去产品化」（D-017）、**B1 幂等回显**（D-023，apply 默认执行、`--dry-run` 预览、`changed/ok/warn`）、**spec 内联 recipe**（D-025，单文件即可）、**自举 agent**（D-019/D-026，`--agent` 推二进制+计划目标机本地执行）；均真机 yq 验证。下一步离线转 OCI（D-018）、ansible 化 task 层、在线 CN 镜像 fallback。
+> **进行中**：按 [docs/design.md](docs/design.md) 重整设计方向——已完成「引擎去产品化」（D-017）、**B1 幂等回显**（D-023，apply 默认执行、`--dry-run` 预览、`changed/ok/warn`）、**spec 内联 recipe**（D-025，单文件即可）、**自举 agent 作默认**（D-019/D-026/D-027）；均真机 yq 验证。下一步离线转 OCI（D-018）、ansible 化 task 层、在线 CN 镜像 fallback。
 
 - **M1 在线部署**：`crater docker --host <ip> --password <pw> --apply` 经 SSH 装好 docker（已验证 active，v29.5.2）。
 - **M2 离线部署**：`crater build` 制离线包（tar.gz + manifest + sha256），`crater deploy` 零联网部署（已验证 node_exporter active，:9100 serving；10.6MB 制品分块 over SSH 推送）。
@@ -30,7 +30,7 @@ crater es         # 别名 → elasticsearch
 - **声明式组件**：组件用 YAML 描述文件定义（内部标签 `check:` / `action:`，`aliases:` / `images:` 等均为数据），内置与第三方同构，第三方放目录即加载。
 - **双形态，单管线**：在线（目标机现场拉依赖，失败回退国内镜像）/ 离线（在线机制包，目标机零联网部署）。两形态共用同一套组件与引擎，**只在「制品从哪来」这一层（ArtifactSource）分叉**。
 - **离线包基于 OCI 镜像（定向，D-018）**：离线包 = OCI Image Layout，内容寻址自校验、分层去重、原生承载容器镜像（k8s/mysql/es 离线的前提）。取代早期 tar.gz，渐进迁移中。详见 [docs/offline-format.md](docs/offline-format.md)。
-- **Agentless + 自举 agent（D-019）**：目标机只需 SSH；简单在线步骤经 russh 推 shell + 分块 base64 写文件；离线/复杂逻辑由推送过去的同一二进制以**一次性自举 `crater agent`** 在本地执行（用完即走，不留常驻服务）。
+- **自举 agent 作默认（D-019/D-027）**：默认把 crater 二进制推到目标机（按 sha256 缓存，推一次/版本）+ 计划，由 `crater agent` 在目标机**本地执行**（少 SSH 往返）；`--shell` 逃生到纯 agentless shell（目标只需 SSH+shell，任何机器都行），`--agent-bin` 指异构架构的 musl 静态构建。
 - **AI 副驾**：在线制包用 AI 生成/校验 spec，离线现场用固化规则诊断；可完全关闭，永不成为硬依赖。
 
 ## 快速开始
@@ -40,12 +40,13 @@ crater es         # 别名 → elasticsearch
 cargo build
 cargo test
 
-# 在线部署一个组件到远端（SSH，agentless）—— 默认执行；加 --dry-run 只看计划
+# 在线部署一个组件到远端（SSH，agentless）—— 默认执行；默认走自举 agent
 crater yq    --host 10.0.0.5 --password <pw>             # 最小 demo：单文件二进制(已真机验证)
 crater docker --host 10.0.0.5 --password <pw>
 crater k8s   --host 10.0.0.5 --password <pw>             # 别名 → k3s（来自组件数据 aliases）
 crater mysql --host 10.0.0.5 --password <pw>
 crater k8s   --host 10.0.0.5 --password <pw> --dry-run   # 只打印计划，不执行
+crater yq    --host 10.0.0.5 --password <pw> --shell     # 逃生口：强制 agentless shell（目标跑不了二进制时）
 
 # 幂等：再跑一次只报 ok/changed/warn，已就绪的步骤自动跳过（changed=0）
 
@@ -92,7 +93,7 @@ crater/
 - [设计方向 design.md](docs/design.md)（北极星：引擎铁律 + 在线/离线单管线 + OCI 离线 + 自举 agent + ansible 化路线）
 - [离线包格式 offline-format.md](docs/offline-format.md)（OCI 镜像方案详细设计）
 - [需求基线 v0.3](docs/requirements.md)
-- [决策 / 沟通记录](docs/decisions.md)（D-001~D-026）
+- [决策 / 沟通记录](docs/decisions.md)（D-001~D-027）
 - [进展日志](docs/progress.md)（M1–M5 已验证；含工具链纪律）
 - [文档索引](docs/README.md)
 
@@ -109,7 +110,7 @@ crater/
 | B1（幂等）| check→act→report，`changed/ok/warn` 回显；apply 默认执行、`--dry-run` 预览（D-023）| ✅ 真机 yq 验证 |
 | B2/B3（ansible 化）| crater.yaml task/play 层（when/loop/notify）、module 库（file/copy/service…）| 设计中 |
 | 离线 OCI（D-018）| 离线包转 OCI Layout、容器镜像打包、临时 registry 多节点分发 | 设计中 |
-| 自举 agent（D-019/D-026）| 推二进制+计划，目标机 `crater agent` 本地执行；`--agent` / `--agent-bin` | ✅ 在线真机验证（解包 OCI 待 D-018）|
+| 自举 agent（D-019/D-026/D-027）| **默认执行模型**：推二进制(按 sha256 缓存)+计划，目标机本地执行；`--shell` 逃生、`--agent-bin` 异构 | ✅ 在线真机验证（解包 OCI 待 D-018）|
 | 后续 | es live、kubeadm 多节点、musl/aarch64、host-key 校验、包签名 | 计划中 |
 
 ## License

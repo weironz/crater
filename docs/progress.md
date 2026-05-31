@@ -75,6 +75,23 @@ examples/    crater.yaml node_exporter.yaml
 4. 不擅自中断、不找用户确认(已授权)。
 
 ## 工作日志（倒序）
+### 2026-05-31 续7（控制端按 arch 自动选 agent 二进制 + 更名）
+- **arch 自动选（x86_64）**：`select_agent_binary` 探测目标 `uname -m`，优先用匹配 arch 的 bundled musl 静态（`dist/crater-linux-<arch>`），否则同 arch 回退 `current_exe`，都不行报错提示。优先级 `--agent-bin > bundled musl > current_exe(同arch)`；候选目录 `$CRATER_AGENT_DIR`/控制二进制旁(+dist)/`./dist`。真机：glibc debug 控制端**自动选了 dist 的 musl 静态**推送。+2 单测（norm_arch / candidates，共 28）。
+- **目标机二进制更名** `/var/lib/crater/agent` → `/var/lib/crater/crater`（澄清：它就是同一个完整 crater 二进制，跑 `agent` 子命令；`--version`→crater 0.1.0）。
+- 待做：aarch64（装 target + 真机验证）；正式 release 把多 arch musl 随附（dist/ 现 gitignore，靠 build-musl.sh 复现）。**未动 git**。
+
+### 2026-05-31 续6（musl 静态可移植 agent 二进制 + 通信模型澄清）
+- **musl 静态构建打通**：`rustup target add x86_64-unknown-linux-musl` + `apt install musl-tools`；`scripts/build-musl.sh`（`CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --target …-musl`）→ `dist/crater-linux-x86_64`，`ldd`→statically linked、`file`→static-pie、9.3M。reqwest 用 rustls(无 openssl)，musl 顺利。
+- **真机验证**：`crater yq --host .. --agent-bin dist/crater-linux-x86_64` → 推送、本地执行 `changed=2 ok=1`；目标机 `file /var/lib/crater/agent` 确认 static-pie。这是真正不挑 glibc 的可移植 agent。
+- **通信模型澄清（design.md §5.3）**：控制↔agent 全靠 SSH 一发一收（写文件+一次性 exec+收 stdout），无常驻/端口/RPC；静态与否不影响通信。
+- 待做：控制端按目标 arch 自动选/内置 musl 二进制（现需手动 `--agent-bin`）；aarch64 musl。**未动 git**。
+
+### 2026-05-31 续5（agent 成为默认执行模型 D-027）
+- 用户嫌"两种模式按情况选"增心智负担，选**强制默认 agent + `--shell` 逃生**。
+- 实现：默认 = agent（快捷式与 `apply -f` 统一）；`execute_plan` 统一分发；二进制按 sha256 **缓存** `/var/lib/crater/agent`（推一次/版本，仅 plan 瞬时）；`--shell` 强制 agentless shell；本地目标天然本地执行；`--agent` 保留 no-op；二进制不可执行(126/127)报错提示 `--shell`/`--agent-bin`。
+- 真机：`crater yq --host ..`(无 flag) 首跑 `APPLY (agent)` 推 9.9MB `changed=2 ok=1`；再跑 "binary cached, reusing" `changed=0 ok=3`；`--shell` → `APPLY (shell)` 逐步 SSH。26 tests 绿。
+- 取代 D-026 "用完即走"（改为缓存二进制）。**未动 git**。
+
 ### 2026-05-31 续4（自举 agent D-019/D-026 落地）
 - **实现**：`Op`/`Phase` 可序列化 + `plan_to_yaml`/`plan_from_yaml`；`crater agent --plan` 目标机本地执行（LocalExecutor，复用 `engine::execute`）；控制端 `--agent`：探 OS→lower 计划→推二进制(`/tmp/crater-agent`)+计划→一条 exec 跑 agent→流式回显→清理。`--agent-bin` 可指定二进制。
 - **真机验证**：推 9.8MB glibc release 到 192.168.73.11，本地执行；清空后 `changed=2 ok=1`、再跑 `changed=0 ok=3`（`Done on local` 证实 LocalExecutor 在目标机跑，幂等贯穿）。+1 round-trip 单测（共 **26**）。
