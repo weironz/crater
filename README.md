@@ -11,7 +11,7 @@ crater es         # 别名 → elasticsearch
 
 ## 状态
 
-🚀 **M1–M5 已完成，并在真机（Ubuntu @ 192.168.73.11）端到端验证通过**。`cargo build` 0 错 0 警，`cargo test` 26 passed。
+🚀 **M1–M5 已完成，并在真机（Ubuntu @ 192.168.73.11）端到端验证通过**。`cargo build` 0 错 0 警，`cargo test` 28 passed。
 
 > **进行中**：按 [docs/design.md](docs/design.md) 重整设计方向——已完成「引擎去产品化」（D-017）、**B1 幂等回显**（D-023，apply 默认执行、`--dry-run` 预览、`changed/ok/warn`）、**spec 内联 recipe**（D-025，单文件即可）、**自举 agent 作默认**（D-019/D-026/D-027）；均真机 yq 验证。下一步离线转 OCI（D-018）、ansible 化 task 层、在线 CN 镜像 fallback。
 
@@ -93,7 +93,7 @@ crater/
 - [设计方向 design.md](docs/design.md)（北极星：引擎铁律 + 在线/离线单管线 + OCI 离线 + 自举 agent + ansible 化路线）
 - [离线包格式 offline-format.md](docs/offline-format.md)（OCI 镜像方案详细设计）
 - [需求基线 v0.3](docs/requirements.md)
-- [决策 / 沟通记录](docs/decisions.md)（D-001~D-027）
+- [决策 / 沟通记录](docs/decisions.md)（D-001~D-028）
 - [进展日志](docs/progress.md)（M1–M5 已验证；含工具链纪律）
 - [文档索引](docs/README.md)
 
@@ -106,7 +106,7 @@ crater/
 | M3 | 组件依赖 DAG + k8s(k3s) | ✅ 真机验证 |
 | M4 | AI 制包侧（NL→spec，确定性护栏）| ✅ 实现+单测 |
 | M5 | AI 离线侧（固化规则诊断 + 内网 endpoint）| ✅ 实现+验证 |
-| A（还债） | 引擎去产品化：别名/doctor/LoadImage/镜像表 全部数据驱动（D-017）| ✅ build 绿 + 26 tests |
+| A（还债） | 引擎去产品化：别名/doctor/LoadImage/镜像表 全部数据驱动（D-017）| ✅ build 绿 + 28 tests |
 | B1（幂等）| check→act→report，`changed/ok/warn` 回显；apply 默认执行、`--dry-run` 预览（D-023）| ✅ 真机 yq 验证 |
 | B2/B3（ansible 化）| crater.yaml task/play 层（when/loop/notify）、module 库（file/copy/service…）| 设计中 |
 | 离线 OCI（D-018）| 离线包转 OCI Layout、容器镜像打包、临时 registry 多节点分发 | 设计中 |

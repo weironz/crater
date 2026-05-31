@@ -75,6 +75,11 @@ examples/    crater.yaml node_exporter.yaml
 4. 不擅自中断、不找用户确认(已授权)。
 
 ## 工作日志（倒序）
+### 2026-05-31 续8（日志规范化 D-028）
+- 统一用 `tracing`：紧凑 `HH:MM:SS` 计时器(零新依赖)、级别、`CRATER_LOG/RUST_LOG` 控 verbosity、**ANSI 按 TTY 开关**(管道/agent 经 SSH 无转义码)。
+- engine `execute` 步骤行 `[n/total] {desc} → {status}` 走 info、命令 stdout 降 debug、**verify 输出留 info**、状态词 ansible 式上色(ok 绿/changed 黄)；**apply 不再预 dump 计划**(消除重复)。
+- 真机验证：控制端 + agent 转发输出同格式、管道无转义码。需 `scripts/build-musl.sh` 重出 dist 让 agent 也带新日志。其余子命令 println 后续迁移。**未动 git**。
+
 ### 2026-05-31 续7（控制端按 arch 自动选 agent 二进制 + 更名）
 - **arch 自动选（x86_64）**：`select_agent_binary` 探测目标 `uname -m`，优先用匹配 arch 的 bundled musl 静态（`dist/crater-linux-<arch>`），否则同 arch 回退 `current_exe`，都不行报错提示。优先级 `--agent-bin > bundled musl > current_exe(同arch)`；候选目录 `$CRATER_AGENT_DIR`/控制二进制旁(+dist)/`./dist`。真机：glibc debug 控制端**自动选了 dist 的 musl 静态**推送。+2 单测（norm_arch / candidates，共 28）。
 - **目标机二进制更名** `/var/lib/crater/agent` → `/var/lib/crater/crater`（澄清：它就是同一个完整 crater 二进制，跑 `agent` 子命令；`--version`→crater 0.1.0）。

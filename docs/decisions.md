@@ -193,3 +193,17 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **通信模型澄清**:控制↔agent 全靠 SSH 一发一收(写文件+一次性 exec+收 stdout)，无常驻进程/端口/RPC;静态与否不影响通信(仅链接方式)。详见 [design.md §5.3](design.md)。
 - **更新(arch 自动选已实现，x86_64)**:`select_agent_binary` 探测目标 `uname -m` → 优先用匹配 arch 的 bundled musl 静态(`dist/crater-linux-<arch>`，也顺带规避同 arch 的 glibc 偏差) → 否则 arch 与控制端相同则回退 `current_exe` → 都不行报错提示 `scripts/build-musl.sh <arch>` / `--agent-bin` / `--shell`。优先级:`--agent-bin` > bundled musl > current_exe(同 arch)。候选目录:`$CRATER_AGENT_DIR`、控制二进制旁(+`dist/`)、`./dist/`。真机验证:glibc debug 控制端也**自动选了 dist 的 musl 静态**推送(`bundled musl static for x86_64`)。**aarch64 仍需装 target + 真机验证**。
 - **目标机二进制更名**:缓存路径 `/var/lib/crater/agent` → **`/var/lib/crater/crater`**(它就是同一个完整 crater 二进制，只是跑 `agent` 子命令;旧名易误解为"另一个 agent 程序")。
+
+---
+
+## 2026-05-31 · 日志规范化
+
+### D-028 统一用 tracing 输出：时间戳 + 级别 + 颜色(按 TTY) + verbosity
+- **背景**:输出全是 `println!`、无时间戳/级别/颜色;且 **apply 会先 dump 整个计划(带 `$ cmd`)再逐步执行**，重复且乱。
+- **决策**:统一走已引入的 `tracing`:
+  - 自定义紧凑计时器 `ClockTime`(UTC `HH:MM:SS`，零新依赖);`with_target(false)`;级别由 `CRATER_LOG`/`RUST_LOG` 控制(默认 INFO)。
+  - **ANSI 按 `stdout().is_terminal()` 开关**——终端着色，管道/重定向/agent 经 SSH(非 TTY) 则纯文本无转义码。
+  - engine `execute`:步骤行 `[n/total] {desc} → {status}` 走 info、warn 走 warn、失败 error+bail;**命令 stdout 降到 debug**，但 **verify 输出留 info**(那是结果证明);状态词 ansible 式上色(ok 绿/changed 黄/warn 黄，同样按 TTY)。
+  - **apply 不再预 dump 计划**(只 dry-run 才 `print_plan`)，消除重复。
+- **理由**:可读、可 grep、可控 verbosity、重定向干净;agent 转发的目标机输出与控制端同格式(目标机非 TTY 自动无色)。
+- **影响**:`crater apply` 输出变为 `HH:MM:SS INFO …` 结构化行;真机验证控制端 + agent 转发输出格式一致、管道无转义码。`CRATER_LOG=debug` 看命令细节。其余子命令(build/deploy/ai/doctor)的 println 后续一并迁移。

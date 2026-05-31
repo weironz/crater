@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
+use tracing::info;
 
 use crater_core::bundle::{self, BundleStage, Manifest, ManifestComponent, BUNDLE_FORMAT_VERSION};
 use crater_core::component::ComponentDescriptor;
@@ -145,11 +146,46 @@ enum Cmd {
     Component(Vec<String>),
 }
 
+/// Compact wall-clock timer (`HH:MM:SS`, UTC) — dependency-free, keeps log
+/// lines short vs the default RFC3339 timestamp.
+struct ClockTime;
+impl tracing_subscriber::fmt::time::FormatTime for ClockTime {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        let s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        write!(w, "{:02}:{:02}:{:02}", (s / 3600) % 24, (s / 60) % 60, s % 60)
+    }
+}
+
+fn log_level() -> tracing::Level {
+    match std::env::var("CRATER_LOG")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .ok()
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("trace") => tracing::Level::TRACE,
+        Some("debug") => tracing::Level::DEBUG,
+        Some("warn") => tracing::Level::WARN,
+        Some("error") => tracing::Level::ERROR,
+        _ => tracing::Level::INFO,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // ANSI only on a real terminal — keeps redirected/piped output and the
+    // agent's SSH-forwarded output free of escape codes.
+    let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
     tracing_subscriber::fmt()
+        .with_max_level(log_level())
+        .with_timer(ClockTime)
         .with_target(false)
-        .without_time()
+        .with_ansi(ansi)
+        .with_writer(std::io::stdout)
         .init();
 
     match Cli::parse().cmd {
@@ -413,24 +449,24 @@ async fn deploy_shortcut(args: Vec<String>) -> Result<()> {
     let is_remote = f.host.is_some();
     let use_shell = f.shell || !is_remote;
     let mode = if !f.do_apply {
-        "DRY-RUN"
+        "dry-run"
     } else if use_shell {
-        "APPLY (shell)"
+        "apply via shell"
     } else {
-        "APPLY (agent)"
+        "apply via agent"
     };
-    println!("Component : {}", desc.name);
-    println!("Version   : {ver}");
-    println!("Target    : {}", exec.label());
-    println!("OS family : {}", osf.as_str());
-    println!("Mode      : {mode}");
-    println!("Steps     : {}", plan.len());
-    println!("------------------------------------------");
-    print_plan(&plan);
-    println!("------------------------------------------");
+    info!(
+        "{} v{ver} → {} ({}, os={}, {} steps)",
+        desc.name,
+        exec.label(),
+        mode,
+        osf.as_str(),
+        plan.len()
+    );
 
     if !f.do_apply {
-        println!("Dry-run only (--dry-run). Omit it to execute.");
+        print_plan(&plan);
+        info!("dry-run only (--dry-run); omit it to execute");
         return Ok(());
     }
     execute_plan(&plan, exec.as_ref(), use_shell, f.agent_bin.as_deref()).await
@@ -520,7 +556,6 @@ async fn run_via_agent(exec: &dyn Executor, plan: &[Op], agent_bin: Option<&Path
     // Pick the binary to ship: explicit override > a bundled musl static
     // matching the target's arch > the control binary (only if same arch).
     let (bin_path, how) = select_agent_binary(exec, agent_bin).await?;
-    println!("Agent on {}: using {} ({how})", exec.label(), bin_path.display());
     let bytes = std::fs::read(&bin_path)
         .map_err(|e| anyhow!("read agent binary {}: {e}", bin_path.display()))?;
     let want = crater_core::bundle::sha256_hex(&bytes);
@@ -535,11 +570,11 @@ async fn run_via_agent(exec: &dyn Executor, plan: &[Op], agent_bin: Option<&Path
         .run(&format!("sha256sum {remote_bin} 2>/dev/null | cut -d' ' -f1"))
         .await?;
     if cached.ok() && cached.stdout.trim() == want {
-        println!("Agent on {}: binary cached (sha256 match), reusing.", exec.label());
+        info!("agent: binary cached on target (sha256 match), reusing [{how}]");
     } else {
-        println!(
-            "Agent on {}: pushing binary ({} bytes) ...",
-            exec.label(),
+        info!(
+            "agent: pushing {} ({} bytes) [{how}]",
+            bin_path.display(),
             bytes.len()
         );
         exec.run("mkdir -p /var/lib/crater").await?;
@@ -549,13 +584,14 @@ async fn run_via_agent(exec: &dyn Executor, plan: &[Op], agent_bin: Option<&Path
     exec.write_file(remote_plan, engine::plan_to_yaml(plan)?.as_bytes())
         .await?;
 
-    println!("--- agent output (executing locally on target) ---");
+    info!("agent: executing on target ↓");
     let out = exec
         .run(&format!("{remote_bin} agent --plan {remote_plan}"))
         .await?;
+    // Forward the agent's output verbatim (already tracing-formatted on the target).
     print!("{}", out.stdout);
     if !out.stderr.trim().is_empty() {
-        eprintln!("{}", out.stderr.trim());
+        eprint!("{}", out.stderr);
     }
     // Plan is transient; the cached binary stays for reuse.
     let _ = exec.run(&format!("rm -f {remote_plan}")).await;
@@ -580,7 +616,7 @@ async fn run_agent(plan: Option<PathBuf>) -> Result<()> {
     let text = std::fs::read_to_string(&plan_path)
         .map_err(|e| anyhow!("read plan {}: {e}", plan_path.display()))?;
     let ops = engine::plan_from_yaml(&text)?;
-    println!("[agent] executing {} step(s) locally", ops.len());
+    info!("agent: executing {} step(s) locally", ops.len());
     engine::execute(&ops, &LocalExecutor).await
 }
 
@@ -638,12 +674,12 @@ async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
     let ordered = order_components(&spec, &components_dir)?;
     let by_name: BTreeMap<String, &crater_core::spec::ComponentRef> =
         spec.components.iter().map(|c| (c.name.clone(), c)).collect();
-    println!(
-        "Spec: {} host(s), {} component(s), order=[{}], mode={}",
+    info!(
+        "{}: {} host(s), component(s) [{}], mode={}",
+        file.display(),
         spec.inventory.hosts.len(),
-        spec.components.len(),
-        ordered.join(" -> "),
-        if do_apply { "APPLY" } else { "DRY-RUN" }
+        ordered.join(", "),
+        if do_apply { "apply" } else { "dry-run" }
     );
 
     if spec.inventory.hosts.is_empty() {
@@ -657,14 +693,14 @@ async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
                 .unwrap_or_else(|| "latest".into());
             let ctx = PlanContext::new(OsFamily::Unknown, ver.clone(), component_dir);
             let plan = build_plan(&desc, &ctx)?;
-            println!("\n=== {} (v{ver}) — {} steps ===", cref.name, plan.len());
+            info!("{} v{ver} — {} steps (no inventory → dry-run):", cref.name, plan.len());
             print_plan(&plan);
         }
         return Ok(());
     }
 
     for host in &spec.inventory.hosts {
-        println!("\n########## host: {} ({}) ##########", host.name, host.address);
+        info!("▶ host {} ({})", host.name, host.address);
         let exec: Box<dyn Executor> = if do_apply {
             let pw = host
                 .password
@@ -695,16 +731,17 @@ async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
                 .unwrap_or_else(|| "latest".into());
             let ctx = PlanContext::new(osf, ver.clone(), component_dir);
             let plan = build_plan(&desc, &ctx)?;
-            println!("\n--- component {} (v{ver}) — {} steps ---", cref.name, plan.len());
-            print_plan(&plan);
+            info!("{} v{ver} — {} steps", cref.name, plan.len());
             if do_apply {
                 // Agent by default (D-027); --shell forces the shell executor.
                 execute_plan(&plan, exec.as_ref(), do_shell, None).await?;
+            } else {
+                print_plan(&plan);
             }
         }
     }
     if !do_apply {
-        println!("\n(dry-run; omit --dry-run to execute over SSH.)");
+        info!("dry-run only; omit --dry-run to execute over SSH");
     }
     Ok(())
 }

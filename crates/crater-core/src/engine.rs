@@ -385,42 +385,65 @@ pub fn plan_from_yaml(text: &str) -> crate::Result<Vec<Op>> {
     Ok(serde_yaml::from_str(text)?)
 }
 
+/// Color a status word for terminals (ansible-style: ok=green, changed=yellow,
+/// warn=yellow). On a non-TTY (piped, or agent over SSH) it stays plain so no
+/// escape codes leak into captured/forwarded output.
+fn paint_status(s: StepStatus) -> String {
+    use std::io::IsTerminal;
+    let word = s.tag();
+    if !std::io::stdout().is_terminal() {
+        return word.to_string();
+    }
+    let code = match s {
+        StepStatus::Ok => "32",      // green
+        StepStatus::Changed => "33", // yellow
+        StepStatus::Warn => "33",
+    };
+    format!("\x1b[{code}m{word}\x1b[0m")
+}
+
 /// Execute a plan against a target. Stops on the first hard failure.
 ///
 /// Each step reports `ok` / `changed` / `warn` ansible-style: read-only phases
 /// (preflight/verify) report `ok` or `warn`; install steps run their
 /// idempotency `check` first and report `ok` (already satisfied, skipped) or
 /// `changed` (acted). A re-run of an already-converged plan is all `ok`.
+/// Command output is logged at DEBUG (set `CRATER_LOG=debug`), except verify
+/// output, which is surfaced at INFO since it's the result the user wants.
 pub async fn execute(ops: &[Op], exec: &dyn Executor) -> crate::Result<()> {
     let total = ops.len();
     let (mut n_ok, mut n_changed, mut n_warn) = (0u32, 0u32, 0u32);
     for (i, op) in ops.iter().enumerate() {
         let n = i + 1;
-        print!("[{n}/{total}] {:?} {} ...", op.phase(), op.describe());
-        let status = exec_one(op, exec, n).await?;
-        println!(" {}", status.tag());
+        let (status, surfaced) = exec_one(op, exec, n).await?;
+        let line = format!("[{n}/{total}] {} → {}", op.describe(), paint_status(status));
+        match status {
+            StepStatus::Warn => tracing::warn!("{line}"),
+            _ => tracing::info!("{line}"),
+        }
+        for l in surfaced {
+            tracing::info!("      {l}");
+        }
         match status {
             StepStatus::Ok => n_ok += 1,
             StepStatus::Changed => n_changed += 1,
             StepStatus::Warn => n_warn += 1,
         }
     }
-    println!(
-        "Done on {}: changed={n_changed} ok={n_ok} warn={n_warn} ({total} step(s)).",
+    tracing::info!(
+        "done on {}: changed={n_changed} ok={n_ok} warn={n_warn} ({total} step(s))",
         exec.label()
     );
     Ok(())
 }
 
-fn print_indented(prefix: char, text: &str) {
-    for line in text.trim().lines() {
-        println!("      {prefix} {line}");
-    }
-}
-
-/// Run one op, printing any details on their own indented lines, and return the
-/// step status. The caller prints the status tag and keeps the tally.
-async fn exec_one(op: &Op, exec: &dyn Executor, n: usize) -> crate::Result<StepStatus> {
+/// Run one op; return its status plus any lines to surface at INFO (verify
+/// output). Command stdout/stderr otherwise goes to DEBUG.
+async fn exec_one(
+    op: &Op,
+    exec: &dyn Executor,
+    n: usize,
+) -> crate::Result<(StepStatus, Vec<String>)> {
     match op {
         Op::Shell {
             phase,
@@ -434,23 +457,35 @@ async fn exec_one(op: &Op, exec: &dyn Executor, n: usize) -> crate::Result<StepS
             if *phase == Phase::Install {
                 if let Some(probe) = check {
                     if exec.run(probe).await?.ok() {
-                        return Ok(StepStatus::Ok);
+                        return Ok((StepStatus::Ok, Vec::new()));
                     }
                 }
             }
             let out = exec.run(cmd).await?;
-            print_indented('|', &out.stdout);
+            let so = out.stdout.trim();
+            // Verify output is the result the user wants → INFO; the rest → DEBUG.
+            let surfaced = if !so.is_empty() && *phase == Phase::Verify {
+                so.lines().map(str::to_string).collect()
+            } else {
+                for l in so.lines() {
+                    tracing::debug!("      {l}");
+                }
+                Vec::new()
+            };
             if out.ok() {
-                // Read-only phases didn't mutate anything; install did.
-                Ok(match phase {
+                let st = match phase {
                     Phase::Install => StepStatus::Changed,
                     Phase::Preflight | Phase::Verify => StepStatus::Ok,
-                })
+                };
+                Ok((st, surfaced))
             } else {
-                print_indented('!', &out.stderr);
+                for l in out.stderr.trim().lines() {
+                    tracing::debug!("      ! {l}");
+                }
                 if *soft_fail {
-                    Ok(StepStatus::Warn)
+                    Ok((StepStatus::Warn, surfaced))
                 } else {
+                    tracing::error!("[{n}] {} failed (exit {})", op.describe(), out.code);
                     anyhow::bail!("step {n} failed (exit {}): {}", out.code, out.stderr.trim());
                 }
             }
@@ -461,11 +496,11 @@ async fn exec_one(op: &Op, exec: &dyn Executor, n: usize) -> crate::Result<StepS
             let probe = format!("sha256sum '{path}' 2>/dev/null | cut -d' ' -f1");
             let cur = exec.run(&probe).await?;
             if cur.ok() && cur.stdout.trim() == want {
-                return Ok(StepStatus::Ok);
+                return Ok((StepStatus::Ok, Vec::new()));
             }
             exec.write_file(path, content.as_bytes()).await?;
-            print_indented('|', &format!("wrote {} bytes", content.len()));
-            Ok(StepStatus::Changed)
+            tracing::debug!("      wrote {} bytes -> {path}", content.len());
+            Ok((StepStatus::Changed, Vec::new()))
         }
         Op::PushFile {
             local_path, dest, ..
@@ -477,11 +512,11 @@ async fn exec_one(op: &Op, exec: &dyn Executor, n: usize) -> crate::Result<StepS
             let probe = format!("sha256sum '{dest}' 2>/dev/null | cut -d' ' -f1");
             let cur = exec.run(&probe).await?;
             if cur.ok() && cur.stdout.trim() == want {
-                return Ok(StepStatus::Ok);
+                return Ok((StepStatus::Ok, Vec::new()));
             }
             exec.write_file(dest, &data).await?;
-            print_indented('|', &format!("pushed {} bytes -> {dest}", data.len()));
-            Ok(StepStatus::Changed)
+            tracing::debug!("      pushed {} bytes -> {dest}", data.len());
+            Ok((StepStatus::Changed, Vec::new()))
         }
     }
 }
