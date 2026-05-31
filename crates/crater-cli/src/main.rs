@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
+use futures::StreamExt;
 use tracing::info;
 
 use crater_core::bundle::{self, BundleStage, Manifest, ManifestComponent, BUNDLE_FORMAT_VERSION};
@@ -570,10 +571,11 @@ async fn run_via_agent(exec: &dyn Executor, plan: &[Op], agent_bin: Option<&Path
         .run(&format!("sha256sum {remote_bin} 2>/dev/null | cut -d' ' -f1"))
         .await?;
     if cached.ok() && cached.stdout.trim() == want {
-        info!("agent: binary cached on target (sha256 match), reusing [{how}]");
+        info!("[{}] agent: binary cached (sha256 match), reusing [{how}]", exec.label());
     } else {
         info!(
-            "agent: pushing {} ({} bytes) [{how}]",
+            "[{}] agent: pushing {} ({} bytes) [{how}]",
+            exec.label(),
             bin_path.display(),
             bytes.len()
         );
@@ -584,7 +586,7 @@ async fn run_via_agent(exec: &dyn Executor, plan: &[Op], agent_bin: Option<&Path
     exec.write_file(remote_plan, engine::plan_to_yaml(plan)?.as_bytes())
         .await?;
 
-    info!("agent: executing on target ↓");
+    info!("[{}] agent: executing on target ↓", exec.label());
     let out = exec
         .run(&format!("{remote_bin} agent --plan {remote_plan}"))
         .await?;
@@ -700,79 +702,169 @@ async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
     }
 
     // Cross-node facts (D-030): hostvars[host][name], populated by `register:`
-    // and injected as `hostvars.<host>.<name>` template vars for later hosts.
+    // and injected as `hostvars.<host>.<name>` template vars for later groups.
     let mut hostvars: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
-    for host in &spec.inventory.hosts {
-        info!("▶ host {} ({})", host.name, host.address);
-        let exec: Box<dyn Executor> = if do_apply {
-            let pw = host
-                .password
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow!("host {} has no password (M1 requires one)", host.name))?;
-            Box::new(SshExecutor::connect(&host.address, host.port, &host.user, pw).await?)
-        } else {
-            Box::new(LocalExecutor)
-        };
+    if !do_apply {
+        // Dry-run: print each host's plans sequentially (no execution).
+        for host in &spec.inventory.hosts {
+            run_host(host, &ordered, &by_name, &components_dir, spec_dir, &hostvars, false, do_shell)
+                .await?;
+        }
+        info!("dry-run only; omit --dry-run to execute over SSH");
+        return Ok(());
+    }
 
-        let osf = if do_apply {
-            os::detect_via(exec.as_ref()).await
-        } else {
-            OsFamily::Unknown
-        };
+    // F17: hosts grouped by role-set. Groups run sequentially (so a producer
+    // role registers before a consumer role reads it), but hosts WITHIN a group
+    // run in parallel — same-role peers are independent. Each host returns its
+    // registered facts, merged into hostvars after the whole group finishes.
+    let forks = forks_limit();
+    for group in group_hosts_by_role(&spec.inventory.hosts) {
+        if group.len() > 1 {
+            let mut roles = group[0].roles.clone();
+            roles.sort();
+            info!(
+                "▷ group [{}] — {} hosts in parallel (forks={forks})",
+                roles.join(","),
+                group.len()
+            );
+        }
+        let results: Vec<Result<(String, Vec<(String, String)>)>> = futures::stream::iter(
+            group.iter().map(|host| {
+                run_host(host, &ordered, &by_name, &components_dir, spec_dir, &hostvars, true, do_shell)
+            }),
+        )
+        .buffer_unordered(forks)
+        .collect()
+        .await;
 
-        for cname in &ordered {
-            let cref = by_name[cname];
-            if !host.roles.is_empty() && !host.roles.contains(&cref.name) {
-                continue;
-            }
-            let (desc, component_dir) = resolve_descriptor(cref, &components_dir, spec_dir)?;
-            let ver = cref
-                .version
-                .clone()
-                .or_else(|| desc.version_default.clone())
-                .unwrap_or_else(|| "latest".into());
-            let mut ctx = PlanContext::new(osf, ver.clone(), component_dir);
-            // Make every other host's registered facts available as template vars.
-            for (h, kv) in &hostvars {
-                for (k, v) in kv {
-                    ctx.vars.insert(format!("hostvars.{h}.{k}"), v.clone());
-                }
-            }
-            let plan = build_plan(&desc, &ctx)?;
-            info!("{} v{ver} — {} steps", cref.name, plan.len());
-            if do_apply {
-                // Agent by default (D-027); --shell forces the shell executor.
-                execute_plan(&plan, exec.as_ref(), do_shell, None).await?;
-                // Capture this component's facts on this host for later hosts.
-                for reg in &desc.register {
-                    let out = exec.run(&engine::render(&reg.cmd, &ctx.vars)).await?;
-                    if !out.ok() {
-                        anyhow::bail!(
-                            "register '{}' on {} failed (exit {}): {}",
-                            reg.name,
-                            host.name,
-                            out.code,
-                            out.stderr.trim()
-                        );
+        // Merge this group's registered facts; surface the first host error.
+        let mut first_err = None;
+        for r in results {
+            match r {
+                Ok((host_name, regs)) => {
+                    for (k, v) in regs {
+                        hostvars.entry(host_name.clone()).or_default().insert(k, v);
                     }
-                    let val = out.stdout.trim().to_string();
-                    info!("registered {}.{} ({} bytes)", host.name, reg.name, val.len());
-                    hostvars
-                        .entry(host.name.clone())
-                        .or_default()
-                        .insert(reg.name.clone(), val);
                 }
-            } else {
-                print_plan(&plan);
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
             }
         }
-    }
-    if !do_apply {
-        info!("dry-run only; omit --dry-run to execute over SSH");
+        if let Some(e) = first_err {
+            return Err(e);
+        }
     }
     Ok(())
+}
+
+/// Group hosts by their role-set (sorted), preserving each signature's first
+/// appearance order. Same-role hosts land in one group (run in parallel);
+/// distinct role-sets form ordered groups (run sequentially) so a producer role
+/// registers its facts before a consumer role consumes them (F17 + D-030).
+fn group_hosts_by_role(hosts: &[crater_core::spec::Host]) -> Vec<Vec<&crater_core::spec::Host>> {
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: BTreeMap<String, Vec<&crater_core::spec::Host>> = BTreeMap::new();
+    for h in hosts {
+        let mut roles = h.roles.clone();
+        roles.sort();
+        let sig = roles.join(",");
+        if !groups.contains_key(&sig) {
+            order.push(sig.clone());
+        }
+        groups.entry(sig).or_default().push(h);
+    }
+    order.into_iter().filter_map(|s| groups.remove(&s)).collect()
+}
+
+/// Max hosts to deploy concurrently within a group (`CRATER_FORKS`, default 10).
+fn forks_limit() -> usize {
+    std::env::var("CRATER_FORKS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(10)
+}
+
+/// Deploy one host: connect, detect OS, run its role's components (agent/shell),
+/// and return its registered facts (for hostvars). Read-only over `hostvars` —
+/// the caller merges results after the group, so parallel peers don't race.
+async fn run_host(
+    host: &crater_core::spec::Host,
+    ordered: &[String],
+    by_name: &BTreeMap<String, &crater_core::spec::ComponentRef>,
+    components_dir: &Path,
+    spec_dir: &Path,
+    hostvars: &BTreeMap<String, BTreeMap<String, String>>,
+    do_apply: bool,
+    do_shell: bool,
+) -> Result<(String, Vec<(String, String)>)> {
+    info!("▶ host {} ({})", host.name, host.address);
+    let exec: Box<dyn Executor> = if do_apply {
+        let pw = host
+            .password
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("host {} has no password (M1 requires one)", host.name))?;
+        Box::new(SshExecutor::connect(&host.address, host.port, &host.user, pw).await?)
+    } else {
+        Box::new(LocalExecutor)
+    };
+    let osf = if do_apply {
+        os::detect_via(exec.as_ref()).await
+    } else {
+        OsFamily::Unknown
+    };
+
+    let mut registered: Vec<(String, String)> = Vec::new();
+    for cname in ordered {
+        let cref = by_name[cname];
+        if !host.roles.is_empty() && !host.roles.contains(&cref.name) {
+            continue;
+        }
+        let (desc, component_dir) = resolve_descriptor(cref, components_dir, spec_dir)?;
+        let ver = cref
+            .version
+            .clone()
+            .or_else(|| desc.version_default.clone())
+            .unwrap_or_else(|| "latest".into());
+        let mut ctx = PlanContext::new(osf, ver.clone(), component_dir);
+        // Other hosts' registered facts become template vars.
+        for (h, kv) in hostvars {
+            for (k, v) in kv {
+                ctx.vars.insert(format!("hostvars.{h}.{k}"), v.clone());
+            }
+        }
+        let plan = build_plan(&desc, &ctx)?;
+        info!("[{}] {} v{ver} — {} steps", host.name, cref.name, plan.len());
+        if !do_apply {
+            print_plan(&plan);
+            continue;
+        }
+        // Agent by default (D-027); --shell forces the shell executor.
+        execute_plan(&plan, exec.as_ref(), do_shell, None).await?;
+        // Capture this component's facts on this host for later groups.
+        for reg in &desc.register {
+            let out = exec.run(&engine::render(&reg.cmd, &ctx.vars)).await?;
+            if !out.ok() {
+                anyhow::bail!(
+                    "register '{}' on {} failed (exit {}): {}",
+                    reg.name,
+                    host.name,
+                    out.code,
+                    out.stderr.trim()
+                );
+            }
+            let val = out.stdout.trim().to_string();
+            info!("[{}] registered {} ({} bytes)", host.name, reg.name, val.len());
+            registered.push((reg.name.clone(), val));
+        }
+    }
+    Ok((host.name.clone(), registered))
 }
 
 // ---------------------------------------------------------------------------

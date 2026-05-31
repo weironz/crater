@@ -229,3 +229,14 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **影响**:`ComponentDescriptor.register` + `RegisterSpec` + `ComponentRef` 内联同字段;`apply_spec` 维护 `hostvars` 跨主机、注入 `hostvars.<h>.<k>`、装后捕获;`engine::render` 转 pub 且支持空格/点号键。**describe 仍显示模板原文(不泄漏 token 等敏感值到日志)**，实际执行渲染后命令。真机验证(192.168.73.11→.12):leader register token-from-ubuntu → follower 经 `{{hostvars.leader.token}}` 收到。+1 单测(共 31)。
 - **已知边界/后续**:register 为**组件级**(非步骤级);跨主机顺序靠 inventory 顺序(未按 role 自动排);敏感值未标 `no_log`(目前靠 describe 不渲染规避);并发(F17)正交待加。
 - **终极验收(k3s 两节点真集群)**:`components/k3s` 加 `register:[token,url]`、新增 `components/k3s-agent`(用 `{{hostvars.server.token/url}}` join)、`examples/k3s-cluster.yaml`。真机 192.168.73.11(server)+.12(agent)→ `kubectl get nodes` 两节点全 Ready。**D-030 传值成立**(诊断 `curl server:6443/ping→pong` 已证)。踩坑:克隆 VM hostname 同为 `ubuntu`，k3s 拒重名节点→组件加 `K3S_NODE_NAME=agent-<ip-dashed>` 唯一化(数据修复，守 D-017)。
+
+---
+
+## 2026-05-31 · 并发（F17）
+
+### D-031 同 role 主机并行：按 role 分组、组间串行、组内并发
+- **背景**:多节点原为串行逐台(N 台慢)。要并行，但不能破坏 D-030 的"register→消费"跨节点顺序。
+- **决策**:hosts 按 **role-set 签名分组**(签名=排序后的 roles 拼接)，**组按首次出现顺序串行**(producer 角色先于 consumer 角色 register)，**组内主机并发**(同 role 是对等节点、互不依赖)。每台 host 跑完返回自己的 register facts，**整组结束后再合并进 hostvars**(避免并发写竞争 + 组内本就不该互相依赖)。
+- **理由**:同 role 并行是最常见的提速场景(多 agent/多 web);组间串行守住 D-030(server 组先 register、agent 组后 join)。
+- **影响**:抽出 `run_host`(返回 `(host, Vec<(name,val)>)`);`group_hosts_by_role` + `forks_limit`(`CRATER_FORKS`，默认 10);组内用 `futures::stream::buffer_unordered(forks)` 并发(加 `futures` 依赖);组内任一 host 失败→整组跑完后返回首个错误。控制端日志加 `[host]`/`[root@ip]` 前缀;agent 转发输出为连续块(由前面的 `[host] agent: executing ↓` 标记)。真机:`examples/multi-node.yaml` 两台同 role `[yq]` 同时 07:12:57 启动、总时长≈max(各主机)。
+- **已知边界**:跨组顺序仍靠 role 首次出现序(未显式声明 role 依赖);组内 host 失败不停其对等(但整体 apply 失败);并发日志按行可能交错(块级连续、有 host 前缀)。

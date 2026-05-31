@@ -323,6 +323,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crater-core",
+ "futures",
  "tokio",
  "tracing",
  "tracing-subscriber",

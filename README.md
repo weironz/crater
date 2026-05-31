@@ -93,7 +93,7 @@ crater/
 - [设计方向 design.md](docs/design.md)（北极星：引擎铁律 + 在线/离线单管线 + OCI 离线 + 自举 agent + ansible 化路线）
 - [离线包格式 offline-format.md](docs/offline-format.md)（OCI 镜像方案详细设计）
 - [需求基线 v0.3](docs/requirements.md)
-- [决策 / 沟通记录](docs/decisions.md)（D-001~D-030）
+- [决策 / 沟通记录](docs/decisions.md)（D-001~D-031）
 - [进展日志](docs/progress.md)（M1–M5 已验证；含工具链纪律）
 - [文档索引](docs/README.md)
 
@@ -114,7 +114,8 @@ crater/
 | 自举 agent（D-019/D-026/D-027）| **默认执行模型**：推二进制(按 sha256 缓存)+计划，目标机本地执行；`--shell` 逃生、`--agent-bin` 异构 | ✅ 在线真机验证（解包 OCI 待 D-018）|
 | 多节点 + 跨节点 fact（D-030）| 多主机 fan-out + 按 role 过滤；`register`/`hostvars` 跨节点传值（真集群钥匙）| ✅ 两台真机验证 |
 | k3s 两节点集群（D-030 验收）| server `register` node-token → agent 用 `{{hostvars.server.*}}` join | ✅ 真机：2 节点全 Ready |
-| 后续 | 并发(F17)、按 role 排主机序、register no_log、es live、kubeadm、musl/aarch64、host-key、包签名 | 计划中 |
+| 并发 F17（D-031）| 按 role 分组：组间串行(保 register 序)、组内并行(`CRATER_FORKS`，默认 10) | ✅ 两台真机并行验证 |
+| 后续 | 显式 role 依赖、register no_log、es live、kubeadm、musl/aarch64、host-key、包签名 | 计划中 |
 
 ## License
 

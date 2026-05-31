@@ -81,7 +81,8 @@ examples/    crater.yaml node_exporter.yaml
 - 跨节点 **register/hostvars 已实现 + 真机验证**（D-030）：组件 `register: [{name,cmd}]` → 控制端经该 host executor 捕获 stdout → `hostvars[host][name]`；其它 host 用 `{{ hostvars.<host>.<name> }}`（主机按 inventory 顺序，leader 先 register）。真机 `examples/cross-node.yaml`：leader register `token-from-ubuntu` → follower 收到。`engine::render` 转 pub + 支持空格/点号键；describe 不渲染（不泄漏敏感值）。+1 单测（共 31）。
 - **k3s 两节点真集群验证（D-030 终极验收）**：`components/k3s` 加 `register: [token, url]`；新增 `components/k3s-agent`（用 `K3S_URL/K3S_TOKEN={{hostvars.server.*}}` join）；`examples/k3s-cluster.yaml`。真机：server(n11) register node-token(108B)+url → agent(n12) join → `kubectl get nodes` 两节点全 Ready（ubuntu control-plane + agent-192-168-73-12 worker）。
   - **踩坑**：克隆 VM hostname 都叫 `ubuntu`，k3s 拒绝重名节点（node-password rejected）→ 组件加 `K3S_NODE_NAME=agent-<ip-dashed>` 唯一化解决。诊断时 `curl server:6443/ping→pong` 证实 D-030 传值本身没问题，是 k3s 环境去重要求。
-- 下一步：并发（F17，同 role 主机并行）；按 role 自动排主机顺序；register `no_log` 敏感标记。
+- **并发 F17 已实现 + 真机验证**（D-031）：hosts 按 role-set 分组，**组间串行**（保 D-030 register→消费序）、**组内并发**（`futures::buffer_unordered`，上限 `CRATER_FORKS` 默认 10）；抽出 `run_host` 返回 register facts、整组后合并；日志加 `[host]`/`[root@ip]` 前缀。真机 `examples/multi-node.yaml` 两台同 role `[yq]` 07:12:57 同时启动、总时长≈max(各主机)。k3s 集群的 `[k3s]`→`[k3s-agent]` 两组仍串行（顺序不变）。
+- 下一步：按 role 显式声明跨组依赖；register `no_log`；OCI 离线（D-018）。
 
 ### 2026-05-31 续9（module 契约地基 D-029）
 - 四层 module 模型记入 design.md §6.1 + ADR D-029。**契约地基已做**：
