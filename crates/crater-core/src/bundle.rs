@@ -211,9 +211,21 @@ impl BundleStage {
             builder.append_data(&mut header, rel, data.as_slice())?;
         }
         let layer = builder.into_inner()?;
-        let (layer_digest, layer_size) = self.store_raw(&layer)?;
+        self.image_from_layer(reference, &layer)
+    }
 
-        // Minimal OCI config + manifest over the layer (a real, pushable image).
+    /// Like [`store_rootfs_layer`] but the layer is a tar of a real directory
+    /// tree (preserving file modes) — used when `crater build --image` has
+    /// materialized a component's file actions into a staging rootfs.
+    pub fn store_rootfs_layer_dir(&self, reference: &str, dir: &Path) -> crate::Result<ImageRef> {
+        let layer = tar_dir_to_vec(dir)?;
+        self.image_from_layer(reference, &layer)
+    }
+
+    /// Store a fs-layer tar + synthesize a minimal OCI image (config+manifest)
+    /// over it. Returns an [`ImageRef`]; the image is a real, pushable OCI image.
+    fn image_from_layer(&self, reference: &str, layer: &[u8]) -> crate::Result<ImageRef> {
+        let (layer_digest, layer_size) = self.store_raw(layer)?;
         let config = json!({
             "architecture": "amd64", "os": "linux",
             "rootfs": {"type": "layers", "diff_ids": [format!("sha256:{layer_digest}")]}
@@ -342,6 +354,34 @@ fn tar_dir_to_vec(dir: &Path) -> crate::Result<Vec<u8>> {
     let mut tar = tar::Builder::new(Vec::new());
     tar.append_dir_all(".", dir)?;
     Ok(tar.into_inner()?)
+}
+
+/// Extract a (optionally gzip) tar archive into `dest_dir`, dropping `strip`
+/// leading path components — the pure-Rust equivalent of the target's
+/// `tar -xf … --strip-components`, used to bake an `extract` action into a
+/// rootfs layer at build time (`crater build --image`).
+pub fn untar_gz_into(dest_dir: &Path, data: &[u8], strip: u32) -> crate::Result<()> {
+    use flate2::read::GzDecoder;
+    fs::create_dir_all(dest_dir)?;
+    // gzip-sniff (magic 1f 8b); otherwise treat as plain tar.
+    let is_gz = data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b;
+    let reader: Box<dyn Read> = if is_gz {
+        Box::new(GzDecoder::new(data))
+    } else {
+        Box::new(data)
+    };
+    let mut ar = tar::Archive::new(reader);
+    ar.set_preserve_permissions(true);
+    for entry in ar.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.to_path_buf();
+        let stripped: PathBuf = path.components().skip(strip as usize).collect();
+        if stripped.as_os_str().is_empty() {
+            continue;
+        }
+        entry.unpack(dest_dir.join(stripped))?;
+    }
+    Ok(())
 }
 
 /// Pack a staged OCI layout into a single file (an `oci-archive`: plain tar —

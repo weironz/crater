@@ -13,30 +13,33 @@
 | **load+install** | `crater deploy --bundle x.oci --host <host>` | crater 自己解包：制品 push-from-blob / rootfs 镜像 `tar -xpf -C /` |
 | **pull** | （build 时，组件 `images:`） | `oci-client` 从 registry 拉容器镜像 blob 进包（rustls 纯 Rust） |
 
-两条离线落地路径，按组件性质选：
-- **制品/文件型**（yq、二进制）：`--image` 封装 rootfs 镜像 → load 时展开到 `/`。
-- **daemon 型**（node_exporter 等需 systemd）：recipe-replay（download→push-blob、systemd_unit 等照常执行）。
+## 构建逻辑：vs Dockerfile（每个动作都有归宿，零遗漏）
 
-## 构建逻辑：vs Dockerfile
+crater 构建 OCI 镜像**不用 Dockerfile、不起容器**。"Dockerfile"就是组件的 `component.yaml`。**你只写一份 component.yaml，不用选模式、不用懂拆分**——`build --image` 自动按动作类型分流，并**打印**清楚什么烤进了镜像、什么会在目标机执行：
 
-crater 构建 OCI 镜像**不用 Dockerfile，也不起容器**。它的"Dockerfile"就是组件的 `component.yaml`（声明式 actions），逻辑是**「声明式 → 文件树 → 一个层」**，纯 Rust（download + tar + json），两端零运行时。
-
-| | Docker | crater（`build --image`） |
+| 动作类型 | 例子 | 归宿 |
 |---|---|---|
-| 构建配方 | Dockerfile（FROM / RUN / COPY） | component.yaml（声明式 actions） |
-| 怎么产生层 | 每条指令一层；`RUN` 在**容器沙箱执行命令**、快照 fs diff 成层 | **不执行命令、不起容器**；把**文件类动作**的产物物化成 rootfs 文件树 → 一个层 |
-| 依赖 | dockerd / buildkit + 容器运行时 | 纯 Rust，零运行时 |
-| base | `FROM <base>` | 无（相当于 `FROM scratch`，层里只有制品文件） |
+| **文件类**（`produces_files`） | download / **extract** / write_file / render_template | **真实物化进 staging rootfs**（extract 真解压、download 真落盘），tar 成一个层烤进镜像 |
+| **命令式** | run_cmd / pkg_install / systemd_unit / module | 没法变成文件 diff → 作为**残留 recipe** 随镜像带走，load 时在目标机 replay |
 
-构建步骤（yq 为例）：
-1. 读组件动作，挑**文件类**的：`download→dest`、`write_file`、`render_template`。
-2. 物化进 rootfs 树：`(usr/local/bin/yq, <字节>, 0755)`。
-3. tar 成一个层（含权限位）。
-4. 手写 OCI config（rootfs.diff_ids）+ manifest（config+layer）→ 标准 OCI Image Layout。
+build 输出示例（透明，**绝不静默丢**）：
+```
+node_exporter → image crater/node_exporter:1.8.2: baked 3 file action(s); will replay on target: [systemd_unit]
+yq            → image crater/yq:4.53.2:            baked 1 file action(s); will replay on target: [run_cmd]
+```
 
-**关键边界（这解释了为何分两条路径）**：因为 crater 不在沙箱里执行命令再快照，它只能把**文件类动作**烤进层；**命令式动作**（`run_cmd`/`pkg_install`/`systemd_unit`）没法变成一个 fs diff（那需要容器沙箱执行+快照）。所以纯文件型 → 烤进 rootfs 镜像；daemon/复杂型 → 留给 deploy 时 recipe-replay。这是**有意不引入构建期容器运行时**的取舍（契合纯 Rust / CN / air-gap）。Docker 的 `RUN` 烤层能力，本质是用容器换来的。
+load（`crater deploy`）= 把 rootfs 层 `tar -xpf -C /` 展开 + **replay 残留的命令式动作** + verify。
 
-后续可补（都无需容器 builder）：`from: <base>` + COPY 式叠加（已能 `pull` 基镜像 blob，纯层组合即可，是 Dockerfile `FROM`+`COPY` 子集）。
+| | Docker | crater |
+|---|---|---|
+| 构建配方 | Dockerfile（FROM/RUN/COPY） | component.yaml（声明式 actions，自动分流） |
+| 怎么产生层 | `RUN` 在容器沙箱执行+快照 fs diff | 把文件类动作的**真实文件效果**物化进 staging rootfs → tar 成层 |
+| 命令式步骤 | RUN 烤进层（靠容器） | 不烤；作残留在目标机 replay（无构建期容器） |
+| 依赖 | dockerd/buildkit + 容器运行时 | 纯 Rust，两端零运行时 |
+
+**为什么这样**：crater 不引入构建期容器沙箱（契合纯 Rust / CN / air-gap），所以命令式步骤无法快照成层——但它们不会被丢掉，而是 load 时 replay。两端零容器运行时是核心取舍；Docker 的 `RUN` 烤层本质是拿容器换的。
+
+后续（无需容器 builder）：`from: <base>` + COPY 式纯层叠加（已能 `pull` 基镜像 blob，是 Dockerfile `FROM`+`COPY` 子集）；layer 体积裁剪（剔除下载 scratch 已做）。
 
 ## 基本 demo
 
@@ -48,11 +51,14 @@ crater deploy --bundle /tmp/yq.oci --host <host> --password <pw>   # load+instal
 ```
 期望：`load image crater/yq:4.53.2 → extracting rootfs to /` → `verify: yq --version → v4.53.2`。
 
-**daemon 型离线**（node_exporter，recipe-replay）：
+**daemon 型 `--image`**（node_exporter：extract 烤进层、systemd 在目标 replay）：
 ```bash
-crater build -f examples/node_exporter.yaml -o /tmp/ne.oci
-crater deploy --bundle /tmp/ne.oci --host <host> --password <pw>  # push(offline) 制品 + systemd 起服务
+crater build --image -f examples/node_exporter.yaml -o /tmp/ne.oci
+# build 打印：baked 3 file action(s); will replay on target: [systemd_unit]
+crater deploy --bundle /tmp/ne.oci --host <host> --password <pw>
+# load: 展开 rootfs（binary+unit）→ replay systemd_unit → :9100 出 metrics
 ```
+（也可用不带 `--image` 的 `crater build`：纯 recipe-replay 离线包，download→push-blob + 动作照常执行——两种离线形态并存。）
 
 **查看包结构**（验证 OCI 合规）：
 ```bash
@@ -61,8 +67,9 @@ tar -xf /tmp/yq.oci -C /tmp/x && cat /tmp/x/oci-layout /tmp/x/index.json && ls /
 
 ## 验证（真机 192.168.73.12）
 
-- node_exporter 离线（增量①）：`push(offline)` → `:9100` 出 metrics，`changed=4 ok=3`。
-- yq 封装为 OCI 镜像离线（增量②）：rootfs 层展开到 `/`、`/usr/local/bin/yq` -rwxr-xr-x、`yq --version` v4.53.2。
+- yq `--image`：baked 1（download）+ replay [run_cmd chmod] → 展开 + chmod +x → `yq --version` v4.53.2。
+- node_exporter `--image`：baked 3（download+**extract**+write_file）+ replay [systemd_unit] → 展开 binary+unit、replay systemd → `:9100` 出 metrics。**（extract 不再被漏）**
+- 纯 recipe-replay 离线（增量①）：node_exporter `push(offline)` → `:9100`，`changed=4 ok=3`。
 - 包结构经校验：`oci-layout`/`index.json`(带 `org.crater.manifest` 注解)/`blobs/sha256` 齐全，镜像 manifest 引用 config+layers。
 
 ## 边界 / 后续

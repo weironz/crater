@@ -155,3 +155,35 @@ pub enum Action {
         runtime: Option<String>,
     },
 }
+
+impl Action {
+    /// Whether this action's effect is **placing files on disk** (so it can be
+    /// baked into an OCI rootfs layer at build time, D-018 ②). The rest are
+    /// imperative (run a command / touch system state) and can only be replayed
+    /// on the target — `crater build --image` carries them as a residual recipe,
+    /// never silently dropping them.
+    pub fn produces_files(&self) -> bool {
+        matches!(
+            self,
+            Action::Download { .. }
+                | Action::Extract { .. }
+                | Action::WriteFile { .. }
+                | Action::RenderTemplate { .. }
+        )
+    }
+
+    /// Short human label for build/deploy summaries.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Action::PkgInstall { .. } => "pkg_install",
+            Action::Download { .. } => "download",
+            Action::Extract { .. } => "extract",
+            Action::RenderTemplate { .. } => "render_template",
+            Action::WriteFile { .. } => "write_file",
+            Action::SystemdUnit { .. } => "systemd_unit",
+            Action::RunCmd { .. } => "run_cmd",
+            Action::Module { .. } => "module",
+            Action::LoadImage { .. } => "load_image",
+        }
+    }
+}

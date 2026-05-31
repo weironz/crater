@@ -266,3 +266,13 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **理由**:守"目标机零依赖"(agentless);镜像是标准 OCI(可签名/可 registry 流转)，但安装不绑容器运行时——crater 自身即 save/load。
 - **真机验证(192.168.73.12)**:`crater build --image -f yq.yaml -o yq-img.oci`→ 封装 `crater/yq:4.53.2`(rootfs 层 0755)、13.7MB oci-archive;`crater deploy --bundle yq-img.oci`→ crater 解包展开到 `/`→ `/usr/local/bin/yq` -rwxr-xr-x、`yq --version` v4.53.2。+1 单测(rootfs 层 round-trip，含 0755)，共 30。
 - **边界/后续**:rootfs 模型只 bake 文件类动作(systemd/run_cmd 不入层，daemon 类仍走 recipe-replay 离线路径);registry **push**;多 arch rootfs;镜像签名(N4)。
+
+---
+
+## 2026-05-31 · build --image 完整化（修静默遗漏）
+
+### D-018 增量 2 修订：build --image 按动作分类、零静默丢弃
+- **背景**:用户质疑"怎么识别 component.yaml 哪些进镜像，不会遗漏吗、学习成本高吗"。审视发现初版 `build --image` 只处理 download(dest)+write_file、**静默跳过 extract/run_cmd 等**——`node_exporter --image` 会产出**没有二进制的残缺镜像且不报错**（extract 被漏）。
+- **决策**:`Action::produces_files()` 显式分类。build --image：**文件类**(download/extract/write_file/render_template)由 crater **真实物化文件效果**进 staging rootfs（extract 纯 Rust 解 gz+tar+strip，download 落盘），tar 成层；**命令式**(run_cmd/pkg_install/systemd_unit/module)作**残留 recipe** 随镜像带走、load 时目标机 replay。build **打印** `baked N file action(s); will replay on target: [...]`，**绝不静默丢**；无任何文件产物则报错引导用 plain build。load = 展开层 + replay 残留(非文件类 install)+verify。
+- **理由**:用户只写一份 component.yaml、不选模式不懂拆分;每个动作都有归宿且透明;修掉 extract 遗漏。守"两端零容器运行时"。
+- **真机(192.168.73.12)**:`node_exporter --image` baked 3(含 extract)+replay[systemd_unit]→ 展开 binary+unit、systemd replay、`:9100` metrics;`yq --image` baked 1+replay[run_cmd chmod]→ yq v4.53.2。`untar_gz_into`/`store_rootfs_layer_dir` + 下载 scratch 剔除。

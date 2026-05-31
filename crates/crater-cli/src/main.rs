@@ -1023,48 +1023,96 @@ async fn build_image_bundle(spec_file: &Path, out: &Path) -> Result<()> {
             version: ver.clone(),
         });
 
-        // Render the component's file outputs into a rootfs (path, bytes, mode).
+        // Materialize the component's FILE actions into a staging rootfs
+        // (download/extract/write_file/render_template) — by replaying their
+        // real file effect, not guessing. Imperative actions (run_cmd/pkg/
+        // systemd/module) can't become a fs diff → they're the residual recipe,
+        // replayed on the target at load. Nothing is silently dropped.
         let mut ctx = PlanContext::new(OsFamily::Unknown, ver.clone(), cdir.clone());
-        ctx.offline_blobs = Some(BTreeMap::new()); // raw URLs
-        let mut files: Vec<(String, Vec<u8>, u32)> = Vec::new();
-        for a in desc.install.iter().chain(desc.verify.iter()) {
+        ctx.offline_blobs = Some(BTreeMap::new()); // rendered_url yields raw URLs
+        let rootfs_dir = stage_root.join("__rootfs").join(&cref.name);
+        std::fs::create_dir_all(&rootfs_dir)?;
+        let mut baked = 0usize;
+        let mut residual: Vec<String> = Vec::new();
+        for a in &desc.install {
             match a {
-                Action::Download { dest: Some(dest), .. } => {
-                    let raw = ctx.rendered_url(match a {
-                        Action::Download { url_tmpl, .. } => url_tmpl,
-                        _ => unreachable!(),
-                    });
+                Action::Download { url_tmpl, dest, .. } => {
+                    let raw = ctx.rendered_url(url_tmpl);
                     let url = online.rewrite(&raw);
                     info!("  fetch {raw}");
                     let (data, _) = source::fetch_best(&url)
                         .await
                         .map_err(|e| anyhow!("fetch {raw}: {e}"))?;
-                    files.push((dest.display().to_string(), data, 0o755));
+                    let dest = dest
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "/tmp/crater-dl".into());
+                    let p = rootfs_dir.join(dest.trim_start_matches('/'));
+                    if let Some(parent) = p.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&p, &data)?;
+                    baked += 1;
+                }
+                Action::Extract { from, to, strip } => {
+                    let from = from
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "/tmp/crater-dl".into());
+                    let src = rootfs_dir.join(from.trim_start_matches('/'));
+                    let data = bundle::read_file(&src)
+                        .map_err(|e| anyhow!("extract: source {from} not in rootfs: {e}"))?;
+                    let to = rootfs_dir.join(to.display().to_string().trim_start_matches('/'));
+                    bundle::untar_gz_into(&to, &data, *strip)?;
+                    baked += 1;
                 }
                 Action::WriteFile { dst, content } => {
-                    files.push((dst.display().to_string(), content.clone().into_bytes(), 0o644));
+                    let p = rootfs_dir.join(dst.display().to_string().trim_start_matches('/'));
+                    if let Some(parent) = p.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&p, engine::render(content, &ctx.vars))?;
+                    baked += 1;
                 }
-                _ => {} // systemd/run_cmd/extract/pkg_install aren't bakeable into a layer
+                Action::RenderTemplate { src, dst } => {
+                    let tpl = std::fs::read_to_string(cdir.join("templates").join(src))
+                        .map_err(|e| anyhow!("read template {src}: {e}"))?;
+                    let p = rootfs_dir.join(dst.display().to_string().trim_start_matches('/'));
+                    if let Some(parent) = p.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&p, engine::render(&tpl, &ctx.vars))?;
+                    baked += 1;
+                }
+                other => residual.push(other.kind().to_string()),
             }
         }
-        if files.is_empty() {
+        // Drop the download scratch dir so it doesn't leak into the image.
+        let _ = std::fs::remove_dir_all(rootfs_dir.join("tmp"));
+        if baked == 0 {
             anyhow::bail!(
-                "component '{}' has no file outputs to wrap into an image (needs download+dest / write_file)",
-                cref.name
+                "component '{}' produces no files to bake into an image (only imperative actions: [{}]); use plain `crater build` (recipe-replay) instead",
+                cref.name,
+                residual.join(", ")
             );
         }
-        // Stage the descriptor so deploy can run verify steps after load.
+
+        // Stage the descriptor so deploy can replay the residual recipe + verify.
         let staged = stage.components_dir().join(&cref.name);
         std::fs::create_dir_all(&staged)?;
         std::fs::write(staged.join("component.yaml"), desc.to_yaml()?)?;
 
         let reference = format!("crater/{}:{ver}", cref.name);
-        let ir = stage.store_rootfs_layer(&reference, &files)?;
-        info!(
-            "  wrapped {} file(s) into image {reference} (manifest sha256={})",
-            files.len(),
-            &ir.manifest_digest[..16]
-        );
+        let ir = stage.store_rootfs_layer_dir(&reference, &rootfs_dir)?;
+        if residual.is_empty() {
+            info!("  {} → image {reference}: baked {baked} file action(s); nothing to replay", cref.name);
+        } else {
+            info!(
+                "  {} → image {reference}: baked {baked} file action(s); will replay on target: [{}]",
+                cref.name,
+                residual.join(", ")
+            );
+        }
         rootfs.push(ir);
     }
 
@@ -1157,25 +1205,20 @@ async fn deploy_bundle(
                 info!("  installed {}", ir.reference);
             }
         }
-        // Run only verify steps (run_cmd) to confirm — files are already in place.
+        // Files are already on disk (layer extracted). Replay only the RESIDUAL
+        // (imperative) install actions — run_cmd/pkg_install/systemd_unit/module
+        // — that couldn't be baked, then verify. File actions are skipped (done).
         if do_apply {
             for mc in &manifest.components {
                 let cdir = stage.components_dir().join(&mc.name);
-                if let Ok(desc) = ComponentDescriptor::from_yaml_file(&cdir.join("component.yaml")) {
+                if let Ok(mut desc) = ComponentDescriptor::from_yaml_file(&cdir.join("component.yaml")) {
+                    desc.install.retain(|a| !a.produces_files());
+                    desc.preflight.clear(); // already validated at build time
                     let ctx = PlanContext::new(osf, mc.version.clone(), cdir);
-                    let verify: Vec<_> = desc
-                        .verify
-                        .iter()
-                        .filter_map(|a| match a {
-                            crater_core::component::Action::RunCmd { cmd, .. } => {
-                                Some(engine::render(cmd, &ctx.vars))
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    for cmd in verify {
-                        let out = exec.run(&cmd).await?;
-                        info!("verify: {} → {}", cmd, out.stdout.trim());
+                    let plan = build_plan(&desc, &ctx)?;
+                    if !plan.is_empty() {
+                        info!("replay {} residual step(s) for {}", plan.len(), mc.name);
+                        engine::execute(&plan, exec.as_ref()).await?;
                     }
                 }
             }
