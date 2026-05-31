@@ -76,6 +76,9 @@ pub enum Op {
         describe: String,
         path: String,
         content: String,
+        /// Optional chmod mode applied after writing (e.g. "0644", D-037-b copy).
+        #[serde(default)]
+        mode: Option<String>,
     },
     /// Push a pre-fetched local blob (offline bundle) to the target.
     PushFile {
@@ -431,6 +434,7 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 describe: format!("render {} -> {}", src, dst.display()),
                 path: dst.display().to_string(),
                 content: render(&raw, &ctx.vars)?,
+                mode: None,
             }
         }
         Action::WriteFile { dst, content } => Op::WriteFile {
@@ -438,6 +442,7 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
             describe: format!("write file {}", dst.display()),
             path: dst.display().to_string(),
             content: render(content, &ctx.vars)?,
+            mode: None,
         },
         Action::SystemdUnit {
             name,
@@ -521,6 +526,113 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 cmd,
                 soft_fail: false,
                 check: None,
+            }
+        }
+        Action::File {
+            path,
+            state,
+            mode,
+            owner,
+            group,
+        } => {
+            use crate::component::FileState;
+            let p = path.display().to_string();
+            let chmod = mode
+                .as_ref()
+                .map(|m| format!(" && chmod {m} '{p}'"))
+                .unwrap_or_default();
+            let chown = match (owner, group) {
+                (Some(o), Some(g)) => format!(" && chown {o}:{g} '{p}'"),
+                (Some(o), None) => format!(" && chown {o} '{p}'"),
+                (None, Some(g)) => format!(" && chgrp {g} '{p}'"),
+                (None, None) => String::new(),
+            };
+            let (describe, cmd, check) = match state {
+                FileState::Directory => (
+                    format!("dir {p}"),
+                    format!("mkdir -p '{p}'{chmod}{chown}"),
+                    Some(format!("test -d '{p}'")),
+                ),
+                FileState::Absent => (
+                    format!("remove {p}"),
+                    format!("rm -rf '{p}'"),
+                    Some(format!("test ! -e '{p}'")),
+                ),
+                FileState::Touch => (
+                    format!("touch {p}"),
+                    format!("touch '{p}'{chmod}{chown}"),
+                    Some(format!("test -e '{p}'")),
+                ),
+            };
+            Op::Shell {
+                phase,
+                describe,
+                cmd,
+                soft_fail: false,
+                check,
+            }
+        }
+        Action::Copy { src, dest, mode } => {
+            // Read the control-side file and inline it (works under the agent
+            // too, which can't reach control-side paths). Text only — binaries
+            // go through `place` (a material). Idempotent + chmod via WriteFile.
+            let src_path = ctx.component_dir.join(src);
+            let bytes = std::fs::read(&src_path)
+                .map_err(|e| anyhow::anyhow!("copy: read {}: {e}", src_path.display()))?;
+            let content = String::from_utf8(bytes).map_err(|_| {
+                anyhow::anyhow!(
+                    "copy: {} is not UTF-8 (use `place` for binaries)",
+                    src_path.display()
+                )
+            })?;
+            Op::WriteFile {
+                phase,
+                describe: format!("copy {} -> {}", src, dest.display()),
+                path: dest.display().to_string(),
+                content,
+                mode: mode.clone(),
+            }
+        }
+        Action::Service {
+            name,
+            state,
+            enabled,
+        } => {
+            use crate::component::ServiceState;
+            let mut cmds = vec!["systemctl daemon-reload".to_string()];
+            match enabled {
+                Some(true) => cmds.push(format!("systemctl enable {name}")),
+                Some(false) => cmds.push(format!("systemctl disable {name}")),
+                None => {}
+            }
+            let mut probes = Vec::new();
+            match state {
+                Some(ServiceState::Started) => {
+                    cmds.push(format!("systemctl start {name}"));
+                    probes.push(format!("systemctl is-active --quiet {name}"));
+                }
+                Some(ServiceState::Stopped) => {
+                    cmds.push(format!("systemctl stop {name}"));
+                    probes.push(format!("! systemctl is-active --quiet {name}"));
+                }
+                // restart is never "already done" — always runs (reports changed).
+                Some(ServiceState::Restarted) => cmds.push(format!("systemctl restart {name}")),
+                None => {}
+            }
+            if let Some(true) = enabled {
+                probes.push(format!("systemctl is-enabled --quiet {name}"));
+            }
+            let check = if probes.is_empty() {
+                None
+            } else {
+                Some(probes.join(" && "))
+            };
+            Op::Shell {
+                phase,
+                describe: format!("service {name}"),
+                cmd: cmds.join(" && "),
+                soft_fail: false,
+                check,
             }
         }
     };
@@ -712,15 +824,24 @@ async fn exec_one(
                 }
             }
         }
-        Op::WriteFile { path, content, .. } => {
+        Op::WriteFile {
+            path, content, mode, ..
+        } => {
             // Idempotency: skip the write if the remote file already matches.
             let want = crate::bundle::sha256_hex(content.as_bytes());
             let probe = format!("sha256sum '{path}' 2>/dev/null | cut -d' ' -f1");
             let cur = exec.run(&probe).await?;
             if cur.ok() && cur.stdout.trim() == want {
+                // Content already in place; still ensure mode if requested.
+                if let Some(m) = mode {
+                    exec.run(&format!("chmod {m} '{path}'")).await?;
+                }
                 return Ok((StepStatus::Ok, Vec::new()));
             }
             exec.write_file(path, content.as_bytes()).await?;
+            if let Some(m) = mode {
+                exec.run(&format!("chmod {m} '{path}'")).await?;
+            }
             tracing::debug!("      wrote {} bytes -> {path}", content.len());
             Ok((StepStatus::Changed, Vec::new()))
         }

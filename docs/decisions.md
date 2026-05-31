@@ -439,3 +439,15 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - 分工:**build→库 / save→文件 / load←文件 / push·pull↔registry / apply←库·registry**(docker 同构)。
   - legacy tar-bundle `build_bundle`(crater-manifest 格式)不再被任何命令调用,标 `#[allow(dead_code)]` 保留(apply/deploy 仍能读老包)。
 - **真机**:`build -t .../yq:built`→库;`crater images` 见;`save -o /tmp/saved.oci`(13MB);清库→`load`(包内 ref)→`apply` recipe-replay 装 yq v4.53.2;`build` 无 -t → `crater/yq:4.53.2`;`save` 不存在 ref 报错。33 tests 绿。
+
+---
+
+## 2026-06-01 · action 原语补齐(D-037-b 首批)
+
+### D-039 file / copy / service 原语
+- **file**:`state: directory|absent|touch` + `mode/owner/group`;引擎生成 `mkdir -p`/`rm -rf`/`touch` + chmod/chown,幂等探针 `test -d` / `test ! -e` / `test -e`。
+- **copy**:控制端文件(`src` 相对 task 目录)**内联进 plan**(agent 也能写,不依赖控制端路径)+ sha256 幂等 + chmod;文本 only(二进制走 `place`)。
+- **service**:systemd `started/stopped/restarted` + `enabled`;started/stopped 用 `is-active` 探针幂等,restart 总执行。
+- **实现**:`Op::WriteFile` 加 `mode` + sha256 幂等(`copy` 复用;`render_template`/`write_file` 同获幂等)。三原语全是 Shell/WriteFile 这类既有 Op,旧 agent 也能执行(mode 经新逻辑 shell/local 通道 chmod)。
+- **守 D-036**:全声明式数据,幂等/排序/条件由引擎,YAML 只声明原语 + 参数。
+- **真机**:本机 + n11 `--shell` 跑 `examples/fcs-demo.yaml`:`file` 建 `/etc/crater-demo`(755)、`copy` 推 `app.conf`(644+内容)、`service ssh` 幂等 ok、`needs` 排序正确;再跑 `changed=0`。33 tests 绿。

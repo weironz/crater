@@ -212,6 +212,57 @@ pub enum Action {
         #[serde(default)]
         runtime: Option<String>,
     },
+    /// Manage a path's state (D-037-b): create a directory, remove a path, or
+    /// touch a file — with optional mode/owner/group. Idempotent in the engine.
+    File {
+        path: PathBuf,
+        state: FileState,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        owner: Option<String>,
+        #[serde(default)]
+        group: Option<String>,
+    },
+    /// Copy a control-side file to the target (D-037-b). `src` is resolved
+    /// relative to the component/task dir; the content is inlined into the plan
+    /// (so it works under the agent too), written idempotently (sha256), chmod.
+    Copy {
+        src: String,
+        dest: PathBuf,
+        #[serde(default)]
+        mode: Option<String>,
+    },
+    /// Manage a systemd service (D-037-b): a generalization of `systemd_unit`
+    /// adding stop/restart. Idempotent for started/stopped (probe is-active).
+    Service {
+        name: String,
+        #[serde(default)]
+        state: Option<ServiceState>,
+        #[serde(default)]
+        enabled: Option<bool>,
+    },
+}
+
+/// Desired state for the `file` primitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileState {
+    /// `mkdir -p` the path (idempotent: skip if already a directory).
+    Directory,
+    /// `rm -rf` the path (idempotent: skip if it doesn't exist).
+    Absent,
+    /// Ensure the file exists (`touch`; idempotent: skip if present).
+    Touch,
+}
+
+/// Desired runtime state for the `service` primitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceState {
+    Started,
+    Stopped,
+    Restarted,
 }
 
 impl Action {
@@ -243,6 +294,9 @@ impl Action {
             Action::Place { .. } => "place",
             Action::Module { .. } => "module",
             Action::LoadImage { .. } => "load_image",
+            Action::File { .. } => "file",
+            Action::Copy { .. } => "copy",
+            Action::Service { .. } => "service",
         }
     }
 }

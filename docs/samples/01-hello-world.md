@@ -95,15 +95,13 @@ crater apply yq -i inventory.yaml
 构建镜像
 
 ```
-crater build -f examples/yq.yaml -t docker.io/library/yq:v4.53.2
+crater build -f examples/yq/yq.yaml -t 192.168.73.5:5000/yq:4.53.2
 ```
 
-
-
-
+部署
 
 ```
-crater apply docker.io/library/yq:v1.0
+crater apply 192.168.73.5:5000/yq:4.53.2
 crater apply yq.tar
 ```
 

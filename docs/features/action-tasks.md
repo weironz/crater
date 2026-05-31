@@ -58,6 +58,19 @@ action 项字段(全是引擎读得懂的封闭词汇,**无需执行即可静态
 | 取值 | `{{ version }}` | 残废渲染器纯代入,写表达式直接报错(D-036/#1) |
 | 循环 | (不在 YAML) | action 收列表参数 / targeting 组内逐台 |
 
+## 内置 action 原语(Rust 白盒)
+
+`pkg_install` `download` `extract` `render_template` `write_file` `systemd_unit`
+`run_cmd` `place` `load_image` `module`,以及 D-037-b 补齐的:
+
+| 原语 | 参数 | 引擎语义(幂等) |
+|---|---|---|
+| `file` | `path` + `state: directory\|absent\|touch` + `mode/owner/group` | `mkdir -p`/`rm -rf`/`touch`;探针 `test -d`/`test ! -e`/`test -e` |
+| `copy` | `src`(控制端,相对 task 目录) + `dest` + `mode` | 读控制端文件**内联进 plan**(agent 也能写),sha256 幂等 + chmod;文本 only(二进制走 `place`) |
+| `service` | `name` + `state: started\|stopped\|restarted` + `enabled` | systemd start/stop/restart + enable/disable;started/stopped 探针 `is-active` |
+
+`copy` 复用增强后的 `Op::WriteFile`(加 `mode` + sha256 幂等),`render_template`/`write_file` 也因此变幂等(内容不变报 ok)。
+
 ## demo(真机验证 2026-06-01)
 
 ```bash
@@ -75,7 +88,8 @@ crater apply examples/install-yq.yaml -i inventory.yaml                 # 层3 i
 - 本期:`actions` + `needs` + `phase` + `when_os/when_offline` + materials + 三层 targeting。
 - `retries`/`ignore_errors` 字段已解析,**运行时行为**后续。
 - `hosts` 本期支持 `all`;**组过滤**后续。
-- handlers/notify、register/hostvars 在 task 模型下、原语补齐(file/copy/service/lineinfile/user/group)后续。
+- 原语已补 **file/copy/service**(D-039);lineinfile/user/group 后续。
+- handlers/notify、register/hostvars 在 task 模型下、`retries/ignore_errors` 运行时、`hosts` 组过滤后续。
 - 命名 task 库(裸名 `crater apply <task>` 解析新 actions 格式)后续;现阶段裸名仍解析 `components/`(旧格式兼容)。
 
 ## 关联
