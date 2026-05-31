@@ -19,6 +19,7 @@ pub mod dag;
 pub mod diagnose;
 pub mod engine;
 pub mod executor;
+pub mod module;
 pub mod os;
 pub mod source;
 pub mod spec;

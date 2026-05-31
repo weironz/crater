@@ -120,6 +120,14 @@ pub enum Action {
         #[serde(default)]
         check: Option<String>,
     },
+    /// Invoke a module (D-029). `uses` resolves to a data-defined module
+    /// `modules/<uses>.yaml`; `with` supplies its params. Lowers to a checked
+    /// shell op, so it inherits the idempotency contract.
+    Module {
+        uses: String,
+        #[serde(default)]
+        with: BTreeMap<String, serde_yaml::Value>,
+    },
     /// Load/pull a container image. The runtime is NOT assumed: when `runtime`
     /// is set we use it verbatim; otherwise we probe for whatever generic OCI
     /// tool is on the box (nerdctl/docker/podman/ctr). Reserved for offline

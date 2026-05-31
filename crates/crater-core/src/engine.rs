@@ -116,6 +116,8 @@ pub struct PlanContext {
     pub source: OnlineSource,
     /// Offline mode: maps a rendered download URL -> local pre-fetched blob.
     pub offline_blobs: Option<BTreeMap<String, PathBuf>>,
+    /// Directory holding data-defined modules (`modules/<name>.yaml`, D-029).
+    pub modules_dir: PathBuf,
 }
 
 impl PlanContext {
@@ -129,6 +131,7 @@ impl PlanContext {
             vars,
             source: OnlineSource::with_default_mirrors(),
             offline_blobs: None,
+            modules_dir: PathBuf::from("modules"),
         }
     }
 
@@ -328,6 +331,26 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
             // Author-supplied idempotency probe (data), rendered like the cmd.
             check: check.as_ref().map(|c| render(c, &ctx.vars)),
         },
+        Action::Module { uses, with } => {
+            // Data-defined module (D-029): load modules/<uses>.yaml, render its
+            // check/act with `with` (+ ctx vars), lower to a checked shell op.
+            let path = ctx.modules_dir.join(format!("{uses}.yaml"));
+            let desc = crate::module::ModuleDescriptor::from_yaml_file(&path)?;
+            let with_strings: BTreeMap<String, String> = with
+                .iter()
+                .map(|(k, v)| (k.clone(), yaml_value_to_string(v)))
+                .collect();
+            desc.check_params(uses, &with_strings)?;
+            let mut vars = ctx.vars.clone();
+            vars.extend(with_strings);
+            Op::Shell {
+                phase,
+                describe: format!("module {uses}"),
+                cmd: render(&desc.act, &vars),
+                soft_fail: false,
+                check: desc.check.as_ref().map(|c| render(c, &vars)),
+            }
+        }
         Action::LoadImage { reference, runtime } => {
             let cmd = match runtime {
                 // Explicit runtime from data: use it verbatim.
@@ -371,6 +394,17 @@ fn pick_packages(by_os: &BTreeMap<String, Vec<String>>, os: OsFamily) -> Vec<Str
         }
     }
     Vec::new()
+}
+
+/// Stringify a module param value for `{{var}}` substitution.
+fn yaml_value_to_string(v: &serde_yaml::Value) -> String {
+    match v {
+        serde_yaml::Value::String(s) => s.clone(),
+        serde_yaml::Value::Bool(b) => b.to_string(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        serde_yaml::Value::Null => String::new(),
+        other => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
+    }
 }
 
 /// Serialize a lowered plan for shipping to the self-bootstrap agent (D-019).
@@ -577,6 +611,60 @@ mod tests {
         .unwrap();
         assert_eq!(shell_check(&v), None);
         assert_eq!(v.phase(), Phase::Verify);
+    }
+
+    #[test]
+    fn module_action_lowers_to_checked_shell() {
+        let dir = std::env::temp_dir().join("crater-module-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("lineinfile.yaml"),
+            "params: [path, line]\ncheck: 'grep -qF \"{{line}}\" \"{{path}}\"'\nact: 'echo \"{{line}}\" >> \"{{path}}\"'\n",
+        )
+        .unwrap();
+        let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
+        ctx.modules_dir = dir;
+
+        let mut with = BTreeMap::new();
+        with.insert("path".into(), serde_yaml::Value::String("/etc/hosts".into()));
+        with.insert("line".into(), serde_yaml::Value::String("1.1.1.1 x".into()));
+        let op = action_op(
+            Phase::Install,
+            &Action::Module {
+                uses: "lineinfile".into(),
+                with,
+            },
+            &ctx,
+        )
+        .unwrap();
+        match op {
+            Op::Shell { cmd, check, .. } => {
+                assert_eq!(cmd, "echo \"1.1.1.1 x\" >> \"/etc/hosts\"");
+                assert_eq!(check.as_deref(), Some("grep -qF \"1.1.1.1 x\" \"/etc/hosts\""));
+            }
+            _ => panic!("module should lower to a shell op"),
+        }
+    }
+
+    #[test]
+    fn module_missing_param_errors() {
+        let dir = std::env::temp_dir().join("crater-module-test2");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("needs.yaml"), "params: [a, b]\nact: 'echo {{a}} {{b}}'\n").unwrap();
+        let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
+        ctx.modules_dir = dir;
+        let mut with = BTreeMap::new();
+        with.insert("a".into(), serde_yaml::Value::String("x".into()));
+        let err = action_op(
+            Phase::Install,
+            &Action::Module {
+                uses: "needs".into(),
+                with,
+            },
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("missing required param 'b'"));
     }
 
     #[test]

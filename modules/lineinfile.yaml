@@ -1,0 +1,6 @@
+# Data-defined module (D-029, layer 2): ensure a line is present in a file.
+# Zero Rust — referenced from a component via `action: module, uses: lineinfile`.
+# Lowers to a checked shell op, so it's idempotent (ok when the line exists).
+params: [path, line]
+check: 'grep -qxF "{{line}}" "{{path}}"'
+act: 'printf "%s\n" "{{line}}" >> "{{path}}"'

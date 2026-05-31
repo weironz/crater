@@ -1,0 +1,16 @@
+# Demo of a data-defined module (D-029): use `lineinfile` (modules/lineinfile.yaml)
+# to ensure a line in a file — idempotent (changed first run, ok after).
+# Run from repo root (so modules/ resolves):  crater apply -f examples/module-demo.yaml
+inventory:
+  hosts:
+    - { name: test, address: 192.168.73.11, user: root, port: 22, password: "123456", roles: [hosts-entry] }
+
+components:
+  - name: hosts-entry
+    install:
+      - action: module
+        uses: lineinfile
+        with: { path: /tmp/crater-demo.txt, line: "hello from a crater module" }
+    verify:
+      - action: run_cmd
+        cmd: "cat /tmp/crater-demo.txt"

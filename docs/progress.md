@@ -75,6 +75,14 @@ examples/    crater.yaml node_exporter.yaml
 4. 不擅自中断、不找用户确认(已授权)。
 
 ## 工作日志（倒序）
+### 2026-05-31 续9（module 契约地基 D-029）
+- 四层 module 模型记入 design.md §6.1 + ADR D-029。**契约地基已做**：
+  - 新增 `Action::Module{uses, with}` + `module.rs`(`ModuleDescriptor`: params/check/act + 缺参校验) + `PlanContext.modules_dir`(默认 `modules/`)。
+  - `module` action 控制端解析 `modules/<uses>.yaml`，用 `with`(+vars) 渲染 check/act → `Op::Shell{check,cmd}`，直接吃 B1 幂等。modules/ 只在控制端需要（agent 收的是已渲染的 Op）。
+  - 数据定义 module 示例 `modules/lineinfile.yaml`（零 Rust）。
+- 真机：`examples/module-demo.yaml` 用 lineinfile，首跑 `[1/2] module lineinfile → changed`、再跑 `→ ok`（grep 命中跳过 act）。+2 单测（module lower / 缺参错误），共 **30**。
+- 第 2 层（数据定义）即可用；内置集扩充（B3）、外部 module JSON 协议后续。**未动 git**。
+
 ### 2026-05-31 续8（日志规范化 D-028）
 - 统一用 `tracing`：紧凑 `HH:MM:SS` 计时器(零新依赖)、级别、`CRATER_LOG/RUST_LOG` 控 verbosity、**ANSI 按 TTY 开关**(管道/agent 经 SSH 无转义码)。
 - engine `execute` 步骤行 `[n/total] {desc} → {status}` 走 info、命令 stdout 降 debug、**verify 输出留 info**、状态词 ansible 式上色(ok 绿/changed 黄)；**apply 不再预 dump 计划**(消除重复)。

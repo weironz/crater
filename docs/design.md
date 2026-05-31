@@ -179,6 +179,36 @@ crater 有两种把动作落到目标机的方式。**agent 是默认执行模�
 
 > task 层与 component 的分工：**component** = 精选、可复用、带 DAG、能离线的「已知物」；**task** = 一次性、长尾的「随便什么」。两者共用幂等契约与同一批 module。
 
+### 6.1 module 模块化：四层模型（D-029）
+
+`action` 集若只是一个 Rust enum，会"每加一个 module 就改 Rust + 逼第三方 fork"。借鉴 ansible，按「复杂度/通用度」分四层定义 module；**复用已造好的零件**：B1 的 `StepStatus(ok/changed/failed)` 就是模块结果契约，自举 agent(D-027) 就是送达载体，D-017 数据驱动就是"放目录即加载"。
+
+| 层 | 形态 | 何时用 | 改 Rust? | 类比 ansible |
+|---|---|---|---|---|
+| **1 内置类型化** | Rust enum 变体（download/pkg_install/systemd_unit…，将来 file/copy/template/service/user/lineinfile/cron），typed + 幂等 + OS 抽象，lower 成 shell | 通用高频、需幂等/OS 抽象的核心 | 是（刻意精选 ~15-20） | ansible-core 模块 |
+| **2 数据定义** | `modules/<name>.yaml`：`params` + `check:` + `act:` 模板，引擎渲染后 lower 成 `Op::Shell{check,cmd}` | 简单可复用幂等操作，零代码 | 否（放目录即加载） | — (crater 特有，最轻) |
+| **3 外部 module** | 脚本/静态二进制 + JSON 契约（收 params+check_mode，吐 `{status,changed,msg}`），agent 送到目标机跑 | 复杂逻辑、第三方生态 | 否（开放生态） | collection / Galaxy |
+| **4 `run_cmd`+`check`** | 裸命令 + 幂等探针 | 一次性长尾、逃生口 | 否 | command/shell |
+
+**统一契约**：所有层都遵循 `check → act → StepStatus`（B1）。
+- 第 1/2 层 lower 成 `Op::Shell{check, cmd}`，**shell 模式也能用**（任何目标机）。
+- 第 3 层需 agent（送二进制/脚本到目标机），优先**静态二进制 / 纯 shell 脚本**以守"目标机零依赖"（不像 ansible 依赖目标机 Python）——这也给"agent 作默认(D-027)"再添一条理由：**更丰富的 module 生态依赖 agent**。
+
+**`module` action 语法**（第 2/3 层入口）：
+```yaml
+- action: module
+  uses: lineinfile          # 解析顺序：内置 > modules/<uses>.yaml > 外部 module
+  with: { path: /etc/hosts, line: "1.1.1.1 x" }
+```
+数据定义 module 示例 `modules/lineinfile.yaml`：
+```yaml
+params: [path, line]
+check: "grep -qF {{line}} {{path}}"     # 命中→ok（跳过）
+act:   "printf '%s\n' {{line}} >> {{path}}"
+```
+
+**落地顺序**：① 钉契约（`module` action + 数据定义 module 加载 → `Op::Shell{check,cmd}`，**本批做的地基**）；② 扩内置集（B3）；③ 外部 module JSON 协议（待生态需求，agent 已具送达能力）。
+
 ---
 
 ## 7. CLI 终极形态、生命周期与状态

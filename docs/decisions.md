@@ -207,3 +207,13 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - **apply 不再预 dump 计划**(只 dry-run 才 `print_plan`)，消除重复。
 - **理由**:可读、可 grep、可控 verbosity、重定向干净;agent 转发的目标机输出与控制端同格式(目标机非 TTY 自动无色)。
 - **影响**:`crater apply` 输出变为 `HH:MM:SS INFO …` 结构化行;真机验证控制端 + agent 转发输出格式一致、管道无转义码。`CRATER_LOG=debug` 看命令细节。其余子命令(build/deploy/ai/doctor)的 println 后续一并迁移。
+
+---
+
+## 2026-05-31 · module 模块化契约
+
+### D-029 module 四层模型 + 契约地基（数据定义 module 先行）
+- **背景**:`Action` 是固定 Rust enum（8 个），表达力靠 `run_cmd` 兜但幂等/声明式覆盖薄;用户问"功能复杂起来怎么定义、是否借鉴 ansible 模块化"。
+- **决策**:借鉴 ansible，按复杂度/通用度分**四层** module（详见 [design.md §6.1](design.md)）：① 内置类型化(Rust enum，core) ② 数据定义(`modules/<name>.yaml` 的 params+check+act 模板) ③ 外部 module(脚本/静态二进制 + JSON 契约，agent 送达) ④ `run_cmd`+`check` 逃生口。**统一契约 = `check→act→StepStatus`(B1)**;第 1/2 层 lower 成 `Op::Shell{check,cmd}`(shell 模式可用)，第 3 层需 agent(优先静态二进制/纯 shell，守目标机零依赖)。
+- **理由**:复用已造零件(StepStatus=结果契约、agent=送达、数据驱动=放目录即加载);避免"每加 module 就改 Rust+fork";与 D-017(产品=数据、原语=代码)、D-027(agent 默认) 自洽。
+- **影响（本批做的地基）**:新增 `Action::Module{uses, with}` + `module.rs`(ModuleDescriptor: params/check/act) + `PlanContext.modules_dir`;`module` action 解析 `modules/<uses>.yaml`、用 `with`(+vars) 渲染 check/act → `Op::Shell{check,cmd}`，直接吃 B1 幂等回显。缺参报错。第 2 层(数据定义)即可用、零代码扩;内置集扩充(B3)与外部 JSON 协议后续。
