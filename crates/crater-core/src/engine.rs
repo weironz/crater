@@ -217,10 +217,20 @@ pub fn build_plan(desc: &ComponentDescriptor, ctx: &PlanContext) -> crate::Resul
 /// lives here in Rust** (D-036): `when_os`/`when_offline` filter steps, `needs`
 /// topologically orders them; the YAML only declared primitives + data. The
 /// caller must have populated `ctx.materials` (for `place`) and `ctx.os`.
+/// A lowered task step: the Op plus its run policy (D-037-b). The task model
+/// drives steps from the control plane (so retries/notify see each result),
+/// unlike the component model which can ship the whole plan to an agent.
+pub struct TaskStep {
+    pub op: Op,
+    pub retries: u32,
+    pub ignore_errors: bool,
+    pub notify: Vec<String>,
+}
+
 pub fn plan_from_task(
     actions: &[crate::task::ActionStep],
     ctx: &PlanContext,
-) -> crate::Result<Vec<Op>> {
+) -> crate::Result<Vec<TaskStep>> {
     let offline = ctx.offline_blobs.is_some();
     let os = ctx.os;
 
@@ -270,14 +280,132 @@ pub fn plan_from_task(
         .collect();
     let order = crate::dag::topo_sort(&nodes)?;
 
-    // 3) Lower each step to an Op in dependency order.
+    // 3) Lower each step to an Op (+ its run policy) in dependency order.
     let by_id: BTreeMap<&str, &Item> = items.iter().map(|it| (it.id.as_str(), it)).collect();
-    let mut ops = Vec::new();
+    let mut steps = Vec::new();
     for id in order {
         let it = by_id[id.as_str()];
-        ops.push(action_op(it.step.phase, &it.step.action, ctx)?);
+        steps.push(TaskStep {
+            op: action_op(it.step.phase, &it.step.action, ctx)?,
+            retries: it.step.retries,
+            ignore_errors: it.step.ignore_errors,
+            notify: it.step.notify.clone(),
+        });
     }
-    Ok(ops)
+    Ok(steps)
+}
+
+/// Lower a task's handlers (D-037-b) to `id -> Op`. Each handler needs an `id`
+/// (the name a step `notify`s).
+pub fn plan_handlers(
+    handlers: &[crate::task::ActionStep],
+    ctx: &PlanContext,
+) -> crate::Result<BTreeMap<String, Op>> {
+    let mut out = BTreeMap::new();
+    for h in handlers {
+        let id = h
+            .id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("handler needs an `id` (a step notifies it by id)"))?;
+        out.insert(id, action_op(h.phase, &h.action, ctx)?);
+    }
+    Ok(out)
+}
+
+/// Run one Op with a retry/ignore-errors policy (D-037-b). `total == 0` marks a
+/// handler (logged differently). Returns the final status.
+async fn run_one(
+    op: &Op,
+    exec: &dyn Executor,
+    n: usize,
+    total: usize,
+    retries: u32,
+    ignore_errors: bool,
+) -> crate::Result<StepStatus> {
+    let mut attempt = 0u32;
+    loop {
+        match exec_one(op, exec, n).await {
+            Ok((status, surfaced)) => {
+                let line = if total == 0 {
+                    format!("  ⤷ handler {} → {}", op.describe(), paint_status(status))
+                } else {
+                    format!("[{n}/{total}] {} → {}", op.describe(), paint_status(status))
+                };
+                match status {
+                    StepStatus::Warn => tracing::warn!("{line}"),
+                    _ => tracing::info!("{line}"),
+                }
+                for l in surfaced {
+                    tracing::info!("      {l}");
+                }
+                return Ok(status);
+            }
+            Err(e) => {
+                if attempt < retries {
+                    attempt += 1;
+                    tracing::warn!("[{n}/{total}] {} failed, retry {attempt}/{retries}: {e}", op.describe());
+                    continue;
+                }
+                if ignore_errors {
+                    tracing::warn!("[{n}/{total}] {} failed (ignore_errors): {e}", op.describe());
+                    return Ok(StepStatus::Warn);
+                }
+                return Err(e);
+            }
+        }
+    }
+}
+
+/// Execute a task plan from the control plane (D-037-b): each step with its
+/// retry/ignore-errors policy; `changed` steps queue their `notify` handlers,
+/// which run once (deduped, in order) at the end.
+pub async fn execute_task(
+    steps: &[TaskStep],
+    handlers: &BTreeMap<String, Op>,
+    exec: &dyn Executor,
+) -> crate::Result<()> {
+    let total = steps.len();
+    let (mut n_ok, mut n_changed, mut n_warn) = (0u32, 0u32, 0u32);
+    let mut notified: Vec<String> = Vec::new();
+    for (i, st) in steps.iter().enumerate() {
+        let status = run_one(&st.op, exec, i + 1, total, st.retries, st.ignore_errors).await?;
+        match status {
+            StepStatus::Ok => n_ok += 1,
+            StepStatus::Changed => {
+                n_changed += 1;
+                for h in &st.notify {
+                    if !notified.contains(h) {
+                        notified.push(h.clone());
+                    }
+                }
+            }
+            StepStatus::Warn => n_warn += 1,
+        }
+    }
+    // Run notified handlers once, in notify order (ansible semantics).
+    for hid in &notified {
+        match handlers.get(hid) {
+            Some(op) => {
+                let status = run_one(op, exec, 0, 0, 0, false).await?;
+                match status {
+                    StepStatus::Ok => n_ok += 1,
+                    StepStatus::Changed => n_changed += 1,
+                    StepStatus::Warn => n_warn += 1,
+                }
+            }
+            None => tracing::warn!("notify: no handler with id '{hid}'"),
+        }
+    }
+    tracing::info!(
+        "done on {}: changed={n_changed} ok={n_ok} warn={n_warn} ({total} step(s){})",
+        exec.label(),
+        if notified.is_empty() {
+            String::new()
+        } else {
+            format!(", {} handler(s)", notified.len())
+        }
+    );
+    Ok(())
 }
 
 /// Collect every binary material a component declares (D-034), as

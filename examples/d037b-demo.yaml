@@ -1,0 +1,27 @@
+# D-037-b 运行时:retries / ignore_errors / handlers(notify)。
+name: d037b-demo
+hosts: all
+handlers:
+  - id: mark_reload
+    action: run_cmd
+    cmd: "date +%s > /tmp/crater-reload"
+actions:
+  - id: dir
+    action: file
+    path: /etc/crater-d2
+    state: directory
+  - id: conf
+    action: copy
+    src: files/app.conf
+    dest: /etc/crater-d2/app.conf
+    mode: "0644"
+    needs: [dir]
+    notify: [mark_reload]          # conf 变更 → 末尾触发 handler
+  - id: retry_demo
+    action: run_cmd
+    cmd: "test -f /tmp/crater-retry || { touch /tmp/crater-retry; exit 1; }"
+    retries: 2                      # 第一次失败 → 重试成功
+  - id: ignore_demo
+    action: run_cmd
+    cmd: "exit 3"
+    ignore_errors: true            # 失败转 warn,不中断

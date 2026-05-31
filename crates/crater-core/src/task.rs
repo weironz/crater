@@ -36,6 +36,10 @@ pub struct TaskFile {
     /// Ordered actions. Dependencies via `needs`; the engine topo-sorts.
     #[serde(default)]
     pub actions: Vec<ActionStep>,
+    /// Handlers (D-037-b): actions run once at the end, only if a `changed`
+    /// action `notify`d them (by `id`). Deduped, in notify order.
+    #[serde(default)]
+    pub handlers: Vec<ActionStep>,
 }
 
 fn default_hosts() -> String {
@@ -65,9 +69,13 @@ pub struct ActionStep {
     /// Engine retry count (data). Runtime behavior lands in D-037-b. `0` = none.
     #[serde(default)]
     pub retries: u32,
-    /// Continue past a failure (data). Runtime behavior lands in D-037-b.
+    /// Continue past a failure even after retries (D-037-b): the step reports
+    /// `warn` instead of aborting.
     #[serde(default)]
     pub ignore_errors: bool,
+    /// Handler ids to trigger when this step reports `changed` (D-037-b).
+    #[serde(default)]
+    pub notify: Vec<String>,
     /// The primitive + its params, flattened so the YAML stays flat:
     /// `{ id, action: place, dest: …, needs: [..] }`.
     #[serde(flatten)]

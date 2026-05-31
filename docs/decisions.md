@@ -473,3 +473,17 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **run_task_on_host** 注入 `hostvars.<host>.<name>` 到 ctx.vars(供 `plan_from_task` 渲染),执行 plan 后采集 `register` cmds → 返回 `(host, registered)`。
 - **守 D-036**:排序/分组/合并在引擎;`{{ hostvars.* }}` 纯取值,尚无值时残废渲染器保留(不报错)。
 - **真机**(`examples/cross-node-task.yaml` + 两节点 inventory,roles first/second):n11(first 组)注册 ip → 组间串行 → n12(second 组)的 action 渲染出 `first-node = 192.168.73.11`;n11 自身无 peer 时留字面。33 tests 绿。
+
+---
+
+## 2026-06-01 · task 运行时:retries/ignore_errors/handlers + hosts 组过滤
+
+### D-042 task 控制端驱动 + retries/ignore_errors/notify/handlers + hosts 组过滤
+- **task 模型改为控制端逐 step 驱动**(不再走 agent):per-step 的 retries/ignore_errors/notify 需要控制端看到每步结果。component 模型仍保留 agent;task 的 agent 化(把策略编码进 plan)列为后续。
+- **`plan_from_task` 返回 `Vec<TaskStep>`**(op + retries + ignore_errors + notify);`plan_handlers` 把 `handlers:` lower 成 `id->Op`;`execute_task` 在控制端逐 step 执行:
+  - `retries: N` —— 失败重试至多 N 次。
+  - `ignore_errors` —— 失败(含重试用尽)转 `warn`,不中断。
+  - `notify: [hid]` + `changed` —— 排入 handler;所有 actions 后,被触发的 handler 去重、按 notify 顺序执行一次(ansible 语义);step 为 `ok` 不触发。
+- **`hosts: <group>` 组过滤**:`apply_task` 只取 `roles` 含该组的 host(`all`=全部;无 roles 的 CLI/本机 host 视为已选,总匹配)。
+- **守 D-036**:retries/ignore_errors/notify/hosts 全是封闭数据字段,控制流在 Rust。
+- **真机**(`examples/d037b-demo.yaml` 本机):`ignore_demo`(exit 3)→ warn 不中断;`retry_demo`(首次 exit 1)→ retry 1/2 → changed;`conf` changed → 末尾 handler 执行(再跑幂等 ok → handler 不触发)。`examples/hostfilter-demo.yaml`(`hosts: first` + first/second inventory)→ 仅 n11 跑。33 tests 绿。

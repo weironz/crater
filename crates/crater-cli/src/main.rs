@@ -934,6 +934,20 @@ async fn apply_task(
     use crater_core::task::TaskFile;
     let task = TaskFile::from_yaml_file(path)?;
     let spec_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    // `hosts` group filter (D-037-b): `all` → every target; a group name → only
+    // hosts whose roles include it. Hosts with no roles (CLI --host / local) are
+    // taken as already-chosen and always match.
+    let hosts: Vec<crater_core::spec::Host> = if task.hosts == "all" {
+        hosts
+    } else {
+        hosts
+            .into_iter()
+            .filter(|h| h.roles.is_empty() || h.roles.contains(&task.hosts))
+            .collect()
+    };
+    if hosts.is_empty() {
+        anyhow::bail!("task hosts='{}' matched no target host", task.hosts);
+    }
     info!(
         "task '{}': {} action(s), hosts={}, {} target(s), mode={}",
         task.name,
@@ -991,7 +1005,7 @@ async fn run_task_on_host(
     spec_dir: &Path,
     hostvars: &BTreeMap<String, BTreeMap<String, String>>,
     do_apply: bool,
-    do_shell: bool,
+    _do_shell: bool,
 ) -> Result<(String, Vec<(String, String)>)> {
     if host.is_local() {
         info!("▶ host {} (local)", host.name);
@@ -1022,15 +1036,17 @@ async fn run_task_on_host(
     for m in &task.materials {
         ctx.materials.insert(m.name.clone(), m.clone());
     }
-    let plan = engine::plan_from_task(&task.actions, &ctx)?;
-    info!("[{}] task {} — {} step(s)", host.name, task.name, plan.len());
+    let steps = engine::plan_from_task(&task.actions, &ctx)?;
+    let handlers = engine::plan_handlers(&task.handlers, &ctx)?;
+    info!("[{}] task {} — {} step(s)", host.name, task.name, steps.len());
     if !do_apply {
-        print_plan(&plan);
+        let ops: Vec<Op> = steps.iter().map(|s| s.op.clone()).collect();
+        print_plan(&ops);
         return Ok((host.name.clone(), Vec::new()));
     }
-    // Local always runs directly; remote uses agent unless --shell (D-027).
-    let use_shell = do_shell || host.is_local();
-    execute_plan(&plan, exec.as_ref(), use_shell, None).await?;
+    // Task model drives steps from the control plane so per-step retries /
+    // ignore_errors / notify see each result (D-037-b); no agent for tasks.
+    engine::execute_task(&steps, &handlers, exec.as_ref()).await?;
 
     // Capture this host's facts for later groups (D-030).
     let mut registered: Vec<(String, String)> = Vec::new();

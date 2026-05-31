@@ -1,0 +1,7 @@
+# hosts 组过滤:只在 roles 含 `first` 的主机跑。
+name: hostfilter-demo
+hosts: first
+actions:
+  - id: mark
+    action: run_cmd
+    cmd: "echo ran-on-$(hostname -I | awk '{print $1}')"
