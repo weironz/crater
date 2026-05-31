@@ -6,21 +6,16 @@
 
 | 文件 | 内容 | 状态 |
 |------|------|------|
-| [design.md](design.md) | **设计方向（北极星）**：引擎铁律(D-017) + 在线/离线单管线 + OCI 离线 + 自举 agent + ansible 化路线 | 持续 |
+| [design.md](design.md) | **设计方向（北极星）**：D-036 YAML 纯数据铁律 + D-017 引擎零产品知识 + task 模型 + 自举 agent + 离线 OCI artifact | 持续 |
+| [action-layer.md](action-layer.md) | **task/action 层设计**（`crater apply <动作>`，Ansible 能力在 D-036 约束下落地） | 持续 |
 | [features/](features/README.md) | **功能文档目录**：每个功能一份（介绍 + demo + 验证），见其 README 索引 | 持续 |
-| [offline-format.md](offline-format.md) | 离线包格式（OCI 镜像方案）详细设计 | 持续 |
-| [../examples/yq/demo-online-yq.md](../examples/yq/demo-online-yq.md) | 在线部署 demo（以 yq 为例，最小可复现） | 持续 |
-| [requirements.md](requirements.md) | 需求基线总览（定位、功能、AI、非功能、CLI、OS、路线） | v0.3 |
-| [decisions.md](decisions.md) | 关键决策 / 沟通记录（ADR 风格，D-001~D-032） | 持续 |
-| [progress.md](progress.md) | 开发进展日志（M1–M5 真机验证 + 还债 A 批；含工具链纪律） | 持续 |
+| [offline-format.md](offline-format.md) | 离线包格式（OCI artifact 方案）详细设计 | 持续 |
+| [requirements.md](requirements.md) | 需求基线总览（定位、功能、AI、非功能、CLI、OS、路线） | 持续 |
+| [decisions.md](decisions.md) | 关键决策 / 沟通记录（ADR 风格，D-001~D-046） | 持续 |
+| [progress.md](progress.md) | 开发进展日志（含工具链纪律） | 持续 |
 
-## 规划中的文档（按需新增）
-
-| 文件 | 内容 |
-|------|------|
-| `component-schema.md` | 组件描述文件完整 schema（动作原语全集、参数规范、aliases/images 字段） |
-| `spec-schema.md` | `crater.yaml` 顶层 schema（inventory + components + tasks + 全局 + AI/offline 字段） |
-| `ai-design.md` | AI 能力详细设计（provider 降级、知识固化、离线 RAG） |
+> 注：component 模型已于 **D-046** 收敛为单一 task 模型。`design.md` / `requirements.md` /
+> `offline-format.md` / `progress.md` 仍含 component 时代历史描述，逐步刷新中。
 
 ## 维护约定
 

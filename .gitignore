@@ -20,3 +20,8 @@ _*.log
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 本地产物
+/inventory.yaml
+*.oci
+*.tar

@@ -11,16 +11,14 @@
 | 引擎零产品知识（装万物地基） | [engine-zero-product-knowledge.md](engine-zero-product-knowledge.md) | D-017 |
 | 物料闭包 `materials:` + `action: place` | [materials-and-place.md](materials-and-place.md) | D-034 |
 | apply 三层目标（本机/--host/-i）+ SSH key 认证 | [apply-targets.md](apply-targets.md) | D-035 |
-| 通用 task（`crater apply <动作>`，Ansible 能力） | [action-tasks.md](action-tasks.md) | D-037 |
+| 通用 task（`crater apply <动作>`，Ansible 能力；含离线打包/agent） | [action-tasks.md](action-tasks.md) | D-037~D-046 |
 | YAML 纯数据铁律（残废模板渲染器） | （见 decisions） | D-036 |
 | 幂等回显 + apply 默认执行 | [idempotency-and-apply.md](idempotency-and-apply.md) | D-023/D-024 |
-| spec 内联 recipe（单文件） | [inline-recipe.md](inline-recipe.md) | D-025 |
 | module 模块化（数据定义） | [modules.md](modules.md) | D-029 |
-| 自举 agent（默认执行模型） | [self-bootstrap-agent.md](self-bootstrap-agent.md) | D-019/026/027 |
-| 多节点 + 跨节点 fact + k3s 集群 + 并发 | [multi-node-and-cluster.md](multi-node-and-cluster.md) | D-030/D-031 |
-| 离线 OCI（build/save/load/pull） | [offline-oci.md](offline-oci.md) | D-018 |
-| 镜像管理（images/pull/push/login + apply &lt;ref&gt;） | [images-registry.md](images-registry.md) | D-018 |
-| 在线部署（以 yq 为例，最小可复现） | [../../examples/yq/demo-online-yq.md](../../examples/yq/demo-online-yq.md) | — |
+| 自举 agent（默认执行模型，贯穿 task） | [self-bootstrap-agent.md](self-bootstrap-agent.md) | D-019/027/044 |
+| 多节点 + 跨节点 register/hostvars + 并发 | [multi-node-and-cluster.md](multi-node-and-cluster.md) | D-030/D-031 |
+| 离线 OCI（build/save/load/pull，recipe-replay） | [offline-oci.md](offline-oci.md) | D-018/033/045 |
+| 镜像管理（images/pull/push/tag/login + apply &lt;ref&gt;） | [images-registry.md](images-registry.md) | D-018/033 |
 
 ## 约定
 
