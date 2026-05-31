@@ -35,3 +35,11 @@ verify:
     cmd: "systemctl is-active k3s || true"
   - action: run_cmd
     cmd: "for i in $(seq 1 60); do k3s kubectl get nodes 2>/dev/null | grep -q ' Ready ' && break; sleep 3; done; k3s kubectl get nodes 2>&1 || true"
+
+# Publish join info so agent nodes can join via hostvars (D-030). Harmless for
+# single-node use (captured into hostvars, simply unused).
+register:
+  - name: token
+    cmd: "cat /var/lib/rancher/k3s/server/node-token"
+  - name: url
+    cmd: "echo https://$(hostname -I | awk '{print $1}'):6443"

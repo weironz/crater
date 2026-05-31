@@ -1,0 +1,24 @@
+# k3s-agent — join a worker node to an existing k3s server (D-030 cluster demo).
+# The server (component `k3s`) registers `token` + `url`; this agent consumes
+# them via hostvars. When K3S_URL is set, the install script installs the
+# k3s-agent service (worker) instead of a server.
+#
+# Requires the server host to be listed BEFORE this host in inventory, so the
+# server has installed + registered its token first (hosts run in order).
+name: k3s-agent
+version_default: "v1.30.5+k3s1"
+supported_os: [ubuntu, debian, rhel, centos, rocky]
+
+install:
+  - action: run_cmd
+    cmd: "curl -sfL https://rancher-mirror.rancher.cn/k3s/k3s-install.sh -o /tmp/k3s-install.sh"
+  - action: run_cmd
+    # K3S_URL/K3S_TOKEN come from the server's registered facts (hostvars).
+    # K3S_NODE_NAME makes the node name unique even when hosts share a hostname
+    # (cloned VMs often all say "ubuntu"; k3s rejects duplicate node names).
+    cmd: "INSTALL_K3S_MIRROR=cn INSTALL_K3S_VERSION={{version}} K3S_URL={{hostvars.server.url}} K3S_TOKEN={{hostvars.server.token}} K3S_NODE_NAME=agent-$(hostname -I | awk '{print $1}' | tr '.' '-') sh /tmp/k3s-install.sh"
+    check: "systemctl is-active k3s-agent"   # already joined → skip (idempotent)
+
+verify:
+  - action: run_cmd
+    cmd: "systemctl is-active k3s-agent || true"

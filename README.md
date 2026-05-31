@@ -113,7 +113,8 @@ crater/
 | 离线 OCI（D-018）| 离线包转 OCI Layout、容器镜像打包、临时 registry 多节点分发 | 设计中 |
 | 自举 agent（D-019/D-026/D-027）| **默认执行模型**：推二进制(按 sha256 缓存)+计划，目标机本地执行；`--shell` 逃生、`--agent-bin` 异构 | ✅ 在线真机验证（解包 OCI 待 D-018）|
 | 多节点 + 跨节点 fact（D-030）| 多主机 fan-out + 按 role 过滤；`register`/`hostvars` 跨节点传值（真集群钥匙）| ✅ 两台真机验证 |
-| 后续 | k3s 多节点 join（用 D-030）、并发(F17)、es live、kubeadm、musl/aarch64、host-key 校验、包签名 | 计划中 |
+| k3s 两节点集群（D-030 验收）| server `register` node-token → agent 用 `{{hostvars.server.*}}` join | ✅ 真机：2 节点全 Ready |
+| 后续 | 并发(F17)、按 role 排主机序、register no_log、es live、kubeadm、musl/aarch64、host-key、包签名 | 计划中 |
 
 ## License
 

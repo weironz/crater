@@ -79,7 +79,9 @@ examples/    crater.yaml node_exporter.yaml
 - **多节点实测（两台真机）**：`examples/multi-node.yaml` 把 yq 铺到 192.168.73.11 + 192.168.73.12，逐主机独立幂等（n11 ok、n12 changed），各自走 agent。**基础多节点（fan-out 相同/不同组件到多台）已验证**。
 - **已知缺口**：跨节点 fact 传递（k3s join token 等真集群）、并发（F17，现串行）、主机分组/`--limit`、跨主机容错。
 - 跨节点 **register/hostvars 已实现 + 真机验证**（D-030）：组件 `register: [{name,cmd}]` → 控制端经该 host executor 捕获 stdout → `hostvars[host][name]`；其它 host 用 `{{ hostvars.<host>.<name> }}`（主机按 inventory 顺序，leader 先 register）。真机 `examples/cross-node.yaml`：leader register `token-from-ubuntu` → follower 收到。`engine::render` 转 pub + 支持空格/点号键；describe 不渲染（不泄漏敏感值）。+1 单测（共 31）。
-- 下一步：用此机制做 **k3s 多节点 join**（server 装好 register node-token → agent `K3S_URL`/`K3S_TOKEN` join）→ 并发（F17）。
+- **k3s 两节点真集群验证（D-030 终极验收）**：`components/k3s` 加 `register: [token, url]`；新增 `components/k3s-agent`（用 `K3S_URL/K3S_TOKEN={{hostvars.server.*}}` join）；`examples/k3s-cluster.yaml`。真机：server(n11) register node-token(108B)+url → agent(n12) join → `kubectl get nodes` 两节点全 Ready（ubuntu control-plane + agent-192-168-73-12 worker）。
+  - **踩坑**：克隆 VM hostname 都叫 `ubuntu`，k3s 拒绝重名节点（node-password rejected）→ 组件加 `K3S_NODE_NAME=agent-<ip-dashed>` 唯一化解决。诊断时 `curl server:6443/ping→pong` 证实 D-030 传值本身没问题，是 k3s 环境去重要求。
+- 下一步：并发（F17，同 role 主机并行）；按 role 自动排主机顺序；register `no_log` 敏感标记。
 
 ### 2026-05-31 续9（module 契约地基 D-029）
 - 四层 module 模型记入 design.md §6.1 + ADR D-029。**契约地基已做**：
