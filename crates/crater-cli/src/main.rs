@@ -90,6 +90,11 @@ enum Cmd {
         /// deploy installs it by extracting the layer — no container runtime.
         #[arg(long)]
         image: bool,
+        /// Reference (tag) for the built artifact, e.g. `192.168.1.5:5000/yq:1.0`.
+        /// Defaults to `crater/<name>:<version>`. Only valid with --image, and
+        /// only for a single-component spec.
+        #[arg(short = 't', long)]
+        tag: Option<String>,
     },
     /// Deploy an offline bundle to a target (zero network on the target).
     Deploy {
@@ -309,10 +314,14 @@ async fn main() -> Result<()> {
             file,
             output,
             image,
+            tag,
         } => {
             if image {
-                build_image_bundle(&file, &output).await
+                build_image_bundle(&file, &output, tag).await
             } else {
+                if tag.is_some() {
+                    anyhow::bail!("-t/--tag only applies to `--image` builds");
+                }
                 build_bundle(&file, &output).await
             }
         }
@@ -1458,10 +1467,16 @@ async fn build_bundle(spec_file: &Path, out: &Path) -> Result<()> {
 /// annotations. NOT a runnable image (no fake rootfs config). Loaded by
 /// recipe-replay (materials feed the recipe's download actions offline), so the
 /// full recipe works — including systemd/run_cmd, no "bakeable-only" limit.
-async fn build_image_bundle(spec_file: &Path, out: &Path) -> Result<()> {
+async fn build_image_bundle(spec_file: &Path, out: &Path, tag: Option<String>) -> Result<()> {
     use crater_core::component::Action;
 
     let spec = CraterSpec::from_yaml_file(spec_file)?;
+    if tag.is_some() && spec.components.len() > 1 {
+        anyhow::bail!(
+            "-t/--tag is for a single-component spec; this spec has {} components — omit -t (each gets crater/<name>:<version>)",
+            spec.components.len()
+        );
+    }
     let components_dir = PathBuf::from("components");
     let spec_dir = spec_file.parent().unwrap_or_else(|| Path::new("."));
     let stage_root = std::env::temp_dir().join(format!("crater-img-{}", std::process::id()));
@@ -1508,7 +1523,9 @@ async fn build_image_bundle(spec_file: &Path, out: &Path) -> Result<()> {
             }
         }
         let recipe = desc.to_yaml()?;
-        let reference = format!("crater/{}:{ver}", cref.name);
+        let reference = tag
+            .clone()
+            .unwrap_or_else(|| format!("crater/{}:{ver}", cref.name));
         let ir = stage.store_component_artifact(
             &reference,
             &cref.name,
