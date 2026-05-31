@@ -72,6 +72,9 @@ pub struct ComponentRef {
     pub requires: Vec<String>,
     #[serde(default)]
     pub images: Vec<String>,
+    /// Inline material closure (D-034), mirrors the descriptor's `materials:`.
+    #[serde(default)]
+    pub materials: Vec<crate::component::Material>,
     #[serde(default)]
     pub supported_os: Vec<String>,
     #[serde(default)]
@@ -100,6 +103,7 @@ impl ComponentRef {
             supported_os: self.supported_os.clone(),
             requires: self.requires.clone(),
             images: self.images.clone(),
+            materials: self.materials.clone(),
             preflight: self.preflight.clone(),
             install: self.install.clone(),
             verify: self.verify.clone(),

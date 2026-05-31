@@ -4,7 +4,7 @@
 
 ## 这是什么
 
-crater 自带一个**本地 OCI 镜像库** + **纯 Rust registry 客户端**（oci-client，rustls，无 Docker）。镜像是离线依赖的打包/分发载体；安装由 crater 自己解包（展开 rootfs），目标机零容器运行时。
+crater 自带一个**本地 OCI 镜像库** + **纯 Rust registry 客户端**（oci-client，rustls，无 Docker）。它既分发 **crater B 类 artifact**（`build --image` 产物，apply 时 recipe-replay，D-033），也能搬运**普通容器镜像**（A 类，apply 时展开层）；目标机零容器运行时。
 
 - **本地库**：`~/.crater/store`（`$CRATER_HOME` 可改），一个累积的 OCI Image Layout（`oci-layout` + `index.json` 每个 tag 一条 + `blobs/sha256/`）。
 - **凭据**：`~/.crater/auth.json`（按 registry 存 user/pass），pull/push 自动用。
@@ -16,7 +16,7 @@ crater 自带一个**本地 OCI 镜像库** + **纯 Rust registry 客户端**（
 | `crater push <ref>` | 把本地库的镜像推到 registry |
 | `crater load <file.oci> --as <ref>` | 把 oci-archive（`build --image` 产物）导入本地库并打 tag |
 | `crater registry login <registry> -u U -p P` | 存该 registry 的凭据 |
-| `crater apply <ref> --host/-i` | 库里有就用、没有就 pull，再把镜像 rootfs 层**展开到目标机**安装 |
+| `crater apply <ref> --host/-i` | 库里有就用、没有就 pull；crater artifact→**recipe-replay**，普通镜像→**展开层**到目标机 |
 
 - HTTP（不带 TLS）的临时/内网 registry：设 `CRATER_INSECURE_REGISTRIES=host:port`（逗号分隔，通用，引擎不认识具体 registry）。
 - 临时 registry 可用 crater 自己装：`crater zot`（`components/zot`，数据驱动，systemd 管理，:5000）。
@@ -32,7 +32,7 @@ crater images
 #  REFERENCE                              DIGEST        SIZE
 #  docker.io/library/hello-world:latest   3455a1c81403  402
 
-# apply 直接吃镜像地址：本地库命中→用，否则自动 pull，再展开到目标机
+# apply 直接吃镜像地址：本地库命中→用，否则自动 pull（hello-world 是普通镜像→展开层）
 crater apply docker.io/library/hello-world:latest --host <host> --password <pw>
 #  → image …: 1 layer(s), 1 host(s)；▶ host …；extracted layer 1/1
 
@@ -49,7 +49,8 @@ crater load /tmp/yq.oci --as 192.168.73.5:5000/yq:4.53.2
 crater push 192.168.73.5:5000/yq:4.53.2               # → zot；curl .../v2/_catalog 见 {"repositories":["yq"]}
 rm -rf ~/.crater/store                                # 清本地库，强制从 zot 拉
 crater apply 192.168.73.5:5000/yq:4.53.2 --host 192.168.73.12 --password 123456
-#  → "not in local store → pulling"（真从 zot 拉）→ extract → /usr/local/bin/yq -rwxr-xr-x、v4.53.2
+#  → "not in local store → pulling"（真从 zot 拉）→ "crater component artifact → recipe-replay"
+#  → place (offline) yq-bin -> /usr/local/bin/yq → v4.53.2、可执行
 ```
 
 ## 验证（真机）
@@ -60,5 +61,5 @@ crater apply 192.168.73.5:5000/yq:4.53.2 --host 192.168.73.12 --password 123456
 
 ## 边界 / 后续
 
-- `apply <ref>` 把镜像**所有层展开到 `/`**（rootfs 覆盖语义，适合 crater/sealos 式镜像）；download 落地的制品在 `build --image` 时置 0755（+x 进层），所以纯 extract 也可执行。任意容器镜像展开到 `/` 会铺满其容器根文件系统，按需使用。
+- `apply <ref>`：**crater B 类 artifact**（`artifactType` 命中）→ recipe-replay（取 recipe + material blob，走在线同一引擎，`place` 按名落地，D-033/D-034）；**普通容器镜像**（无 artifactType）→ 把所有层展开到 `/`（rootfs 覆盖语义，适合 crater/sealos 式镜像；任意镜像展开到 `/` 会铺满其容器根文件系统，按需使用）。
 - 多 arch manifest-list 的平台选择、镜像签名（N4）、库 GC、registry TLS/认证 后续。

@@ -341,3 +341,29 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - 纯 Rust 构建(oci-spec/手写 blob/ocipkg)，不 shell docker（已守）。
 - **对评审的补充（crater 约束）**:① **zstd 非免费**——zstd 编码=zstd-sys(C 依赖)，冲突 D-012/N1，默认仍 gzip(flate2)、zstd 可选、解码用 ruzstd;② **生态验证**——确认 oci-client/Harbor/zot 对 artifactType+referrers 的支持，不行则回退"带 annotations 的 image-manifest"(B 类语义、最大兼容);③ **A 类保留**——容器型组件的镜像走 A 类搬运，按 `run-mode` 数据路由;④ 守 D-017——A/B/run-mode/mediaType 全是数据，引擎只按 mediaType 通用处理。
 - **影响**:现状 `build --image`(伪 image) 标为过渡实现，迁 artifact 为路线项（不阻塞现功能）。crater 定位明确为 **B 类 artifact 分发器 + A 类镜像搬运**。详见 [design.md §4.3](design.md)。
+
+---
+
+## 2026-05-31 · B 类 artifact 迁移落地 + 物料闭包显式化
+
+### D-033 build --image → 正经 B 类 OCI artifact；artifactType 全程保真
+- **背景**：落地 D-032 的迁移项——把 `build --image` 从伪 rootfs image 改成正经 B 类 OCI artifact，并跑通 registry 往返。
+- **决策/实现**：
+  - `build --image` 产出 `artifactType: application/vnd.crater.component.v1` 的 image-manifest（image-spec 1.1 兼容形态，最大化 oci-client/zot 支持），分层：recipe 层(`vnd.crater.recipe.v1+yaml`) + 每物料一层(`vnd.crater.material.v1`) + 组件 config(`vnd.crater.component.config`)；自描述 annotations（名/版本/run-mode）。**无伪 rootfs config、无假 image 层**。
+  - load/apply 语义：检测 artifactType → **recipe-replay**（materials 喂 recipe 的离线动作），不再 extract rootfs 到 /。
+  - **artifactType 全程保真（关键修复）**：oci-client 高层 `pull`/`push` 是面向 image 的，会**合成 image-manifest 丢掉 artifactType + 自定义 layer mediaType**（D-032 标的"生态验证项"被验证）。改为：
+    - push：`OciImageManifest`(deser 自存储清单，保 artifactType) + `push_blob`(config+各层) + `push_manifest`。
+    - pull：`pull_manifest_raw`(原样存清单字节) + `pull_blob`(按 digest 取各 blob，**绕开 `pull` 对非 image layer mediaType 的拒绝**——曾报 `Incompatible layer media type: ...recipe.v1+yaml`)。
+  - 验证用 `CRATER_INSECURE_REGISTRIES`（D-018 增量）走 http zot。
+- **真机闭环**：`build --image yq`（artifact，13.7MB）→ `load --as zot/yq:art` → `push`（zot 上 manifest 带 `artifactType` + recipe/material 层）→ 清本地库 → `apply zot/yq:art --host .12`（pull_blob 取自定义层 → recipe-replay）→ n12 `yq --version` v4.53.2。**B 类 artifact 端到端通过**。
+
+### D-034 物料闭包显式化：组件加 `materials:` 段 + `action: place`（解耦"装什么/怎么装"）
+- **背景**：外部评审指出严重设计问题——`component.yaml` 还不足以驱动打包：`build` 靠**扫描结构化 install 动作**发现物料（只看得见 `download`），一旦依赖藏在 `run_cmd` 自由文本（`apt-get install mysql-server`）或容器镜像里，打包器就**瞎了**，离线包必然残缺。根因：依赖与动作耦合在 install 里。
+- **决策**（采纳评审，命名做工程取舍）：
+  - **顶层 `materials:` 段**显式声明物料闭包（`kind: binary|image|os_package`，可带 `sha256`）。`build` **只读 materials**（`collect_materials`），不再扫 install——藏在 run_cmd 里的依赖再也不会漏。（取名 `materials` 而非评审的 `artifacts`：`artifacts` 与 OCI artifact 冲突，`requires` 已被组件 DAG 占用。）
+  - **`action: place`** 按**逻辑名**引用 material（不写死物理 URL）：在线→目标机自己 curl material 的 `url_tmpl`；离线→控制端推打包好的 blob（按 material **名**索引，内容寻址自校验）。**在线/离线由引擎的 source 决定，不由 spec 决定**——评审要的"构建一次两种形态通吃"在数据层真正落地。`mode`（如 0755）折进 place，一步落地可执行（去掉单独 chmod run_cmd）。
+  - B 类 artifact 的 material 层改按 **material 名**标注（`org.crater.material.name`），materialize→blobmap 按名建键，与 place 离线索引一致（旧 source-url 标注保留兼容）。
+- **真机验证（yq 最小闭环，新模型）**：
+  - 在线 `crater yq --host .11`：`place yq-bin <- <url>` → changed=1（chmod 折入）；再跑 changed=0（幂等 ok）。
+  - 离线 `build`（日志 `fetch material yq-bin`，按名打包）→ load→push→清库→`apply zot/yq:m --host .12`：`place (offline) yq-bin -> /usr/local/bin/yq` → n12 `yq --version` v4.53.2。
+- **范围**：本期把 `binary` 全链路打通（yq 闭环），`image`/`os_package` 与 build 的 version×os 矩阵（用 OCI image index 按平台/annotation 组织）为**已设计、待 mysql/docker 落地**的下一阶段（评审问题四）。yq 作最小闭环先证模型，再推到有真实依赖闭包的组件。

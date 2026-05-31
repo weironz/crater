@@ -41,6 +41,32 @@ const MT_ARTIFACT: &str = "application/vnd.crater.artifact.v1";
 const ANN_CRATER_MANIFEST: &str = "org.crater.manifest";
 const ANN_SOURCE_URL: &str = "org.crater.source-url";
 
+// ---- B 类 OCI artifact (D-032): a crater component, not a runnable image ----
+/// artifactType marking a manifest as a crater component (image-spec 1.1 form:
+/// an image-manifest carrying `artifactType` — max registry/oci-client compat).
+pub const AT_COMPONENT: &str = "application/vnd.crater.component.v1";
+const MT_COMPONENT_CONFIG: &str = "application/vnd.crater.component.config.v1+json";
+/// Layer carrying the component recipe (component.yaml).
+const MT_RECIPE: &str = "application/vnd.crater.recipe.v1+yaml";
+/// Layer carrying a downloaded material (binary/tarball), annotated with its
+/// logical material name (D-034) so `place` resolves it offline by name.
+const MT_MATERIAL: &str = "application/vnd.crater.material.v1";
+const ANN_MATERIAL_NAME: &str = "org.crater.material.name";
+const ANN_COMPONENT_NAME: &str = "org.crater.component.name";
+const ANN_COMPONENT_VERSION: &str = "org.crater.component.version";
+const ANN_RUN_MODE: &str = "org.crater.run-mode";
+
+/// A crater component artifact materialized for install: the recipe is written
+/// under `components/<name>/component.yaml`, and `blobmap` maps each material's
+/// source-url to its local blob (so the recipe's `download` actions resolve
+/// offline). Drives `run_pipeline` in offline mode — no fake rootfs extraction.
+#[derive(Debug, Clone)]
+pub struct MaterializedComponent {
+    pub name: String,
+    pub version: String,
+    pub blobmap: std::collections::BTreeMap<String, PathBuf>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Manifest {
     pub format_version: u32,
@@ -222,6 +248,52 @@ impl BundleStage {
         self.image_from_layer(reference, &layer)
     }
 
+    /// Build a **B 类 OCI artifact** for a crater component (D-032): a recipe
+    /// layer + one material layer per downloaded artifact (annotated source-url)
+    /// + a small component config, under an `artifactType` manifest. NOT a
+    /// runnable image. Loaded by recipe-replay (materials feed the recipe's
+    /// `download` actions offline), not by extracting a rootfs.
+    pub fn store_component_artifact(
+        &self,
+        reference: &str,
+        name: &str,
+        version: &str,
+        run_mode: &str,
+        recipe_yaml: &[u8],
+        materials: &[(String, Vec<u8>)],
+    ) -> crate::Result<ImageRef> {
+        let (recipe_d, recipe_s) = self.store_raw(recipe_yaml)?;
+        let mut layers = vec![json!({
+            "mediaType": MT_RECIPE, "digest": format!("sha256:{recipe_d}"), "size": recipe_s,
+            "annotations": { ANN_COMPONENT_NAME: name }
+        })];
+        // Each material layer is annotated with its logical material name (D-034)
+        // — the key `place` resolves against during offline recipe-replay.
+        for (mat_name, data) in materials {
+            let (d, s) = self.store_raw(data)?;
+            layers.push(json!({
+                "mediaType": MT_MATERIAL, "digest": format!("sha256:{d}"), "size": s,
+                "annotations": { ANN_MATERIAL_NAME: mat_name }
+            }));
+        }
+        let cfg = json!({"name": name, "version": version, "runMode": run_mode});
+        let (cfg_d, cfg_s) = self.store_raw(&serde_json::to_vec(&cfg)?)?;
+        let manifest = json!({
+            "schemaVersion": 2, "mediaType": MT_MANIFEST, "artifactType": AT_COMPONENT,
+            "config": {"mediaType": MT_COMPONENT_CONFIG, "digest": format!("sha256:{cfg_d}"), "size": cfg_s},
+            "layers": layers,
+            "annotations": {
+                ANN_COMPONENT_NAME: name, ANN_COMPONENT_VERSION: version, ANN_RUN_MODE: run_mode
+            }
+        });
+        let (md, ms) = self.store_raw(&serde_json::to_vec(&manifest)?)?;
+        Ok(ImageRef {
+            reference: reference.to_string(),
+            manifest_digest: md,
+            manifest_size: ms,
+        })
+    }
+
     /// Store a fs-layer tar + synthesize a minimal OCI image (config+manifest)
     /// over it. Returns an [`ImageRef`]; the image is a real, pushable OCI image.
     fn image_from_layer(&self, reference: &str, layer: &[u8]) -> crate::Result<ImageRef> {
@@ -316,6 +388,27 @@ impl BundleStage {
         Ok(())
     }
 
+    /// Write an OCI layout whose `index.json` lists crater **component artifacts**
+    /// (D-032) — no crater-manifest, no rootfs. Used by `crater build --image`.
+    pub fn write_artifact_index(&self, artifacts: &[ImageRef]) -> crate::Result<()> {
+        let manifests: Vec<_> = artifacts
+            .iter()
+            .map(|ir| {
+                json!({
+                    "mediaType": MT_MANIFEST,
+                    "artifactType": AT_COMPONENT,
+                    "digest": format!("sha256:{}", ir.manifest_digest),
+                    "size": ir.manifest_size,
+                    "annotations": { "org.opencontainers.image.ref.name": ir.reference }
+                })
+            })
+            .collect();
+        let index = json!({"schemaVersion": 2, "mediaType": MT_INDEX, "manifests": manifests});
+        fs::write(self.root.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
+        fs::write(self.root.join("oci-layout"), br#"{"imageLayoutVersion":"1.0.0"}"#)?;
+        Ok(())
+    }
+
     /// Read the crater-manifest back out of the OCI layout (index → annotation → blob).
     pub fn read_manifest(&self) -> crate::Result<Manifest> {
         let index: serde_json::Value =
@@ -403,6 +496,78 @@ pub fn unpack(bundle_file: &Path, dest_root: &Path) -> crate::Result<BundleStage
     Ok(BundleStage {
         root: dest_root.to_path_buf(),
     })
+}
+
+/// If `manifest` is a crater component artifact (D-032), materialize it: write
+/// its recipe to `out_components_dir/<name>/component.yaml` and map each
+/// material's source-url to its blob (for offline recipe-replay). Returns
+/// `None` for a plain (non-crater) image, so callers fall back to rootfs/import.
+pub fn materialize_component(
+    manifest: &serde_json::Value,
+    blobs_dir: &Path,
+    out_components_dir: &Path,
+) -> crate::Result<Option<MaterializedComponent>> {
+    if manifest["artifactType"].as_str() != Some(AT_COMPONENT) {
+        return Ok(None);
+    }
+    let name = manifest["annotations"][ANN_COMPONENT_NAME]
+        .as_str()
+        .unwrap_or("component")
+        .to_string();
+    let version = manifest["annotations"][ANN_COMPONENT_VERSION]
+        .as_str()
+        .unwrap_or("latest")
+        .to_string();
+    let cdir = out_components_dir.join(&name);
+    fs::create_dir_all(&cdir)?;
+    let mut blobmap = std::collections::BTreeMap::new();
+    if let Some(layers) = manifest["layers"].as_array() {
+        for l in layers {
+            let mt = l["mediaType"].as_str().unwrap_or("");
+            let digest = l["digest"].as_str().unwrap_or("");
+            let blob = blobs_dir.join(digest.strip_prefix("sha256:").unwrap_or(digest));
+            if mt == MT_RECIPE {
+                fs::write(cdir.join("component.yaml"), fs::read(&blob)?)?;
+            } else if mt == MT_MATERIAL {
+                // Key by material name (D-034); fall back to legacy source-url.
+                if let Some(key) = l["annotations"][ANN_MATERIAL_NAME]
+                    .as_str()
+                    .or_else(|| l["annotations"][ANN_SOURCE_URL].as_str())
+                {
+                    blobmap.insert(key.to_string(), blob);
+                }
+            }
+        }
+    }
+    Ok(Some(MaterializedComponent { name, version, blobmap }))
+}
+
+/// Read all crater component artifacts from an unpacked bundle dir: for each
+/// `index.json` manifest with `artifactType` crater.component, materialize it
+/// (recipe → `out_components_dir`, materials → blobmap). Empty ⇒ not a B 类
+/// artifact bundle (caller falls back to the legacy crater-manifest path).
+pub fn read_artifact_components(
+    bundle_root: &Path,
+    out_components_dir: &Path,
+) -> crate::Result<Vec<MaterializedComponent>> {
+    let blobs_dir = bundle_root.join("blobs").join("sha256");
+    let index: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle_root.join("index.json"))?)?;
+    let mut out = Vec::new();
+    if let Some(ms) = index["manifests"].as_array() {
+        for m in ms {
+            if m["artifactType"].as_str() != Some(AT_COMPONENT) {
+                continue;
+            }
+            let d = m["digest"].as_str().unwrap_or("");
+            let mblob = fs::read(blobs_dir.join(d.strip_prefix("sha256:").unwrap_or(d)))?;
+            let manifest: serde_json::Value = serde_json::from_slice(&mblob)?;
+            if let Some(mc) = materialize_component(&manifest, &blobs_dir, out_components_dir)? {
+                out.push(mc);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Detect whether a file is an OCI archive (a tar containing `oci-layout`) —

@@ -108,7 +108,12 @@ impl ImageStore {
         self.write_index(&idx)
     }
 
-    /// Pull an image from a registry into the store (pure Rust, oci-client).
+    /// Pull an image/artifact from a registry into the store (pure Rust,
+    /// oci-client). We store the **raw manifest bytes** (via `pull_manifest_raw`)
+    /// so `artifactType` + custom layer mediaTypes survive the round-trip — the
+    /// high-level `pull()` would synthesize a plain image-manifest and drop them
+    /// (D-033). Blob *data* still comes from `pull()`; their sha256 match the
+    /// digests the raw manifest references (content-addressed).
     pub async fn pull(&self, reference: &str) -> crate::Result<()> {
         use oci_client::manifest as mt;
         use oci_client::Reference;
@@ -117,6 +122,7 @@ impl ImageStore {
             .parse()
             .map_err(|e| anyhow::anyhow!("bad image ref '{reference}': {e}"))?;
         let client = registry_client();
+        let auth = auth_for(reference);
         let accepted = vec![
             mt::IMAGE_MANIFEST_MEDIA_TYPE,
             mt::IMAGE_MANIFEST_LIST_MEDIA_TYPE,
@@ -126,54 +132,73 @@ impl ImageStore {
             mt::IMAGE_CONFIG_MEDIA_TYPE,
             mt::IMAGE_DOCKER_CONFIG_MEDIA_TYPE,
         ];
-        let img = client
-            .pull(&r, &auth_for(reference), accepted)
+        let (raw, _digest) = client
+            .pull_manifest_raw(&r, &auth, &accepted)
             .await
-            .map_err(|e| anyhow::anyhow!("pull '{reference}': {e}"))?;
+            .map_err(|e| anyhow::anyhow!("pull manifest '{reference}': {e}"))?;
 
-        let (cfg_d, cfg_s) = self.store_raw(&img.config.data)?;
-        let mut layers = Vec::new();
-        for l in &img.layers {
-            let (d, s) = self.store_raw(&l.data)?;
-            layers.push(json!({"mediaType": l.media_type, "digest": format!("sha256:{d}"), "size": s}));
+        // Fetch config + each layer blob by digest. We use `pull_blob` (not the
+        // high-level `pull`, which rejects non-image layer mediaTypes like our
+        // crater.recipe/material) so artifacts pull cleanly.
+        let m: serde_json::Value = serde_json::from_slice(&raw)?;
+        let mut digests: Vec<String> = Vec::new();
+        if let Some(d) = m["config"]["digest"].as_str() {
+            digests.push(d.to_string());
         }
-        let manifest = json!({
-            "schemaVersion": 2, "mediaType": MT_MANIFEST,
-            "config": {"mediaType": img.config.media_type, "digest": format!("sha256:{cfg_d}"), "size": cfg_s},
-            "layers": layers
-        });
-        let (md, ms) = self.store_raw(&serde_json::to_vec(&manifest)?)?;
+        if let Some(ls) = m["layers"].as_array() {
+            for l in ls {
+                if let Some(d) = l["digest"].as_str() {
+                    digests.push(d.to_string());
+                }
+            }
+        }
+        for d in &digests {
+            let mut buf: Vec<u8> = Vec::new();
+            client
+                .pull_blob(&r, d.as_str(), &mut buf)
+                .await
+                .map_err(|e| anyhow::anyhow!("pull blob {d} of '{reference}': {e}"))?;
+            self.store_raw(&buf)?;
+        }
+        let (md, ms) = self.store_raw(&raw)?;
         self.tag(reference, &md, ms)?;
         Ok(())
     }
 
-    /// Push a stored image to a registry (oci-client).
+    /// Push a stored image/artifact to a registry (oci-client). Re-serializes the
+    /// stored manifest through `OciImageManifest` so `artifactType` (B 类 marker)
+    /// + custom layer mediaTypes are preserved on the wire (D-033).
     pub async fn push(&self, reference: &str) -> crate::Result<()> {
-        use oci_client::client::{Config, ImageLayer};
-        use oci_client::Reference;
+        use oci_client::manifest::{OciImageManifest, OciManifest};
+        use oci_client::{Reference, RegistryOperation};
 
         let manifest_blob = self.manifest_blob(reference)?;
-        let m: serde_json::Value = serde_json::from_slice(&manifest_blob)?;
-        let cfg_digest = m["config"]["digest"].as_str().unwrap_or("");
-        let cfg_mt = m["config"]["mediaType"].as_str().unwrap_or("").to_string();
-        let cfg_data = std::fs::read(self.blob_path(strip(cfg_digest)))?;
-        let config = Config::new(cfg_data, cfg_mt, None);
-
-        let mut layers = Vec::new();
-        if let Some(ls) = m["layers"].as_array() {
-            for l in ls {
-                let d = l["digest"].as_str().unwrap_or("");
-                let lmt = l["mediaType"].as_str().unwrap_or("").to_string();
-                let data = std::fs::read(self.blob_path(strip(d)))?;
-                layers.push(ImageLayer::new(data, lmt, None));
-            }
-        }
+        let im: OciImageManifest = serde_json::from_slice(&manifest_blob)?;
         let r: Reference = reference
             .parse()
             .map_err(|e| anyhow::anyhow!("bad image ref '{reference}': {e}"))?;
         let client = registry_client();
+        let auth = auth_for(reference);
         client
-            .push(&r, &layers, config, &auth_for(reference), None)
+            .auth(&r, &auth, RegistryOperation::Push)
+            .await
+            .map_err(|e| anyhow::anyhow!("auth '{reference}': {e}"))?;
+
+        // push config + each layer blob, then the manifest itself.
+        let cfg = std::fs::read(self.blob_path(strip(&im.config.digest)))?;
+        client
+            .push_blob(&r, cfg, &im.config.digest)
+            .await
+            .map_err(|e| anyhow::anyhow!("push config '{reference}': {e}"))?;
+        for l in &im.layers {
+            let data = std::fs::read(self.blob_path(strip(&l.digest)))?;
+            client
+                .push_blob(&r, data, &l.digest)
+                .await
+                .map_err(|e| anyhow::anyhow!("push layer '{reference}': {e}"))?;
+        }
+        client
+            .push_manifest(&r, &OciManifest::Image(im))
             .await
             .map_err(|e| anyhow::anyhow!("push '{reference}': {e}"))?;
         Ok(())
@@ -228,6 +253,16 @@ impl ImageStore {
         self.tag(as_ref, mdig, msize)?;
         let _ = std::fs::remove_dir_all(&tmp);
         Ok(())
+    }
+
+    /// The parsed OCI manifest of a stored image (to detect crater artifacts).
+    pub fn resolve_manifest(&self, reference: &str) -> crate::Result<serde_json::Value> {
+        Ok(serde_json::from_slice(&self.manifest_blob(reference)?)?)
+    }
+
+    /// blobs/sha256 dir (for materializing artifact layers).
+    pub fn blobs_dir(&self) -> PathBuf {
+        self.root.join("blobs").join("sha256")
     }
 
     /// Ordered fs-layer blob paths of a stored image (for apply/extract).

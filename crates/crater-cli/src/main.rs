@@ -21,7 +21,9 @@ use tracing::info;
 use crater_core::bundle::{self, BundleStage, Manifest, ManifestComponent, BUNDLE_FORMAT_VERSION};
 use crater_core::component::ComponentDescriptor;
 use crater_core::dag::{self, DepNode};
-use crater_core::engine::{self, build_plan, collect_downloads, Op, Phase, PlanContext};
+use crater_core::engine::{
+    self, build_plan, collect_downloads, collect_materials, Op, Phase, PlanContext,
+};
 use crater_core::executor::{Executor, LocalExecutor, SshExecutor};
 use crater_core::os::{self, OsFamily};
 use crater_core::source::{self, OnlineSource};
@@ -1055,6 +1057,7 @@ async fn run_host(
                             describe: format!("push rootfs layer ({})", cref.name),
                             local_path: layer.clone(),
                             dest: "/tmp/crater-rootfs.tar".into(),
+                            mode: None,
                         },
                         Op::Shell {
                             phase: Phase::Install,
@@ -1214,11 +1217,12 @@ async fn build_bundle(spec_file: &Path, out: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `crater build --image`: wrap a spec's components into OCI **rootfs images**
-/// (crater build — no Docker). Each component's file outputs (download→dest,
-/// write_file, render_template) become a single fs layer; the target installs
-/// by extracting it to `/`. Non-file actions (systemd/run_cmd) aren't baked —
-/// this is for file-deployables like yq. Saved as an OCI archive.
+/// `crater build --image`: wrap each component into a **B 类 OCI artifact**
+/// (D-032, `artifactType: application/vnd.crater.component.v1`) — recipe layer +
+/// one material layer per `download` (annotated source-url) + self-describing
+/// annotations. NOT a runnable image (no fake rootfs config). Loaded by
+/// recipe-replay (materials feed the recipe's download actions offline), so the
+/// full recipe works — including systemd/run_cmd, no "bakeable-only" limit.
 async fn build_image_bundle(spec_file: &Path, out: &Path) -> Result<()> {
     use crater_core::component::Action;
 
@@ -1230,9 +1234,8 @@ async fn build_image_bundle(spec_file: &Path, out: &Path) -> Result<()> {
     let stage = bundle::BundleStage::new(stage_root.clone())?;
     let online = OnlineSource::with_default_mirrors();
 
-    info!("building OCI rootfs image(s) from {}", spec_file.display());
-    let mut manifest_components = Vec::new();
-    let mut rootfs = Vec::new();
+    info!("building OCI component artifact(s) from {}", spec_file.display());
+    let mut artifacts = Vec::new();
     for cref in &spec.components {
         let (desc, cdir) = resolve_descriptor(cref, &components_dir, spec_dir)?;
         let ver = cref
@@ -1240,134 +1243,59 @@ async fn build_image_bundle(spec_file: &Path, out: &Path) -> Result<()> {
             .clone()
             .or_else(|| desc.version_default.clone())
             .unwrap_or_else(|| "latest".into());
-        manifest_components.push(ManifestComponent {
-            name: cref.name.clone(),
-            version: ver.clone(),
-        });
 
-        // Materialize the component's FILE actions into a staging rootfs
-        // (download/extract/write_file/render_template) — by replaying their
-        // real file effect, not guessing. Imperative actions (run_cmd/pkg/
-        // systemd/module) can't become a fs diff → they're the residual recipe,
-        // replayed on the target at load. Nothing is silently dropped.
+        // Materials = the component's declared `materials:` closure (D-034),
+        // keyed by logical NAME — the same key the recipe's `place` action
+        // resolves against in offline replay. Reading the declaration (not
+        // scraping install actions) is the whole point: nothing hidden in a
+        // run_cmd can be missed. Legacy `download` actions are still packed by
+        // their raw URL for back-compat. write_file/extract come from the recipe.
         let mut ctx = PlanContext::new(OsFamily::Unknown, ver.clone(), cdir.clone());
         ctx.offline_blobs = Some(BTreeMap::new()); // rendered_url yields raw URLs
-        let rootfs_dir = stage_root.join("__rootfs").join(&cref.name);
-        std::fs::create_dir_all(&rootfs_dir)?;
-        let mut baked = 0usize;
-        let mut residual: Vec<String> = Vec::new();
+        let mut materials: Vec<(String, Vec<u8>)> = Vec::new();
+        for (name, raw) in collect_materials(&desc, &ctx) {
+            let url = online.rewrite(&raw);
+            info!("  fetch material {name} <- {raw}");
+            let (data, _) = source::fetch_best(&url)
+                .await
+                .map_err(|e| anyhow!("fetch material {name}: {e}"))?;
+            materials.push((name, data));
+        }
         for a in &desc.install {
-            match a {
-                Action::Download { url_tmpl, dest, .. } => {
-                    let raw = ctx.rendered_url(url_tmpl);
-                    let url = online.rewrite(&raw);
-                    info!("  fetch {raw}");
-                    let (data, _) = source::fetch_best(&url)
-                        .await
-                        .map_err(|e| anyhow!("fetch {raw}: {e}"))?;
-                    let dest = dest
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "/tmp/crater-dl".into());
-                    let p = rootfs_dir.join(dest.trim_start_matches('/'));
-                    if let Some(parent) = p.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    std::fs::write(&p, &data)?;
-                    // Downloaded artifacts are usually executables; bake +x into
-                    // the layer so a plain `apply <image-ref>` (extract-only, no
-                    // residual replay) still yields a runnable binary.
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755))?;
-                    }
-                    baked += 1;
-                }
-                Action::Extract { from, to, strip } => {
-                    let from = from
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "/tmp/crater-dl".into());
-                    let src = rootfs_dir.join(from.trim_start_matches('/'));
-                    let data = bundle::read_file(&src)
-                        .map_err(|e| anyhow!("extract: source {from} not in rootfs: {e}"))?;
-                    let to = rootfs_dir.join(to.display().to_string().trim_start_matches('/'));
-                    bundle::untar_gz_into(&to, &data, *strip)?;
-                    baked += 1;
-                }
-                Action::WriteFile { dst, content } => {
-                    let p = rootfs_dir.join(dst.display().to_string().trim_start_matches('/'));
-                    if let Some(parent) = p.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    std::fs::write(&p, engine::render(content, &ctx.vars))?;
-                    baked += 1;
-                }
-                Action::RenderTemplate { src, dst } => {
-                    let tpl = std::fs::read_to_string(cdir.join("templates").join(src))
-                        .map_err(|e| anyhow!("read template {src}: {e}"))?;
-                    let p = rootfs_dir.join(dst.display().to_string().trim_start_matches('/'));
-                    if let Some(parent) = p.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    std::fs::write(&p, engine::render(&tpl, &ctx.vars))?;
-                    baked += 1;
-                }
-                other => residual.push(other.kind().to_string()),
+            if let Action::Download { url_tmpl, .. } = a {
+                let raw = ctx.rendered_url(url_tmpl);
+                let url = online.rewrite(&raw);
+                info!("  fetch {raw}");
+                let (data, _) = source::fetch_best(&url)
+                    .await
+                    .map_err(|e| anyhow!("fetch {raw}: {e}"))?;
+                materials.push((raw, data));
             }
         }
-        // Drop the download scratch dir so it doesn't leak into the image.
-        let _ = std::fs::remove_dir_all(rootfs_dir.join("tmp"));
-        if baked == 0 {
-            anyhow::bail!(
-                "component '{}' produces no files to bake into an image (only imperative actions: [{}]); use plain `crater build` (recipe-replay) instead",
-                cref.name,
-                residual.join(", ")
-            );
-        }
-
-        // Stage the descriptor so deploy can replay the residual recipe + verify.
-        let staged = stage.components_dir().join(&cref.name);
-        std::fs::create_dir_all(&staged)?;
-        std::fs::write(staged.join("component.yaml"), desc.to_yaml()?)?;
-
+        let recipe = desc.to_yaml()?;
         let reference = format!("crater/{}:{ver}", cref.name);
-        let ir = stage.store_rootfs_layer_dir(&reference, &rootfs_dir)?;
-        if residual.is_empty() {
-            info!("  {} → image {reference}: baked {baked} file action(s); nothing to replay", cref.name);
-        } else {
-            info!(
-                "  {} → image {reference}: baked {baked} file action(s); will replay on target: [{}]",
-                cref.name,
-                residual.join(", ")
-            );
-        }
-        rootfs.push(ir);
+        let ir = stage.store_component_artifact(
+            &reference,
+            &cref.name,
+            &ver,
+            "process",
+            recipe.as_bytes(),
+            &materials,
+        )?;
+        info!("  {} → artifact {reference}: recipe + {} material(s)", cref.name, materials.len());
+        artifacts.push(ir);
     }
 
-    let name = spec
-        .components
-        .first()
-        .map(|c| c.name.clone())
-        .unwrap_or_else(|| "bundle".into());
-    let manifest = Manifest {
-        format_version: BUNDLE_FORMAT_VERSION,
-        name,
-        components: manifest_components,
-        blobs: vec![],
-        images: vec![],
-        rootfs,
-    };
-    stage.write_manifest(&manifest)?;
+    stage.write_artifact_index(&artifacts)?;
     bundle::pack(&stage_root, out)?;
     let _ = std::fs::remove_dir_all(&stage_root);
     let size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
     info!(
-        "wrote {} ({} rootfs image(s), {} bytes) — save: oci-archive",
+        "wrote {} ({} component artifact(s), {} bytes) — OCI artifact ({})",
         out.display(),
-        manifest.rootfs.len(),
-        size
+        artifacts.len(),
+        size,
+        crater_core::bundle::AT_COMPONENT
     );
     Ok(())
 }
@@ -1388,6 +1316,34 @@ async fn apply_oci_bundle(
     let dest_root = std::env::temp_dir().join(format!("crater-deploy-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dest_root);
     let stage = bundle::unpack(bundle_file, &dest_root)?;
+
+    // B 类 artifact bundle (D-032)? → recipe-replay (materials feed the recipe).
+    let recipe_dir = dest_root.join("__components");
+    let mats = bundle::read_artifact_components(&dest_root, &recipe_dir)?;
+    if !mats.is_empty() {
+        info!("offline (B 类 artifact): {} component(s)", mats.len());
+        let mut art_blobmap: BTreeMap<String, PathBuf> = BTreeMap::new();
+        let mut components: Vec<ComponentRef> = Vec::new();
+        for mc in mats {
+            art_blobmap.extend(mc.blobmap);
+            components.push(component_ref(&mc.name, &mc.version));
+        }
+        let spec = CraterSpec {
+            inventory: Inventory { hosts },
+            components,
+            offline: true,
+            ai: None,
+        };
+        let artifacts = Artifacts::Offline {
+            blobmap: art_blobmap,
+            rootfs: BTreeMap::new(),
+        };
+        let res = run_pipeline(&spec, &artifacts, &recipe_dir, &recipe_dir, do_apply, do_shell).await;
+        let _ = std::fs::remove_dir_all(&dest_root);
+        return res;
+    }
+
+    // Legacy recipe-replay bundle (crater-manifest + rootfs/blob layers).
     let manifest = stage.read_manifest()?;
     stage.verify(&manifest)?; // content-addressed: digests are the integrity check
     info!(
@@ -1427,6 +1383,7 @@ async fn apply_oci_bundle(
             params: Default::default(),
             requires: vec![],
             images: vec![],
+            materials: vec![],
             supported_os: vec![],
             preflight: vec![],
             install: vec![],
@@ -1492,6 +1449,23 @@ fn inventory_hosts(
     }
 }
 
+/// A bare ComponentRef (name + version) whose recipe resolves from disk/bundle.
+fn component_ref(name: &str, version: &str) -> crater_core::spec::ComponentRef {
+    crater_core::spec::ComponentRef {
+        name: name.to_string(),
+        version: Some(version.to_string()),
+        params: Default::default(),
+        requires: vec![],
+        images: vec![],
+        materials: vec![],
+        supported_os: vec![],
+        preflight: vec![],
+        install: vec![],
+        verify: vec![],
+        register: vec![],
+    }
+}
+
 /// Build a one-host inventory entry from CLI flags (roles empty → all components).
 fn single_host(
     host: String,
@@ -1547,21 +1521,47 @@ async fn push_image(reference: &str) -> Result<()> {
     Ok(())
 }
 
-/// `crater apply <image-ref>`: resolve from the local store (pull on miss), then
-/// install its rootfs on each host by extracting every layer to `/` — crater's
-/// own load, no container runtime. Hosts run in parallel (`CRATER_FORKS`).
+/// `crater apply <image-ref>`: resolve from the local store (pull on miss). A
+/// **crater component artifact** (B 类, D-032) → recipe-replay via `run_pipeline`
+/// (materials feed the recipe offline). A plain container image → extract its
+/// rootfs layers to `/` on each host (parallel). crater-native, no runtime.
 async fn apply_image_ref(
     reference: &str,
     hosts: Vec<crater_core::spec::Host>,
     do_apply: bool,
 ) -> Result<()> {
+    use crater_core::spec::{CraterSpec, Inventory};
+
     let store = ImageStore::open()?;
     if !store.has(reference) {
         info!("{reference} not in local store → pulling");
         store.pull(reference).await?;
     }
+
+    // B 类 crater component artifact → recipe-replay (the unified pipeline).
+    let manifest = store.resolve_manifest(reference)?;
+    let recipe_dir = std::env::temp_dir().join(format!("crater-ref-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&recipe_dir);
+    if let Some(mc) = bundle::materialize_component(&manifest, &store.blobs_dir(), &recipe_dir)? {
+        info!("image {reference}: crater component artifact → recipe-replay");
+        let spec = CraterSpec {
+            inventory: Inventory { hosts },
+            components: vec![component_ref(&mc.name, &mc.version)],
+            offline: true,
+            ai: None,
+        };
+        let artifacts = Artifacts::Offline {
+            blobmap: mc.blobmap,
+            rootfs: BTreeMap::new(),
+        };
+        let res = run_pipeline(&spec, &artifacts, &recipe_dir, &recipe_dir, do_apply, true).await;
+        let _ = std::fs::remove_dir_all(&recipe_dir);
+        return res;
+    }
+
+    // Plain container image → rootfs overlay (extract all layers to /).
     let layers = store.resolve_layers(reference)?;
-    info!("image {reference}: {} layer(s), {} host(s)", layers.len(), hosts.len());
+    info!("image {reference}: plain image, {} layer(s), {} host(s)", layers.len(), hosts.len());
     if !do_apply {
         info!("dry-run; omit --dry-run to install (extract layers to / on each host)");
         return Ok(());

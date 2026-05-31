@@ -77,6 +77,10 @@ pub enum Op {
         describe: String,
         local_path: PathBuf,
         dest: String,
+        /// Optional chmod mode applied after the push (e.g. "0755"), so a
+        /// `place`d binary lands executable in one step (D-034).
+        #[serde(default)]
+        mode: Option<String>,
     },
 }
 
@@ -105,6 +109,7 @@ impl Op {
     }
 }
 
+#[derive(Clone)]
 pub struct PlanContext {
     pub os: OsFamily,
     pub version: String,
@@ -114,8 +119,12 @@ pub struct PlanContext {
     pub vars: BTreeMap<String, String>,
     /// Mirror rewriter for download URLs (online mode, China-friendly).
     pub source: OnlineSource,
-    /// Offline mode: maps a rendered download URL -> local pre-fetched blob.
+    /// Offline mode: maps a key -> local pre-fetched blob. Download actions key
+    /// by rendered URL; `place` actions key by material name (D-034).
     pub offline_blobs: Option<BTreeMap<String, PathBuf>>,
+    /// Declared materials by name (D-034), populated from the descriptor in
+    /// `build_plan` so `place` can resolve a material's URL for online fetch.
+    pub materials: BTreeMap<String, crate::component::Material>,
     /// Directory holding data-defined modules (`modules/<name>.yaml`, D-029).
     pub modules_dir: PathBuf,
 }
@@ -131,6 +140,7 @@ impl PlanContext {
             vars,
             source: OnlineSource::with_default_mirrors(),
             offline_blobs: None,
+            materials: BTreeMap::new(),
             modules_dir: PathBuf::from("modules"),
         }
     }
@@ -171,6 +181,13 @@ pub fn collect_downloads(desc: &ComponentDescriptor, ctx: &PlanContext) -> Vec<(
 }
 
 pub fn build_plan(desc: &ComponentDescriptor, ctx: &PlanContext) -> crate::Result<Vec<Op>> {
+    // Make the declared materials (D-034) resolvable by `place` actions.
+    let mut ctx = ctx.clone();
+    for m in &desc.materials {
+        ctx.materials.insert(m.name.clone(), m.clone());
+    }
+    let ctx = &ctx;
+
     let mut ops = Vec::new();
     for c in &desc.preflight {
         ops.push(check_op(c));
@@ -182,6 +199,22 @@ pub fn build_plan(desc: &ComponentDescriptor, ctx: &PlanContext) -> crate::Resul
         ops.push(action_op(Phase::Verify, a, ctx)?);
     }
     Ok(ops)
+}
+
+/// Collect every binary material a component declares (D-034), as
+/// `(material_name, rendered_url)` — what `crate build` fetches and packs,
+/// keyed by material name (the same key `place` resolves against offline).
+pub fn collect_materials(desc: &ComponentDescriptor, ctx: &PlanContext) -> Vec<(String, String)> {
+    use crate::component::MaterialKind;
+    let mut out = Vec::new();
+    for m in &desc.materials {
+        if m.kind == MaterialKind::Binary {
+            if let Some(tmpl) = &m.url_tmpl {
+                out.push((m.name.clone(), ctx.rendered_url(tmpl)));
+            }
+        }
+    }
+    out
 }
 
 fn check_op(c: &Check) -> Op {
@@ -242,6 +275,7 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                     describe: format!("push (offline) -> {dest}"),
                     local_path: local.clone(),
                     dest,
+                    mode: None,
                 }
             } else {
                 Op::Shell {
@@ -250,6 +284,42 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                     cmd: format!("curl -fL --retry 3 -o '{dest}' '{url}'"),
                     soft_fail: false,
                     // Skip the download if the artifact is already present.
+                    check: Some(format!("test -s '{dest}'")),
+                }
+            }
+        }
+        Action::Place { material, dest, mode } => {
+            let dest = dest.display().to_string();
+            if let Some(blobs) = &ctx.offline_blobs {
+                // Offline: push the packed blob, keyed by material NAME (D-034).
+                let local = blobs.get(material).ok_or_else(|| {
+                    anyhow::anyhow!("offline bundle missing material '{material}'")
+                })?;
+                Op::PushFile {
+                    phase,
+                    describe: format!("place (offline) {material} -> {dest}"),
+                    local_path: local.clone(),
+                    dest,
+                    mode: mode.clone(),
+                }
+            } else {
+                // Online: the target fetches the material's declared URL itself.
+                let m = ctx.materials.get(material).ok_or_else(|| {
+                    anyhow::anyhow!("place: unknown material '{material}' (declare it under `materials:`)")
+                })?;
+                let tmpl = m.url_tmpl.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("place: material '{material}' has no url_tmpl for online fetch")
+                })?;
+                let url = ctx.rendered_url(tmpl);
+                let mut cmd = format!("curl -fL --retry 3 -o '{dest}' '{url}'");
+                if let Some(mode) = mode {
+                    cmd.push_str(&format!(" && chmod {mode} '{dest}'"));
+                }
+                Op::Shell {
+                    phase,
+                    describe: format!("place {material} <- {url}"),
+                    cmd,
+                    soft_fail: false,
                     check: Some(format!("test -s '{dest}'")),
                 }
             }
@@ -540,7 +610,10 @@ async fn exec_one(
             Ok((StepStatus::Changed, Vec::new()))
         }
         Op::PushFile {
-            local_path, dest, ..
+            local_path,
+            dest,
+            mode,
+            ..
         } => {
             let data = std::fs::read(local_path)
                 .map_err(|e| anyhow::anyhow!("read local blob {}: {e}", local_path.display()))?;
@@ -552,6 +625,9 @@ async fn exec_one(
                 return Ok((StepStatus::Ok, Vec::new()));
             }
             exec.write_file(dest, &data).await?;
+            if let Some(mode) = mode {
+                exec.run(&format!("chmod {mode} '{dest}'")).await?;
+            }
             tracing::debug!("      pushed {} bytes -> {dest}", data.len());
             Ok((StepStatus::Changed, Vec::new()))
         }

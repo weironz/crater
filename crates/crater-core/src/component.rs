@@ -27,6 +27,16 @@ pub struct ComponentDescriptor {
     /// Other components that must be deployed before this one (M3 DAG).
     #[serde(default)]
     pub requires: Vec<String>,
+    /// **Material closure** (D-034): every external thing this component needs
+    /// packed for offline — binaries, container images, OS packages — declared
+    /// explicitly so `crater build` reads it directly instead of scraping
+    /// `install` actions (which would miss anything hidden in `run_cmd`). The
+    /// install phase references these by logical name via `action: place`; the
+    /// engine, not the spec, decides online-fetch vs offline-push. (Named
+    /// `materials` — `artifacts` collides with OCI artifacts, `requires` with the
+    /// component DAG above.)
+    #[serde(default)]
+    pub materials: Vec<Material>,
     /// Container images to pack into the offline bundle (D-018 ②). Pulled at
     /// build time into the OCI layout; loaded on the target at deploy. Data, not
     /// code — the engine names no image.
@@ -53,6 +63,39 @@ pub struct ComponentDescriptor {
 pub struct RegisterSpec {
     pub name: String,
     pub cmd: String,
+}
+
+/// One declared material in a component's offline closure (D-034). The build
+/// side reads these to know exactly what to fetch and pack; the install side
+/// references them by `name` via `action: place`. `sha256` is optional in
+/// source and verified content-addressed at deploy (free from the OCI digest).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Material {
+    pub name: String,
+    pub kind: MaterialKind,
+    /// `binary`: URL template fetched online and at build (`{{version}}` etc.).
+    #[serde(default)]
+    pub url_tmpl: Option<String>,
+    /// `image`: container image reference template (pulled into the OCI bundle).
+    #[serde(default, rename = "ref")]
+    pub reference: Option<String>,
+    /// `os_package`: OS-family-keyed package name lists (deb vs rpm fork).
+    #[serde(default)]
+    pub packages: BTreeMap<String, Vec<String>>,
+    /// Optional content digest (sha256 hex, no prefix). Verified if present.
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+/// The three kinds of material a component can declare (D-034). Only `binary`
+/// is wired end-to-end today (yq closed loop); `image`/`os_package` are the
+/// designed next stage for container/OS-dependent components (mysql/docker).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialKind {
+    Binary,
+    Image,
+    OsPackage,
 }
 
 impl ComponentDescriptor {
@@ -145,6 +188,20 @@ pub enum Action {
         #[serde(default)]
         with: BTreeMap<String, serde_yaml::Value>,
     },
+    /// Place a declared material (D-034) at `dest`, optionally `chmod mode`.
+    /// References a `materials:` entry by logical name — NOT a physical URL. The
+    /// engine resolves it per mode: online, the target fetches the material's
+    /// `url_tmpl`; offline, the control side pushes the packed blob (content-
+    /// verified). This is the online/offline-unifying primitive: one spec line,
+    /// the source backend decides where the bytes come from.
+    Place {
+        material: String,
+        dest: PathBuf,
+        /// chmod mode (e.g. "0755"); folded into the place so a binary lands
+        /// executable in one idempotent step (no separate `chmod` run_cmd).
+        #[serde(default)]
+        mode: Option<String>,
+    },
     /// Load/pull a container image. The runtime is NOT assumed: when `runtime`
     /// is set we use it verbatim; otherwise we probe for whatever generic OCI
     /// tool is on the box (nerdctl/docker/podman/ctr). Reserved for offline
@@ -182,6 +239,7 @@ impl Action {
             Action::WriteFile { .. } => "write_file",
             Action::SystemdUnit { .. } => "systemd_unit",
             Action::RunCmd { .. } => "run_cmd",
+            Action::Place { .. } => "place",
             Action::Module { .. } => "module",
             Action::LoadImage { .. } => "load_image",
         }
