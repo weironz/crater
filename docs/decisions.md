@@ -314,3 +314,16 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **决策/实现**:`store.rs` —— 本地 OCI 镜像库 `~/.crater/store`（累积 OCI layout，index.json 每 tag 一条）；registry I/O 用 `oci-client`（rustls，纯 Rust）；凭据 `~/.crater/auth.json`（按 registry）。命令：`images`（列库）/`pull <ref>`（registry→库）/`push <ref>`（库→registry）/`registry login`（存凭据）。`apply <ref>`：识别镜像地址（含 `/` 或 `:` 且非文件）→ 库命中即用、否则 pull → 把镜像**所有 rootfs 层展开到 `/`** 安装（多主机并发，crater 自解包、零运行时）。原 SSH 拷文件 `crater push` **更名 `crater cp`**（push 让给镜像）。
 - **真机(192.168.73.12)**:`registry login` 写 auth.json（并实际影响 pull 认证）;匿名 `pull hello-world`→库;`images` 列出;`apply docker.io/library/hello-world:latest --host .12`→库命中→展开→目标机 `/hello`(ELF) 落地。
 - **边界**:`push` 已实现(oci-client client.push) 但无可写 registry **未 live 验证**;`apply <ref>` 是 rootfs 覆盖语义(适合 crater/sealos 式镜像);manifest-list 平台选择/签名/库 GC 后续。
+
+---
+
+## 2026-05-31 · 临时 registry 闭环（zot）
+
+### D-018 增量：build→push→pull/apply 闭环 + crater 自装 zot（守 D-017）
+- **背景**:用户要搭临时 registry（zot，本机 192.168.73.5，systemd），跑通 build→push→另一台 pull/apply 闭环。
+- **决策/实现**:
+  - **zot 用 crater 自己装**（狗粮）:`components/zot/component.yaml`（download 二进制 + write config/systemd unit + systemd_unit + verify curl /v2/）——纯数据，引擎零 zot 知识（grep 确认 `.rs` 仅文档注释提 zot）。`crater zot`（本机 LocalExecutor）装好，`/v2/ -> 200`。
+  - **HTTP registry**:通用 env `CRATER_INSECURE_REGISTRIES=host:port` → oci-client `ClientProtocol::HttpsExcept`（不认识具体 registry）。
+  - **`crater load <file.oci> --as <ref>`**:把 build --image 的 oci-archive 导入本地库并打 tag（`ImageStore::import_oci_archive`）。
+  - **+x 进层**:build --image 的 download 落地置 0755，使纯 `apply <ref>`（extract-only，无残留 replay）也得到可执行二进制（修 yq exit 126）。
+- **真机闭环**:`crater zot` → `build --image yq` → `load --as 192.168.73.5:5000/yq:4.53.2` → `push`（zot catalog `{"repositories":["yq"]}`）→ 清本地库 → `apply 192.168.73.5:5000/yq:4.53.2 --host .12`（真从 zot pull）→ n12 `/usr/local/bin/yq` 0755、`yq --version` v4.53.2。**push 至此 live 验证通过**。

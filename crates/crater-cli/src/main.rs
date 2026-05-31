@@ -167,6 +167,14 @@ enum Cmd {
     Push {
         reference: String,
     },
+    /// Import an oci-archive file (e.g. `build --image` output) into the store.
+    Load {
+        /// Path to the .oci archive.
+        file: PathBuf,
+        /// Tag to store it under, e.g. 192.168.73.5:5000/yq:4.53.2
+        #[arg(long = "as")]
+        as_ref: String,
+    },
     /// Registry credentials.
     Registry {
         #[command(subcommand)]
@@ -282,6 +290,11 @@ async fn main() -> Result<()> {
         Cmd::Images => list_images().await,
         Cmd::Pull { reference } => pull_image(&reference).await,
         Cmd::Push { reference } => push_image(&reference).await,
+        Cmd::Load { file, as_ref } => {
+            ImageStore::open()?.import_oci_archive(&file, &as_ref)?;
+            info!("loaded {} → {as_ref}", file.display());
+            Ok(())
+        }
         Cmd::Registry { cmd } => match cmd {
             RegistryCmd::Login {
                 registry,
@@ -1261,6 +1274,14 @@ async fn build_image_bundle(spec_file: &Path, out: &Path) -> Result<()> {
                         std::fs::create_dir_all(parent)?;
                     }
                     std::fs::write(&p, &data)?;
+                    // Downloaded artifacts are usually executables; bake +x into
+                    // the layer so a plain `apply <image-ref>` (extract-only, no
+                    // residual replay) still yields a runnable binary.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755))?;
+                    }
                     baked += 1;
                 }
                 Action::Extract { from, to, strip } => {

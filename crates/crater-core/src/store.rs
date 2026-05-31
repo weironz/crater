@@ -111,12 +111,12 @@ impl ImageStore {
     /// Pull an image from a registry into the store (pure Rust, oci-client).
     pub async fn pull(&self, reference: &str) -> crate::Result<()> {
         use oci_client::manifest as mt;
-        use oci_client::{client::ClientConfig, Client, Reference};
+        use oci_client::Reference;
 
         let r: Reference = reference
             .parse()
             .map_err(|e| anyhow::anyhow!("bad image ref '{reference}': {e}"))?;
-        let client = Client::new(ClientConfig::default());
+        let client = registry_client();
         let accepted = vec![
             mt::IMAGE_MANIFEST_MEDIA_TYPE,
             mt::IMAGE_MANIFEST_LIST_MEDIA_TYPE,
@@ -150,7 +150,7 @@ impl ImageStore {
     /// Push a stored image to a registry (oci-client).
     pub async fn push(&self, reference: &str) -> crate::Result<()> {
         use oci_client::client::{Config, ImageLayer};
-        use oci_client::{client::ClientConfig, Client, Reference};
+        use oci_client::Reference;
 
         let manifest_blob = self.manifest_blob(reference)?;
         let m: serde_json::Value = serde_json::from_slice(&manifest_blob)?;
@@ -171,7 +171,7 @@ impl ImageStore {
         let r: Reference = reference
             .parse()
             .map_err(|e| anyhow::anyhow!("bad image ref '{reference}': {e}"))?;
-        let client = Client::new(ClientConfig::default());
+        let client = registry_client();
         client
             .push(&r, &layers, config, &auth_for(reference), None)
             .await
@@ -188,6 +188,46 @@ impl ImageStore {
             .ok_or_else(|| anyhow::anyhow!("image '{reference}' not in local store"))?
             .to_string();
         Ok(std::fs::read(self.blob_path(strip(&md)))?)
+    }
+
+    /// Import an oci-archive file (e.g. `crater build --image` output) into the
+    /// store under `as_ref`: copy its image's manifest/config/layer blobs in and
+    /// tag them. Picks the archive manifest carrying an `image.ref.name` (the
+    /// rootfs image), not crater's own bundle manifest.
+    pub fn import_oci_archive(&self, archive: &std::path::Path, as_ref: &str) -> crate::Result<()> {
+        let tmp = std::env::temp_dir().join(format!("crater-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        crate::bundle::unpack(archive, &tmp)?;
+        let index: serde_json::Value = serde_json::from_slice(&std::fs::read(tmp.join("index.json"))?)?;
+        let entry = index["manifests"]
+            .as_array()
+            .and_then(|a| a.iter().find(|m| m["annotations"][ANN_REF].as_str().is_some()))
+            .ok_or_else(|| anyhow::anyhow!("{}: no image manifest (ref.name) in archive", archive.display()))?;
+        let mdig = entry["digest"].as_str().unwrap_or("").to_string();
+        let mdig = strip(&mdig);
+        let src_blob = |d: &str| tmp.join("blobs").join("sha256").join(strip(d));
+        let copy_in = |d: &str| -> crate::Result<()> {
+            let data = std::fs::read(src_blob(d))?;
+            self.store_raw(&data)?;
+            Ok(())
+        };
+        // manifest + config + layers.
+        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(src_blob(mdig))?)?;
+        copy_in(mdig)?;
+        if let Some(c) = manifest["config"]["digest"].as_str() {
+            copy_in(c)?;
+        }
+        if let Some(ls) = manifest["layers"].as_array() {
+            for l in ls {
+                if let Some(d) = l["digest"].as_str() {
+                    copy_in(d)?;
+                }
+            }
+        }
+        let msize = entry["size"].as_u64().unwrap_or(0);
+        self.tag(as_ref, mdig, msize)?;
+        let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
     }
 
     /// Ordered fs-layer blob paths of a stored image (for apply/extract).
@@ -207,6 +247,24 @@ impl ImageStore {
 
 fn strip(digest: &str) -> &str {
     digest.strip_prefix("sha256:").unwrap_or(digest)
+}
+
+/// An oci-client honoring `$CRATER_INSECURE_REGISTRIES` (comma-separated hosts
+/// served over plain HTTP, e.g. a temp zot at `192.168.73.5:5000`).
+fn registry_client() -> oci_client::Client {
+    use oci_client::client::{ClientConfig, ClientProtocol};
+    let mut cfg = ClientConfig::default();
+    if let Ok(list) = std::env::var("CRATER_INSECURE_REGISTRIES") {
+        let regs: Vec<String> = list
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !regs.is_empty() {
+            cfg.protocol = ClientProtocol::HttpsExcept(regs);
+        }
+    }
+    oci_client::Client::new(cfg)
 }
 
 // ---------------------------------------------------------------------------
