@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::component::{Action, Material};
+use crate::component::{Action, Material, RegisterSpec};
 use crate::engine::Phase;
 
 /// A task file: `crater apply <name>.yaml`.
@@ -29,6 +29,10 @@ pub struct TaskFile {
     /// Offline material closure (D-034) — what `crater build` packs.
     #[serde(default)]
     pub materials: Vec<Material>,
+    /// Facts to capture on each host after its actions run, exposed to later
+    /// host groups as `hostvars.<host>.<name>` (D-030, now in the task model).
+    #[serde(default)]
+    pub register: Vec<RegisterSpec>,
     /// Ordered actions. Dependencies via `needs`; the engine topo-sorts.
     #[serde(default)]
     pub actions: Vec<ActionStep>,

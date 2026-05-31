@@ -462,3 +462,14 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **group**:`groupadd`(`-r`)/`groupdel`;幂等探针 `getent group`。
 - **守 D-036**:全声明式,幂等/排序由引擎。
 - **真机本机**(`examples/lug-demo.yaml`):`group craterdemo` + `user crateruser`(附加组生效)+ `lineinfile` 把预置的 `max_connections=50` 经 regexp 替换为 `=100`(仅 1 行);`needs` 排序(group→user);再跑 `changed=0`。33 tests 绿。
+
+---
+
+## 2026-06-01 · register/hostvars 进 task 模型
+
+### D-041 task 模型的 register/hostvars(复用 D-030)
+- **TaskFile 加顶层 `register: [{name, cmd}]`**(复用 `component::RegisterSpec`):每个 host 跑完 actions 后采集 fact。
+- **apply_task host 编排改为复刻组件管线**(D-030/D-031):`group_hosts_by_role` 把 host 按 role-set 分组,**组间串行**(producer 组的 register 先落 hostvars)、**组内并行**;每组完成后把各 host 的 fact 合入全局 `hostvars`。
+- **run_task_on_host** 注入 `hostvars.<host>.<name>` 到 ctx.vars(供 `plan_from_task` 渲染),执行 plan 后采集 `register` cmds → 返回 `(host, registered)`。
+- **守 D-036**:排序/分组/合并在引擎;`{{ hostvars.* }}` 纯取值,尚无值时残废渲染器保留(不报错)。
+- **真机**(`examples/cross-node-task.yaml` + 两节点 inventory,roles first/second):n11(first 组)注册 ip → 组间串行 → n12(second 组)的 action 渲染出 `first-node = 192.168.73.11`;n11 自身无 peer 时留字面。33 tests 绿。

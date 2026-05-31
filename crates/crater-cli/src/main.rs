@@ -921,8 +921,10 @@ async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
 }
 
 /// `crater apply <task>.yaml` (D-037): run a generic task across the targets.
-/// All control flow (when-filter, needs-ordering) is in the engine; this just
-/// fans the lowered plan out to each host.
+/// Control flow (when-filter, needs-ordering) is in the engine. Host
+/// orchestration mirrors the component pipeline (D-030/D-031): hosts grouped by
+/// role-set run group-by-group (so a producer's `register` lands in `hostvars`
+/// before a consumer group reads it), parallel within a group.
 async fn apply_task(
     path: &Path,
     hosts: Vec<crater_core::spec::Host>,
@@ -940,17 +942,45 @@ async fn apply_task(
         hosts.len(),
         if do_apply { "apply" } else { "dry-run" }
     );
+
+    let mut hostvars: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+
+    if !do_apply {
+        for h in &hosts {
+            run_task_on_host(&task, h, &spec_dir, &hostvars, false, do_shell).await?;
+        }
+        info!("dry-run only; omit --dry-run to execute");
+        return Ok(());
+    }
+
     let forks = forks_limit();
-    let results: Vec<Result<()>> = futures::stream::iter(
-        hosts
-            .iter()
-            .map(|h| run_task_on_host(&task, h, &spec_dir, do_apply, do_shell)),
-    )
-    .buffer_unordered(forks)
-    .collect()
-    .await;
-    for r in results {
-        r?;
+    for group in group_hosts_by_role(&hosts) {
+        let results: Vec<Result<(String, Vec<(String, String)>)>> = futures::stream::iter(
+            group
+                .iter()
+                .map(|h| run_task_on_host(&task, h, &spec_dir, &hostvars, true, do_shell)),
+        )
+        .buffer_unordered(forks)
+        .collect()
+        .await;
+        let mut first_err = None;
+        for r in results {
+            match r {
+                Ok((host_name, regs)) => {
+                    for (k, v) in regs {
+                        hostvars.entry(host_name.clone()).or_default().insert(k, v);
+                    }
+                }
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
+        if let Some(e) = first_err {
+            return Err(e);
+        }
     }
     Ok(())
 }
@@ -959,9 +989,10 @@ async fn run_task_on_host(
     task: &crater_core::task::TaskFile,
     host: &crater_core::spec::Host,
     spec_dir: &Path,
+    hostvars: &BTreeMap<String, BTreeMap<String, String>>,
     do_apply: bool,
     do_shell: bool,
-) -> Result<()> {
+) -> Result<(String, Vec<(String, String)>)> {
     if host.is_local() {
         info!("▶ host {} (local)", host.name);
     } else {
@@ -982,6 +1013,12 @@ async fn run_task_on_host(
     for (k, v) in &task.vars {
         ctx.vars.insert(k.clone(), v.clone());
     }
+    // Other hosts' registered facts become template vars (D-030).
+    for (h, kv) in hostvars {
+        for (k, v) in kv {
+            ctx.vars.insert(format!("hostvars.{h}.{k}"), v.clone());
+        }
+    }
     for m in &task.materials {
         ctx.materials.insert(m.name.clone(), m.clone());
     }
@@ -989,11 +1026,30 @@ async fn run_task_on_host(
     info!("[{}] task {} — {} step(s)", host.name, task.name, plan.len());
     if !do_apply {
         print_plan(&plan);
-        return Ok(());
+        return Ok((host.name.clone(), Vec::new()));
     }
     // Local always runs directly; remote uses agent unless --shell (D-027).
     let use_shell = do_shell || host.is_local();
-    execute_plan(&plan, exec.as_ref(), use_shell, None).await
+    execute_plan(&plan, exec.as_ref(), use_shell, None).await?;
+
+    // Capture this host's facts for later groups (D-030).
+    let mut registered: Vec<(String, String)> = Vec::new();
+    for reg in &task.register {
+        let out = exec.run(&engine::render(&reg.cmd, &ctx.vars)?).await?;
+        if !out.ok() {
+            anyhow::bail!(
+                "register '{}' on {} failed (exit {}): {}",
+                reg.name,
+                host.name,
+                out.code,
+                out.stderr.trim()
+            );
+        }
+        let val = out.stdout.trim().to_string();
+        info!("[{}] registered {} ({} bytes)", host.name, reg.name, val.len());
+        registered.push((reg.name.clone(), val));
+    }
+    Ok((host.name.clone(), registered))
 }
 
 /// The single deploy pipeline shared by online & offline (D-020): order

@@ -74,6 +74,24 @@ action 项字段(全是引擎读得懂的封闭词汇,**无需执行即可静态
 
 `copy` 复用增强后的 `Op::WriteFile`(加 `mode` + sha256 幂等),`render_template`/`write_file` 也因此变幂等(内容不变报 ok)。
 
+## register / hostvars(跨 host fact,D-030 机制)
+
+task 顶层 `register: [{name, cmd}]` 在每个 host 跑完 actions 后采集 fact。host 按
+role 分组(`group_hosts_by_role`):**组间串行、组内并行**;每组完成后 fact 合入
+`hostvars`,供后续组的 actions 以 `{{ hostvars.<host>.<name> }}` 取值——这是集群
+形成(leader 注册 token、follower join)的钥匙。
+
+```yaml
+hosts: all
+register:
+  - { name: ip, cmd: "hostname -I | awk '{print $1}'" }
+actions:
+  - { action: run_cmd, cmd: "echo peer={{ hostvars.n11.ip }}" }   # 后续组取前组的 fact
+```
+
+排序/分组/合并全在引擎(D-036);`{{ hostvars.* }}` 只是取值,尚无值时(更早的组、
+dry-run)残废渲染器原样保留、不报错。
+
 ## demo(真机验证 2026-06-01)
 
 ```bash
@@ -92,7 +110,7 @@ crater apply examples/install-yq.yaml -i inventory.yaml                 # 层3 i
 - `retries`/`ignore_errors` 字段已解析,**运行时行为**后续。
 - `hosts` 本期支持 `all`;**组过滤**后续。
 - 原语已补 **file/copy/service**(D-039)、**lineinfile/user/group**(D-040)。
-- handlers/notify、register/hostvars 在 task 模型下、`retries/ignore_errors` 运行时、`hosts` 组过滤后续。
+- register/hostvars 已在 task 模型(D-041);handlers/notify、`retries/ignore_errors` 运行时、`hosts` 组过滤后续。
 - 命名 task 库(裸名 `crater apply <task>` 解析新 actions 格式)后续;现阶段裸名仍解析 `components/`(旧格式兼容)。
 
 ## 关联
