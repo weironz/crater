@@ -29,7 +29,7 @@ x.oci  (tar 包，展开后是标准 OCI Image Layout)
         ├── <d1>   image config       # OCI config（含 crater 注解）
         ├── <d2>   crater-manifest     # mediaType: application/vnd.crater.manifest.v1+json
         ├── <d3>   layer: components   # 所有 component.yaml + templates 打成一层
-        ├── <d4>   layer: artifacts    # 二进制/tarball（node_exporter、k3s 二进制…）
+        ├── <d4>   layer: artifacts    # 二进制/tarball（yq、zot 二进制…）
         └── <dN>   nested image blobs  # 容器镜像（pause/coredns/mysql/es…）的 manifest+config+layers
 ```
 
@@ -59,22 +59,22 @@ OCI 只管「字节按 digest 存好」；crater-manifest 管「这些字节是�
 
 ---
 
-## 3. 组件数据扩展：`images:`（数据，非代码）
+## 3. task 物料扩展：`materials:`（数据，非代码）
 
-容器型组件离线时需要把镜像一起带走。镜像清单是**数据**，写在 component.yaml：
+离线时要带走的东西是**数据**，写在 task 的 `materials:`（D-034）：`kind: binary`(二进制/tarball)、
+`kind: image`(容器镜像,build 拉 blob 进包、目标 import)、`kind: os_package`(deb/rpm)。
 
 ```yaml
-name: k3s
-aliases: [k8s, kubernetes]
-# 离线时需打包的容器镜像（在线时由 k3s 自身/运行时拉取，不读此字段）
-images:
-  - docker.io/rancher/mirrored-pause:3.6
-  - docker.io/rancher/mirrored-coredns-coredns:1.10.1
-install:
-  - run_cmd: "...INSTALL_K3S_MIRROR=cn... k3s-install.sh"
+name: app
+materials:
+  - { name: app-bin, kind: binary, url_tmpl: "https://.../app-{{version}}" }
+  - { name: app-img, kind: image,  ref: "docker.io/library/app:{{version}}" }   # 待接线
+actions:
+  - { id: place, action: place, material: app-bin, dest: /usr/local/bin/app, mode: "0755" }
 ```
 
-引擎只做「把 `images:` 里列的镜像拉下来塞进 OCI 包、在目标机导入」——**不知道这些镜像属于谁**。
+引擎只做「把 `materials:` 列的东西拉下来塞进 artifact、apply 时落地/import」——**不知道它们属于谁**。
+(注:`kind: binary` 已全链路;`image`/`os_package` 为待接线项,见下文与 D-034。)
 
 ---
 
@@ -122,7 +122,7 @@ install:
 ## 7. 迁移：从 tar.gz 到 OCI（增量推进）
 
 1. ✅ **增量 1（已落地，D-018 实现）**：`bundle.rs` 直接重写为 OCI Image Layout（制品/文件型），打包为 oci-archive（纯 tar）。`BundleStage` API 不变 → `build`/`deploy` 零改动；`serde_json` 手写 manifest/config/index（未引 `oci-spec`/`oci-client`，纯 Rust）。真机：node_exporter 离线部署 `:9100` OK，包结构经校验。**直接替换 tar.gz**（FORMAT_VERSION=2），未保留旧路径（无需要）。
-2. ⏳ **增量 2**：镜像支持——组件 `images:` → `oci-client` 拉镜像 blob 并入 layout → 目标机 `ctr image import`/`docker load`，解锁 k3s/mysql/es air-gap。
+2. ⏳ **增量 2**：镜像支持——组件 `images:` → `oci-client` 拉镜像 blob 并入 layout → 目标机 `ctr image import`/`docker load`，解锁容器型组件 air-gap。
 3. ⏳ **增量 3**：临时 registry（F13）多节点分发。
 4. ⏳ **增量 4**：agent 解 OCI（D-019 接力，目标机本地解包/导入）。
 

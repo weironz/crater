@@ -36,7 +36,7 @@ crater run --host <host> -- "hostname"
 
 ## 验证（真机）
 
-- `crater run`：贯穿全程用于探测/收尾（如 `k3s kubectl get nodes`、`yq --version`）。
+- `crater run`：贯穿全程用于探测/收尾（如 `docker version`、`yq --version`）。
 - 分块写文件：离线制品（node_exporter 10.6MB）、自举 agent 二进制（musl 9.7MB）、OCI rootfs 层（13.7MB）均经 `write_file` 推送成功。
 
 ## 关联功能（都建立在本执行器上）

@@ -77,7 +77,7 @@ CRATER_INSECURE_REGISTRIES=<registry> crater apply <registry>/yq:4.53.2 --host <
 - 本期 `kind: binary` 全链路打通（yq 闭环）。
 - `kind: image`（容器镜像，build 时 pull 进 OCI、离线 import）与 `kind: os_package`
   （build 时下 deb/rpm、离线本地装）**已在数据模型留位、尚未接线**——它们是给
-  mysql/docker/k3s 这类有真实依赖闭包的组件准备的下一阶段。
+  mysql/docker 这类有真实依赖闭包的 task 准备的下一阶段。
 - `build` 的 **version × os 矩阵**：`os_package` 按 OS 分叉（deb vs rpm），多 OS 物料拟用
   OCI image index 按平台/annotation 组织。yq 是纯二进制单一维度，未触发；mysql 会撞上。
 - yq 作为最小闭环先证明新模型在线/离线都通，再把 `materials`+`place` 推到复杂组件。
