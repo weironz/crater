@@ -36,6 +36,11 @@ impl CraterSpec {
 pub struct Inventory {
     #[serde(default)]
     pub hosts: Vec<Host>,
+    /// Named groups → members (role names or other group names, nestable). Lets
+    /// a task's `hosts:` target an aggregate like `cluster` (D-043). Purely
+    /// declarative — the engine resolves it to a role set; no logic in YAML.
+    #[serde(default)]
+    pub groups: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

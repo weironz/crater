@@ -487,3 +487,13 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **`hosts: <group>` 组过滤**:`apply_task` 只取 `roles` 含该组的 host(`all`=全部;无 roles 的 CLI/本机 host 视为已选,总匹配)。
 - **守 D-036**:retries/ignore_errors/notify/hosts 全是封闭数据字段,控制流在 Rust。
 - **真机**(`examples/d037b-demo.yaml` 本机):`ignore_demo`(exit 3)→ warn 不中断;`retry_demo`(首次 exit 1)→ retry 1/2 → changed;`conf` changed → 末尾 handler 执行(再跑幂等 ok → handler 不触发)。`examples/hostfilter-demo.yaml`(`hosts: first` + first/second inventory)→ 仅 n11 跑。33 tests 绿。
+
+---
+
+## 2026-06-01 · 命名 task 库 + inventory 嵌套 groups
+
+### D-043 命名 task 库 + inventory `groups:`(嵌套组)
+- **命名 task 库**:`crater apply <name>`(裸名,无后缀/无 `/:`)→ 解析 `tasks/<name>.yaml`(actions 格式)并 apply_task;不存在则回退组件 `components/<name>`(旧路径,兼容)。
+- **inventory 嵌套 `groups:`**:`Inventory` 加 `groups: BTreeMap<String, Vec<String>>`(组→成员,成员是 role 名或其它组名,可嵌套)。task 的 `hosts: <group>` 由 `expand_group` 递归展开为 role 集合(防循环),保留 roles 与之相交的主机(`all`=全部;无 roles 的 CLI/本机主机视为已选)。
+- **守 D-036**:groups 纯声明数据,展开/过滤在 Rust;不把 k8s 拓扑词汇固化进引擎(组名是某部署的数据)。
+- **真机**:`crater apply yq --host n11`→`tasks/yq.yaml` 装 yq v4.53.2;`examples/group-demo.yaml`(`hosts: cluster`)+ inventory `groups: {cluster:[control,worker]}` → n11(control)+n12(worker)各跑一次。33 tests 绿。

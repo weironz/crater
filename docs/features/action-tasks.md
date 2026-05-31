@@ -11,7 +11,7 @@
 ## 命令形态(方案 A:后缀自识别)
 
 ```
-crater apply yq                       # 裸名(无后缀、无 / :)→ 命名 task / 组件
+crater apply yq                       # 裸名 → 命名 task tasks/yq.yaml(无则回退组件)
 crater apply install-yq.yaml          # .yaml/.yml 后缀 → 文件(task 或 spec,引擎自辨)
 crater apply -f ./x.yaml              # -f 显式文件
 crater apply docker.io/lib/app:v1     # 含 / 或 : → 镜像
@@ -19,6 +19,19 @@ crater apply yq.tar                   # .tar/.oci → 离线包
 ```
 
 目标(沿用 [D-035](../decisions.md) 三层):无 → 本机;`--host a,b` → 少量共用凭据;`-i inventory.yaml` → 大量各自凭据。
+
+**命名 task 库**(D-043):`crater apply <name>` 裸名解析 `tasks/<name>.yaml`(actions 格式);不存在则回退组件 `components/<name>`。
+
+**inventory 嵌套 `groups:`**(D-043):task 的 `hosts: <group>` 可指向 inventory 里的命名组,组成员是 role 名或其它组名(可嵌套),引擎递归展开为 role 集合后过滤主机:
+
+```yaml
+inventory:
+  hosts:
+    - { name: n1, address: .., roles: [control] }
+    - { name: n2, address: .., roles: [worker] }
+  groups:
+    cluster: [control, worker]      # hosts: cluster → control ∪ worker
+```
 
 ## task YAML 结构
 
@@ -119,7 +132,8 @@ crater apply examples/install-yq.yaml -i inventory.yaml                 # 层3 i
 - `hosts` 本期支持 `all`;**组过滤**后续。
 - 原语已补 **file/copy/service**(D-039)、**lineinfile/user/group**(D-040)。
 - register/hostvars(D-041)、handlers/notify + `retries/ignore_errors` 运行时 + `hosts` 组过滤(D-042)均已实现。
-- 后续:task 的 agent 化(把 retry/notify 策略编码进 plan)、命名 task 库、inventory `groups:` 嵌套组。
+- 命名 task 库 + inventory 嵌套 `groups:` 已实现(D-043)。
+- 后续:task 的 agent 化(把 retry/notify 策略编码进 plan,与 D-042 控制端驱动权衡)。
 - 命名 task 库(裸名 `crater apply <task>` 解析新 actions 格式)后续;现阶段裸名仍解析 `components/`(旧格式兼容)。
 
 ## 关联

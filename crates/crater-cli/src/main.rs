@@ -858,7 +858,8 @@ async fn apply_source(
         if crater_core::task::is_task_file(&path) {
             info!("apply: {src} → task");
             let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
-            return apply_task(&path, hosts, !dry_run, shell).await;
+            let groups = inventory_groups(inventory.as_deref())?;
+            return apply_task(&path, hosts, groups, !dry_run, shell).await;
         }
         info!("apply: {src} → online (spec)");
         return apply_spec(&path, !dry_run, shell).await;
@@ -869,13 +870,21 @@ async fn apply_source(
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
         return apply_image_ref(&src, hosts, !dry_run).await;
     }
+    // Named task in the library: `crater apply <name>` → tasks/<name>.yaml (D-043).
+    let named = PathBuf::from("tasks").join(format!("{src}.yaml"));
+    if named.is_file() && crater_core::task::is_task_file(&named) {
+        info!("apply: {src} → named task (tasks/{src}.yaml)");
+        let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
+        let groups = inventory_groups(inventory.as_deref())?;
+        return apply_task(&named, hosts, groups, !dry_run, shell).await;
+    }
     // Online: bare component name → shortcut (build its flag args). Comma-hosts
     // and key auth route through the unified pipeline instead (below) when given.
     if inventory.is_some() || host.as_deref().map(|h| h.contains(',')).unwrap_or(false) || key.is_some() {
         info!("apply: {src} → online (component, fleet)");
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
         let spec = CraterSpec {
-            inventory: crater_core::spec::Inventory { hosts },
+            inventory: crater_core::spec::Inventory { hosts, groups: Default::default() },
             components: vec![component_ref(&src, "")],
             offline: false,
             ai: None,
@@ -928,21 +937,24 @@ async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
 async fn apply_task(
     path: &Path,
     hosts: Vec<crater_core::spec::Host>,
+    groups: BTreeMap<String, Vec<String>>,
     do_apply: bool,
     do_shell: bool,
 ) -> Result<()> {
     use crater_core::task::TaskFile;
     let task = TaskFile::from_yaml_file(path)?;
     let spec_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-    // `hosts` group filter (D-037-b): `all` → every target; a group name → only
-    // hosts whose roles include it. Hosts with no roles (CLI --host / local) are
-    // taken as already-chosen and always match.
+    // `hosts` group filter (D-037-b/D-043): `all` → every target; else expand the
+    // group name to a role set (nested `groups:` resolved) and keep hosts whose
+    // roles intersect it. Hosts with no roles (CLI --host / local) always match.
     let hosts: Vec<crater_core::spec::Host> = if task.hosts == "all" {
         hosts
     } else {
+        let mut seen = BTreeSet::new();
+        let wanted = expand_group(&task.hosts, &groups, &mut seen);
         hosts
             .into_iter()
-            .filter(|h| h.roles.is_empty() || h.roles.contains(&task.hosts))
+            .filter(|h| h.roles.is_empty() || h.roles.iter().any(|r| wanted.contains(r)))
             .collect()
     };
     if hosts.is_empty() {
@@ -1667,7 +1679,7 @@ async fn apply_oci_bundle(
             components.push(component_ref(&mc.name, &mc.version));
         }
         let spec = CraterSpec {
-            inventory: Inventory { hosts },
+            inventory: Inventory { hosts, groups: Default::default() },
             components,
             offline: true,
             ai: None,
@@ -1730,7 +1742,7 @@ async fn apply_oci_bundle(
         })
         .collect();
     let spec = CraterSpec {
-        inventory: Inventory { hosts },
+        inventory: Inventory { hosts, groups: Default::default() },
         components,
         offline: true,
         ai: None,
@@ -1760,6 +1772,38 @@ async fn deploy_bundle(
 ) -> Result<()> {
     let hosts = target_hosts(None, host, user, password, None, port)?;
     apply_oci_bundle(bundle_file, hosts, do_apply, false).await
+}
+
+/// The inventory's named `groups:` (from `-i`), else empty (D-043).
+fn inventory_groups(inv: Option<&Path>) -> Result<BTreeMap<String, Vec<String>>> {
+    match inv {
+        Some(p) => Ok(CraterSpec::from_yaml_file(p)?.inventory.groups),
+        None => Ok(BTreeMap::new()),
+    }
+}
+
+/// Expand a group/role name to a set of leaf role names (D-043). A name found in
+/// `groups` recurses over its members (nestable); otherwise it IS a role.
+/// `seen` guards against cycles.
+fn expand_group(
+    name: &str,
+    groups: &BTreeMap<String, Vec<String>>,
+    seen: &mut BTreeSet<String>,
+) -> BTreeSet<String> {
+    if !seen.insert(name.to_string()) {
+        return BTreeSet::new();
+    }
+    match groups.get(name) {
+        Some(members) => members
+            .iter()
+            .flat_map(|m| expand_group(m, groups, seen))
+            .collect(),
+        None => {
+            let mut s = BTreeSet::new();
+            s.insert(name.to_string());
+            s
+        }
+    }
 }
 
 /// Resolve deploy targets for image/oci/component sources, three layers:
@@ -1888,7 +1932,7 @@ async fn apply_image_ref(
     if let Some(mc) = bundle::materialize_component(&manifest, &store.blobs_dir(), &recipe_dir)? {
         info!("image {reference}: crater component artifact → recipe-replay");
         let spec = CraterSpec {
-            inventory: Inventory { hosts },
+            inventory: Inventory { hosts, groups: Default::default() },
             components: vec![component_ref(&mc.name, &mc.version)],
             offline: true,
             ai: None,
