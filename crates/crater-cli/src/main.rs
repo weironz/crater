@@ -21,7 +21,7 @@ use tracing::info;
 use crater_core::bundle::{self, BundleStage, Manifest, ManifestComponent, BUNDLE_FORMAT_VERSION};
 use crater_core::component::ComponentDescriptor;
 use crater_core::dag::{self, DepNode};
-use crater_core::engine::{self, build_plan, collect_downloads, Op, PlanContext};
+use crater_core::engine::{self, build_plan, collect_downloads, Op, Phase, PlanContext};
 use crater_core::executor::{Executor, LocalExecutor, SshExecutor};
 use crater_core::os::{self, OsFamily};
 use crater_core::source::{self, OnlineSource};
@@ -49,7 +49,11 @@ enum Cmd {
         source: Option<String>,
         #[arg(short, long)]
         file: Option<PathBuf>,
-        /// Target for oci/component sources (a spec carries its own inventory).
+        /// Inventory file (its `inventory:` hosts) for oci/component sources —
+        /// enables multi-host offline. A spec source carries its own inventory.
+        #[arg(short = 'i', long)]
+        inventory: Option<PathBuf>,
+        /// Single target for oci/component sources (shorthand for -i).
         #[arg(long)]
         host: Option<String>,
         #[arg(long, default_value = "root")]
@@ -209,13 +213,14 @@ async fn main() -> Result<()> {
         Cmd::Apply {
             source,
             file,
+            inventory,
             host,
             user,
             password,
             port,
             dry_run,
             shell,
-        } => apply_source(source, file, host, user, password, port, dry_run, shell).await,
+        } => apply_source(source, file, inventory, host, user, password, port, dry_run, shell).await,
         Cmd::Build {
             file,
             output,
@@ -707,6 +712,7 @@ fn order_components(spec: &CraterSpec, components_dir: &Path) -> Result<Vec<Stri
 async fn apply_source(
     source: Option<String>,
     file: Option<PathBuf>,
+    inventory: Option<PathBuf>,
     host: Option<String>,
     user: String,
     password: Option<String>,
@@ -721,9 +727,11 @@ async fn apply_source(
     let path = PathBuf::from(&src);
 
     if path.is_file() && bundle::is_oci_archive(&path) {
-        // Offline: OCI bundle. Inventory comes from CLI (D-020: not in the image).
+        // Offline: OCI bundle. Inventory from CLI (D-020: never inside the image)
+        // — `-i inventory.yaml` (multi-host) or `--host` (single).
         info!("apply: {src} → offline (OCI bundle)");
-        return deploy_bundle(&path, host, &user, password, port, !dry_run).await;
+        let hosts = inventory_hosts(inventory.as_deref(), host, &user, password, port)?;
+        return apply_oci_bundle(&path, hosts, !dry_run, shell).await;
     }
     if path.is_file() {
         // Online: declarative spec (inventory inside).
@@ -756,24 +764,47 @@ async fn apply_source(
 
 async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
     let spec = CraterSpec::from_yaml_file(file)?;
-    let components_dir = PathBuf::from("components");
-    // Inline recipes' relative template paths resolve against the spec's dir.
-    let spec_dir = file.parent().unwrap_or_else(|| Path::new("."));
-    let ordered = order_components(&spec, &components_dir)?;
+    let spec_dir = file.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    // Online: artifacts fetched by the target; recipes from ./components.
+    run_pipeline(
+        &spec,
+        &Artifacts::Online,
+        &PathBuf::from("components"),
+        &spec_dir,
+        do_apply,
+        do_shell,
+    )
+    .await
+}
+
+/// The single deploy pipeline shared by online & offline (D-020): order
+/// components by DAG, group hosts by role (parallel within / sequential across),
+/// run each host, merge registered facts. `artifacts` is the only online/offline
+/// difference. `components_dir` is `./components` (online) or the bundle's staged
+/// components (offline).
+async fn run_pipeline(
+    spec: &CraterSpec,
+    artifacts: &Artifacts,
+    components_dir: &Path,
+    spec_dir: &Path,
+    do_apply: bool,
+    do_shell: bool,
+) -> Result<()> {
+    let ordered = order_components(spec, components_dir)?;
     let by_name: BTreeMap<String, &crater_core::spec::ComponentRef> =
         spec.components.iter().map(|c| (c.name.clone(), c)).collect();
     info!(
-        "{}: {} host(s), component(s) [{}], mode={}",
-        file.display(),
+        "{} host(s), component(s) [{}], {}, mode={}",
         spec.inventory.hosts.len(),
         ordered.join(", "),
+        if artifacts.is_offline() { "offline" } else { "online" },
         if do_apply { "apply" } else { "dry-run" }
     );
 
     if spec.inventory.hosts.is_empty() {
         for cname in &ordered {
             let cref = by_name[cname];
-            let (desc, component_dir) = resolve_descriptor(cref, &components_dir, spec_dir)?;
+            let (desc, component_dir) = resolve_descriptor(cref, components_dir, spec_dir)?;
             let ver = cref
                 .version
                 .clone()
@@ -794,7 +825,7 @@ async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
     if !do_apply {
         // Dry-run: print each host's plans sequentially (no execution).
         for host in &spec.inventory.hosts {
-            run_host(host, &ordered, &by_name, &components_dir, spec_dir, &hostvars, false, do_shell)
+            run_host(host, &ordered, &by_name, artifacts, components_dir, spec_dir, &hostvars, false, do_shell)
                 .await?;
         }
         info!("dry-run only; omit --dry-run to execute over SSH");
@@ -818,7 +849,7 @@ async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
         }
         let results: Vec<Result<(String, Vec<(String, String)>)>> = futures::stream::iter(
             group.iter().map(|host| {
-                run_host(host, &ordered, &by_name, &components_dir, spec_dir, &hostvars, true, do_shell)
+                run_host(host, &ordered, &by_name, artifacts, components_dir, spec_dir, &hostvars, true, do_shell)
             }),
         )
         .buffer_unordered(forks)
@@ -846,6 +877,27 @@ async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Where a host gets its artifacts — the ONLY thing that differs between online
+/// and offline. The host-pipeline (grouping/parallel/agent/register/idempotency)
+/// is identical for both (D-020 单管线).
+enum Artifacts {
+    /// Online: the target fetches (curl/apt); agent default applies.
+    Online,
+    /// Offline (OCI bundle, on the control machine): `download`→push-from-blob,
+    /// or a rootfs image extracted to `/`. Runs via the shell executor since the
+    /// blobs live on control. `blobmap`: url→blob; `rootfs`: component→layer blob.
+    Offline {
+        blobmap: BTreeMap<String, PathBuf>,
+        rootfs: BTreeMap<String, PathBuf>,
+    },
+}
+
+impl Artifacts {
+    fn is_offline(&self) -> bool {
+        matches!(self, Artifacts::Offline { .. })
+    }
 }
 
 /// Group hosts by their role-set (sorted), preserving each signature's first
@@ -879,10 +931,12 @@ fn forks_limit() -> usize {
 /// Deploy one host: connect, detect OS, run its role's components (agent/shell),
 /// and return its registered facts (for hostvars). Read-only over `hostvars` —
 /// the caller merges results after the group, so parallel peers don't race.
+#[allow(clippy::too_many_arguments)]
 async fn run_host(
     host: &crater_core::spec::Host,
     ordered: &[String],
     by_name: &BTreeMap<String, &crater_core::spec::ComponentRef>,
+    artifacts: &Artifacts,
     components_dir: &Path,
     spec_dir: &Path,
     hostvars: &BTreeMap<String, BTreeMap<String, String>>,
@@ -925,14 +979,47 @@ async fn run_host(
                 ctx.vars.insert(format!("hostvars.{h}.{k}"), v.clone());
             }
         }
-        let plan = build_plan(&desc, &ctx)?;
+        // Build the plan — the ONLY online/offline difference (D-020).
+        let plan = match artifacts {
+            Artifacts::Online => build_plan(&desc, &ctx)?,
+            Artifacts::Offline { blobmap, rootfs } => {
+                if let Some(layer) = rootfs.get(&cref.name) {
+                    // rootfs image: push the layer, extract to /, then replay the
+                    // residual (non-file) install + verify.
+                    let mut ops = vec![
+                        Op::PushFile {
+                            phase: Phase::Install,
+                            describe: format!("push rootfs layer ({})", cref.name),
+                            local_path: layer.clone(),
+                            dest: "/tmp/crater-rootfs.tar".into(),
+                        },
+                        Op::Shell {
+                            phase: Phase::Install,
+                            describe: "extract rootfs to /".into(),
+                            cmd: "tar -xpf /tmp/crater-rootfs.tar -C / && rm -f /tmp/crater-rootfs.tar".into(),
+                            soft_fail: false,
+                            check: None,
+                        },
+                    ];
+                    let mut resid = desc.clone();
+                    resid.install.retain(|a| !a.produces_files());
+                    resid.preflight.clear();
+                    ops.extend(build_plan(&resid, &ctx)?);
+                    ops
+                } else {
+                    ctx.offline_blobs = Some(blobmap.clone());
+                    build_plan(&desc, &ctx)?
+                }
+            }
+        };
         info!("[{}] {} v{ver} — {} steps", host.name, cref.name, plan.len());
         if !do_apply {
             print_plan(&plan);
             continue;
         }
-        // Agent by default (D-027); --shell forces the shell executor.
-        execute_plan(&plan, exec.as_ref(), do_shell, None).await?;
+        // Agent default online (D-027); offline pins to shell (blobs on control).
+        let use_shell = do_shell || artifacts.is_offline();
+        execute_plan(&plan, exec.as_ref(), use_shell, None).await?;
         // Capture this component's facts on this host for later groups.
         for reg in &desc.register {
             let out = exec.run(&engine::render(&reg.cmd, &ctx.vars)).await?;
@@ -1214,19 +1301,24 @@ async fn build_image_bundle(spec_file: &Path, out: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn deploy_bundle(
+/// Offline deploy via the SAME pipeline as online (D-020 单管线): unpack the OCI
+/// bundle, build a synthetic spec (components from the bundle's crater-manifest,
+/// inventory from CLI), set `Artifacts::Offline`, and run `run_pipeline`. So
+/// offline gets the same host grouping / parallelism / register / idempotency —
+/// the only difference is where artifacts come from (the bundle, on control).
+async fn apply_oci_bundle(
     bundle_file: &Path,
-    host: Option<String>,
-    user: &str,
-    password: Option<String>,
-    port: u16,
+    hosts: Vec<crater_core::spec::Host>,
     do_apply: bool,
+    do_shell: bool,
 ) -> Result<()> {
+    use crater_core::spec::{ComponentRef, CraterSpec, Inventory};
+
     let dest_root = std::env::temp_dir().join(format!("crater-deploy-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dest_root);
     let stage = bundle::unpack(bundle_file, &dest_root)?;
     let manifest = stage.read_manifest()?;
-    stage.verify(&manifest)?; // checksum every blob before touching the target
+    stage.verify(&manifest)?; // content-addressed: digests are the integrity check
     info!(
         "bundle {} — {} component(s), {} blob(s), {} rootfs image(s), checksums OK",
         manifest.name,
@@ -1239,91 +1331,111 @@ async fn deploy_bundle(
     for b in &manifest.blobs {
         blobmap.insert(b.source_url.clone(), stage.blob_path(&b.sha256));
     }
-
-    let exec: Box<dyn Executor> = match &host {
-        Some(h) => {
-            let pw = password
-                .as_deref()
-                .ok_or_else(|| anyhow!("--password required for --host"))?;
-            info!("connecting to {user}@{h}:{port}");
-            Box::new(SshExecutor::connect(h, port, user, pw).await?)
-        }
-        None => Box::new(LocalExecutor),
-    };
-    let osf = if do_apply && host.is_some() {
-        os::detect_via(exec.as_ref()).await
-    } else {
-        OsFamily::Unknown
-    };
-
-    // crater-native `load`: install rootfs images by extracting their fs layer
-    // to `/` on the target — no container runtime. (D-018 ②, the yq path.)
-    if !manifest.rootfs.is_empty() {
-        for ir in &manifest.rootfs {
-            let layer_digest = stage.layer_of(&ir.manifest_digest)?;
-            let layer = bundle::read_file(&stage.blob_path(&layer_digest))?;
-            info!(
-                "load image {} → extracting rootfs ({} bytes) to /",
-                ir.reference,
-                layer.len()
-            );
-            if do_apply {
-                let remote = "/tmp/crater-rootfs.tar";
-                exec.write_file(remote, &layer).await?;
-                let out = exec.run(&format!("tar -xpf {remote} -C / && rm -f {remote}")).await?;
-                if !out.ok() {
-                    anyhow::bail!("extract rootfs failed (exit {}): {}", out.code, out.stderr.trim());
-                }
-                info!("  installed {}", ir.reference);
-            }
-        }
-        // Files are already on disk (layer extracted). Replay only the RESIDUAL
-        // (imperative) install actions — run_cmd/pkg_install/systemd_unit/module
-        // — that couldn't be baked, then verify. File actions are skipped (done).
-        if do_apply {
-            for mc in &manifest.components {
-                let cdir = stage.components_dir().join(&mc.name);
-                if let Ok(mut desc) = ComponentDescriptor::from_yaml_file(&cdir.join("component.yaml")) {
-                    desc.install.retain(|a| !a.produces_files());
-                    desc.preflight.clear(); // already validated at build time
-                    let ctx = PlanContext::new(osf, mc.version.clone(), cdir);
-                    let plan = build_plan(&desc, &ctx)?;
-                    if !plan.is_empty() {
-                        info!("replay {} residual step(s) for {}", plan.len(), mc.name);
-                        engine::execute(&plan, exec.as_ref()).await?;
-                    }
-                }
-            }
-        }
-        let _ = std::fs::remove_dir_all(&dest_root);
-        if !do_apply {
-            info!("dry-run; omit --dry-run to load+install on the target");
-        }
-        return Ok(());
+    let mut rootfs: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for ir in &manifest.rootfs {
+        // reference is "crater/<component>:<ver>".
+        let name = ir
+            .reference
+            .trim_start_matches("crater/")
+            .split(':')
+            .next()
+            .unwrap_or(&ir.reference)
+            .to_string();
+        let layer_digest = stage.layer_of(&ir.manifest_digest)?;
+        rootfs.insert(name, stage.blob_path(&layer_digest));
     }
+    let artifacts = Artifacts::Offline { blobmap, rootfs };
 
-    for mc in &manifest.components {
-        let cdir = stage.components_dir().join(&mc.name);
-        let desc = ComponentDescriptor::from_yaml_file(&cdir.join("component.yaml"))?;
-        let ctx = PlanContext::new(osf, mc.version.clone(), cdir).with_offline(blobmap.clone());
-        let plan = build_plan(&desc, &ctx)?;
-        println!(
-            "\n--- component {} (v{}) — {} steps [{}] ---",
-            mc.name,
-            mc.version,
-            plan.len(),
-            if do_apply { "APPLY" } else { "DRY-RUN" }
-        );
-        print_plan(&plan);
-        if do_apply {
-            engine::execute(&plan, exec.as_ref()).await?;
-        }
-    }
+    // Synthetic spec: recipes resolve from the bundle's staged components.
+    let components: Vec<ComponentRef> = manifest
+        .components
+        .iter()
+        .map(|mc| ComponentRef {
+            name: mc.name.clone(),
+            version: Some(mc.version.clone()),
+            params: Default::default(),
+            requires: vec![],
+            images: vec![],
+            supported_os: vec![],
+            preflight: vec![],
+            install: vec![],
+            verify: vec![],
+            register: vec![],
+        })
+        .collect();
+    let spec = CraterSpec {
+        inventory: Inventory { hosts },
+        components,
+        offline: true,
+        ai: None,
+    };
+
+    let res = run_pipeline(
+        &spec,
+        &artifacts,
+        &stage.components_dir(),
+        &dest_root,
+        do_apply,
+        do_shell,
+    )
+    .await;
     let _ = std::fs::remove_dir_all(&dest_root);
-    if !do_apply {
-        println!("\n(dry-run; omit --dry-run to execute.)");
+    res
+}
+
+/// Back-compat `crater deploy --bundle x --host H`: single-host offline apply.
+async fn deploy_bundle(
+    bundle_file: &Path,
+    host: Option<String>,
+    user: &str,
+    password: Option<String>,
+    port: u16,
+    do_apply: bool,
+) -> Result<()> {
+    let hosts = match host {
+        Some(h) => vec![single_host(h, user, password, port)],
+        None => anyhow::bail!("crater deploy needs --host (the offline target)"),
+    };
+    apply_oci_bundle(bundle_file, hosts, do_apply, false).await
+}
+
+/// Resolve the target inventory for offline/component sources: `-i file` (its
+/// `inventory:` hosts, multi-host) or `--host` (single), else error.
+fn inventory_hosts(
+    inv: Option<&Path>,
+    host: Option<String>,
+    user: &str,
+    password: Option<String>,
+    port: u16,
+) -> Result<Vec<crater_core::spec::Host>> {
+    if let Some(p) = inv {
+        let spec = CraterSpec::from_yaml_file(p)?;
+        if spec.inventory.hosts.is_empty() {
+            anyhow::bail!("inventory {} has no hosts", p.display());
+        }
+        Ok(spec.inventory.hosts)
+    } else if let Some(h) = host {
+        Ok(vec![single_host(h, user, password, port)])
+    } else {
+        anyhow::bail!("offline apply needs a target: -i <inventory.yaml> or --host <ip>")
     }
-    Ok(())
+}
+
+/// Build a one-host inventory entry from CLI flags (roles empty → all components).
+fn single_host(
+    host: String,
+    user: &str,
+    password: Option<String>,
+    port: u16,
+) -> crater_core::spec::Host {
+    crater_core::spec::Host {
+        name: host.clone(),
+        address: host,
+        user: user.to_string(),
+        port,
+        password,
+        roles: vec![],
+    }
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {

@@ -1,0 +1,7 @@
+# Inventory-only file for offline multi-host apply (-i). roles omitted → each
+# host gets all the bundle's components.
+#   crater apply yq.oci -i examples/two-hosts.yaml
+inventory:
+  hosts:
+    - { name: n11, address: 192.168.73.11, user: root, port: 22, password: "123456" }
+    - { name: n12, address: 192.168.73.12, user: root, port: 22, password: "123456" }

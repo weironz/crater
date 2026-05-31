@@ -291,3 +291,16 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **理由**:一条 `apply` 收敛所有部署入口;**执行引擎一致**（engine::execute 的幂等/changed-ok/tracing 两端共用），在线/离线只差"制品从哪来"（ArtifactSource）。
 - **真机**:`crater apply yq.yaml`→online(spec);`crater apply yq --host`→online(component);`crater apply yq-img.oci --host .12`→offline，load+install yq、`changed=1 ok=1`。
 - **后续（更深统一）**:让离线也走 apply_spec 的同一主机循环（agent/并发/register）——目前离线走 deploy_bundle 的较简单循环（shell、单流程）。把"在线/离线"彻底收敛成"同一 host-pipeline + ArtifactSource 分叉"是下一步。
+
+---
+
+## 2026-05-31 · 彻底单管线（离线并入 run_pipeline）
+
+### D-020 终极落地：在线/离线共用 run_pipeline，唯一分叉 = ArtifactSource
+- **背景**:此前 apply 路由统一了命令，但离线仍走 deploy_bundle 的较简单循环（单流程、无并发/register）。要彻底单管线。
+- **决策/实现**:抽出 `run_pipeline(spec, artifacts, components_dir, spec_dir, ...)`——order DAG → 按 role 分组（组内并发、组间串行）→ run_host → 合并 register facts。新增 `enum Artifacts { Online | Offline{blobmap, rootfs} }`，是**唯一的在线/离线差异**：
+  - run_host 按 artifacts 建计划：Online=build_plan;Offline blob=ctx.offline_blobs(download→push-from-blob);Offline rootfs=push 层 + `tar -xpf -C /` + 残留(非文件 install)+verify。
+  - 离线强制 shell executor（blob 在控制端;agent 需先 ship blob，后续）。
+  - 离线 inventory 由 CLI 提供：`crater apply x.oci -i inv.yaml`(多主机) / `--host`(单)。`apply_oci_bundle` 解包→合成 spec(components 来自 manifest)→run_pipeline。`deploy_bundle` 成单主机包装。
+- **真机(两台)**:`crater apply yq.oci -i two-hosts.yaml` → `▷ group [] — 2 hosts in parallel` → 两台并发 push 层+extract+chmod+verify yq v4.53.2、各 changed=3 ok=1。**离线获得了与在线相同的多主机/并发/register/幂等/tracing**。
+- **意义**:在线/离线真正只剩"制品从哪来"一处差异（design.md §3 的"双形态单管线"从设计变为实现）。
