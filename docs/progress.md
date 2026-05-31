@@ -75,6 +75,11 @@ examples/    crater.yaml node_exporter.yaml
 4. 不擅自中断、不找用户确认(已授权)。
 
 ## 工作日志（倒序）
+### 2026-05-31 续10（多节点实测 + 跨节点 register/hostvars 起步）
+- **多节点实测（两台真机）**：`examples/multi-node.yaml` 把 yq 铺到 192.168.73.11 + 192.168.73.12，逐主机独立幂等（n11 ok、n12 changed），各自走 agent。**基础多节点（fan-out 相同/不同组件到多台）已验证**。
+- **已知缺口**：跨节点 fact 传递（k3s join token 等真集群）、并发（F17，现串行）、主机分组/`--limit`、跨主机容错。
+- 下一步：跨节点 **register/hostvars**（真集群钥匙）→ k3s 多节点 join → 并发。
+
 ### 2026-05-31 续9（module 契约地基 D-029）
 - 四层 module 模型记入 design.md §6.1 + ADR D-029。**契约地基已做**：
   - 新增 `Action::Module{uses, with}` + `module.rs`(`ModuleDescriptor`: params/check/act + 缺参校验) + `PlanContext.modules_dir`(默认 `modules/`)。
