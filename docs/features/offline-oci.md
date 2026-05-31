@@ -10,7 +10,7 @@
 |---|---|---|
 | **build** | `crater build [--image] -f spec -o x.oci` | 制离线包；`--image` 把组件文件产物封装成 rootfs OCI 镜像 `crater/<name>:<ver>` |
 | **save** | （build 产物） | oci-archive（纯 tar），skopeo/oras 可读 |
-| **load+install** | `crater deploy --bundle x.oci --host <host>` | crater 自己解包：制品 push-from-blob / rootfs 镜像 `tar -xpf -C /` |
+| **load+install** | `crater apply x.oci --host <host>`（= `crater deploy --bundle`） | crater 自己解包：制品 push-from-blob / rootfs 镜像 `tar -xpf -C /` |
 | **pull** | （build 时，组件 `images:`） | `oci-client` 从 registry 拉容器镜像 blob 进包（rustls 纯 Rust） |
 
 ## 构建逻辑：vs Dockerfile（每个动作都有归宿，零遗漏）
@@ -46,8 +46,8 @@ load（`crater deploy`）= 把 rootfs 层 `tar -xpf -C /` 展开 + **replay 残�
 **把 yq 封装成 OCI 镜像 → 离线安装**：
 ```bash
 crater build --image -f examples/yq/yq.yaml -o /tmp/yq.oci   # build+save：crater/yq:4.53.2（rootfs 层）
-# 分发 yq.oci 到离线机器，然后：
-crater deploy --bundle /tmp/yq.oci --host <host> --password <pw>   # load+install（crater 自解包展开到 /）
+# 分发 yq.oci 到离线机器，然后（在线/离线同一条 apply，D-020）：
+crater apply /tmp/yq.oci --host <host> --password <pw>            # load+install（自动识别 OCI 包→离线）
 ```
 期望：`load image crater/yq:4.53.2 → extracting rootfs to /` → `verify: yq --version → v4.53.2`。
 

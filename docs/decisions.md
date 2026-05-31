@@ -276,3 +276,18 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **决策**:`Action::produces_files()` 显式分类。build --image：**文件类**(download/extract/write_file/render_template)由 crater **真实物化文件效果**进 staging rootfs（extract 纯 Rust 解 gz+tar+strip，download 落盘），tar 成层；**命令式**(run_cmd/pkg_install/systemd_unit/module)作**残留 recipe** 随镜像带走、load 时目标机 replay。build **打印** `baked N file action(s); will replay on target: [...]`，**绝不静默丢**；无任何文件产物则报错引导用 plain build。load = 展开层 + replay 残留(非文件类 install)+verify。
 - **理由**:用户只写一份 component.yaml、不选模式不懂拆分;每个动作都有归宿且透明;修掉 extract 遗漏。守"两端零容器运行时"。
 - **真机(192.168.73.12)**:`node_exporter --image` baked 3(含 extract)+replay[systemd_unit]→ 展开 binary+unit、systemd replay、`:9100` metrics;`yq --image` baked 1+replay[run_cmd chmod]→ yq v4.53.2。`untar_gz_into`/`store_rootfs_layer_dir` + 下载 scratch 剔除。
+
+---
+
+## 2026-05-31 · apply 统一在线/离线（D-020 落地）
+
+### D-020 落地：`crater apply <source>` 自动识别（在线 spec / 离线 OCI / 组件名）
+- **背景**:用户要在线/离线**逻辑一致**——`crater apply -f xx.yaml` 与 `crater apply xxx-oci-image` 同一条命令。
+- **决策/实现**:`apply` 收位置参数 `<source>`，`apply_source` 自动识别并路由：
+  - `.yaml`（spec 文件）→ **在线**（apply_spec，inventory 在 spec 内）;
+  - OCI 归档（`bundle::is_oci_archive` peek `oci-layout`）→ **离线** load+install（deploy_bundle，inventory 由 `--host`/`-i` 提供，守 D-020"inventory 不入镜像"）;
+  - 组件名 → 在线快捷式。
+  `-f` 保留为别名;`crater deploy` 保留为离线等价命令。
+- **理由**:一条 `apply` 收敛所有部署入口;**执行引擎一致**（engine::execute 的幂等/changed-ok/tracing 两端共用），在线/离线只差"制品从哪来"（ArtifactSource）。
+- **真机**:`crater apply yq.yaml`→online(spec);`crater apply yq --host`→online(component);`crater apply yq-img.oci --host .12`→offline，load+install yq、`changed=1 ok=1`。
+- **后续（更深统一）**:让离线也走 apply_spec 的同一主机循环（agent/并发/register）——目前离线走 deploy_bundle 的较简单循环（shell、单流程）。把"在线/离线"彻底收敛成"同一 host-pipeline + ArtifactSource 分叉"是下一步。

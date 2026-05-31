@@ -405,6 +405,27 @@ pub fn unpack(bundle_file: &Path, dest_root: &Path) -> crate::Result<BundleStage
     })
 }
 
+/// Detect whether a file is an OCI archive (a tar containing `oci-layout`) —
+/// lets `crater apply <source>` route offline bundles vs online specs.
+pub fn is_oci_archive(path: &Path) -> bool {
+    let Ok(f) = fs::File::open(path) else {
+        return false;
+    };
+    let mut ar = tar::Archive::new(f);
+    let Ok(entries) = ar.entries() else {
+        return false;
+    };
+    for e in entries.flatten() {
+        if let Ok(p) = e.path() {
+            let s = p.to_string_lossy();
+            if s == "oci-layout" || s == "./oci-layout" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Read a whole file into memory (small helper used by build).
 pub fn read_file(path: &Path) -> crate::Result<Vec<u8>> {
     let mut f = fs::File::open(path)?;

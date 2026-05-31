@@ -40,12 +40,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Apply a declarative spec file (crater.yaml). Executes by default (via the
-    /// self-bootstrap agent); --dry-run prints the plan, --shell forces the
-    /// agentless shell executor.
+    /// Apply a source — one command for online & offline (D-020). `<source>`
+    /// auto-detects: a spec `.yaml` (online), an OCI archive `.oci` (offline
+    /// load+install), or a component name (online shortcut). Same engine &
+    /// idempotency either way; offline just sources artifacts from the bundle.
     Apply {
+        /// spec.yaml | x.oci (offline bundle) | component name. (Or use -f.)
+        source: Option<String>,
         #[arg(short, long)]
-        file: PathBuf,
+        file: Option<PathBuf>,
+        /// Target for oci/component sources (a spec carries its own inventory).
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long, default_value = "root")]
+        user: String,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long, default_value_t = 22)]
+        port: u16,
         /// Print the plan without executing.
         #[arg(long)]
         dry_run: bool,
@@ -195,10 +207,15 @@ async fn main() -> Result<()> {
 
     match Cli::parse().cmd {
         Cmd::Apply {
+            source,
             file,
+            host,
+            user,
+            password,
+            port,
             dry_run,
             shell,
-        } => apply_spec(&file, !dry_run, shell).await,
+        } => apply_source(source, file, host, user, password, port, dry_run, shell).await,
         Cmd::Build {
             file,
             output,
@@ -680,6 +697,61 @@ fn order_components(spec: &CraterSpec, components_dir: &Path) -> Result<Vec<Stri
         });
     }
     dag::topo_sort(&nodes)
+}
+
+/// `crater apply <source>` — one entry point for online & offline (D-020).
+/// Auto-detect the source kind and route; the execution engine (idempotency,
+/// tracing, agent/shell) is shared — online vs offline differ only in where
+/// artifacts come from.
+#[allow(clippy::too_many_arguments)]
+async fn apply_source(
+    source: Option<String>,
+    file: Option<PathBuf>,
+    host: Option<String>,
+    user: String,
+    password: Option<String>,
+    port: u16,
+    dry_run: bool,
+    shell: bool,
+) -> Result<()> {
+    // `<source>` positional, else `-f`.
+    let src = source
+        .or_else(|| file.map(|p| p.display().to_string()))
+        .ok_or_else(|| anyhow!("apply needs a <source>: a spec.yaml, an x.oci bundle, or a component name"))?;
+    let path = PathBuf::from(&src);
+
+    if path.is_file() && bundle::is_oci_archive(&path) {
+        // Offline: OCI bundle. Inventory comes from CLI (D-020: not in the image).
+        info!("apply: {src} → offline (OCI bundle)");
+        return deploy_bundle(&path, host, &user, password, port, !dry_run).await;
+    }
+    if path.is_file() {
+        // Online: declarative spec (inventory inside).
+        info!("apply: {src} → online (spec)");
+        return apply_spec(&path, !dry_run, shell).await;
+    }
+    // Online: bare component name → shortcut (build its flag args).
+    info!("apply: {src} → online (component)");
+    let mut args = vec![src];
+    if let Some(h) = host {
+        args.push("--host".into());
+        args.push(h);
+    }
+    args.push("--user".into());
+    args.push(user);
+    if let Some(pw) = password {
+        args.push("--password".into());
+        args.push(pw);
+    }
+    args.push("--port".into());
+    args.push(port.to_string());
+    if dry_run {
+        args.push("--dry-run".into());
+    }
+    if shell {
+        args.push("--shell".into());
+    }
+    deploy_shortcut(args).await
 }
 
 async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
