@@ -39,6 +39,8 @@ load（`crater deploy`）= 把 rootfs 层 `tar -xpf -C /` 展开 + **replay 残�
 
 **为什么这样**：crater 不引入构建期容器沙箱（契合纯 Rust / CN / air-gap），所以命令式步骤无法快照成层——但它们不会被丢掉，而是 load 时 replay。两端零容器运行时是核心取舍；Docker 的 `RUN` 烤层本质是拿容器换的。
 
+> **⚠️ A/B 之分（D-032）**：`build --image` 现在把物料封成**伪容器镜像**（image-manifest + rootfs config，永不被 run）——这是反模式。crater 物料应走 **B 类 OCI artifact**（`artifactType` + 自定义 mediaType 分层），不伪装成 image；要跑容器的才走 A 类 image（crater 只搬运）。迁移为路线项，详见 [design.md §4.3](../design.md)。
+
 后续（无需容器 builder）：`from: <base>` + COPY 式纯层叠加（已能 `pull` 基镜像 blob，是 Dockerfile `FROM`+`COPY` 子集）；layer 体积裁剪（剔除下载 scratch 已做）。
 
 ## 基本 demo

@@ -327,3 +327,17 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - **`crater load <file.oci> --as <ref>`**:把 build --image 的 oci-archive 导入本地库并打 tag（`ImageStore::import_oci_archive`）。
   - **+x 进层**:build --image 的 download 落地置 0755，使纯 `apply <ref>`（extract-only，无残留 replay）也得到可执行二进制（修 yq exit 126）。
 - **真机闭环**:`crater zot` → `build --image yq` → `load --as 192.168.73.5:5000/yq:4.53.2` → `push`（zot catalog `{"repositories":["yq"]}`）→ 清本地库 → `apply 192.168.73.5:5000/yq:4.53.2 --host .12`（真从 zot pull）→ n12 `/usr/local/bin/yq` 0755、`yq --version` v4.53.2。**push 至此 live 验证通过**。
+
+---
+
+## 2026-05-31 · OCI 用法分 A/B（外部架构评审）
+
+### D-032 OCI 分 A 类(image) / B 类(artifact)；crater 主力 B 类，迁移伪 image
+- **背景**:外部架构评审确认 OCI 方向正确（内容寻址去重、天然增量、Harbor/oras 生态、registry+tar 双形态），并点出关键分叉——「用 OCI 封装依赖」有两类：**A 类容器镜像**(image-spec，被 containerd run) vs **B 类 OCI artifact**(artifactType，落地宿主机的物料)。评审指出常见反模式：把单二进制伪装成永不被 run 的畸形 image。审视发现 crater 现状 `build --image` 正中此反模式（image-manifest + rootfs config 假装可运行）。
+- **决策**:
+  - 明确 A/B：A 类 crater **只搬运**（pull blob→layout→目标机 import，零自造 build，现 `pull` 已对）；**B 类是主力**——自造 OCI artifact。
+  - **迁移 `build --image`**：伪 image → 正经 artifact：`artifactType: application/vnd.crater.component.v1`；分层有边界(binary/config/recipe/ospkg)；annotations 自描述(名/版本/run-mode)；recipe 进包。load 语义从"extract rootfs 到 /"→"按 layer mediaType + 包内 recipe 驱动落地"（与 crater recipe 模型收敛，去伪 rootfs）。
+  - 聚合包用 **OCI image index** 引用多组件 artifact → 跨 bundle blob 全局去重。
+  - 纯 Rust 构建(oci-spec/手写 blob/ocipkg)，不 shell docker（已守）。
+- **对评审的补充（crater 约束）**:① **zstd 非免费**——zstd 编码=zstd-sys(C 依赖)，冲突 D-012/N1，默认仍 gzip(flate2)、zstd 可选、解码用 ruzstd;② **生态验证**——确认 oci-client/Harbor/zot 对 artifactType+referrers 的支持，不行则回退"带 annotations 的 image-manifest"(B 类语义、最大兼容);③ **A 类保留**——容器型组件的镜像走 A 类搬运，按 `run-mode` 数据路由;④ 守 D-017——A/B/run-mode/mediaType 全是数据，引擎只按 mediaType 通用处理。
+- **影响**:现状 `build --image`(伪 image) 标为过渡实现，迁 artifact 为路线项（不阻塞现功能）。crater 定位明确为 **B 类 artifact 分发器 + A 类镜像搬运**。详见 [design.md §4.3](design.md)。

@@ -93,7 +93,7 @@ crater/
 - [设计方向 design.md](docs/design.md)（北极星：引擎铁律 + 在线/离线单管线 + OCI 离线 + 自举 agent + ansible 化路线）
 - [离线包格式 offline-format.md](docs/offline-format.md)（OCI 镜像方案详细设计）
 - [需求基线 v0.3](docs/requirements.md)
-- [决策 / 沟通记录](docs/decisions.md)（D-001~D-031）
+- [决策 / 沟通记录](docs/decisions.md)（D-001~D-032）
 - [进展日志](docs/progress.md)（M1–M5 已验证；含工具链纪律）
 - [文档索引](docs/README.md)
 

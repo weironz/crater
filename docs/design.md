@@ -122,6 +122,33 @@ bundle.oci  (tar of an OCI layout)
 3. 制品落地：文件→按描述放置；容器镜像→`ctr image import`/`docker load` 导入本地运行时，或推到**临时 registry**（F13）供多节点共享。
 4. 跑同一套计划引擎（离线模式：`download` Op → push-from-blob Op，与现状同形）。
 
+### 4.3 OCI 用法分 A/B：容器镜像 vs 物料包（D-032）
+
+「用 OCI 封装依赖」有两条本质不同的路，**别混**：
+
+| | A 类 · 容器镜像(image) | B 类 · 物料包(OCI artifact) |
+|---|---|---|
+| 是什么 | 被 containerd **run** 的镜像（ES 官方镜像、应用镜像） | 拿 OCI 当通用分发格式，装二进制/rpm/helm/recipe，**落地到宿主机**(copy+systemd) |
+| 规范 | image-spec（config 有 entrypoint/env、rootfs 可运行） | image-spec 1.1 的 `artifactType`（ORAS 之道） |
+| crater 怎么处理 | **只搬运**：pull blob 存 layout → 目标机 `ctr import`，**零自造 build** | **主力**：自造 artifact（自定义 mediaType 分层 + annotations 自描述） |
+
+**铁律**：要跑容器走 A 类 image；落地宿主机的物料走 B 类 artifact，**不要把 yq 二进制伪装成一个永不被 run 的畸形 image**。crater 主力是 B 类。
+
+> ⚠️ 现状缺口：`crater build --image` 目前把物料封成**伪 image**（image-manifest + rootfs config）——正是上面的反模式，标记为**过渡实现**，迁移到 B 类 artifact 是路线项。
+
+**B 类 artifact 构建原则**：
+1. **分层有边界**：binary / config / recipe / ospkg 各自成 layer（细粒度去重，升级只换变动层）。
+2. **manifest 自描述**：`artifactType: application/vnd.crater.component.v1` + annotations（component 名/版本/`run-mode: process|container`），引擎靠它路由。
+3. **recipe 进包**：物料 + 怎么装同 artifact，自包含。
+4. **纯 Rust 构建**：`oci-spec` 类型 + 手写 blob（或 `ocipkg`），不 shell docker（守 N1/单二进制）。
+5. **聚合用 image index**：多组件 bundle = 一个 index 引用各组件 artifact manifest → 跨 bundle 底层 blob（glibc rpm、containerd…）**全局去重**。
+
+**crater 特有约束（对评审的补充）**：
+- **zstd 非免费**：tar+zstd 解压快，但 zstd 编码 = `zstd-sys`（C 依赖），与 D-012/N1「纯 Rust/免 C/musl 静态」冲突 → 默认仍 **gzip(flate2)**，zstd 作**可选**；解码可先用 `ruzstd`(纯 Rust)。
+- **生态验证**：需确认 `oci-client` 支持 artifact manifest（artifactType/referrers）+ Harbor/zot 的 1.1 支持；不行则**务实回退**＝带自定义 annotations 的 image-manifest（B 类语义、image-manifest 类型，最大兼容）。
+- **A 类仍保留**：以容器跑的组件（其镜像）走 A 类搬运；crater 两类都要，按数据里的 `run-mode` 决定。
+- **守 D-017**：A/B/run-mode/mediaType 全是**数据**，引擎只按 mediaType/artifactType 通用处理，不认识具体产品。
+
 ---
 
 ## 5. 执行模型：自举 agent（默认）+ agentless shell（逃生/引导）
