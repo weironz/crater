@@ -213,9 +213,12 @@ enum Cmd {
     /// Internal: self-bootstrap agent. Runs ON the target node, executing a
     /// lowered plan locally (pushed here by the control machine). D-019.
     Agent {
-        /// Path to the serialized plan to execute locally.
+        /// Path to a serialized component plan (Vec<Op>) to execute locally.
         #[arg(long)]
         plan: Option<PathBuf>,
+        /// Path to a serialized task plan (steps + handlers, D-044) to run locally.
+        #[arg(long)]
+        task_plan: Option<PathBuf>,
     },
     /// Shortcut: `crater <component> [flags]`.
     #[command(external_subcommand)]
@@ -379,7 +382,7 @@ async fn main() -> Result<()> {
             port,
             cmd,
         } => run_adhoc(&host, &user, password, port, &cmd.join(" ")).await,
-        Cmd::Agent { plan } => run_agent(plan).await,
+        Cmd::Agent { plan, task_plan } => run_agent(plan, task_plan).await,
         Cmd::Component(args) => deploy_shortcut(args).await,
     }
 }
@@ -703,20 +706,17 @@ async fn select_agent_binary(
 /// plan executes locally in one shot — fewer SSH round-trips, and the foundation
 /// for OCI unpack / richer local logic. The binary is cached on the target (by
 /// sha256), so it's pushed once per version; only the plan file is transient.
-async fn run_via_agent(exec: &dyn Executor, plan: &[Op], agent_bin: Option<&Path>) -> Result<()> {
+/// Push the crater binary to the target (cached by sha256 at
+/// `/var/lib/crater/crater`) and return that path. Shared by component
+/// (`--plan`) and task (`--task-plan`) agent runs.
+async fn push_agent_binary(exec: &dyn Executor, agent_bin: Option<&Path>) -> Result<&'static str> {
     // Pick the binary to ship: explicit override > a bundled musl static
     // matching the target's arch > the control binary (only if same arch).
     let (bin_path, how) = select_agent_binary(exec, agent_bin).await?;
     let bytes = std::fs::read(&bin_path)
         .map_err(|e| anyhow!("read agent binary {}: {e}", bin_path.display()))?;
     let want = crater_core::bundle::sha256_hex(&bytes);
-
-    // Same crater binary, cached on the target as `crater` (it's the exact same
-    // executable as the control side; we just invoke its `agent` subcommand).
     let remote_bin = "/var/lib/crater/crater";
-    let remote_plan = "/tmp/crater-plan.yaml";
-
-    // Push the binary only if the target doesn't already have this exact version.
     let cached = exec
         .run(&format!("sha256sum {remote_bin} 2>/dev/null | cut -d' ' -f1"))
         .await?;
@@ -733,20 +733,15 @@ async fn run_via_agent(exec: &dyn Executor, plan: &[Op], agent_bin: Option<&Path
         exec.write_file(remote_bin, &bytes).await?;
         exec.run(&format!("chmod +x {remote_bin}")).await?;
     }
-    exec.write_file(remote_plan, engine::plan_to_yaml(plan)?.as_bytes())
-        .await?;
+    Ok(remote_bin)
+}
 
-    info!("[{}] agent: executing on target ↓", exec.label());
-    let out = exec
-        .run(&format!("{remote_bin} agent --plan {remote_plan}"))
-        .await?;
-    // Forward the agent's output verbatim (already tracing-formatted on the target).
+/// Forward an agent run's output verbatim and map a failed exit to an error.
+fn forward_agent_output(out: &crater_core::executor::CmdOutput) -> Result<()> {
     print!("{}", out.stdout);
     if !out.stderr.trim().is_empty() {
         eprint!("{}", out.stderr);
     }
-    // Plan is transient; the cached binary stays for reuse.
-    let _ = exec.run(&format!("rm -f {remote_plan}")).await;
     if !out.ok() {
         if out.code == 126 || out.code == 127 {
             anyhow::bail!(
@@ -761,10 +756,53 @@ async fn run_via_agent(exec: &dyn Executor, plan: &[Op], agent_bin: Option<&Path
     Ok(())
 }
 
+async fn run_via_agent(exec: &dyn Executor, plan: &[Op], agent_bin: Option<&Path>) -> Result<()> {
+    let remote_bin = push_agent_binary(exec, agent_bin).await?;
+    let remote_plan = "/tmp/crater-plan.yaml";
+    exec.write_file(remote_plan, engine::plan_to_yaml(plan)?.as_bytes())
+        .await?;
+    info!("[{}] agent: executing on target ↓", exec.label());
+    let out = exec
+        .run(&format!("{remote_bin} agent --plan {remote_plan}"))
+        .await?;
+    let _ = exec.run(&format!("rm -f {remote_plan}")).await;
+    forward_agent_output(&out)
+}
+
+/// Run a task plan on the target via the self-bootstrap agent (D-044): push the
+/// binary + the rendered task plan (steps + policy + handlers), then the target
+/// runs `execute_task` locally. `--shell`/local callers use the control-plane
+/// `execute_task` instead.
+async fn run_task_via_agent(
+    exec: &dyn Executor,
+    steps: &[engine::TaskStep],
+    handlers: &BTreeMap<String, Op>,
+    agent_bin: Option<&Path>,
+) -> Result<()> {
+    let remote_bin = push_agent_binary(exec, agent_bin).await?;
+    let remote_plan = "/tmp/crater-task-plan.yaml";
+    exec.write_file(remote_plan, engine::task_plan_to_yaml(steps, handlers)?.as_bytes())
+        .await?;
+    info!("[{}] agent: executing task on target ↓", exec.label());
+    let out = exec
+        .run(&format!("{remote_bin} agent --task-plan {remote_plan}"))
+        .await?;
+    let _ = exec.run(&format!("rm -f {remote_plan}")).await;
+    forward_agent_output(&out)
+}
+
 /// `crater agent --plan <file>`: run ON the target. Reads a lowered plan and
 /// executes it locally (the control machine pushed the plan + this binary).
-async fn run_agent(plan: Option<PathBuf>) -> Result<()> {
-    let plan_path = plan.ok_or_else(|| anyhow!("crater agent: --plan <file> is required"))?;
+async fn run_agent(plan: Option<PathBuf>, task_plan: Option<PathBuf>) -> Result<()> {
+    // Task plan (D-044): steps + handlers, run via execute_task locally.
+    if let Some(tp) = task_plan {
+        let text = std::fs::read_to_string(&tp)
+            .map_err(|e| anyhow!("read task plan {}: {e}", tp.display()))?;
+        let plan = engine::task_plan_from_yaml(&text)?;
+        info!("agent: executing task ({} step(s)) locally", plan.steps.len());
+        return engine::execute_task(&plan.steps, &plan.handlers, &LocalExecutor).await;
+    }
+    let plan_path = plan.ok_or_else(|| anyhow!("crater agent: --plan or --task-plan required"))?;
     let text = std::fs::read_to_string(&plan_path)
         .map_err(|e| anyhow!("read plan {}: {e}", plan_path.display()))?;
     let ops = engine::plan_from_yaml(&text)?;
@@ -1017,7 +1055,7 @@ async fn run_task_on_host(
     spec_dir: &Path,
     hostvars: &BTreeMap<String, BTreeMap<String, String>>,
     do_apply: bool,
-    _do_shell: bool,
+    do_shell: bool,
 ) -> Result<(String, Vec<(String, String)>)> {
     if host.is_local() {
         info!("▶ host {} (local)", host.name);
@@ -1056,9 +1094,14 @@ async fn run_task_on_host(
         print_plan(&ops);
         return Ok((host.name.clone(), Vec::new()));
     }
-    // Task model drives steps from the control plane so per-step retries /
-    // ignore_errors / notify see each result (D-037-b); no agent for tasks.
-    engine::execute_task(&steps, &handlers, exec.as_ref()).await?;
+    // Default: self-bootstrap agent runs the whole task plan locally on the
+    // target (D-044) — same model as components, fewer SSH round-trips. Local
+    // or --shell drives it from the control plane (agentless escape, D-027).
+    if do_shell || host.is_local() {
+        engine::execute_task(&steps, &handlers, exec.as_ref()).await?;
+    } else {
+        run_task_via_agent(exec.as_ref(), &steps, &handlers, None).await?;
+    }
 
     // Capture this host's facts for later groups (D-030).
     let mut registered: Vec<(String, String)> = Vec::new();

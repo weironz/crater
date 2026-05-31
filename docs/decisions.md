@@ -497,3 +497,18 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **inventory 嵌套 `groups:`**:`Inventory` 加 `groups: BTreeMap<String, Vec<String>>`(组→成员,成员是 role 名或其它组名,可嵌套)。task 的 `hosts: <group>` 由 `expand_group` 递归展开为 role 集合(防循环),保留 roles 与之相交的主机(`all`=全部;无 roles 的 CLI/本机主机视为已选)。
 - **守 D-036**:groups 纯声明数据,展开/过滤在 Rust;不把 k8s 拓扑词汇固化进引擎(组名是某部署的数据)。
 - **真机**:`crater apply yq --host n11`→`tasks/yq.yaml` 装 yq v4.53.2;`examples/group-demo.yaml`(`hosts: cluster`)+ inventory `groups: {cluster:[control,worker]}` → n11(control)+n12(worker)各跑一次。33 tests 绿。
+
+---
+
+## 2026-06-01 · task 默认走自举 agent(修正 D-042)
+
+### D-044 task 经自举 agent 执行(自举 agent 贯穿 component+task)
+- **背景**:D-042 把 task 做成控制端逐 step 驱动,理由(控制端要看每步)不充分——component 的 agent 模式本就目标本地跑、回传汇总,用户一直接受。task 单独绕开 agent 破坏了"自举 agent 是 crater 全局默认执行模型"的一致性。
+- **修正**:**task 默认走自举 agent**(与 component 一致);`--shell`/本机走控制端 `execute_task`(agentless 逃生,D-027)。
+- **实现**:
+  - `TaskStep`/`TaskPlan`(steps+handlers)可序列化;`task_plan_to_yaml`/`from_yaml`。
+  - `crater agent --task-plan <file>`:目标本地读 task plan → `execute_task`(LocalExecutor);retries/ignore_errors/notify/handlers 全在目标内执行,输出转发。
+  - 抽 `push_agent_binary`(component/task 共享 binary sha256 缓存推送)+ `forward_agent_output`;新增 `run_task_via_agent`。
+  - `run_task_on_host`:默认 `run_task_via_agent`,`do_shell`/`is_local` 走控制端 `execute_task`。register/hostvars 仍控制端组间串行采集(不变)。
+  - 重建 bundled musl agent(`dist/crater-linux-x86_64`,含 `--task-plan`);sha256 变 → 自动重推。
+- **真机**:命名 task `apply yq --host`(推新 agent → executing task on target → yq v4.53.2);`d037b-demo --host`(ignore_errors/retry/handler 全在目标 agent 内,输出转发);`--shell`(控制端,无 agent)。33 tests 绿。

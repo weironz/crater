@@ -68,7 +68,7 @@ action 项字段(全是引擎读得懂的封闭词汇,**无需执行即可静态
 - **`ignore_errors: true`**:失败(含重试用尽)转 `warn`,不中断后续。
 - **`notify: [hid]`** + 顶层 **`handlers: [...]`**:step 报 `changed` 时排入对应 handler;所有 actions 跑完后,被触发的 handler **去重、按 notify 顺序执行一次**(ansible 语义)。step 为 `ok`(幂等命中)则不触发。
 - **`hosts: <group>`**:只在 `roles` 含该组名的主机跑(`all` = 全部;CLI `--host`/本机给的无 roles 主机视为已选,总匹配)。
-- **task 模型从控制端逐 step 驱动**(不像 component 走 agent):per-step 重试/notify 需要控制端看到每步结果。component 模型仍用 agent;task 的 agent 化(策略编码进 plan)后续。
+- **task 默认走自举 agent**(D-044,与 component 一致):控制端渲染+lower 出 task plan(steps+policy+handlers)推到目标,目标 `crater agent --task-plan` 本地跑 `execute_task`(retries/notify/handlers 都在目标内执行,输出转发回控制端)。`--shell`/本机则走控制端逐 step(agentless 逃生)。register/hostvars 仍由控制端组间串行采集。
 
 ## 控制流在引擎(D-036 落地)
 
@@ -132,8 +132,8 @@ crater apply examples/install-yq.yaml -i inventory.yaml                 # 层3 i
 - `hosts` 本期支持 `all`;**组过滤**后续。
 - 原语已补 **file/copy/service**(D-039)、**lineinfile/user/group**(D-040)。
 - register/hostvars(D-041)、handlers/notify + `retries/ignore_errors` 运行时 + `hosts` 组过滤(D-042)均已实现。
-- 命名 task 库 + inventory 嵌套 `groups:` 已实现(D-043)。
-- 后续:task 的 agent 化(把 retry/notify 策略编码进 plan,与 D-042 控制端驱动权衡)。
+- 命名 task 库 + 嵌套 `groups:`(D-043)、task 默认走自举 agent + `--shell` 逃生(D-044)均已实现。
+- **task 模型(D-037)功能完整**:actions/needs/phase/when、materials/place、register/hostvars、retries/ignore_errors、handlers/notify、hosts 组过滤、命名 task 库、嵌套 groups、自举 agent、16 原语。
 - 命名 task 库(裸名 `crater apply <task>` 解析新 actions 格式)后续;现阶段裸名仍解析 `components/`(旧格式兼容)。
 
 ## 关联

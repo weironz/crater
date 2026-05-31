@@ -217,14 +217,42 @@ pub fn build_plan(desc: &ComponentDescriptor, ctx: &PlanContext) -> crate::Resul
 /// lives here in Rust** (D-036): `when_os`/`when_offline` filter steps, `needs`
 /// topologically orders them; the YAML only declared primitives + data. The
 /// caller must have populated `ctx.materials` (for `place`) and `ctx.os`.
-/// A lowered task step: the Op plus its run policy (D-037-b). The task model
-/// drives steps from the control plane (so retries/notify see each result),
-/// unlike the component model which can ship the whole plan to an agent.
+/// A lowered task step: the Op plus its run policy (D-037-b). Serializable so the
+/// whole task plan can be shipped to the self-bootstrap agent (D-044).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskStep {
     pub op: Op,
+    #[serde(default)]
     pub retries: u32,
+    #[serde(default)]
     pub ignore_errors: bool,
+    #[serde(default)]
     pub notify: Vec<String>,
+}
+
+/// A serializable task plan (steps + handlers) for the agent (D-044): the
+/// control plane renders+lowers it, the target's `crater agent --task-plan`
+/// runs `execute_task` locally — same agent model as the component plan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskPlan {
+    pub steps: Vec<TaskStep>,
+    #[serde(default)]
+    pub handlers: BTreeMap<String, Op>,
+}
+
+pub fn task_plan_to_yaml(
+    steps: &[TaskStep],
+    handlers: &BTreeMap<String, Op>,
+) -> crate::Result<String> {
+    let plan = TaskPlan {
+        steps: steps.to_vec(),
+        handlers: handlers.clone(),
+    };
+    Ok(serde_yaml::to_string(&plan)?)
+}
+
+pub fn task_plan_from_yaml(text: &str) -> crate::Result<TaskPlan> {
+    Ok(serde_yaml::from_str(text)?)
 }
 
 pub fn plan_from_task(
