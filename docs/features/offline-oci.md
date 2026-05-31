@@ -23,27 +23,27 @@ crater 构建 OCI **不用 Dockerfile、不起容器**。`crater build` 把一�
 
 | 层 / 字段 | mediaType / 值 | 内容 |
 |---|---|---|
-| **manifest** | `artifactType: application/vnd.crater.component.v1` | 标记这是 crater 组件（非可运行 image），自描述 annotations（名/版本/run-mode） |
-| **recipe 层** | `application/vnd.crater.recipe.v1+yaml` | 组件的 `component.yaml`（部署配方本身进包） |
+| **manifest** | `artifactType: application/vnd.crater.component.v1` | 标记这是 crater task artifact（非可运行 image），自描述 annotations（名/版本/run-mode）。注:`crater.component` 是历史协议常量名,内容是 task |
+| **recipe 层** | `application/vnd.crater.recipe.v1+yaml` | task 的 YAML 本身（部署配方进包） |
 | **material 层**（每物料一层） | `application/vnd.crater.material.v1` | `materials:` 段声明的物料 blob，按 **material 名** 标注（D-034） |
 | **config** | `application/vnd.crater.component.config.v1+json` | `{name, version, runMode}` |
 
-build 读组件的 **`materials:` 段**（D-034）知道抓什么打包——**不扫 install**，藏在 run_cmd
+build 读 task 的 **`materials:` 段**（D-034）知道抓什么打包——**不扫 actions**，藏在 run_cmd
 里的依赖不会漏。输出示例：
 ```
 yq → artifact crater/yq:4.53.2: recipe + 1 material(s)
 wrote /tmp/yq.oci (1 component artifact(s), … bytes) — OCI artifact (application/vnd.crater.component.v1)
 ```
 
-**load = recipe-replay**：apply 识别 `artifactType` → 取出 recipe（写回 `components/<name>/`）
-+ material blob（按名建 blobmap）→ 走**和在线完全相同的引擎**跑离线管线（D-020）：`place`
+**load = recipe-replay**：apply 识别 `artifactType` → 取出 task recipe + material blob（按名建
+blobmap）→ 走**和在线完全相同的 task 引擎**(`plan_from_task`)跑离线（D-020/D-045）：`place`
 从包内 blob 推送、extract/write_file/systemd 照常 replay、verify 收尾。**没有伪 rootfs、没有
 `tar -xpf -C /` 覆盖宿主根**。
 
 | | Docker | crater B 类 artifact |
 |---|---|---|
 | 是什么 | 被运行时 run 的容器镜像 | 落地宿主机的物料 + 配方包，永不被 run |
-| 构建配方 | Dockerfile（FROM/RUN/COPY） | component.yaml（`materials:` + 声明式 actions） |
+| 构建配方 | Dockerfile（FROM/RUN/COPY） | task.yaml（`materials:` + 声明式 actions） |
 | 安装方式 | 容器运行时拉起 | crater 解包 → recipe-replay（与在线同一引擎） |
 | 依赖 | dockerd/buildkit + 容器运行时 | 纯 Rust，两端零运行时 |
 
@@ -66,7 +66,7 @@ crater save 192.168.73.5:5000/yq:1.0 -o /tmp/yq.oci              # → 离线文
 crater load /tmp/yq.oci                                          # → 库(用包内 ref.name)
 crater apply 192.168.73.5:5000/yq:1.0 --host <host> --password <pw>
 ```
-期望：`crater component artifact → recipe-replay` → `place (offline) yq-bin -> /usr/local/bin/yq` → `yq --version` v4.53.2。
+期望：`crater task artifact → recipe-replay` → `place (offline) yq-bin -> /usr/local/bin/yq` → `yq --version` v4.53.2。
 
 **经 registry 分发**（build → push → 另一台 pull/apply，见 [images-registry.md](images-registry.md)）：
 ```bash

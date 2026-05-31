@@ -1,8 +1,11 @@
 # Crater 离线包格式（OCI）设计
 
-> 定型：离线包基于 **OCI 镜像 / OCI Image Layout**，取代 M2 的 tar.gz（[decisions.md D-018](decisions.md)）。
-> 配套阅读：[design.md §3–§4](design.md)。
-> 最后更新：2026-05-31
+> 定型：离线包 = **B 类 OCI artifact**（OCI Image Layout，artifactType `crater.component`），取代 M2 的 tar.gz（[decisions.md D-018/D-033](decisions.md)）。
+> 配套阅读：[design.md §3–§4](design.md)、[features/offline-oci.md](features/offline-oci.md)。
+> 最后更新：2026-06-01
+>
+> **D-045/D-046 起**：离线包由 **task** 打成（`crater build -f task -t ref` → `crater save -o x.oci`），
+> recipe = task YAML，apply 时按 task `plan_from_task` recipe-replay。下文「组件/component」按 task 理解。
 
 ---
 

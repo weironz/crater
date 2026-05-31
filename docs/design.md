@@ -1,15 +1,21 @@
 # Crater 设计方向（重新整理）
 
 > 北极星文档。新会话读完 `requirements.md` 后读本文，建立「为什么这么设计」的整体心智。
-> 最后更新：2026-05-31
+> 最后更新：2026-06-01
+>
+> **D-046 起,component 模型已收敛为单一 task 模型**:`components/<name>/component.yaml`
+> → `tasks/<name>.yaml`(顶层 `actions:` 列表);多组件 `crater.yaml` spec → 单 task +
+> 分离的 `inventory.yaml`。下文出现的「component / 组件 / recipe」一律按 **task** 理解;
+> 命令以当前 CLI 为准(`crater apply <task>`、`crater build -f task -t ref`、`crater save`)。
+> 引擎原理(零产品知识、在线/离线单管线、自举 agent、OCI 离线、D-036 YAML 纯数据)不变。
 
 ---
 
 ## 0. 一句话
 
-Crater 是一个**领域无关的、跑在 SSH 上的声明式部署引擎**：引擎只懂「怎么做」（通用原语），「做什么」（docker/k3s/mysql…）全是数据（YAML 描述文件）。它有**在线 / 离线**两种形态，共用同一套组件、同一套执行引擎，只在「制品从哪来」这一层分叉。
+Crater 是一个**领域无关的、跑在 SSH 上的声明式远程执行引擎**：引擎只懂「怎么做」（通用原语），「做什么」（装 docker/mysql、改配置、起服务、跑巡检…）全是 **task 数据**（YAML）。它有**在线 / 离线**两种形态，共用同一套 task 与执行引擎，只在「制品从哪来」这一层分叉。
 
-这跟 Ansible 是同一个哲学：ansible-core 不知道 nginx 是什么，nginx 的知识在 playbook/role（数据）里。**「类似 Ansible」与「装万物」是同一个目标。**
+这跟 Ansible 是同一个哲学：ansible-core 不知道 nginx 是什么，知识在 playbook（数据）里。**「类似 Ansible」与「装万物」是同一个目标——且守住「YAML 是数据、逻辑在引擎」（D-036），绝不重蹈 Ansible 把 YAML 变程序的覆辙。**
 
 ---
 
@@ -20,9 +26,9 @@ Crater 是一个**领域无关的、跑在 SSH 上的声明式部署引擎**：�
 | 允许在代码里 | 禁止在代码里（必须是数据） |
 |---|---|
 | 通用原语：`download`/`extract`/`render_template`/`write_file`/`systemd_unit`/`run_cmd`/`pkg_install`/`load_image`… | 产品名、服务名、别名、镜像源、诊断规则、依赖关系 |
-| 幂等契约、DAG 排序、SSH 执行、OCI 打包/解包、镜像导入机制 | 「k8s 其实是 k3s」「docker 的服务叫 docker」「k3s 要拉哪些镜像」 |
+| 幂等契约、DAG 排序、SSH 执行、OCI 打包/解包、镜像导入机制 | 「es 其实是 elasticsearch」「docker 的服务叫 docker」「装 mysql 要哪些 OS 包」 |
 
-**判据**：新增一个可部署对象 = 丢一个 `component.yaml`（必要时加模板/制品清单），**绝不改 Rust 重编译**。
+**判据**：新增一个可部署对象 = 写一个 `tasks/<name>.yaml`（task：原语 + 物料），**绝不改 Rust 重编译**。
 
 这条铁律是「装万物」可信的唯一保证。已在「还债 A 批」清掉历史违规（`resolve_alias`、`doctor` 写死服务名、`LoadImage` 写死 docker、`source.rs` 写死镜像表）——详见 [decisions.md D-017](decisions.md)。
 
@@ -38,15 +44,15 @@ Crater 是一个**领域无关的、跑在 SSH 上的声明式部署引擎**：�
 │  OCI 打包 / 解包 / 镜像导入（离线机制，不含具体镜像名）       │
 └──────────────────────────────────────────────────────────┘
               ▲ 只 parse / 执行，不命名产品
-┌── 数据（YAML，领域知识，放目录即生效，可热加载）──────────┐
-│  components/<name>/component.yaml   ：原语序列 + requires      │
-│                       + aliases + images(离线要打包的镜像)     │
-│  crater.yaml                        ：inventory + 组件/任务     │
-│  mirrors.yaml（可选覆盖）           ：镜像/代理源              │
+┌── 数据（YAML，领域知识，放目录即生效）─────────────────────┐
+│  tasks/<name>.yaml      ：actions(原语 + needs) + materials     │
+│                           + hosts + handlers + register          │
+│  inventory.yaml（-i）   ：hosts + 嵌套 groups（targeting）       │
+│  mirrors.yaml（可选覆盖）：镜像/代理源                          │
 └──────────────────────────────────────────────────────────┘
 ```
 
-> **recipe 与 instance 可分可合（D-025）**：`components/<name>/` 是 **recipe**（怎么装，可复用/可签名/可进 OCI 镜像）；`crater.yaml` 是 **instance**（装到哪/哪些，含 inventory 与密钥）。分离是为复用与密钥隔离，但**不强制**——`ComponentRef` 可**内联** `install/verify/…`（Path B），让一个 spec 文件即完整描述部署；`components/` 退化为可选复用库。三种用法并存：零 spec（`crater apply yq --host`）／单文件内联／分离复用。
+> **recipe 与 targeting 分离**：`tasks/<name>.yaml` 是 **recipe**（要达成什么，可复用/打成 OCI artifact）；`inventory.yaml` 是 **targeting**（装到哪/哪些，含密钥）。命名 task（`crater apply yq`）从 `tasks/` 解析；也可直接 `crater apply ./x.yaml`（自带 `hosts:`）+ `--host`/`-i` 提供目标。
 
 ---
 
@@ -104,23 +110,21 @@ bundle.oci  (tar of an OCI layout)
 └── blobs/sha256/
       ├── <digest>  crater-manifest # crater 自定义 mediaType：spec + 制品名→digest→落地动作
       ├── <digest>  components 层    # 组件描述文件打包
-      ├── <digest>  artifact 层…     # 二进制/tarball（如 node_exporter、k3s 二进制），内容寻址
-      └── <digest>  image blob…      # 容器镜像（pause/coredns/mysql/es…）的 manifest+layers 嵌套其中
+      ├── <digest>  material 层…     # 二进制/tarball（如 yq、zot 二进制），内容寻址
+      └── <digest>  recipe 层…       # task YAML（recipe-replay 据此回放）
 ```
 
 - **制品** 与 **容器镜像** 都以 OCI blob 内容寻址存放；`crater-manifest` 是 crater 在 OCI 之上的逻辑索引（哪个制品对应哪个 digest、落地到哪、用哪个原语）。
 - **D-017 守则**：引擎只懂「如何打/解 OCI、如何把镜像导入运行时」；**哪些镜像/制品要打包，由组件数据声明**（组件新增 `images:` 字段，列出该产品离线所需镜像，可带 digest 锁定）。
 
-### 4.1 build（在线控制机）`crater build -f spec.yaml -o x.oci`
-1. spec → 组件（DAG）。
-2. 收集每个组件：`download` 制品（`fetch_best`，CN 镜像 fallback）+ `images:` 声明的容器镜像（OCI distribution 拉取，纯 Rust + rustls）。
-3. 写 blobs（内容寻址）→ 构建 manifest/index + crater 注解 → 导出 oci-archive（可选 zstd）。
+### 4.1 build（在线控制机）`crater build -f task.yaml [-t ref]` → 本地库
+1. 读 task → `materials`（binary：`fetch_best`，CN 镜像 fallback）。
+2. recipe = task YAML 本身；写 blobs（内容寻址）→ artifactType 清单(`crater.component`) → 进本地库（`crater save <ref> -o x.oci` 导出文件）。
 
-### 4.2 deploy（隔离目标机）`crater deploy --bundle x.oci --host ...`
-1. 分块上传 OCI 包到目标机（D-009）。
-2. 目标机解包 OCI Layout（零网络），digest 自校验。
-3. 制品落地：文件→按描述放置；容器镜像→`ctr image import`/`docker load` 导入本地运行时，或推到**临时 registry**（F13）供多节点共享。
-4. 跑同一套计划引擎（离线模式：`download` Op → push-from-blob Op，与现状同形）。
+### 4.2 apply（隔离目标机）`crater apply <ref>|x.oci --host ...`
+1. 从本地库 / registry / 文件取 artifact，分块上传到目标机（D-009）。
+2. digest 自校验 → 识别 `artifactType` → **recipe-replay**：用 `plan_from_task` 离线回放（`place` 从包内 blob 推送），控制端 `execute_task`。
+3. 与在线**同一套 task 引擎**，仅「制品从哪来」分叉（D-020）。
 
 ### 4.3 OCI 用法分 A/B：容器镜像 vs 物料包（D-032）
 
@@ -253,10 +257,12 @@ crater ai diagnose <release> # AI/规则诊断（= 现 doctor；见 §7.5）
 ```
 所有破坏性动词（apply/rollback/remove）支持 `--dry-run`；`plan` 是 apply 预览的快捷式。
 
+> **现状映射**：已实现 `apply`/`build`/`save`/`load`/`tag`/`images`/`pull`/`push`/`ai`/`doctor`/`run`/`cp`/`create`/`agent`；`bundle` = `build`+`save`(B 类 artifact)；`inspect`/`verify`/`rollback`/`remove` 仍为路线。
+
 ### 7.2 `<source>` vs `<release>`：两种第一类对象
 | 概念 | 是什么 | 谁吃它 |
 |---|---|---|
-| **`<source>`** | recipe+制品的**来源**：组件名 / `./x.yaml` playbook / `oci://…` 镜像 / `./x.crater` 归档 / `-f spec.yaml` | plan / apply / bundle / inspect / verify |
+| **`<source>`** | task 的来源：命名 task（`yq`→`tasks/yq.yaml`）/ `./x.yaml` task 文件 / 镜像 `docker.io/…` / `./x.oci` artifact | plan / apply / bundle / inspect / verify |
 | **`<release>`** | 已部署的**实例**：名字 + 修订历史 + 落在哪些主机 | rollback / remove / ai diagnose |
 
 `apply` = 把一个 `<source>` 收敛成/更新一个 `<release>`。release 名默认取组件名，`--release <name>` 可区分（如 `docker-prod` / `docker-staging`）。

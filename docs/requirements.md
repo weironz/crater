@@ -1,7 +1,11 @@
 # Crater 需求文档 v0.3
 
-> 状态：需求基线（M1–M5 已实现验证；设计方向重整，见 [design.md](design.md)）
-> 最后更新：2026-05-31
+> 状态：需求基线；设计方向见 [design.md](design.md)。
+> 最后更新：2026-06-01
+>
+> **D-046 起单一 task 模型**：本文下文的「component / 组件」均按 **task** 理解；
+> `crater <component>` 等旧命令现统一为 `crater apply <task>`（裸名解析 `tasks/<name>.yaml`）。
+> 引擎原则（D-017 零产品知识、D-036 YAML 纯数据）不变。
 
 ---
 

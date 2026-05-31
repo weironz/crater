@@ -1,14 +1,16 @@
-//! `crater` CLI.
+//! `crater` CLI — a declarative remote-execution engine (task model).
 //!
 //! Forms (executes by default; pass --dry-run to only print the plan):
-//!   crater <component> [--host H --user U --password P --port N] [--version X] [--os debian|rhel] [--dry-run]
-//!   crater apply -f crater.yaml [--dry-run]
-//!   crater build -f spec.yaml -o x.bundle                              (online: make offline bundle)
-//!   crater deploy --bundle x.bundle --host H --password P [--dry-run]  (offline)
-//!   crater ai "<request>" [-o crater.yaml]                             (M4)
-//!   crater doctor --file log.txt | --host H --password P [--ai]        (M5)
-//!   crater run --host H --password P -- <cmd>                          (ad-hoc, ansible -m shell)
-//!   crater agent --plan <file>                                         (internal, runs on the node)
+//!   crater apply <task>.yaml [--host a,b | -i inv.yaml] [--key K] [--dry-run|--shell]
+//!   crater apply <name>                       # named task → tasks/<name>.yaml
+//!   crater <name> [flags]                      # shorthand for `crater apply <name>`
+//!   crater apply <image-ref|x.oci> --host H    # deploy an image / offline artifact
+//!   crater build -f task.yaml [-t ref]         # → B 类 OCI artifact in the local store
+//!   crater save <ref> -o x.oci                 # export a stored artifact to a file
+//!   crater ai "<request>" [-o task.yaml]       # NL → validated task
+//!   crater doctor --file log.txt | --host H    # offline rule-based diagnosis
+//!   crater run --host H --password P -- <cmd>  # ad-hoc (ansible -m shell style)
+//!   crater agent --plan|--task-plan <file>     # internal (runs on the target node)
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -30,7 +32,7 @@ use crater_core::store::ImageStore;
 #[command(
     name = "crater",
     version,
-    about = "Deploy anything — online & offline component/cluster installer"
+    about = "Deploy anything — declarative remote-execution engine (task model, online & offline)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -39,10 +41,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Apply a source — one command for online & offline (D-020). `<source>`
-    /// auto-detects: a spec `.yaml` (online), an OCI archive `.oci` (offline
-    /// load+install), or a component name (online shortcut). Same engine &
-    /// idempotency either way; offline just sources artifacts from the bundle.
+    /// Apply a task — one command for online & offline (D-020). `<source>`
+    /// auto-detects: a task `.yaml`, a named task (`tasks/<name>.yaml`), an image
+    /// reference, or an `.oci` artifact. `--host`/`-i`/none picks targets. Same
+    /// engine & idempotency online or offline (offline replays the artifact).
     Apply {
         /// `<source>`, or a `<name>` label when a second positional `<source>`
         /// follows: `crater apply app01 docker.io/library/app01:v1.0`.
@@ -76,13 +78,14 @@ enum Cmd {
         #[arg(long)]
         shell: bool,
     },
-    /// Build a B 类 OCI artifact from a spec into the local store (like
+    /// Build a task into a B 类 OCI artifact in the local store (like
     /// `docker build`). Export to a file with `crater save`.
     Build {
+        /// Task file to build (its `materials` are fetched and packed).
         #[arg(short, long)]
         file: PathBuf,
         /// Reference (tag) for the artifact, e.g. `192.168.1.5:5000/yq:1.0`.
-        /// Defaults to `crater/<name>:<version>`; single-component specs only.
+        /// Defaults to `crater/<name>:<version>`.
         #[arg(short = 't', long)]
         tag: Option<String>,
     },
@@ -94,7 +97,8 @@ enum Cmd {
         #[arg(short, long)]
         output: PathBuf,
     },
-    /// Deploy an offline bundle to a target (zero network on the target).
+    /// Deploy an offline `.oci` task artifact to a target (= `crater apply
+    /// <x.oci>`; zero network on the target).
     Deploy {
         #[arg(long)]
         bundle: PathBuf,
@@ -110,7 +114,7 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// AI copilot: natural language -> validated crater.yaml (M4).
+    /// AI copilot: natural language -> a validated task yaml.
     /// Configure via CRATER_AI_ENDPOINT / CRATER_AI_KEY / CRATER_AI_MODEL.
     Ai {
         #[arg(trailing_var_arg = true, required = true)]
@@ -180,7 +184,7 @@ enum Cmd {
     Push {
         reference: String,
     },
-    /// Import an oci-archive file (e.g. `build --image` output) into the store.
+    /// Import an oci-archive file (e.g. `crater save` output) into the store.
     Load {
         /// Path to the .oci archive.
         file: PathBuf,

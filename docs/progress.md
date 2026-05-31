@@ -1,6 +1,11 @@
 # Crater 进展日志（自主开发）
 
 > 「外部记忆」。新会话先读本文件 + requirements.md + decisions.md 恢复上下文。
+>
+> **当前状态（2026-06-01，D-046 后）**：单一 **task 模型**——`crater apply <task>`（本机/`--host`/`-i`/
+> 命名 task/镜像/`.oci`）、自举 agent 贯穿、离线 OCI artifact（build/save/load/recipe-replay）、
+> 16 原语、register/hostvars/handlers/retries/groups。component 模型已收敛删除。
+> **下文 M1–M5 等历史条目按时间顺序保留为开发记录（component 时代），不代表当前形态。**
 
 ## 🌅 早上总结（已逐项亲眼验证，可信）
 

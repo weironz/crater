@@ -2,6 +2,10 @@
 
 > 每实现一个功能就加一份文档：**功能介绍 + 基本 demo（可复现命令）+ 验证结果 + 关联 ADR**。
 > 篇幅大的功能可在本目录下再建子文件夹分多文档。命令用占位符 `<host>`/`<pw>`。
+>
+> **D-046 后单一 task 模型**：下列文档中「component / 组件」按 **task** 理解，命令以
+> [README](../../README.md) / [action-tasks.md](action-tasks.md) 为准；早期文档（idempotency /
+> engine-zero / modules / ssh-executor 等）的 component 措辞属历史，原理对 task 同样成立。
 
 ## 索引
 
