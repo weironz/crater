@@ -383,94 +383,8 @@ async fn main() -> Result<()> {
             cmd,
         } => run_adhoc(&host, &user, password, port, &cmd.join(" ")).await,
         Cmd::Agent { plan, task_plan } => run_agent(plan, task_plan).await,
-        Cmd::Component(args) => deploy_shortcut(args).await,
+        Cmd::Component(args) => component_shortcut(args).await,
     }
-}
-
-#[derive(Default)]
-struct ShortcutFlags {
-    version: Option<String>,
-    os_override: Option<String>,
-    host: Option<String>,
-    user: String,
-    port: u16,
-    password: Option<String>,
-    components_dir: PathBuf,
-    do_apply: bool,
-    /// Escape hatch: force the agentless shell executor instead of the default
-    /// self-bootstrap agent (use when the target can't run the crater binary).
-    shell: bool,
-    /// Override the binary shipped in agent mode (e.g. a musl static build).
-    agent_bin: Option<PathBuf>,
-}
-
-fn parse_flags(rest: &[String]) -> Result<ShortcutFlags> {
-    let mut f = ShortcutFlags {
-        user: "root".into(),
-        port: 22,
-        components_dir: PathBuf::from("components"),
-        password: std::env::var("CRATER_SSH_PASSWORD").ok(),
-        do_apply: true, // execute by default; --dry-run flips it off
-        ..Default::default()
-    };
-    let mut i = 0;
-    while i < rest.len() {
-        match rest[i].as_str() {
-            "--version" => {
-                f.version = rest.get(i + 1).cloned();
-                i += 2;
-            }
-            "--os" => {
-                f.os_override = rest.get(i + 1).cloned();
-                i += 2;
-            }
-            "--host" => {
-                f.host = rest.get(i + 1).cloned();
-                i += 2;
-            }
-            "--user" => {
-                if let Some(v) = rest.get(i + 1) {
-                    f.user = v.clone();
-                }
-                i += 2;
-            }
-            "--password" => {
-                f.password = rest.get(i + 1).cloned();
-                i += 2;
-            }
-            "--port" => {
-                if let Some(v) = rest.get(i + 1) {
-                    f.port = v.parse().map_err(|_| anyhow!("invalid --port: {v}"))?;
-                }
-                i += 2;
-            }
-            "--components-dir" => {
-                if let Some(v) = rest.get(i + 1) {
-                    f.components_dir = PathBuf::from(v);
-                }
-                i += 2;
-            }
-            "--dry-run" => {
-                f.do_apply = false;
-                i += 1;
-            }
-            "--shell" => {
-                f.shell = true;
-                i += 1;
-            }
-            "--agent" => {
-                // Agent is now the default; accept the flag as a no-op for
-                // back-compat.
-                i += 1;
-            }
-            "--agent-bin" => {
-                f.agent_bin = rest.get(i + 1).map(PathBuf::from);
-                i += 2;
-            }
-            other => return Err(anyhow!("unknown flag: {other}")),
-        }
-    }
-    Ok(f)
 }
 
 async fn run_adhoc(
@@ -528,102 +442,62 @@ async fn push_file(
     Ok(())
 }
 
-/// Resolve a user-typed name (which may be an alias) to a real component dir
-/// name. The engine holds ZERO product knowledge: aliases are declared in each
-/// component's `aliases:` field (data), and we build the map by scanning
-/// `components/`. A short alias works because some component's `aliases:` field
-/// declares it (data) — not because the engine hardcodes any product name.
-fn resolve_component(name: &str, components_dir: &Path) -> String {
-    // Exact directory match wins — no scan needed.
-    if components_dir.join(name).join("component.yaml").is_file() {
-        return name.to_string();
-    }
-    if let Ok(rd) = std::fs::read_dir(components_dir) {
-        for e in rd.flatten() {
-            let yaml = e.path().join("component.yaml");
-            if !yaml.is_file() {
-                continue;
+/// `crater <name> [flags]` ≡ `crater apply <name> [flags]` (D-046): the bare
+/// name routes to the named task `tasks/<name>.yaml`. The old component-spec
+/// shortcut is gone — everything is a task.
+async fn component_shortcut(args: Vec<String>) -> Result<()> {
+    let mut name: Option<String> = None;
+    let mut host: Option<String> = None;
+    let mut user = String::from("root");
+    let mut password: Option<String> = std::env::var("CRATER_SSH_PASSWORD").ok();
+    let mut key: Option<PathBuf> = None;
+    let mut port: u16 = 22;
+    let mut dry_run = false;
+    let mut shell = false;
+    let mut inventory: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--host" => {
+                i += 1;
+                host = args.get(i).cloned();
             }
-            if let Ok(desc) = ComponentDescriptor::from_yaml_file(&yaml) {
-                if desc.aliases.iter().any(|a| a == name) {
-                    return desc.name;
+            "--user" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    user = v.clone();
                 }
             }
-        }
-    }
-    // No match: hand back the original so the caller fails with a clear error.
-    name.to_string()
-}
-
-async fn deploy_shortcut(args: Vec<String>) -> Result<()> {
-    let mut it = args.into_iter();
-    let raw = it.next().ok_or_else(|| anyhow!("missing component name"))?;
-    let rest: Vec<String> = it.collect();
-    let f = parse_flags(&rest)?;
-    let name = resolve_component(&raw, &f.components_dir);
-
-    let component_dir = f.components_dir.join(&name);
-    let desc = ComponentDescriptor::from_yaml_file(&component_dir.join("component.yaml"))
-        .map_err(|e| anyhow!("failed to load component '{name}': {e}"))?;
-
-    let exec: Box<dyn Executor> = match &f.host {
-        Some(host) => {
-            let pw = f
-                .password
-                .as_deref()
-                .ok_or_else(|| anyhow!("--password (or CRATER_SSH_PASSWORD) required for --host"))?;
-            println!("Connecting to {}@{host}:{} ...", f.user, f.port);
-            Box::new(SshExecutor::connect(host, f.port, &f.user, pw).await?)
-        }
-        None => Box::new(LocalExecutor),
-    };
-
-    let osf = match &f.os_override {
-        Some(s) => OsFamily::from_name(s),
-        None => {
-            if f.host.is_some() {
-                os::detect_via(exec.as_ref()).await
-            } else {
-                os::detect_local()
+            "--password" => {
+                i += 1;
+                password = args.get(i).cloned();
             }
+            "--key" => {
+                i += 1;
+                key = args.get(i).map(PathBuf::from);
+            }
+            "--port" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    port = v.parse().map_err(|_| anyhow!("invalid --port: {v}"))?;
+                }
+            }
+            "-i" | "--inventory" => {
+                i += 1;
+                inventory = args.get(i).map(PathBuf::from);
+            }
+            "--dry-run" => dry_run = true,
+            "--shell" => shell = true,
+            s if !s.starts_with('-') && name.is_none() => name = Some(s.to_string()),
+            other => anyhow::bail!(
+                "unknown flag '{other}' for `crater <name>`; use `crater apply` for the full surface"
+            ),
         }
-    };
-
-    let ver = f
-        .version
-        .clone()
-        .or_else(|| desc.version_default.clone())
-        .unwrap_or_else(|| "latest".into());
-
-    let ctx = PlanContext::new(osf, ver.clone(), component_dir);
-    let plan = build_plan(&desc, &ctx)?;
-
-    // Agent is the default execution model (D-027); --shell forces the
-    // agentless shell executor. A local target (no --host) always runs locally.
-    let is_remote = f.host.is_some();
-    let use_shell = f.shell || !is_remote;
-    let mode = if !f.do_apply {
-        "dry-run"
-    } else if use_shell {
-        "apply via shell"
-    } else {
-        "apply via agent"
-    };
-    info!(
-        "{} v{ver} → {} ({}, os={}, {} steps)",
-        desc.name,
-        exec.label(),
-        mode,
-        osf.as_str(),
-        plan.len()
-    );
-
-    if !f.do_apply {
-        print_plan(&plan);
-        info!("dry-run only (--dry-run); omit it to execute");
-        return Ok(());
+        i += 1;
     }
-    execute_plan(&plan, exec.as_ref(), use_shell, f.agent_bin.as_deref()).await
+    let name = name.ok_or_else(|| anyhow!("missing task name"))?;
+    apply_source(None, Some(name), None, inventory, host, user, password, key, port, dry_run, shell)
+        .await
 }
 
 /// Dispatch a plan to the chosen executor. Default is the self-bootstrap agent
@@ -908,7 +782,9 @@ async fn apply_source(
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
         return apply_image_ref(&src, hosts, !dry_run).await;
     }
-    // Named task in the library: `crater apply <name>` → tasks/<name>.yaml (D-043).
+    // Named task in the library: `crater apply <name>` → tasks/<name>.yaml
+    // (D-043). This is the only bare-name path now (D-046): component shortcut
+    // and component-spec fleet are gone — everything is a task.
     let named = PathBuf::from("tasks").join(format!("{src}.yaml"));
     if named.is_file() && crater_core::task::is_task_file(&named) {
         info!("apply: {src} → named task (tasks/{src}.yaml)");
@@ -916,40 +792,10 @@ async fn apply_source(
         let groups = inventory_groups(inventory.as_deref())?;
         return apply_task(&named, hosts, groups, None, !dry_run, shell).await;
     }
-    // Online: bare component name → shortcut (build its flag args). Comma-hosts
-    // and key auth route through the unified pipeline instead (below) when given.
-    if inventory.is_some() || host.as_deref().map(|h| h.contains(',')).unwrap_or(false) || key.is_some() {
-        info!("apply: {src} → online (component, fleet)");
-        let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
-        let spec = CraterSpec {
-            inventory: crater_core::spec::Inventory { hosts, groups: Default::default() },
-            components: vec![component_ref(&src, "")],
-            offline: false,
-            ai: None,
-        };
-        return run_pipeline(&spec, &Artifacts::Online, &PathBuf::from("components"), Path::new("."), !dry_run, shell).await;
-    }
-    info!("apply: {src} → online (component)");
-    let mut args = vec![src];
-    if let Some(h) = host {
-        args.push("--host".into());
-        args.push(h);
-    }
-    args.push("--user".into());
-    args.push(user);
-    if let Some(pw) = password {
-        args.push("--password".into());
-        args.push(pw);
-    }
-    args.push("--port".into());
-    args.push(port.to_string());
-    if dry_run {
-        args.push("--dry-run".into());
-    }
-    if shell {
-        args.push("--shell".into());
-    }
-    deploy_shortcut(args).await
+    anyhow::bail!(
+        "'{src}': not a file, image ref, or named task. Put a task at tasks/{src}.yaml, \
+         or pass a path / -f <file> / an image reference."
+    )
 }
 
 async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
