@@ -59,7 +59,7 @@ fn rules() -> &'static [Rule] {
             finding: Finding {
                 category: "disk",
                 cause: "磁盘空间不足",
-                fix: "清理 /var/lib/docker、/var/lib/rancher 或日志;扩容后重试(df -h 定位)。",
+                fix: "清理大目录(/var/lib、日志等);扩容后重试(df -h 定位)。",
             },
         },
         Rule {
@@ -107,7 +107,7 @@ fn rules() -> &'static [Rule] {
             finding: Finding {
                 category: "cgroup",
                 cause: "cgroup 驱动不匹配或 cgroup v2 问题",
-                fix: "统一 cgroupdriver=systemd(docker daemon.json 与 kubelet 一致)。",
+                fix: "统一 cgroupdriver=systemd(各服务的 cgroup 驱动保持一致)。",
             },
         },
     ];

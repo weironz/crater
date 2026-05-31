@@ -367,3 +367,62 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - 在线 `crater yq --host .11`：`place yq-bin <- <url>` → changed=1（chmod 折入）；再跑 changed=0（幂等 ok）。
   - 离线 `build`（日志 `fetch material yq-bin`，按名打包）→ load→push→清库→`apply zot/yq:m --host .12`：`place (offline) yq-bin -> /usr/local/bin/yq` → n12 `yq --version` v4.53.2。
 - **范围**：本期把 `binary` 全链路打通（yq 闭环），`image`/`os_package` 与 build 的 version×os 矩阵（用 OCI image index 按平台/annotation 组织）为**已设计、待 mysql/docker 落地**的下一阶段（评审问题四）。yq 作最小闭环先证模型，再推到有真实依赖闭包的组件。
+
+---
+
+## 2026-05-31 · apply 三层目标 + SSH key 认证 + 本机部署
+
+### D-035 apply 按规模分三层目标（本机 / --host 少量 / -i 大量）+ key 认证
+- **背景**：用户要 apply 按部署规模自然分层，命令形态 `crater apply <name> <source>`：
+  - 不指定主机 → **本机单机**；`--host a,b,c`（共用一套凭据）→ **少量机器**；`-i inventory.yaml`（每主机独立凭据）→ **大量机器**。
+  - 提出 `--host` 共用密码的限制，要 key 认证 + 异构凭据解法。
+- **决策/实现**：
+  - **目标解析三层**（`target_hosts`）：`-i` 读文件 inventory（每主机各自 password/key）；`--host` 按逗号拆多主机、共用 `--user`+`--password|--key`+`--port`；都没有 → 单个**本机 host**（`Host::local()`，`address=@local`）。
+  - **本机执行**：`Host::is_local()` 时 `run_host` 用 `LocalExecutor`，且强制 `use_shell=true`（本机不 bootstrap agent）。`LocalExecutor::write_file` 改为直写文件系统（绕开 trait 默认的 shell-base64，13MB 二进制会撑爆 `MAX_ARG_STRLEN`）。
+  - **SSH key 认证**：`SshAuth::{Password, Key{path,passphrase}}` + `SshExecutor::connect_auth`；key 走 `russh::keys::load_secret_key` + `authenticate_publickey`。`Host` 加 `key: Option<PathBuf>`，key 优先于 password。
+  - **`apply <name> <source>` 双位置参数**：两个位置参数时首个为部署 label、次个为 source；单个时即 source（向后兼容）。
+  - **异构凭据解法**：`--host` 故意只共用一套凭据（少量同构机器）；每主机不同密码/key → 用 `-i inventory.yaml`（每 host 各带 password/key）。
+- **真机验证**（zot 上 yq B 类 artifact，pull→recipe-replay）：
+  - 层1：`apply app01 <zot>/yq:m`（无主机）→ 本机 `/usr/local/bin/yq` v4.53.2。
+  - 层2：`--host 192.168.73.11,192.168.73.12 --password 123456` → 两台并行装好。
+  - 层3：`-i inv.yaml` → n11/n12 装好。
+  - key：`ssh-keygen` 装公钥到 n12 → `--key /tmp/crater_key`（无密码）→ n12 装好。
+
+---
+
+## 2026-06-01 · 不可妥协铁律：YAML 是数据，逻辑在引擎
+
+### D-036 YAML 纯声明（数据），绝不变成编程语言；机制上堵死
+- **原则（凌驾所有功能需求）**：crater 用户写的 YAML（action.yaml/component.yaml）永远是**纯声明式数据**。所有"怎么做"的逻辑——条件、循环、计算、重试、幂等、错误处理、依赖排序——**全在 Rust 引擎**。YAML 只允许两类内容：(1) 声明用哪个 action 原语 + 参数；(2) 取值引用 `{{ variable.path }}`（纯代入，无运算）。
+- **判据（每次设计 YAML 字段/模板必过）**：这份 YAML 能否被另一个程序**静态读取/分析/diff/生成而无需执行**？能→数据（对）；必须执行才知道干什么→程序（错，重蹈 Ansible）。可静态分析是 **dry-run / preflight / AI 生成后人工审核**三大能力的前提，YAML 一旦有逻辑这些全失效。
+- **理论根基**：声明式配置 + 机制/策略分离（机制=引擎能力，策略=YAML 数据）。正面参照 Kubernetes（逻辑全在 controller）、Terraform（HCL 故意非图灵完备）。**反面教材 Ansible**：给 YAML 加 `when`/`loop`/Jinja2，最终 YAML 成了无类型检查、无调试器、不可静态分析的烂语言。**要 Ansible 的能力，不要它把 YAML 变程序的覆辙。**
+- **遇到"似乎要在 YAML 写逻辑"时的标准动作**（默认把逻辑挪进 Rust）：
+  - 循环 → 引擎在 Rust 遍历算好，作为普通变量喂给 YAML（`{{ seed_hosts }}`）。
+  - 计算 → 引擎算出结果存变量，YAML 只取结果（不放公式）。
+  - 条件 → 引擎预定义的**封闭枚举开关**（如 `when_offline: true`，有限可知），或拆成不同 action 变体；**不是**用户可自由书写的布尔表达式。
+  - 新操作 → 先用现有原语（尤其 `run_cmd`）组合；仅当高频 + run_cmd 别扭 + 值得引擎白盒理解时，才**新增 action 原语（Rust 代码，收敛在 ~20–30 个内）**。新增的是"种类"，不是 YAML 语法。
+- **机制上堵死（不靠自觉）**：模板引擎必须是"残废"的——只做 `{{ path }}` 替换，用户想写 if/for/表达式/filter 时**直接报错**，而非默默放过。等同 Terraform 主动选择"配置语言能力不足"。
+- **当前代码审计（D-036 立时）**：
+  - `engine::render` 已是纯 `{{ path }}` 替换（结构合规），但 ① 注释"Tera/minijinja can replace this later"是违背原则的邀请，需删除并反转为"故意残废、禁止升级"；② 对 `{{ env=='prod' }}` 这类**默默放过**而非报错——待加：替换后扫描残留 `{{...}}`，凡非可解析的纯点路径（含 `|`/`==`/运算符等）即报错。
+  - `Action`/`ComponentRef` 模型无 `when`/`loop`/表达式字段（合规）；`RunCmd.check` 是 shell 探针（run_cmd 白盒逃生口，非 YAML 表达式语言）。
+- **影响**：取代/强化 [D-017]（引擎零产品知识）——D-017 管"引擎不认识产品"，D-036 管"YAML 不写逻辑"。后续 ansible 化 task/play 层必须在此约束下设计：能力进引擎，YAML 保持愚蠢。
+
+---
+
+## 2026-06-01 · action 层:通用 task 模型(Ansible 能力,守 D-036)
+
+### D-037 通用 task 模型形态定案 + 分期实现
+- **心智**:`crater apply <动作>`——task = "在目标机达成的一组状态"(装产品只是其一),crater 成为通用声明式远程执行引擎。详见 [action-layer.md](action-layer.md)。**严守 D-036**:task 纯数据,控制流全在 Rust。
+- **形态定案**(§8 六项)：
+  1. 顶层动作列表字段名 **`actions:`**。
+  2. **phase 并入**有序 `actions`,每项可选 `phase:`(默认 `install`),取代独立三段;旧 `component.yaml` 的 preflight/install/verify 三段仍兼容加载。
+  3. 命名 task 库目录**保留 `components/`**(概念上即 task 库)。
+  4. targeting:task 文件 `hosts: <group>|all` + `-i` 提供 inventory/groups + `--host` 临时覆盖(共用凭据)+ 无→本机(复用 D-035 三层)。
+  5. **handlers/notify 后置**。
+  6. 条件开关首批 **`when_os` + `when_offline`**(封闭枚举,非自由表达式)。
+- **命令识别(方案 A,后缀自识别)**:裸名→命名 task;`.yaml/.yml`→文件;`.tar/.oci`→离线包;含 `/`或`:`→镜像;`-f` 强制文件。优先级:`-f` > `/`或`:` > 后缀 > 裸名。
+- **D-036 在 task 模型的落地**:循环→引擎遍历(action 收列表参数)或 targeting(组内逐台);条件→`when_os`/`when_offline` 封闭枚举或拆 action;计算→引擎 fact 算好再 `{{ }}` 取;排序→`needs`(复用 dag 拓扑);模板→残废渲染器(D-036/#1 已落地)。
+- **分期**：
+  - **本期(D-037-a)**：`TaskFile` schema(`name/hosts/vars/materials/actions[]`,action 项含 `id/needs/phase/when_os/when_offline/retries/ignore_errors` + 原语)+ 引擎 `plan_from_task`(when 过滤 → needs 拓扑 → 生成 plan)+ apply 识别 task 文件 + 三层 targeting 执行 + 真机 yq task 验证。`retries/ignore_errors` 字段已解析,**运行时行为下期**;`hosts` 本期支持 `all`(组过滤下期)。
+  - **后期(D-037-b)**：handlers/notify、retries/ignore_errors 运行时、`hosts` group 过滤、原语补齐(file/copy/service/lineinfile/user/group)、register/hostvars 在 task 模型下打通。
+- **守 D-036**：实现中任何"想给 YAML 加条件/循环/表达式"的冲动 → 停 → 挪进 Rust。

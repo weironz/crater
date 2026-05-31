@@ -5,8 +5,8 @@
 
 # Host/registry rewrite rules applied to download & image URLs (online deploy).
 registry_rewrites:
-  - from: registry.k8s.io
-    to: registry.aliyuncs.com/google_containers
+  - from: docker.io
+    to: docker.m.daocloud.io
 
 # GitHub download mirrors, tried in order AFTER a direct attempt.
 github_mirrors:

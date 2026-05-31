@@ -238,12 +238,12 @@ mod tests {
 
     #[tokio::test]
     async fn nl_to_spec_validates_components() {
-        let avail = vec!["docker".to_string(), "k3s".to_string()];
-        let p = FakeProvider("```yaml\ncomponents:\n  - name: k3s\n```".into());
-        let (_y, spec) = nl_to_spec(&p, &avail, "give me k8s").await.unwrap();
-        assert_eq!(spec.components[0].name, "k3s");
+        let avail = vec!["docker".to_string(), "node_exporter".to_string()];
+        let p = FakeProvider("```yaml\ncomponents:\n  - name: node_exporter\n```".into());
+        let (_y, spec) = nl_to_spec(&p, &avail, "give me a metrics exporter").await.unwrap();
+        assert_eq!(spec.components[0].name, "node_exporter");
 
-        let p2 = FakeProvider("```yaml\ncomponents:\n  - name: kubernetes_full\n```".into());
+        let p2 = FakeProvider("```yaml\ncomponents:\n  - name: not_a_component\n```".into());
         assert!(nl_to_spec(&p2, &avail, "x").await.is_err());
     }
 }

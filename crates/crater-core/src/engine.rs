@@ -7,7 +7,7 @@
 //! Offline mode: when [`PlanContext::offline_blobs`] is set, `download` actions
 //! become [`Op::PushFile`] (push a pre-fetched blob) instead of `curl`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -17,10 +17,16 @@ use crate::executor::Executor;
 use crate::os::OsFamily;
 use crate::source::OnlineSource;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Phase {
+    // Serialize as PascalCase (keeps the lowered-plan wire format stable for the
+    // self-bootstrap agent); `alias` lets task YAML use lowercase `phase: verify`.
+    #[serde(alias = "preflight")]
     Preflight,
+    #[default]
+    #[serde(alias = "install")]
     Install,
+    #[serde(alias = "verify")]
     Verify,
 }
 
@@ -153,23 +159,26 @@ impl PlanContext {
 
     /// The rendered download URL for an action.
     /// Offline mode skips mirror rewrite (the raw URL is the manifest key).
-    pub fn rendered_url(&self, url_tmpl: &str) -> String {
-        let raw = render(url_tmpl, &self.vars);
-        if self.offline_blobs.is_some() {
+    pub fn rendered_url(&self, url_tmpl: &str) -> crate::Result<String> {
+        let raw = render(url_tmpl, &self.vars)?;
+        Ok(if self.offline_blobs.is_some() {
             raw
         } else {
             self.source.rewrite(&raw)
-        }
+        })
     }
 }
 
 /// Collect every (rendered_url, dest_path) a component would download.
 /// Used by `crater build` to know what to fetch into the bundle.
-pub fn collect_downloads(desc: &ComponentDescriptor, ctx: &PlanContext) -> Vec<(String, String)> {
+pub fn collect_downloads(
+    desc: &ComponentDescriptor,
+    ctx: &PlanContext,
+) -> crate::Result<Vec<(String, String)>> {
     let mut out = Vec::new();
     for a in desc.install.iter().chain(desc.verify.iter()) {
         if let Action::Download { url_tmpl, dest, .. } = a {
-            let url = ctx.rendered_url(url_tmpl);
+            let url = ctx.rendered_url(url_tmpl)?;
             let dest = dest
                 .as_ref()
                 .map(|p| p.display().to_string())
@@ -177,7 +186,7 @@ pub fn collect_downloads(desc: &ComponentDescriptor, ctx: &PlanContext) -> Vec<(
             out.push((url, dest));
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn build_plan(desc: &ComponentDescriptor, ctx: &PlanContext) -> crate::Result<Vec<Op>> {
@@ -201,20 +210,90 @@ pub fn build_plan(desc: &ComponentDescriptor, ctx: &PlanContext) -> crate::Resul
     Ok(ops)
 }
 
+/// Build an executable plan from a task's `actions` (D-037). **All control flow
+/// lives here in Rust** (D-036): `when_os`/`when_offline` filter steps, `needs`
+/// topologically orders them; the YAML only declared primitives + data. The
+/// caller must have populated `ctx.materials` (for `place`) and `ctx.os`.
+pub fn plan_from_task(
+    actions: &[crate::task::ActionStep],
+    ctx: &PlanContext,
+) -> crate::Result<Vec<Op>> {
+    let offline = ctx.offline_blobs.is_some();
+    let os = ctx.os;
+
+    // 1) Filter by the closed-enum conditions (NOT free expressions, D-036).
+    //    A step's stable id is its declared `id`, else `action<index>`.
+    struct Item<'a> {
+        id: String,
+        step: &'a crate::task::ActionStep,
+    }
+    let mut items: Vec<Item> = Vec::new();
+    let mut filtered: BTreeSet<String> = BTreeSet::new();
+    for (i, s) in actions.iter().enumerate() {
+        let id = s.id.clone().unwrap_or_else(|| format!("action{i}"));
+        let os_ok = s.when_os.is_empty()
+            || os.match_keys().iter().any(|k| s.when_os.iter().any(|w| w == k));
+        let off_ok = s.when_offline.map_or(true, |w| w == offline);
+        if os_ok && off_ok {
+            items.push(Item { id, step: s });
+        } else {
+            filtered.insert(id);
+        }
+    }
+
+    // 2) Topologically order by `needs`. A need pointing at a filtered-out step
+    //    is treated as satisfied (its precondition doesn't apply); a need on a
+    //    truly-undefined id is a hard error (catch typos loud).
+    let active: BTreeSet<String> = items.iter().map(|it| it.id.clone()).collect();
+    for it in &items {
+        for n in &it.step.needs {
+            if !active.contains(n) && !filtered.contains(n) {
+                anyhow::bail!("action '{}' needs '{n}', which is not defined", it.id);
+            }
+        }
+    }
+    let nodes: Vec<crate::dag::DepNode> = items
+        .iter()
+        .map(|it| crate::dag::DepNode {
+            name: it.id.clone(),
+            requires: it
+                .step
+                .needs
+                .iter()
+                .filter(|n| active.contains(*n))
+                .cloned()
+                .collect(),
+        })
+        .collect();
+    let order = crate::dag::topo_sort(&nodes)?;
+
+    // 3) Lower each step to an Op in dependency order.
+    let by_id: BTreeMap<&str, &Item> = items.iter().map(|it| (it.id.as_str(), it)).collect();
+    let mut ops = Vec::new();
+    for id in order {
+        let it = by_id[id.as_str()];
+        ops.push(action_op(it.step.phase, &it.step.action, ctx)?);
+    }
+    Ok(ops)
+}
+
 /// Collect every binary material a component declares (D-034), as
 /// `(material_name, rendered_url)` — what `crate build` fetches and packs,
 /// keyed by material name (the same key `place` resolves against offline).
-pub fn collect_materials(desc: &ComponentDescriptor, ctx: &PlanContext) -> Vec<(String, String)> {
+pub fn collect_materials(
+    desc: &ComponentDescriptor,
+    ctx: &PlanContext,
+) -> crate::Result<Vec<(String, String)>> {
     use crate::component::MaterialKind;
     let mut out = Vec::new();
     for m in &desc.materials {
         if m.kind == MaterialKind::Binary {
             if let Some(tmpl) = &m.url_tmpl {
-                out.push((m.name.clone(), ctx.rendered_url(tmpl)));
+                out.push((m.name.clone(), ctx.rendered_url(tmpl)?));
             }
         }
     }
-    out
+    Ok(out)
 }
 
 fn check_op(c: &Check) -> Op {
@@ -261,7 +340,7 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
             }
         }
         Action::Download { url_tmpl, dest, .. } => {
-            let url = ctx.rendered_url(url_tmpl);
+            let url = ctx.rendered_url(url_tmpl)?;
             let dest = dest
                 .as_ref()
                 .map(|p| p.display().to_string())
@@ -310,7 +389,7 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 let tmpl = m.url_tmpl.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("place: material '{material}' has no url_tmpl for online fetch")
                 })?;
-                let url = ctx.rendered_url(tmpl);
+                let url = ctx.rendered_url(tmpl)?;
                 let mut cmd = format!("curl -fL --retry 3 -o '{dest}' '{url}'");
                 if let Some(mode) = mode {
                     cmd.push_str(&format!(" && chmod {mode} '{dest}'"));
@@ -351,14 +430,14 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 phase,
                 describe: format!("render {} -> {}", src, dst.display()),
                 path: dst.display().to_string(),
-                content: render(&raw, &ctx.vars),
+                content: render(&raw, &ctx.vars)?,
             }
         }
         Action::WriteFile { dst, content } => Op::WriteFile {
             phase,
             describe: format!("write file {}", dst.display()),
             path: dst.display().to_string(),
-            content: render(content, &ctx.vars),
+            content: render(content, &ctx.vars)?,
         },
         Action::SystemdUnit {
             name,
@@ -396,10 +475,10 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
         Action::RunCmd { cmd, check } => Op::Shell {
             phase,
             describe: format!("run: {cmd}"),
-            cmd: render(cmd, &ctx.vars),
+            cmd: render(cmd, &ctx.vars)?,
             soft_fail: false,
             // Author-supplied idempotency probe (data), rendered like the cmd.
-            check: check.as_ref().map(|c| render(c, &ctx.vars)),
+            check: check.as_ref().map(|c| render(c, &ctx.vars)).transpose()?,
         },
         Action::Module { uses, with } => {
             // Data-defined module (D-029): load modules/<uses>.yaml, render its
@@ -416,9 +495,9 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
             Op::Shell {
                 phase,
                 describe: format!("module {uses}"),
-                cmd: render(&desc.act, &vars),
+                cmd: render(&desc.act, &vars)?,
                 soft_fail: false,
-                check: desc.check.as_ref().map(|c| render(c, &vars)),
+                check: desc.check.as_ref().map(|c| render(c, &vars)).transpose()?,
             }
         }
         Action::LoadImage { reference, runtime } => {
@@ -448,16 +527,52 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
     Ok(op)
 }
 
-/// Minimal `{{var}}` substitution (accepts `{{key}}` and `{{ key }}`). Keys can
-/// be dotted, e.g. `hostvars.server.token` (D-030). Tera/minijinja can replace
-/// this later.
-pub fn render(tpl: &str, vars: &BTreeMap<String, String>) -> String {
-    let mut out = tpl.to_string();
-    for (k, v) in vars {
-        out = out.replace(&format!("{{{{{k}}}}}"), v); // {{key}}
-        out = out.replace(&format!("{{{{ {k} }}}}"), v); // {{ key }}
+/// Render `{{ path }}` substitutions — and NOTHING else. This renderer is
+/// **deliberately crippled** (D-036): pure value substitution, never evaluation.
+/// Any `{{ ... }}` whose body is not a bare dotted path (it contains an operator,
+/// a filter `|`, a quote, a parenthesis, or space-separated tokens) is logic/an
+/// expression and is **rejected with an error** — logic belongs in the Rust
+/// engine, not in YAML. Do NOT "upgrade" this to Tera/minijinja: that reopens the
+/// Ansible trap (YAML-as-untyped-unanalyzable-language) this principle exists to
+/// prevent, and breaks dry-run / preflight / AI-review (all need static YAML).
+///
+/// A bare path with no value — `hostvars.*` before its producer registers, a
+/// dry-run, or a downstream tool's own `{{.Field}}` template — is left verbatim
+/// (unresolved, not an error): absence of a value is a timing/passthrough case,
+/// not a logic violation.
+pub fn render(tpl: &str, vars: &BTreeMap<String, String>) -> crate::Result<String> {
+    let mut out = String::with_capacity(tpl.len());
+    let mut rest = tpl;
+    while let Some(open) = rest.find("{{") {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 2..];
+        let close = after
+            .find("}}")
+            .ok_or_else(|| anyhow::anyhow!("模板有未闭合的 `{{{{`(D-036):{tpl}"))?;
+        let raw = &rest[open..open + 2 + close + 2]; // 完整 `{{...}}`
+        let key = after[..close].trim();
+        if !is_bare_path(key) {
+            anyhow::bail!(
+                "模板里不允许逻辑/表达式(D-036):`{raw}`。条件/循环/计算放进 Rust 引擎,YAML 模板只做取值 `{{{{ path }}}}`"
+            );
+        }
+        match vars.get(key) {
+            Some(v) => out.push_str(v),
+            None => out.push_str(raw), // 未定义:原样保留(时序 / dry-run / 下游模板)
+        }
+        rest = &after[close + 2..];
     }
-    out
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// A bare dotted variable path (`version`, `hostvars.server.token`, `.Field`):
+/// only alphanumerics, `_`, `.`, `-`. Anything else (spaces, operators, `|`,
+/// quotes, parens) makes it an expression — forbidden by D-036.
+fn is_bare_path(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
 }
 
 fn pick_packages(by_os: &BTreeMap<String, Vec<String>>, os: OsFamily) -> Vec<String> {
@@ -696,8 +811,43 @@ mod tests {
     fn render_supports_dotted_and_spaced_keys() {
         let mut vars = BTreeMap::new();
         vars.insert("hostvars.leader.token".to_string(), "T".to_string());
-        assert_eq!(render("x={{hostvars.leader.token}}", &vars), "x=T");
-        assert_eq!(render("x={{ hostvars.leader.token }}", &vars), "x=T");
+        assert_eq!(render("x={{hostvars.leader.token}}", &vars).unwrap(), "x=T");
+        assert_eq!(render("x={{ hostvars.leader.token }}", &vars).unwrap(), "x=T");
+    }
+
+    #[test]
+    fn render_leaves_unresolved_bare_paths_verbatim() {
+        let vars = BTreeMap::new();
+        // hostvars not yet registered / dry-run → kept as-is, not an error.
+        assert_eq!(
+            render("t={{ hostvars.s.tok }}", &vars).unwrap(),
+            "t={{ hostvars.s.tok }}"
+        );
+        // a downstream tool's own template (docker --format) is a bare path too.
+        assert_eq!(
+            render("--format '{{.Server.Version}}'", &vars).unwrap(),
+            "--format '{{.Server.Version}}'"
+        );
+    }
+
+    #[test]
+    fn render_rejects_logic_in_templates() {
+        // D-036: conditionals, computation, filters, loops — all rejected, never
+        // silently passed through. Logic must live in Rust, not YAML.
+        let vars = BTreeMap::new();
+        for bad in [
+            "{{ env == 'prod' }}",
+            "{{ mem * 0.5 }}",
+            "heap: {{ (mem_total * 0.5) | int }}M",
+            "{{ range .Nodes }}",
+            "{{ a or b }}",
+            "{{ }}",
+        ] {
+            assert!(
+                render(bad, &vars).is_err(),
+                "expected D-036 rejection for template: {bad}"
+            );
+        }
     }
 
     #[test]

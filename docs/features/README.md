@@ -10,6 +10,9 @@
 | SSH 执行器（russh）+ run/push | [ssh-executor.md](ssh-executor.md) | D-008/D-009 |
 | 引擎零产品知识（装万物地基） | [engine-zero-product-knowledge.md](engine-zero-product-knowledge.md) | D-017 |
 | 物料闭包 `materials:` + `action: place` | [materials-and-place.md](materials-and-place.md) | D-034 |
+| apply 三层目标（本机/--host/-i）+ SSH key 认证 | [apply-targets.md](apply-targets.md) | D-035 |
+| 通用 task（`crater apply <动作>`，Ansible 能力） | [action-tasks.md](action-tasks.md) | D-037 |
+| YAML 纯数据铁律（残废模板渲染器） | （见 decisions） | D-036 |
 | 幂等回显 + apply 默认执行 | [idempotency-and-apply.md](idempotency-and-apply.md) | D-023/D-024 |
 | spec 内联 recipe（单文件） | [inline-recipe.md](inline-recipe.md) | D-025 |
 | module 模块化（数据定义） | [modules.md](modules.md) | D-029 |

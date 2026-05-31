@@ -48,21 +48,29 @@ enum Cmd {
     /// load+install), or a component name (online shortcut). Same engine &
     /// idempotency either way; offline just sources artifacts from the bundle.
     Apply {
-        /// spec.yaml | x.oci (offline bundle) | component name. (Or use -f.)
-        source: Option<String>,
+        /// `<source>`, or a `<name>` label when a second positional `<source>`
+        /// follows: `crater apply app01 docker.io/library/app01:v1.0`.
+        arg1: Option<String>,
+        /// `<source>` (image ref | x.oci | spec.yaml | component) when the first
+        /// positional is a name.
+        arg2: Option<String>,
         #[arg(short, long)]
         file: Option<PathBuf>,
-        /// Inventory file (its `inventory:` hosts) for oci/component sources —
-        /// enables multi-host offline. A spec source carries its own inventory.
+        /// Inventory file (its `inventory:` hosts) — large-fleet form, per-host
+        /// creds. A spec source carries its own inventory.
         #[arg(short = 'i', long)]
         inventory: Option<PathBuf>,
-        /// Single target for oci/component sources (shorthand for -i).
+        /// Target host(s), comma-separated for a small fleet sharing one credential:
+        /// `--host 10.0.0.5,10.0.0.6`. Omit (and no `-i`) → local install.
         #[arg(long)]
         host: Option<String>,
         #[arg(long, default_value = "root")]
         user: String,
         #[arg(long)]
         password: Option<String>,
+        /// SSH private-key file (alternative to --password), shared by all --host.
+        #[arg(long)]
+        key: Option<PathBuf>,
         #[arg(long, default_value_t = 22)]
         port: u16,
         /// Print the plan without executing.
@@ -177,6 +185,13 @@ enum Cmd {
         #[arg(long = "as")]
         as_ref: String,
     },
+    /// Add a new reference (alias) to a stored image, like `docker tag`.
+    Tag {
+        /// Existing reference in the local store.
+        source: String,
+        /// New reference to point at the same manifest (e.g. a registry address).
+        target: String,
+    },
     /// Registry credentials.
     Registry {
         #[command(subcommand)]
@@ -251,16 +266,27 @@ async fn main() -> Result<()> {
 
     match Cli::parse().cmd {
         Cmd::Apply {
-            source,
+            arg1,
+            arg2,
             file,
             inventory,
             host,
             user,
             password,
+            key,
             port,
             dry_run,
             shell,
-        } => apply_source(source, file, inventory, host, user, password, port, dry_run, shell).await,
+        } => {
+            // Two positional forms: `apply <source>` or `apply <name> <source>`.
+            let (name, source) = match (arg1, arg2) {
+                (Some(a), Some(b)) => (Some(a), Some(b)),
+                (Some(a), None) => (None, Some(a)),
+                (None, _) => (None, None),
+            };
+            apply_source(name, source, file, inventory, host, user, password, key, port, dry_run, shell)
+                .await
+        }
         Cmd::Build {
             file,
             output,
@@ -295,6 +321,11 @@ async fn main() -> Result<()> {
         Cmd::Load { file, as_ref } => {
             ImageStore::open()?.import_oci_archive(&file, &as_ref)?;
             info!("loaded {} → {as_ref}", file.display());
+            Ok(())
+        }
+        Cmd::Tag { source, target } => {
+            ImageStore::open()?.retag(&source, &target)?;
+            info!("tagged {source} → {target}");
             Ok(())
         }
         Cmd::Registry { cmd } => match cmd {
@@ -473,8 +504,8 @@ async fn push_file(
 /// Resolve a user-typed name (which may be an alias) to a real component dir
 /// name. The engine holds ZERO product knowledge: aliases are declared in each
 /// component's `aliases:` field (data), and we build the map by scanning
-/// `components/`. `crater k8s` works because `k3s/component.yaml` declares it,
-/// not because the code knows what k8s is.
+/// `components/`. `crater es` works because `elasticsearch/component.yaml`
+/// declares `es` as an alias, not because the code knows what `es` is.
 fn resolve_component(name: &str, components_dir: &Path) -> String {
     // Exact directory match wins — no scan needed.
     if components_dir.join(name).join("component.yaml").is_file() {
@@ -769,12 +800,14 @@ fn order_components(spec: &CraterSpec, components_dir: &Path) -> Result<Vec<Stri
 /// artifacts come from.
 #[allow(clippy::too_many_arguments)]
 async fn apply_source(
+    name: Option<String>,
     source: Option<String>,
     file: Option<PathBuf>,
     inventory: Option<PathBuf>,
     host: Option<String>,
     user: String,
     password: Option<String>,
+    key: Option<PathBuf>,
     port: u16,
     dry_run: bool,
     shell: bool,
@@ -782,28 +815,49 @@ async fn apply_source(
     // `<source>` positional, else `-f`.
     let src = source
         .or_else(|| file.map(|p| p.display().to_string()))
-        .ok_or_else(|| anyhow!("apply needs a <source>: a spec.yaml, an x.oci bundle, or a component name"))?;
+        .ok_or_else(|| anyhow!("apply needs a <source>: a spec.yaml, an x.oci bundle, an image ref, or a component name"))?;
     let path = PathBuf::from(&src);
+    if let Some(n) = &name {
+        info!("apply: deployment '{n}' ← {src}");
+    }
 
     if path.is_file() && bundle::is_oci_archive(&path) {
-        // Offline: OCI bundle. Inventory from CLI (D-020: never inside the image)
-        // — `-i inventory.yaml` (multi-host) or `--host` (single).
+        // Offline: OCI bundle. Targets from CLI (D-020: never inside the image)
+        // — `-i inventory.yaml`, `--host a,b`, or none → local.
         info!("apply: {src} → offline (OCI bundle)");
-        let hosts = inventory_hosts(inventory.as_deref(), host, &user, password, port)?;
+        let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
         return apply_oci_bundle(&path, hosts, !dry_run, shell).await;
     }
     if path.is_file() {
-        // Online: declarative spec (inventory inside).
+        // A task file (top-level `actions:`, D-037) → generic action layer;
+        // otherwise a legacy declarative spec (inventory inside).
+        if crater_core::task::is_task_file(&path) {
+            info!("apply: {src} → task");
+            let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
+            return apply_task(&path, hosts, !dry_run, shell).await;
+        }
         info!("apply: {src} → online (spec)");
         return apply_spec(&path, !dry_run, shell).await;
     }
     // Image reference (registry/store): has a registry path or a tag, not a file.
     if src.contains('/') || src.contains(':') {
         info!("apply: {src} → image (local store / registry)");
-        let hosts = inventory_hosts(inventory.as_deref(), host, &user, password, port)?;
+        let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
         return apply_image_ref(&src, hosts, !dry_run).await;
     }
-    // Online: bare component name → shortcut (build its flag args).
+    // Online: bare component name → shortcut (build its flag args). Comma-hosts
+    // and key auth route through the unified pipeline instead (below) when given.
+    if inventory.is_some() || host.as_deref().map(|h| h.contains(',')).unwrap_or(false) || key.is_some() {
+        info!("apply: {src} → online (component, fleet)");
+        let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
+        let spec = CraterSpec {
+            inventory: crater_core::spec::Inventory { hosts },
+            components: vec![component_ref(&src, "")],
+            offline: false,
+            ai: None,
+        };
+        return run_pipeline(&spec, &Artifacts::Online, &PathBuf::from("components"), Path::new("."), !dry_run, shell).await;
+    }
     info!("apply: {src} → online (component)");
     let mut args = vec![src];
     if let Some(h) = host {
@@ -840,6 +894,82 @@ async fn apply_spec(file: &Path, do_apply: bool, do_shell: bool) -> Result<()> {
         do_shell,
     )
     .await
+}
+
+/// `crater apply <task>.yaml` (D-037): run a generic task across the targets.
+/// All control flow (when-filter, needs-ordering) is in the engine; this just
+/// fans the lowered plan out to each host.
+async fn apply_task(
+    path: &Path,
+    hosts: Vec<crater_core::spec::Host>,
+    do_apply: bool,
+    do_shell: bool,
+) -> Result<()> {
+    use crater_core::task::TaskFile;
+    let task = TaskFile::from_yaml_file(path)?;
+    let spec_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    info!(
+        "task '{}': {} action(s), hosts={}, {} target(s), mode={}",
+        task.name,
+        task.actions.len(),
+        task.hosts,
+        hosts.len(),
+        if do_apply { "apply" } else { "dry-run" }
+    );
+    let forks = forks_limit();
+    let results: Vec<Result<()>> = futures::stream::iter(
+        hosts
+            .iter()
+            .map(|h| run_task_on_host(&task, h, &spec_dir, do_apply, do_shell)),
+    )
+    .buffer_unordered(forks)
+    .collect()
+    .await;
+    for r in results {
+        r?;
+    }
+    Ok(())
+}
+
+async fn run_task_on_host(
+    task: &crater_core::task::TaskFile,
+    host: &crater_core::spec::Host,
+    spec_dir: &Path,
+    do_apply: bool,
+    do_shell: bool,
+) -> Result<()> {
+    if host.is_local() {
+        info!("▶ host {} (local)", host.name);
+    } else {
+        info!("▶ host {} ({})", host.name, host.address);
+    }
+    let exec = connect_executor(host, do_apply).await?;
+    let osf = if do_apply {
+        os::detect_via(exec.as_ref()).await
+    } else {
+        OsFamily::Unknown
+    };
+    let ver = task
+        .vars
+        .get("version")
+        .cloned()
+        .unwrap_or_else(|| "latest".into());
+    let mut ctx = PlanContext::new(osf, ver, spec_dir.to_path_buf());
+    for (k, v) in &task.vars {
+        ctx.vars.insert(k.clone(), v.clone());
+    }
+    for m in &task.materials {
+        ctx.materials.insert(m.name.clone(), m.clone());
+    }
+    let plan = engine::plan_from_task(&task.actions, &ctx)?;
+    info!("[{}] task {} — {} step(s)", host.name, task.name, plan.len());
+    if !do_apply {
+        print_plan(&plan);
+        return Ok(());
+    }
+    // Local always runs directly; remote uses agent unless --shell (D-027).
+    let use_shell = do_shell || host.is_local();
+    execute_plan(&plan, exec.as_ref(), use_shell, None).await
 }
 
 /// The single deploy pipeline shared by online & offline (D-020): order
@@ -993,6 +1123,37 @@ fn forks_limit() -> usize {
         .unwrap_or(10)
 }
 
+/// Build an executor for a host: local (dry-run or `@local`), SSH key, or SSH
+/// password. Shared by component (`run_host`) and task (`run_task_on_host`).
+async fn connect_executor(
+    host: &crater_core::spec::Host,
+    do_apply: bool,
+) -> Result<Box<dyn Executor>> {
+    if !do_apply || host.is_local() {
+        return Ok(Box::new(LocalExecutor));
+    }
+    if let Some(keypath) = &host.key {
+        return Ok(Box::new(
+            SshExecutor::connect_auth(
+                &host.address,
+                host.port,
+                &host.user,
+                &crater_core::executor::SshAuth::Key {
+                    path: keypath.clone(),
+                    passphrase: None,
+                },
+            )
+            .await?,
+        ));
+    }
+    if let Some(pw) = host.password.as_deref().filter(|s| !s.is_empty()) {
+        return Ok(Box::new(
+            SshExecutor::connect(&host.address, host.port, &host.user, pw).await?,
+        ));
+    }
+    anyhow::bail!("host {} needs --password or --key", host.name)
+}
+
 /// Deploy one host: connect, detect OS, run its role's components (agent/shell),
 /// and return its registered facts (for hostvars). Read-only over `hostvars` —
 /// the caller merges results after the group, so parallel peers don't race.
@@ -1008,17 +1169,12 @@ async fn run_host(
     do_apply: bool,
     do_shell: bool,
 ) -> Result<(String, Vec<(String, String)>)> {
-    info!("▶ host {} ({})", host.name, host.address);
-    let exec: Box<dyn Executor> = if do_apply {
-        let pw = host
-            .password
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("host {} has no password (M1 requires one)", host.name))?;
-        Box::new(SshExecutor::connect(&host.address, host.port, &host.user, pw).await?)
+    if host.is_local() {
+        info!("▶ host {} (local)", host.name);
     } else {
-        Box::new(LocalExecutor)
-    };
+        info!("▶ host {} ({})", host.name, host.address);
+    }
+    let exec = connect_executor(host, do_apply).await?;
     let osf = if do_apply {
         os::detect_via(exec.as_ref()).await
     } else {
@@ -1083,12 +1239,13 @@ async fn run_host(
             print_plan(&plan);
             continue;
         }
-        // Agent default online (D-027); offline pins to shell (blobs on control).
-        let use_shell = do_shell || artifacts.is_offline();
+        // Agent default online (D-027); offline pins to shell (blobs on control);
+        // a local host always runs directly (no agent to bootstrap over SSH).
+        let use_shell = do_shell || artifacts.is_offline() || host.is_local();
         execute_plan(&plan, exec.as_ref(), use_shell, None).await?;
         // Capture this component's facts on this host for later groups.
         for reg in &desc.register {
-            let out = exec.run(&engine::render(&reg.cmd, &ctx.vars)).await?;
+            let out = exec.run(&engine::render(&reg.cmd, &ctx.vars)?).await?;
             if !out.ok() {
                 anyhow::bail!(
                     "register '{}' on {} failed (exit {}): {}",
@@ -1152,7 +1309,7 @@ async fn build_bundle(spec_file: &Path, out: &Path) -> Result<()> {
         // Offline ctx so rendered_url() yields RAW urls (the manifest keys).
         let mut ctx = PlanContext::new(OsFamily::Unknown, ver.clone(), cdir.clone());
         ctx.offline_blobs = Some(BTreeMap::new());
-        let downloads = collect_downloads(&desc, &ctx);
+        let downloads = collect_downloads(&desc, &ctx)?;
 
         for (raw_url, _dest) in downloads {
             if !seen.insert(raw_url.clone()) {
@@ -1253,7 +1410,7 @@ async fn build_image_bundle(spec_file: &Path, out: &Path) -> Result<()> {
         let mut ctx = PlanContext::new(OsFamily::Unknown, ver.clone(), cdir.clone());
         ctx.offline_blobs = Some(BTreeMap::new()); // rendered_url yields raw URLs
         let mut materials: Vec<(String, Vec<u8>)> = Vec::new();
-        for (name, raw) in collect_materials(&desc, &ctx) {
+        for (name, raw) in collect_materials(&desc, &ctx)? {
             let url = online.rewrite(&raw);
             info!("  fetch material {name} <- {raw}");
             let (data, _) = source::fetch_best(&url)
@@ -1263,7 +1420,7 @@ async fn build_image_bundle(spec_file: &Path, out: &Path) -> Result<()> {
         }
         for a in &desc.install {
             if let Action::Download { url_tmpl, .. } = a {
-                let raw = ctx.rendered_url(url_tmpl);
+                let raw = ctx.rendered_url(url_tmpl)?;
                 let url = online.rewrite(&raw);
                 info!("  fetch {raw}");
                 let (data, _) = source::fetch_best(&url)
@@ -1420,20 +1577,23 @@ async fn deploy_bundle(
     port: u16,
     do_apply: bool,
 ) -> Result<()> {
-    let hosts = match host {
-        Some(h) => vec![single_host(h, user, password, port)],
-        None => anyhow::bail!("crater deploy needs --host (the offline target)"),
-    };
+    let hosts = target_hosts(None, host, user, password, None, port)?;
     apply_oci_bundle(bundle_file, hosts, do_apply, false).await
 }
 
-/// Resolve the target inventory for offline/component sources: `-i file` (its
-/// `inventory:` hosts, multi-host) or `--host` (single), else error.
-fn inventory_hosts(
+/// Resolve deploy targets for image/oci/component sources, three layers:
+///   `-i inventory.yaml`  → fleet, per-host creds (from the file);
+///   `--host a,b,c`        → small fleet, ONE shared credential (user+password|key);
+///   neither               → a single LOCAL host (runs on the control machine).
+///
+/// Heterogeneous per-host credentials are intentionally NOT expressible via
+/// `--host` (it shares one credential) — use an inventory file for that.
+fn target_hosts(
     inv: Option<&Path>,
     host: Option<String>,
     user: &str,
     password: Option<String>,
+    key: Option<PathBuf>,
     port: u16,
 ) -> Result<Vec<crater_core::spec::Host>> {
     if let Some(p) = inv {
@@ -1443,9 +1603,27 @@ fn inventory_hosts(
         }
         Ok(spec.inventory.hosts)
     } else if let Some(h) = host {
-        Ok(vec![single_host(h, user, password, port)])
+        let hosts: Vec<_> = h
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|addr| crater_core::spec::Host {
+                name: addr.to_string(),
+                address: addr.to_string(),
+                user: user.to_string(),
+                port,
+                password: password.clone(),
+                key: key.clone(),
+                roles: vec![],
+            })
+            .collect();
+        if hosts.is_empty() {
+            anyhow::bail!("--host given but no addresses parsed");
+        }
+        Ok(hosts)
     } else {
-        anyhow::bail!("offline apply needs a target: -i <inventory.yaml> or --host <ip>")
+        // No target → local install on the control machine.
+        Ok(vec![crater_core::spec::Host::local()])
     }
 }
 
@@ -1453,7 +1631,8 @@ fn inventory_hosts(
 fn component_ref(name: &str, version: &str) -> crater_core::spec::ComponentRef {
     crater_core::spec::ComponentRef {
         name: name.to_string(),
-        version: Some(version.to_string()),
+        // Empty version → None, so version_default (or "latest") applies.
+        version: (!version.is_empty()).then(|| version.to_string()),
         params: Default::default(),
         requires: vec![],
         images: vec![],
@@ -1463,23 +1642,6 @@ fn component_ref(name: &str, version: &str) -> crater_core::spec::ComponentRef {
         install: vec![],
         verify: vec![],
         register: vec![],
-    }
-}
-
-/// Build a one-host inventory entry from CLI flags (roles empty → all components).
-fn single_host(
-    host: String,
-    user: &str,
-    password: Option<String>,
-    port: u16,
-) -> crater_core::spec::Host {
-    crater_core::spec::Host {
-        name: host.clone(),
-        address: host,
-        user: user.to_string(),
-        port,
-        password,
-        roles: vec![],
     }
 }
 
@@ -1634,7 +1796,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// All systemd unit names declared across every component under `components/`.
-/// `doctor` probes these instead of hardcoding `docker`/`k3s`: the unit names
+/// `doctor` probes these instead of hardcoding any product's units: the names
 /// live in component data, so a new component is diagnosable without code edits.
 fn known_systemd_units(components_dir: &Path) -> Vec<String> {
     let mut out = Vec::new();

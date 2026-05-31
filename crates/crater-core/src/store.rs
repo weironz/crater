@@ -94,6 +94,20 @@ impl ImageStore {
             .unwrap_or(false)
     }
 
+    /// `crater tag <src> <dst>`: point a new reference at an existing stored
+    /// image/artifact's manifest. Blobs are content-addressed and shared, so no
+    /// data is copied — only a new index entry is added (like `docker tag`).
+    pub fn retag(&self, src: &str, dst: &str) -> crate::Result<()> {
+        let idx = self.read_index()?;
+        let entry = idx["manifests"]
+            .as_array()
+            .and_then(|a| a.iter().find(|m| m["annotations"][ANN_REF].as_str() == Some(src)))
+            .ok_or_else(|| anyhow::anyhow!("image '{src}' not in local store (pull/build/load it first)"))?;
+        let digest = strip(entry["digest"].as_str().unwrap_or("")).to_string();
+        let size = entry["size"].as_u64().unwrap_or(0);
+        self.tag(dst, &digest, size)
+    }
+
     /// Tag (add/replace) a manifest in the index under `reference`.
     fn tag(&self, reference: &str, manifest_digest: &str, size: u64) -> crate::Result<()> {
         let mut idx = self.read_index()?;

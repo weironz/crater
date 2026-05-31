@@ -71,6 +71,18 @@ impl Executor for LocalExecutor {
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
     }
+
+    /// Write directly to the local filesystem — bypassing the trait's
+    /// shell-base64 default, which would blow `MAX_ARG_STRLEN` on large blobs
+    /// (e.g. a 13 MB binary placed during a local `apply`).
+    async fn write_file(&self, path: &str, content: &[u8]) -> crate::Result<()> {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, content)
+            .map_err(|e| anyhow::anyhow!("write_file {path} failed: {e}"))?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -104,24 +116,55 @@ pub struct SshExecutor {
     label: String,
 }
 
+/// SSH authentication method. Password or a private-key file (with optional
+/// passphrase) — the latter is the norm for fleets that disable password auth.
+pub enum SshAuth {
+    Password(String),
+    Key {
+        path: std::path::PathBuf,
+        passphrase: Option<String>,
+    },
+}
+
 impl SshExecutor {
+    /// Connect with a password (kept for call-site stability).
     pub async fn connect(
         host: &str,
         port: u16,
         user: &str,
         password: &str,
     ) -> crate::Result<Self> {
+        Self::connect_auth(host, port, user, &SshAuth::Password(password.to_string())).await
+    }
+
+    /// Connect with an explicit auth method (password or key).
+    pub async fn connect_auth(
+        host: &str,
+        port: u16,
+        user: &str,
+        auth: &SshAuth,
+    ) -> crate::Result<Self> {
         let config = Arc::new(client::Config::default());
         let mut handle = client::connect(config, (host, port), ClientHandler)
             .await
             .map_err(|e| anyhow::anyhow!("ssh connect {host}:{port} failed: {e}"))?;
-        // russh 0.45: authenticate_password returns Result<bool>.
-        let authed = handle
-            .authenticate_password(user, password)
-            .await
-            .map_err(|e| anyhow::anyhow!("ssh auth error for {user}@{host}: {e}"))?;
+        // russh 0.45: authenticate_* return Result<bool>.
+        let authed = match auth {
+            SshAuth::Password(pw) => handle
+                .authenticate_password(user, pw)
+                .await
+                .map_err(|e| anyhow::anyhow!("ssh auth error for {user}@{host}: {e}"))?,
+            SshAuth::Key { path, passphrase } => {
+                let key = russh::keys::load_secret_key(path, passphrase.as_deref())
+                    .map_err(|e| anyhow::anyhow!("load ssh key {}: {e}", path.display()))?;
+                handle
+                    .authenticate_publickey(user, Arc::new(key))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("ssh key auth error for {user}@{host}: {e}"))?
+            }
+        };
         if !authed {
-            anyhow::bail!("ssh password authentication failed for {user}@{host}");
+            anyhow::bail!("ssh authentication failed for {user}@{host} (check password/key)");
         }
         Ok(Self {
             handle,

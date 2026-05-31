@@ -1,6 +1,6 @@
 # Cross-node register/hostvars demo (D-030): the leader registers a fact; the
 # follower consumes it via {{ hostvars.leader.token }}. This is the mechanism
-# behind real clustering (e.g. k3s server token → agent join).
+# behind real clustering (a leader publishes a join token; followers consume it).
 # Hosts run in inventory order, so the leader registers before the follower reads.
 # Run from repo root:  crater apply -f examples/cross-node.yaml
 inventory:

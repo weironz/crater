@@ -24,6 +24,7 @@ pub mod os;
 pub mod source;
 pub mod spec;
 pub mod store;
+pub mod task;
 
 /// Crate-wide result type.
 pub use anyhow::Result;

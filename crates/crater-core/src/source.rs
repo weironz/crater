@@ -129,10 +129,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rewrites_registry_k8s() {
+    fn rewrites_registry() {
         let s = OnlineSource::with_default_mirrors();
-        let out = s.rewrite("registry.k8s.io/pause:3.9");
-        assert!(out.starts_with("registry.aliyuncs.com/google_containers"));
+        let out = s.rewrite("docker.io/library/busybox:latest");
+        assert!(out.starts_with("docker.m.daocloud.io"));
     }
 
     #[test]

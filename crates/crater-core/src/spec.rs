@@ -2,7 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Reserved address marking a host that runs on the control machine itself
+/// (`crater apply <src>` with no `--host`/`-i`). [`Host::is_local`] detects it;
+/// the pipeline then uses the local executor instead of SSH.
+pub const LOCAL_ADDR: &str = "@local";
 
 use crate::component::{Action, Check, ComponentDescriptor, RegisterSpec};
 
@@ -41,11 +46,35 @@ pub struct Host {
     pub user: String,
     #[serde(default = "default_ssh_port")]
     pub port: u16,
-    /// SSH password (M1). Key-based auth + secret store come later.
+    /// SSH password. Mutually optional with `key` — one of them is needed for
+    /// remote hosts (local hosts need neither).
     #[serde(default)]
     pub password: Option<String>,
+    /// SSH private-key file path. Takes precedence over `password` when set.
+    #[serde(default)]
+    pub key: Option<PathBuf>,
     #[serde(default)]
     pub roles: Vec<String>,
+}
+
+impl Host {
+    /// A host that runs on the control machine itself (local execution).
+    pub fn local() -> Self {
+        Host {
+            name: "localhost".into(),
+            address: LOCAL_ADDR.into(),
+            user: default_user(),
+            port: 22,
+            password: None,
+            key: None,
+            roles: Vec::new(),
+        }
+    }
+
+    /// True if this host runs locally (no SSH) — see [`LOCAL_ADDR`].
+    pub fn is_local(&self) -> bool {
+        self.address == LOCAL_ADDR
+    }
 }
 
 fn default_user() -> String {
