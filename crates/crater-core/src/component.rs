@@ -27,6 +27,11 @@ pub struct ComponentDescriptor {
     /// Other components that must be deployed before this one (M3 DAG).
     #[serde(default)]
     pub requires: Vec<String>,
+    /// Container images to pack into the offline bundle (D-018 ②). Pulled at
+    /// build time into the OCI layout; loaded on the target at deploy. Data, not
+    /// code — the engine names no image.
+    #[serde(default)]
+    pub images: Vec<String>,
     #[serde(default)]
     pub preflight: Vec<Check>,
     #[serde(default)]

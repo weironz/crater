@@ -75,6 +75,13 @@ examples/    crater.yaml node_exporter.yaml
 4. 不擅自中断、不找用户确认(已授权)。
 
 ## 工作日志（倒序）
+### 2026-05-31 续12（OCI 离线 D-018 增量 2：crater 原生 build/save/load）
+- 纠偏：镜像只是打包载体，crater 自备 save/load，**目标机零容器运行时**（不靠 ctr/docker import）。
+- **build**(`crater build --image`)：组件文件产物(download→dest / write_file)渲染成 rootfs 层(tar+可执行位)，封装成真 OCI 镜像 `crater/<name>:<ver>`(config+manifest+layer，进 index.json 带 ref.name)。`store_rootfs_layer`/`layer_of`。
+- **save**：oci-archive 纯 tar。**load+install**(`crater deploy`)：crater 自己解包、`tar -xpf -C /` 展开 rootfs 到目标机，再跑 verify。**pull**：oci-client 从 registry 拉(增量①)；**push** 后续。
+- 真机 n12：`crater build --image -f yq.yaml -o yq-img.oci` → `crater/yq:4.53.2`(rootfs 0755)13.7MB；`crater deploy` → 展开到 `/`、`/usr/local/bin/yq` -rwxr-xr-x、verify `yq --version` v4.53.2。+1 单测(rootfs round-trip)，共 30。
+- 边界：rootfs 只 bake 文件类动作；daemon(systemd) 仍走 recipe-replay 离线路径；registry push、多 arch、签名后续。
+
 ### 2026-05-31 续11（OCI 离线 D-018 增量 1）
 - `bundle.rs` 重写为**合规 OCI Image Layout**：`oci-layout` + `index.json`(注解 `org.crater.manifest`) + `blobs/sha256/<digest>`(image manifest/config + components 层 + crater-manifest + 制品 blob，制品带 `org.crater.source-url`)。打包为 oci-archive(纯 tar)。`BundleStage` API 不变→build/deploy 零改动。加 serde_json，FORMAT_VERSION=2。
 - 真机：`crater build -o ne.oci` 结构经 skopeo 式校验(oci-layout/index.json/blobs/sha256 齐全)；`crater deploy --bundle ne.oci --host .12` → push(offline) 制品、node_exporter 1.8.2 `:9100` 出 metrics，changed=4 ok=3。单测断言 OCI 结构。

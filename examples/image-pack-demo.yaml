@@ -1,0 +1,11 @@
+# D-018 ② demo: pack a container image into the OCI offline bundle.
+# Build only needs the component to declare images:; build pulls them into the
+# bundle's OCI layout (verify by inspecting blobs + index.json).
+#   crater build -f examples/image-pack-demo.yaml -o /tmp/img.oci
+components:
+  - name: hello
+    images:
+      - docker.io/library/hello-world:latest
+    install:
+      - action: run_cmd
+        cmd: "echo 'hello-world image is packed in the bundle'"

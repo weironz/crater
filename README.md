@@ -110,7 +110,8 @@ crater/
 | B1（幂等）| check→act→report，`changed/ok/warn` 回显；apply 默认执行、`--dry-run` 预览（D-023）| ✅ 真机 yq 验证 |
 | module 契约（D-029）| 四层 module 模型；`action: module` + 数据定义 module（`modules/*.yaml`，零 Rust 扩展）| ✅ 契约地基 + 真机验证 |
 | B2/B3（ansible 化）| task/play 层（when/loop/notify）、内置 module 库（file/copy/service…）、外部 module JSON 协议 | 设计中 |
-| 离线 OCI（D-018）| 离线包=合规 OCI Image Layout（制品/文件）；容器镜像打包 + 临时 registry 待增量 | ✅ 增量1 真机（node_exporter 离线）|
+| 离线 OCI（D-018 ①②）| ①离线包=合规 OCI Layout；②crater 原生 build（封装 rootfs 镜像）/save/load（自解包，零运行时）+ oci-client pull | ✅ 真机（node_exporter + yq 离线）|
+| 离线 OCI 后续 | registry push、容器镜像 import、临时 registry、多 arch、签名 | 计划中 |
 | 自举 agent（D-019/D-026/D-027）| **默认执行模型**：推二进制(按 sha256 缓存)+计划，目标机本地执行；`--shell` 逃生、`--agent-bin` 异构 | ✅ 在线真机验证（解包 OCI 待 D-018）|
 | 多节点 + 跨节点 fact（D-030）| 多主机 fan-out + 按 role 过滤；`register`/`hostvars` 跨节点传值（真集群钥匙）| ✅ 两台真机验证 |
 | k3s 两节点集群（D-030 验收）| server `register` node-token → agent 用 `{{hostvars.server.*}}` join | ✅ 真机：2 节点全 Ready |

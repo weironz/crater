@@ -251,3 +251,18 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **理由**:内容寻址=校验免费(digest 即文件名);结构 skopeo/oras 可读;为容器镜像(嵌套 OCI blob)与临时 registry 铺路。守 D-017(引擎只懂打/解 OCI，装什么仍是数据)。
 - **真机验证**:`crater build -f node_exporter.yaml -o ne.oci`→ 解开确认 oci-layout/index.json/blobs/sha256 齐全、image manifest 引用 config+layers;`crater deploy --bundle ne.oci --host .12`→ `push (offline)` 推制品、node_exporter 1.8.2 `:9100` 出 metrics，`changed=4 ok=3`。+ 单测断言 OCI 结构。
 - **后续增量**:② 容器镜像打包(组件 `images:` → `oci-client` 拉取 → 嵌套 OCI blob → 目标机 `ctr image import`，解锁 k8s/mysql/es 离线);③ 临时 registry(F13)多节点分发;④ agent 解 OCI(D-019 接力)。deploy_bundle 仍 print_plan + 走 shell(未接 agent/去 dump)，后续统一。
+
+---
+
+## 2026-05-31 · OCI 离线（D-018 增量 2：crater 原生 build/save/load）
+
+### D-018 增量 2：crater 把制品封装进 OCI 镜像，自己 save/load（目标机零运行时）
+- **背景**:纠偏——离线镜像只是**打包载体**，不该依赖目标机的容器运行时(ctr/docker)来导入。crater 需自备 build/pull-push/save/load 能力。从 yq 起步。
+- **决策/实现**:
+  - **build**(`crater build --image`):把组件的文件产物(download→dest、write_file、render_template)渲染成一个 **rootfs 层**(tar，含可执行位)，封装为一个真正的 OCI 镜像(`crater/<name>:<ver>`，config+manifest+layer，进 index.json 带 ref.name)。`store_rootfs_layer`。
+  - **save**:打包为 oci-archive(纯 tar)。
+  - **load+install**(`crater deploy`):crater **自己**解包 oci tar、取 rootfs 层、`tar -xpf -C /` 展开到目标机——**无 ctr/docker**;随后跑组件 verify 步骤确认。
+  - **pull**(增量①已起):`oci-client` 从 registry 拉镜像 blob 进包(rustls，纯 Rust)。**push** 后续。
+- **理由**:守"目标机零依赖"(agentless);镜像是标准 OCI(可签名/可 registry 流转)，但安装不绑容器运行时——crater 自身即 save/load。
+- **真机验证(192.168.73.12)**:`crater build --image -f yq.yaml -o yq-img.oci`→ 封装 `crater/yq:4.53.2`(rootfs 层 0755)、13.7MB oci-archive;`crater deploy --bundle yq-img.oci`→ crater 解包展开到 `/`→ `/usr/local/bin/yq` -rwxr-xr-x、`yq --version` v4.53.2。+1 单测(rootfs 层 round-trip，含 0755)，共 30。
+- **边界/后续**:rootfs 模型只 bake 文件类动作(systemd/run_cmd 不入层，daemon 类仍走 recipe-replay 离线路径);registry **push**;多 arch rootfs;镜像签名(N4)。

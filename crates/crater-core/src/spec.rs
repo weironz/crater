@@ -71,6 +71,8 @@ pub struct ComponentRef {
     #[serde(default)]
     pub requires: Vec<String>,
     #[serde(default)]
+    pub images: Vec<String>,
+    #[serde(default)]
     pub supported_os: Vec<String>,
     #[serde(default)]
     pub preflight: Vec<Check>,
@@ -97,6 +99,7 @@ impl ComponentRef {
             version_default: self.version.clone(),
             supported_os: self.supported_os.clone(),
             requires: self.requires.clone(),
+            images: self.images.clone(),
             preflight: self.preflight.clone(),
             install: self.install.clone(),
             verify: self.verify.clone(),

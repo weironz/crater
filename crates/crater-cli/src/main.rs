@@ -59,6 +59,10 @@ enum Cmd {
         file: PathBuf,
         #[arg(short, long)]
         output: PathBuf,
+        /// Wrap the component's files into an OCI rootfs image (crater build);
+        /// deploy installs it by extracting the layer — no container runtime.
+        #[arg(long)]
+        image: bool,
     },
     /// Deploy an offline bundle to a target (zero network on the target).
     Deploy {
@@ -195,7 +199,17 @@ async fn main() -> Result<()> {
             dry_run,
             shell,
         } => apply_spec(&file, !dry_run, shell).await,
-        Cmd::Build { file, output } => build_bundle(&file, &output).await,
+        Cmd::Build {
+            file,
+            output,
+            image,
+        } => {
+            if image {
+                build_image_bundle(&file, &output).await
+            } else {
+                build_bundle(&file, &output).await
+            }
+        }
         Cmd::Deploy {
             bundle,
             host,
@@ -882,7 +896,9 @@ async fn build_bundle(spec_file: &Path, out: &Path) -> Result<()> {
     let online = OnlineSource::with_default_mirrors();
     let mut manifest_components = Vec::new();
     let mut blobs = Vec::new();
+    let mut images: Vec<bundle::ImageRef> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut seen_images: BTreeSet<String> = BTreeSet::new();
 
     println!("Building bundle from {} ...", spec_file.display());
     let spec_dir = spec_file.parent().unwrap_or_else(|| Path::new("."));
@@ -932,6 +948,18 @@ async fn build_bundle(spec_file: &Path, out: &Path) -> Result<()> {
             println!("    -> {} bytes, sha256={}", entry.size, &entry.sha256[..16]);
             blobs.push(entry);
         }
+
+        // Container images declared by the component (D-018 ②): pull into the
+        // OCI layout so the target can load them with zero network.
+        for image in &desc.images {
+            if !seen_images.insert(image.clone()) {
+                continue;
+            }
+            println!("  pull image {image}");
+            let ir = stage.pull_image(image).await?;
+            println!("    -> manifest sha256={}", &ir.manifest_digest[..16]);
+            images.push(ir);
+        }
     }
 
     let name = spec
@@ -944,6 +972,8 @@ async fn build_bundle(spec_file: &Path, out: &Path) -> Result<()> {
         name,
         components: manifest_components,
         blobs,
+        images,
+        rootfs: vec![],
     };
     stage.write_manifest(&manifest)?;
     stage.verify(&manifest)?;
@@ -952,10 +982,113 @@ async fn build_bundle(spec_file: &Path, out: &Path) -> Result<()> {
     let _ = std::fs::remove_dir_all(&stage_root);
     let size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
     println!(
-        "Wrote {} ({} component(s), {} blob(s), {} bytes).",
+        "Wrote {} ({} component(s), {} blob(s), {} image(s), {} bytes).",
         out.display(),
         manifest.components.len(),
         manifest.blobs.len(),
+        manifest.images.len(),
+        size
+    );
+    Ok(())
+}
+
+/// `crater build --image`: wrap a spec's components into OCI **rootfs images**
+/// (crater build — no Docker). Each component's file outputs (download→dest,
+/// write_file, render_template) become a single fs layer; the target installs
+/// by extracting it to `/`. Non-file actions (systemd/run_cmd) aren't baked —
+/// this is for file-deployables like yq. Saved as an OCI archive.
+async fn build_image_bundle(spec_file: &Path, out: &Path) -> Result<()> {
+    use crater_core::component::Action;
+
+    let spec = CraterSpec::from_yaml_file(spec_file)?;
+    let components_dir = PathBuf::from("components");
+    let spec_dir = spec_file.parent().unwrap_or_else(|| Path::new("."));
+    let stage_root = std::env::temp_dir().join(format!("crater-img-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&stage_root);
+    let stage = bundle::BundleStage::new(stage_root.clone())?;
+    let online = OnlineSource::with_default_mirrors();
+
+    info!("building OCI rootfs image(s) from {}", spec_file.display());
+    let mut manifest_components = Vec::new();
+    let mut rootfs = Vec::new();
+    for cref in &spec.components {
+        let (desc, cdir) = resolve_descriptor(cref, &components_dir, spec_dir)?;
+        let ver = cref
+            .version
+            .clone()
+            .or_else(|| desc.version_default.clone())
+            .unwrap_or_else(|| "latest".into());
+        manifest_components.push(ManifestComponent {
+            name: cref.name.clone(),
+            version: ver.clone(),
+        });
+
+        // Render the component's file outputs into a rootfs (path, bytes, mode).
+        let mut ctx = PlanContext::new(OsFamily::Unknown, ver.clone(), cdir.clone());
+        ctx.offline_blobs = Some(BTreeMap::new()); // raw URLs
+        let mut files: Vec<(String, Vec<u8>, u32)> = Vec::new();
+        for a in desc.install.iter().chain(desc.verify.iter()) {
+            match a {
+                Action::Download { dest: Some(dest), .. } => {
+                    let raw = ctx.rendered_url(match a {
+                        Action::Download { url_tmpl, .. } => url_tmpl,
+                        _ => unreachable!(),
+                    });
+                    let url = online.rewrite(&raw);
+                    info!("  fetch {raw}");
+                    let (data, _) = source::fetch_best(&url)
+                        .await
+                        .map_err(|e| anyhow!("fetch {raw}: {e}"))?;
+                    files.push((dest.display().to_string(), data, 0o755));
+                }
+                Action::WriteFile { dst, content } => {
+                    files.push((dst.display().to_string(), content.clone().into_bytes(), 0o644));
+                }
+                _ => {} // systemd/run_cmd/extract/pkg_install aren't bakeable into a layer
+            }
+        }
+        if files.is_empty() {
+            anyhow::bail!(
+                "component '{}' has no file outputs to wrap into an image (needs download+dest / write_file)",
+                cref.name
+            );
+        }
+        // Stage the descriptor so deploy can run verify steps after load.
+        let staged = stage.components_dir().join(&cref.name);
+        std::fs::create_dir_all(&staged)?;
+        std::fs::write(staged.join("component.yaml"), desc.to_yaml()?)?;
+
+        let reference = format!("crater/{}:{ver}", cref.name);
+        let ir = stage.store_rootfs_layer(&reference, &files)?;
+        info!(
+            "  wrapped {} file(s) into image {reference} (manifest sha256={})",
+            files.len(),
+            &ir.manifest_digest[..16]
+        );
+        rootfs.push(ir);
+    }
+
+    let name = spec
+        .components
+        .first()
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| "bundle".into());
+    let manifest = Manifest {
+        format_version: BUNDLE_FORMAT_VERSION,
+        name,
+        components: manifest_components,
+        blobs: vec![],
+        images: vec![],
+        rootfs,
+    };
+    stage.write_manifest(&manifest)?;
+    bundle::pack(&stage_root, out)?;
+    let _ = std::fs::remove_dir_all(&stage_root);
+    let size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+    info!(
+        "wrote {} ({} rootfs image(s), {} bytes) — save: oci-archive",
+        out.display(),
+        manifest.rootfs.len(),
         size
     );
     Ok(())
@@ -974,11 +1107,12 @@ async fn deploy_bundle(
     let stage = bundle::unpack(bundle_file, &dest_root)?;
     let manifest = stage.read_manifest()?;
     stage.verify(&manifest)?; // checksum every blob before touching the target
-    println!(
-        "Bundle: {} — {} component(s), {} blob(s), checksums OK",
+    info!(
+        "bundle {} — {} component(s), {} blob(s), {} rootfs image(s), checksums OK",
         manifest.name,
         manifest.components.len(),
-        manifest.blobs.len()
+        manifest.blobs.len(),
+        manifest.rootfs.len()
     );
 
     let mut blobmap: BTreeMap<String, PathBuf> = BTreeMap::new();
@@ -991,7 +1125,7 @@ async fn deploy_bundle(
             let pw = password
                 .as_deref()
                 .ok_or_else(|| anyhow!("--password required for --host"))?;
-            println!("Connecting to {user}@{h}:{port} ...");
+            info!("connecting to {user}@{h}:{port}");
             Box::new(SshExecutor::connect(h, port, user, pw).await?)
         }
         None => Box::new(LocalExecutor),
@@ -1001,6 +1135,57 @@ async fn deploy_bundle(
     } else {
         OsFamily::Unknown
     };
+
+    // crater-native `load`: install rootfs images by extracting their fs layer
+    // to `/` on the target — no container runtime. (D-018 ②, the yq path.)
+    if !manifest.rootfs.is_empty() {
+        for ir in &manifest.rootfs {
+            let layer_digest = stage.layer_of(&ir.manifest_digest)?;
+            let layer = bundle::read_file(&stage.blob_path(&layer_digest))?;
+            info!(
+                "load image {} → extracting rootfs ({} bytes) to /",
+                ir.reference,
+                layer.len()
+            );
+            if do_apply {
+                let remote = "/tmp/crater-rootfs.tar";
+                exec.write_file(remote, &layer).await?;
+                let out = exec.run(&format!("tar -xpf {remote} -C / && rm -f {remote}")).await?;
+                if !out.ok() {
+                    anyhow::bail!("extract rootfs failed (exit {}): {}", out.code, out.stderr.trim());
+                }
+                info!("  installed {}", ir.reference);
+            }
+        }
+        // Run only verify steps (run_cmd) to confirm — files are already in place.
+        if do_apply {
+            for mc in &manifest.components {
+                let cdir = stage.components_dir().join(&mc.name);
+                if let Ok(desc) = ComponentDescriptor::from_yaml_file(&cdir.join("component.yaml")) {
+                    let ctx = PlanContext::new(osf, mc.version.clone(), cdir);
+                    let verify: Vec<_> = desc
+                        .verify
+                        .iter()
+                        .filter_map(|a| match a {
+                            crater_core::component::Action::RunCmd { cmd, .. } => {
+                                Some(engine::render(cmd, &ctx.vars))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    for cmd in verify {
+                        let out = exec.run(&cmd).await?;
+                        info!("verify: {} → {}", cmd, out.stdout.trim());
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dest_root);
+        if !do_apply {
+            info!("dry-run; omit --dry-run to load+install on the target");
+        }
+        return Ok(());
+    }
 
     for mc in &manifest.components {
         let cdir = stage.components_dir().join(&mc.name);

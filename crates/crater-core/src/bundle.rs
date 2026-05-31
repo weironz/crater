@@ -49,6 +49,23 @@ pub struct Manifest {
     pub components: Vec<ManifestComponent>,
     /// Content-addressed blob index, keyed by the (rendered) source URL.
     pub blobs: Vec<BlobEntry>,
+    /// Container images PULLED from a registry into the bundle (D-018 ②).
+    #[serde(default)]
+    pub images: Vec<ImageRef>,
+    /// App rootfs images BUILT by crater (yq etc.): a single fs layer crater
+    /// extracts to `/` on the target to install — no container runtime needed.
+    #[serde(default)]
+    pub rootfs: Vec<ImageRef>,
+}
+
+/// A container image packed into the bundle: its OCI blobs are stored under
+/// `blobs/sha256/`, referenced by a (synthesized) image manifest. (D-018 ②)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ImageRef {
+    pub reference: String,
+    /// sha256 hex of the image manifest blob (no `sha256:` prefix).
+    pub manifest_digest: String,
+    pub manifest_size: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -122,6 +139,108 @@ impl BundleStage {
         })
     }
 
+    /// Pull a container image and store its OCI blobs (config + layers +
+    /// synthesized manifest) under `blobs/sha256/` (D-018 ②). Returns an
+    /// [`ImageRef`]; the image becomes a first-class manifest in `index.json`,
+    /// so the whole archive is `ctr image import`-able. Pure Rust via oci-client
+    /// (rustls), so no Docker/skopeo on the control machine.
+    pub async fn pull_image(&self, reference: &str) -> crate::Result<ImageRef> {
+        use oci_client::manifest as mt;
+        use oci_client::{client::ClientConfig, secrets::RegistryAuth, Client, Reference};
+
+        let r: Reference = reference
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad image ref '{reference}': {e}"))?;
+        let client = Client::new(ClientConfig::default());
+        let accepted = vec![
+            mt::IMAGE_MANIFEST_MEDIA_TYPE,
+            mt::IMAGE_MANIFEST_LIST_MEDIA_TYPE,
+            mt::IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE,
+            mt::IMAGE_LAYER_GZIP_MEDIA_TYPE,
+            mt::IMAGE_LAYER_MEDIA_TYPE,
+            mt::IMAGE_CONFIG_MEDIA_TYPE,
+            mt::IMAGE_DOCKER_CONFIG_MEDIA_TYPE,
+        ];
+        let img = client
+            .pull(&r, &RegistryAuth::Anonymous, accepted)
+            .await
+            .map_err(|e| anyhow::anyhow!("pull image '{reference}': {e}"))?;
+
+        // Store config + each layer as content-addressed blobs.
+        let (cfg_digest, cfg_size) = self.store_raw(&img.config.data)?;
+        let mut layers_json = Vec::new();
+        for layer in &img.layers {
+            let (d, sz) = self.store_raw(&layer.data)?;
+            layers_json.push(json!({
+                "mediaType": layer.media_type, "digest": format!("sha256:{d}"), "size": sz
+            }));
+        }
+        // Synthesize a self-consistent OCI image manifest over our stored blobs.
+        let manifest = json!({
+            "schemaVersion": 2,
+            "mediaType": MT_MANIFEST,
+            "config": {"mediaType": img.config.media_type, "digest": format!("sha256:{cfg_digest}"), "size": cfg_size},
+            "layers": layers_json
+        });
+        let mbytes = serde_json::to_vec(&manifest)?;
+        let (mdig, msize) = self.store_raw(&mbytes)?;
+        Ok(ImageRef {
+            reference: reference.to_string(),
+            manifest_digest: mdig,
+            manifest_size: msize,
+        })
+    }
+
+    /// Build an OCI image whose single layer is a rootfs containing `files`
+    /// (each `(path, bytes, mode)`, path relative to `/`). crater's own `build`:
+    /// wrap an artifact (e.g. the yq binary) into an OCI image, no Docker. The
+    /// target installs it by extracting the layer to `/` (crater-native load).
+    pub fn store_rootfs_layer(
+        &self,
+        reference: &str,
+        files: &[(String, Vec<u8>, u32)],
+    ) -> crate::Result<ImageRef> {
+        // Build the rootfs layer tar (paths + exec/permission bits).
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, data, mode) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(*mode);
+            header.set_cksum();
+            let rel = path.trim_start_matches('/');
+            builder.append_data(&mut header, rel, data.as_slice())?;
+        }
+        let layer = builder.into_inner()?;
+        let (layer_digest, layer_size) = self.store_raw(&layer)?;
+
+        // Minimal OCI config + manifest over the layer (a real, pushable image).
+        let config = json!({
+            "architecture": "amd64", "os": "linux",
+            "rootfs": {"type": "layers", "diff_ids": [format!("sha256:{layer_digest}")]}
+        });
+        let (cfg_digest, cfg_size) = self.store_raw(&serde_json::to_vec(&config)?)?;
+        let manifest = json!({
+            "schemaVersion": 2, "mediaType": MT_MANIFEST,
+            "config": {"mediaType": MT_CONFIG, "digest": format!("sha256:{cfg_digest}"), "size": cfg_size},
+            "layers": [{"mediaType": MT_LAYER, "digest": format!("sha256:{layer_digest}"), "size": layer_size}]
+        });
+        let (mdig, msize) = self.store_raw(&serde_json::to_vec(&manifest)?)?;
+        Ok(ImageRef {
+            reference: reference.to_string(),
+            manifest_digest: mdig,
+            manifest_size: msize,
+        })
+    }
+
+    /// The fs-layer blob digest of a stored image manifest (for `load`/extract).
+    pub fn layer_of(&self, manifest_digest: &str) -> crate::Result<String> {
+        let m: serde_json::Value = serde_json::from_slice(&fs::read(self.blob_path(manifest_digest))?)?;
+        let d = m["layers"][0]["digest"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("image manifest {manifest_digest} has no layer"))?;
+        Ok(d.strip_prefix("sha256:").unwrap_or(d).to_string())
+    }
+
     /// Assemble the OCI Image Layout: store the crater-manifest, components
     /// layer, OCI config + image manifest as blobs, and write `index.json` +
     /// `oci-layout`. (Named `write_manifest` for call-site stability.)
@@ -161,14 +280,24 @@ impl BundleStage {
         });
         let (man_digest, man_size) = self.store_raw(&serde_json::to_vec(&manifest)?)?;
 
-        // index.json points at the manifest; the crater-manifest is found via annotation.
-        let index = json!({
-            "schemaVersion": 2, "mediaType": MT_INDEX,
-            "manifests": [{
+        // index.json: the crater image manifest (carrying the crater-manifest
+        // annotation) + one entry per packed container image (named via the
+        // standard ref.name annotation so `ctr image import` names it).
+        let mut manifests = vec![json!({
+            "mediaType": MT_MANIFEST,
+            "digest": format!("sha256:{man_digest}"), "size": man_size,
+            "annotations": { ANN_CRATER_MANIFEST: format!("sha256:{cm_digest}") }
+        })];
+        for img in m.images.iter().chain(m.rootfs.iter()) {
+            manifests.push(json!({
                 "mediaType": MT_MANIFEST,
-                "digest": format!("sha256:{man_digest}"), "size": man_size,
-                "annotations": { ANN_CRATER_MANIFEST: format!("sha256:{cm_digest}") }
-            }]
+                "digest": format!("sha256:{}", img.manifest_digest),
+                "size": img.manifest_size,
+                "annotations": { "org.opencontainers.image.ref.name": img.reference }
+            }));
+        }
+        let index = json!({
+            "schemaVersion": 2, "mediaType": MT_INDEX, "manifests": manifests
         });
         fs::write(self.root.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
         fs::write(self.root.join("oci-layout"), br#"{"imageLayoutVersion":"1.0.0"}"#)?;
@@ -273,6 +402,8 @@ mod tests {
                 version: "24.0".into(),
             }],
             blobs: vec![blob.clone()],
+            images: vec![],
+            rootfs: vec![],
         };
         stage.write_manifest(&m).unwrap();
 
@@ -296,6 +427,22 @@ mod tests {
         let restored = read_file(&stage2.blob_path(&blob.sha256)).unwrap();
         assert_eq!(restored, b"hello-artifact");
 
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn rootfs_layer_round_trips() {
+        let tmp = std::env::temp_dir().join(format!("crater-rootfs-test-{}", std::process::id()));
+        let stage = BundleStage::new(tmp.join("stage")).unwrap();
+        let files = vec![("/usr/local/bin/yq".to_string(), b"BINARY".to_vec(), 0o755)];
+        let ir = stage.store_rootfs_layer("yq:rootfs", &files).unwrap();
+        // The image manifest resolves to a layer blob that is a tar of the rootfs.
+        let layer_digest = stage.layer_of(&ir.manifest_digest).unwrap();
+        let layer = read_file(&stage.blob_path(&layer_digest)).unwrap();
+        let mut ar = tar::Archive::new(layer.as_slice());
+        let entry = ar.entries().unwrap().next().unwrap().unwrap();
+        assert_eq!(entry.path().unwrap().to_str().unwrap(), "usr/local/bin/yq");
+        assert_eq!(entry.header().mode().unwrap() & 0o777, 0o755);
         let _ = fs::remove_dir_all(&tmp);
     }
 }
