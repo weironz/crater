@@ -34,6 +34,42 @@ inventory:
 
 > 即"`--host` 只能一套密码"的解法——少量同构机器用 `--host` 共用，异构就上 inventory（每主机独立）。
 
+## inventory 文件格式 + `crater create inventory`
+
+`-i` / `--inventory` 指向一个 YAML，顶层 `inventory.hosts` 列出目标主机：
+
+```yaml
+inventory:
+  hosts:
+    - name: web1               # 主机别名（日志显示用）
+      address: 192.168.1.11    # IP 或域名（必填）
+      user: root               # SSH 用户（默认 root）
+      port: 22                 # SSH 端口（默认 22）
+      password: "changeme"     # 密码 ——
+      key: ~/.ssh/id_rsa       #   或私钥（二选一，key 优先；~ 自动展开为 $HOME）
+      roles: [web]             # 角色标签（可选；组件/task 按 role 选主机）
+```
+
+| 字段 | 必填 | 默认 | 说明 |
+|---|---|---|---|
+| `name` | 是 | — | 主机别名 |
+| `address` | 是 | — | IP / 域名 |
+| `user` | 否 | `root` | SSH 用户 |
+| `port` | 否 | `22` | SSH 端口 |
+| `password` | 二选一 | — | SSH 密码 |
+| `key` | 二选一 | — | SSH 私钥路径（优先于 password，`~` 展开） |
+| `roles` | 否 | `[]` | 角色标签 |
+
+**不用手写**——`crater create inventory` 生成一份带注释的模板供编辑：
+
+```bash
+crater create inventory                 # → ./inventory.yaml（含三台示例 + 字段注释）
+crater create inventory hosts.yaml      # 指定文件名
+crater create inventory --force         # 覆盖已存在文件（默认拒绝覆盖）
+# 编辑后：
+crater apply <动作> -i inventory.yaml
+```
+
 ## 基本 demo（以 zot 上的 yq B 类 artifact 为例）
 
 ```bash

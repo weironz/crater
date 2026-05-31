@@ -197,6 +197,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RegistryCmd,
     },
+    /// Generate a starter file to edit (e.g. a sample inventory).
+    Create {
+        #[command(subcommand)]
+        what: CreateWhat,
+    },
     /// Internal: self-bootstrap agent. Runs ON the target node, executing a
     /// lowered plan locally (pushed here by the control machine). D-019.
     Agent {
@@ -219,6 +224,19 @@ enum RegistryCmd {
         username: String,
         #[arg(short, long)]
         password: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CreateWhat {
+    /// Write a sample inventory.yaml (host list for `-i`) to edit.
+    Inventory {
+        /// Output path.
+        #[arg(default_value = "inventory.yaml")]
+        path: PathBuf,
+        /// Overwrite if the file already exists.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -338,6 +356,9 @@ async fn main() -> Result<()> {
                 info!("saved credentials for {registry}");
                 Ok(())
             }
+        },
+        Cmd::Create { what } => match what {
+            CreateWhat::Inventory { path, force } => create_inventory(&path, force),
         },
         Cmd::Ai { request, output } => ai_generate(&request.join(" "), output).await,
         Cmd::Doctor {
@@ -1123,6 +1144,63 @@ fn forks_limit() -> usize {
         .unwrap_or(10)
 }
 
+/// Starter inventory written by `crater create inventory`. Comments document
+/// every field; password/key are mutually exclusive (key wins, `~` expands).
+const INVENTORY_TEMPLATE: &str = r#"# crater inventory —— 部署目标主机清单。
+# 用法:crater apply <动作> -i <此文件>(大量机器、每台各自凭据)。
+#
+# 每台主机至少 name + address;认证用 password 或 key(二选一,key 优先)。
+# user 默认 root,port 默认 22。roles 可选(组件/task 按 role 选主机)。
+inventory:
+  hosts:
+    # ① 密码认证
+    - name: web1
+      address: 192.168.1.11
+      user: root
+      port: 22
+      password: "changeme"
+      # roles: [web]
+
+    # ② SSH 私钥认证(适合禁用密码登录的机群;~ 会自动展开为 $HOME)
+    - name: web2
+      address: 192.168.1.12
+      user: ubuntu
+      key: ~/.ssh/id_rsa
+      # roles: [web]
+
+    # ③ 再一台
+    - name: db1
+      address: 192.168.1.20
+      password: "changeme"
+      # roles: [db]
+"#;
+
+/// `crater create inventory [path]`: write a sample inventory for the user to
+/// edit. Refuses to clobber an existing file unless `--force`.
+fn create_inventory(path: &Path, force: bool) -> Result<()> {
+    if path.exists() && !force {
+        anyhow::bail!("{} 已存在(加 --force 覆盖)", path.display());
+    }
+    std::fs::write(path, INVENTORY_TEMPLATE)?;
+    info!(
+        "已生成 {} —— 编辑主机后用:crater apply <动作> -i {}",
+        path.display(),
+        path.display()
+    );
+    Ok(())
+}
+
+/// Expand a leading `~` to `$HOME` (std::fs / russh don't do shell expansion),
+/// so an inventory `key: ~/.ssh/id_rsa` or `--key ~/...` works.
+fn expand_tilde(p: &Path) -> PathBuf {
+    if let Ok(rest) = p.strip_prefix("~") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    p.to_path_buf()
+}
+
 /// Build an executor for a host: local (dry-run or `@local`), SSH key, or SSH
 /// password. Shared by component (`run_host`) and task (`run_task_on_host`).
 async fn connect_executor(
@@ -1139,7 +1217,7 @@ async fn connect_executor(
                 host.port,
                 &host.user,
                 &crater_core::executor::SshAuth::Key {
-                    path: keypath.clone(),
+                    path: expand_tilde(keypath),
                     passphrase: None,
                 },
             )
