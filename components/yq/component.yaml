@@ -1,0 +1,23 @@
+# yq — minimal online-deploy demo (D-017 dogfood).
+# A single dependency-free static binary from GitHub (mikefarah/yq). Not a
+# daemon — just a CLI tool dropped on PATH. The simplest possible "deploy
+# anything": adding it is PURE DATA, zero Rust changes.
+#
+# Online path: the target machine curls the binary itself (agentless, D-007),
+# with CN mirror fallback handled by fetch_best on the build side / mirrors data.
+name: yq
+version_default: "4.53.2"
+supported_os: [ubuntu, debian, rhel, centos, rocky]
+
+install:
+  # Raw binary (not a tarball) → download straight to a PATH location, no extract.
+  - action: download
+    url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64"
+    dest: /usr/local/bin/yq
+  - action: run_cmd
+    cmd: "chmod +x /usr/local/bin/yq"
+    check: "test -x /usr/local/bin/yq"   # 已可执行则跳过（幂等，报 ok）
+
+verify:
+  - action: run_cmd
+    cmd: "/usr/local/bin/yq --version"

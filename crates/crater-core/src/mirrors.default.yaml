@@ -1,0 +1,14 @@
+# Default artifact mirror rules (China-friendly). The engine only PARSES this
+# file — the product/registry names live here as DATA, never in code. Override
+# per environment by putting a `mirrors.yaml` in the working dir, or pointing
+# $CRATER_MIRRORS at one (handy for air-gapped / on-prem internal mirrors).
+
+# Host/registry rewrite rules applied to download & image URLs (online deploy).
+registry_rewrites:
+  - from: registry.k8s.io
+    to: registry.aliyuncs.com/google_containers
+
+# GitHub download mirrors, tried in order AFTER a direct attempt.
+github_mirrors:
+  - https://ghfast.top/
+  - https://gh.api.99988866.xyz/

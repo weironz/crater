@@ -68,5 +68,110 @@ tar + flate2(rust_backend),免 C 工具链,Windows 控制端可直接编。OCI l
 ### D-015 AI 副驾不司机（OpenAI 兼容 + 确定性护栏）
 provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契合政企离线)。`nl_to_spec` 让模型只产候选,再经 schema 反序列化 + 组件存在性校验;幻觉被拒,绝不静默驱动部署。离线诊断 `diagnose.rs` 固化规则零网络零模型先行,内网模型可叠加。
 
-### D-016 组件别名
-`resolve_alias`:`k8s`/`kubernetes`→`k3s`,`es`→`elasticsearch`,使用户字面命令 `crater k8s` / `crater es` 可用。
+### D-016 组件别名（已被 D-017 取代）
+~~`resolve_alias`:`k8s`/`kubernetes`→`k3s`,`es`→`elasticsearch`,使用户字面命令 `crater k8s` / `crater es` 可用。~~
+**作废**:别名被焊死在代码里，违反「引擎零产品知识」(D-017)。现改为组件描述文件的 `aliases:` 字段（数据）。
+
+---
+
+## 2026-05-31 · 架构铁律确立 + 还债（A 批）
+
+### D-017 引擎零产品知识：能装万物 = 引擎通用 + 知识是数据
+- **背景**:用户重申理念——「代码里不能有任何 docker/k3s/mysql 等我期望装的东西的逻辑，因为安装万物是我的理念」。审计发现多处违规:`resolve_alias`(别名焊死)、`doctor` 探针写死 `journalctl -u docker/-u k3s`、`LoadImage` 写死 `docker pull`、`source.rs` 写死 `registry.k8s.io` 镜像。
+- **决策**:确立铁律——**引擎(Rust)只持有「通用原语」(file/copy/template/service/cmd/download/extract/load_image…，类比 ansible-core 的 module)，不得持有任何「具体产品」的名字/服务名/别名/镜像源/诊断规则;后者一律是数据(YAML)**。加一个可部署对象 = 丢一个描述文件，绝不改 Rust 重编译。
+- **理由**:这正是 ansible 的架构本质(ansible-core 不知道 nginx 是什么);「类似 ansible」与「装万物」是同一目标。引擎是领域无关的、跑在 SSH 上的声明式 task 引擎。
+- **影响（本批已做，build 0 错、21 tests 绿、`crater k8s` dry-run 经数据别名解析到 k3s 验证）**:
+  1. `ComponentDescriptor.aliases: Vec<String>`;删 `resolve_alias`，改 `resolve_component` 扫 `components/` 从数据建表;`k3s` 声明 `aliases: [k8s, kubernetes]`、`elasticsearch` 声明 `[es]`。
+  2. `doctor` 探针改为从所有组件的 `SystemdUnit` 名(`ComponentDescriptor::systemd_units`)推导 + 通用 `journalctl -p err`;不再写死服务名。
+  3. `Action::LoadImage` 加 `runtime: Option<String>`;无声明则探测 `nerdctl/docker/podman/ctr`，引擎不假定运行时。
+  4. 镜像表(registry 改写 + github 镜像)移入 `crater-core/src/mirrors.default.yaml`(include_str! 烤进二进制，仍是数据);`$CRATER_MIRRORS`/`./mirrors.yaml` 可外部覆盖(政企内网镜像)。代码只 parse，不命名产品。
+- **后续（B 批，未做）**:幂等契约 + `changed/ok/skipped/failed` 回显;crater.yaml 轻量 task/play 层(module + when/loop/notify);ansible 习惯 module 库(file/copy/service/user/lineinfile/cron/git)。详见 progress.md。
+
+---
+
+## 2026-05-31 · 设计方向重整（离线转 OCI + 自举 agent）
+
+### D-018 离线包基于 OCI 镜像（取代 D-012 的 tar.gz）
+- **背景**:用户定向「离线打包基于 OCI 镜像」。M2 现状是 tar.gz + 手写 manifest + sha256(D-012)，装不下容器镜像、无去重、校验靠手写。
+- **决策**:离线包格式定为 **OCI Image Layout**(序列化为单个 oci-archive tar)。制品与容器镜像均以 OCI blob **内容寻址**存放;crater 在其上加一层 `crater-manifest`(自定义 mediaType)做逻辑索引(spec + 制品名→digest→落地动作)。**取代 D-012 的 tar.gz 为离线主格式**(tar.gz 在 OCI 跑通前保留，渐进迁移)。
+- **理由**:内容寻址=校验免费;分层=多组件共享 base 去重;容器镜像本就是 OCI，可原生打包/导入(k8s/mysql/es 离线的前提);生态(registry/`ctr import`/`docker load`/oras)通吃。参考 sealos clusterimage。
+- **影响（守 D-017）**:引擎只懂「打/解 OCI、导入镜像」机制;**哪些镜像/制品打包由组件数据声明**——组件新增 `images:` 字段(列离线所需镜像，可带 digest 锁定)，`artifacts` 来自 `download:` 原语。在线/离线共用同一套组件与引擎，仅在 ArtifactSource 分叉(Online 目标机自拉 / OciBundle 从包取)。选型:`oci-spec`+`oci-client`(rustls，纯 Rust)，musl 可编性待验证。详见 [offline-format.md](offline-format.md)、[design.md](design.md)。
+
+### D-019 自举 agent（`crater agent`）是离线落地的执行基座，非可选优化
+- **背景**:F16 的 `crater agent` 一直是 TODO 桩(`main.rs` 打印 TODO)。用户重申「需要实现自举 agent」。
+- **决策**:把 crater **二进制本身**推送到目标机，以 `crater agent` 在本地执行计划/解包。**一次性自举，用完即走，不留常驻服务**(仍守 agentless 精神)。控制端与 agent **复用同一套引擎代码**，仅 Executor 换 LocalExecutor。
+- **理由**:OCI 离线 deploy 的解包/digest 校验/`image import`/推临时 registry，用 shell 片段拼极脆弱;用推过去的同一二进制在本地做，干净、可测、复用引擎。并减少弱网下的 SSH 往返;为 B 批幂等 check/回滚提供本地执行环境。
+- **影响**:agentless shell 推送(现状)与自举 agent **互补共存**——简单在线步骤走 shell，离线/复杂逻辑走 agent。详见 [design.md §5](design.md)。
+
+---
+
+## 2026-05-31 · CLI 终极契约 + 生命周期/状态 + AI 接口
+
+### D-020 CLI 终极形态：`apply` 为主入口，`<source>` 与 `<release>` 两类对象
+- **背景**:用户敲定终极命令。早先猜想用 `install`，改为 **`apply`**——声明式幂等动词(收敛到期望态，含 install+upgrade)，与 B1 幂等契约同源，且统一现有 `crater apply -f`。
+- **决策**:动词全集 `plan/apply/bundle/inspect/verify`(吃 `<source>`) + `rollback/remove/ai diagnose`(吃 `<release>`)。
+  - **`<source>`**=recipe+制品来源:组件名 / `./x.yaml` playbook / `oci://…` 镜像 / `./x.crater` 归档 / `-f spec.yaml`，引擎自动识别、统一对待。
+  - **`<release>`**=已部署实例:名字+修订历史+落在哪些主机。`apply` 把 source 收敛成/更新 release;`--release` 区分实例。
+  - **inventory 永远在镜像外**(CLI `--host`/`-i` 或 spec)，不入可分发的 OCI 镜像(密钥/复用)。镜像内 recipe 是默认参数，`--set`/`--values` 覆盖。
+  - 现命令映射:`build`→`bundle`(别名保留)、`doctor`→`ai diagnose`、`crater ai`→`ai generate`、`crater <component>`快捷式=`apply <component>`糖。
+- **理由**:一个 `apply` 收敛所有部署入口;source/release 分离让"装"与"管(回滚/卸载/诊断)"各有清晰对象。
+- **影响**:CLI 重构按此;破坏性动词(apply/rollback/remove)支持 `--dry-run`，`plan`=apply 预览。详见 [design.md §7](design.md)。
+
+### D-021 release 状态记录放目标机；回滚=重放旧期望态，卸载=声明式 `uninstall:`
+- **背景**:rollback/remove/诊断需要"记住装过什么"——crater 现在无状态。
+- **决策**:
+  - **状态放目标机**(非控制端):`/var/lib/crater/releases/<release>/{history.json, rev-<n>/{plan.json, touched.json}}`。契合 agentless/air-gap/政企:控制端可丢、主机自描述、可被任意控制端接管。
+  - **rollback=声明式回滚**:默认重放上一修订存下的期望态(吃幂等红利，不靠逐动作逆操作);OCI 修订钉 `source_digest` 可重放;删过的文件用快照恢复;**有副作用的 `run_cmd` 诚实标记不可自动回滚**，`plan rollback` 先列可逆/不可逆。
+  - **remove=声明式 `uninstall:` 阶段**(组件新增数据字段，与 install/verify 对称，守 D-017):引擎只跑数据声明的拆除步骤;未声明则按 `touched.json` 反向尽力清(默认不动系统包，`--purge` 才删并明示可能不彻底)。
+- **理由**:逐动作写逆操作脆且组合爆炸;声明式重放+记录追踪更稳，且复用幂等地基(B1)。
+- **影响**:apply 每次写新修订;component schema 增 `uninstall:`;依赖 B1 幂等。详见 [design.md §7.4](design.md)。
+
+### D-022 AI 接口保留：独立子命令 + 三个生命周期钩子（实现后置）
+- **背景**:用户要求保留 AI 接口(后置实现)，并明确 AI 要贯穿:制包时分析依赖、部署报错时分析日志、部署后 doctor 检查+智能修复。
+- **决策**:AI 两种存在形式，统一守 D-015(副驾不司机、可 `--ai off`):
+  - **(a) 子命令** `crater ai <sub>`:`diagnose <release>`(现 doctor)、`generate "<nl>"`(现 crater ai)，预留 explain/suggest。
+  - **(b) 生命周期钩子**(默认关，`--ai` 开):**bundle 时**依赖分析/补全(AI2)、**apply 报错时**日志根因+修复命令(AI5/6)、**apply 后**doctor 健康检查+智能修复建议(**仅建议，人工确认**，AI10)。
+  - **降级链**(AI9):固化规则(零网络，离线必可用)→ 内网 endpoint → 云端 OpenAI 兼容;制包时可把专属诊断规则/runbook 固化进 OCI 包(AI4)。
+- **理由**:把 AI 钉成"关键点可选叠加"而非散落，接口/钩子点先占位、契约稳定，多数实现后置不阻塞主线。
+- **影响**:`ai` namespace + 钩子点先占;规则侧已可用(M5)，模型侧叠加后续。详见 [design.md §7.5](design.md)、requirements §5。
+
+---
+
+## 2026-05-31 · B1 幂等回显（已实现 + 真机验证）
+
+### D-023 幂等契约：每步 check→act→report，回显 changed/ok/warn
+- **背景**:B 批地基。原 `execute` 每步无脑跑、无"已就绪则跳过"，重跑 yq 会重新 curl。要 ansible 式幂等回显。
+- **决策**:`Op::Shell` 增可选 `check`(幂等探针);`StepStatus{Ok,Changed,Warn}`;`execute` 按相分流——
+  - **读类**(Preflight/Verify):跑命令，exit0→`ok`，soft_fail 非零→`warn`，从不算 changed。
+  - **安装类**(Install):先跑 `check`，exit0→`ok`(跳过主命令)，否则执行→`changed`(失败且非 soft_fail 则 bail)。
+  - **写文件**(WriteFile/PushFile):比对远端 `sha256sum` 与期望;相同→`ok` 跳过，否则写→`changed`。
+  - 收尾汇总 `changed=.. ok=.. warn=..`。
+- **探针来源(守 D-017，全是数据/通用规则)**:`download`=`test -s dest`、`pkg_install`=`dpkg -s`/`rpm -q`、`systemd_unit`=`is-enabled`/`is-active`(按 enable/start)、`run_cmd` 支持组件 YAML 里写 `check:`(ansible `creates:` 风格)、`extract`/`load_image` 暂无可靠通用探针(总跑，报 changed)。
+- **真机验证(192.168.73.11，yq)**:清空后首次 `changed=2 ok=1`;再次 `changed=0 ok=3`(download/chmod 跳过、verify ok)。23 tests 绿(+2 幂等单测)。
+- **已知边界(后续)**:download 的 `test -s` 不校验版本(版本升级需带版本/校验和的探针);`run_cmd` 默认无 check 则总 changed;`when:`/`skipped`(条件跳过)属 B2 未做。
+
+### D-024 CLI 默认执行：去掉 `--apply`，预览改 `--dry-run`
+- **背景**:用户指出命令尾部的 `--apply` 多余。按 D-020，动词 `apply` 本身即"执行"，`plan`/`--dry-run` 才是预览。
+- **决策**:**默认执行**;`--apply` flag 删除;新增 `--dry-run` 只打印计划不执行。覆盖 Apply/Deploy 子命令与 `crater <component>` 快捷式。
+- **理由**:消除"动词说执行、还要再加 flag 才执行"的冗余;与 D-020 的 `plan`/`apply` 语义一致。
+- **影响**:`crater yq --host .. --password ..` 直接执行(真机验证 idempotent ok=3);`--dry-run` 预览;内部 `do_apply` 语义保留(默认 true)。注意:无 `--host` 的本地快捷式现在也会**真执行**于控制机，预览须显式 `--dry-run`。
+
+### D-025 spec 支持内联 recipe（Path B）：一个 yaml 即可，`components/` 变可选复用库
+- **背景**:用户质疑"recipe(`components/<name>/component.yaml`) + spec(`yq.yaml`) 两个文件"是否必须。结论:分离是为**复用 + 密钥隔离**(recipe 可发布/签名/进 OCI 镜像，inventory 含密码不能进)，但不应**强制**两个文件。
+- **决策**:`ComponentRef` 增内联字段 `preflight/install/verify/requires/supported_os`;任一阶段非空即 `is_inline()`，直接由它构 `ComponentDescriptor`，不再读 `components/<name>/`。一个 spec 文件即可完整描述部署;`components/` 退化为**可选**复用库。
+- **理由**:简单场景不该被迫拆两文件;同时保留分离能力(复用/打包)。三种用法并存:零 spec(`crater apply yq --host`)/ 单文件内联(本决策)/ 分离(复用时)。
+- **影响**:`resolve_descriptor` 统一"内联 vs 磁盘"加载(apply/order/bundle 共用);内联模板路径相对 spec 目录;bundle 把内联 recipe 序列化进包。真机验证 `examples/yq-inline.yaml`(单文件)在线部署 idempotent ok=3。+2 单测(共 25)。详见 [design.md §3.1](design.md)。
+
+---
+
+## 2026-05-31 · 自举 agent 实现（D-019 落地）
+
+### D-026 自举 agent 实现：推二进制+计划，目标机本地执行（在线先行）
+- **背景**:D-019 决策的实现。`crater agent` 原为 TODO 桩。
+- **决策/实现**:
+  - `Op`/`Phase` 加 `Serialize/Deserialize`;`engine::plan_to_yaml`/`plan_from_yaml` 作 agent 线格式(内部 YAML，自产自销)。
+  - `crater agent --plan <file>`:在目标机读计划、用 **LocalExecutor** 本地执行(复用同一 `engine::execute`，幂等回显照旧)。
+  - 控制端 `--agent`:连 SSH→探 OS→**控制端 lower 出具体计划**→推 `/tmp/crater-agent`(二进制，分块 base64)+`/tmp/crater-plan.yaml`→一条 exec 跑 `crater agent --plan`→流式回显→**清理临时文件**(一次性自举，不留常驻)。`--agent-bin` 可指定要推的二进制。
+- **真机验证(192.168.73.11)**:推 9.8MB release 二进制 + 计划，目标机本地执行;清空后首跑 `changed=2 ok=1`、再跑 `changed=0 ok=3`(幂等贯穿 agent 路径)。`Done on local` 证实是 LocalExecutor 在目标机跑。+1 round-trip 单测(共 26)。
+- **二进制兼容**:demo 用 glibc release(控制端与目标同为 Ubuntu 24.04/glibc 2.39);异构目标用 `--agent-bin` 指 musl 静态构建(N1/N2)。
+- **已知边界(后续)**:仅在线计划(Shell/WriteFile);**离线 `PushFile` 未支持**(blob 在控制端，需随计划一并 ship——并入 OCI 离线 D-018 时做);agent 暂不回传结构化结果(只流 stdout)。详见 [design.md §5.2](design.md)。

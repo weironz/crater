@@ -15,6 +15,11 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ComponentDescriptor {
     pub name: String,
+    /// User-friendly aliases that resolve to this component (e.g. `k8s` -> `k3s`).
+    /// Lives in data, never in engine code: adding an alias means editing this
+    /// descriptor, not recompiling crater.
+    #[serde(default)]
+    pub aliases: Vec<String>,
     #[serde(default)]
     pub version_default: Option<String>,
     #[serde(default)]
@@ -37,6 +42,25 @@ impl ComponentDescriptor {
     pub fn from_yaml_file(path: &std::path::Path) -> crate::Result<Self> {
         let text = std::fs::read_to_string(path)?;
         Ok(serde_yaml::from_str(&text)?)
+    }
+
+    /// Serialize back to YAML (used to stage an inline recipe into a bundle).
+    pub fn to_yaml(&self) -> crate::Result<String> {
+        Ok(serde_yaml::to_string(self)?)
+    }
+
+    /// systemd unit names this component manages (from `SystemdUnit` actions).
+    /// Used to derive what to probe in `doctor` — the unit names live in the
+    /// component data, not in engine code.
+    pub fn systemd_units(&self) -> Vec<String> {
+        self.install
+            .iter()
+            .chain(self.verify.iter())
+            .filter_map(|a| match a {
+                Action::SystemdUnit { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -90,9 +114,19 @@ pub enum Action {
     },
     RunCmd {
         cmd: String,
+        /// Optional idempotency probe (ansible `creates:`-style): if this shell
+        /// command exits 0, the target is already in the desired state and `cmd`
+        /// is skipped (reported `ok` instead of `changed`). Data, not code.
+        #[serde(default)]
+        check: Option<String>,
     },
-    /// Reserved for offline image loading (M2+).
+    /// Load/pull a container image. The runtime is NOT assumed: when `runtime`
+    /// is set we use it verbatim; otherwise we probe for whatever generic OCI
+    /// tool is on the box (nerdctl/docker/podman/ctr). Reserved for offline
+    /// image loading (M2+).
     LoadImage {
         reference: String,
+        #[serde(default)]
+        runtime: Option<String>,
     },
 }

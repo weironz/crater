@@ -14,7 +14,8 @@ test.log
 _*.txt
 _*.log
 
-# Editors / OS
+# Editors / OS / tooling
+.claude/
 .idea/
 .vscode/
 .DS_Store

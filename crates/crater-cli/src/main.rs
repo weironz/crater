@@ -1,10 +1,10 @@
 //! `crater` CLI.
 //!
-//! Forms:
-//!   crater <component> [--host H --user U --password P --port N] [--version X] [--os debian|rhel] [--apply]
-//!   crater apply -f crater.yaml [--apply]
+//! Forms (executes by default; pass --dry-run to only print the plan):
+//!   crater <component> [--host H --user U --password P --port N] [--version X] [--os debian|rhel] [--dry-run]
+//!   crater apply -f crater.yaml [--dry-run]
 //!   crater build -f spec.yaml -o x.bundle                              (online: make offline bundle)
-//!   crater deploy --bundle x.bundle --host H --password P [--apply]    (offline)
+//!   crater deploy --bundle x.bundle --host H --password P [--dry-run]  (offline)
 //!   crater ai "<request>" [-o crater.yaml]                             (M4)
 //!   crater doctor --file log.txt | --host H --password P [--ai]        (M5)
 //!   crater run --host H --password P -- <cmd>                          (ad-hoc, ansible -m shell)
@@ -38,12 +38,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Apply a declarative spec file (crater.yaml).
+    /// Apply a declarative spec file (crater.yaml). Executes by default;
+    /// pass --dry-run to only print the plan.
     Apply {
         #[arg(short, long)]
         file: PathBuf,
+        /// Print the plan without executing.
         #[arg(long)]
-        apply: bool,
+        dry_run: bool,
     },
     /// Build an offline bundle from a spec (run on an online control machine).
     Build {
@@ -64,8 +66,9 @@ enum Cmd {
         password: Option<String>,
         #[arg(long, default_value_t = 22)]
         port: u16,
+        /// Print the plan without executing.
         #[arg(long)]
-        apply: bool,
+        dry_run: bool,
     },
     /// AI copilot: natural language -> validated crater.yaml (M4).
     /// Configure via CRATER_AI_ENDPOINT / CRATER_AI_KEY / CRATER_AI_MODEL.
@@ -126,10 +129,12 @@ enum Cmd {
         #[arg(long)]
         chmod: Option<String>,
     },
-    /// Internal: self-bootstrap agent mode running on the target node.
+    /// Internal: self-bootstrap agent. Runs ON the target node, executing a
+    /// lowered plan locally (pushed here by the control machine). D-019.
     Agent {
+        /// Path to the serialized plan to execute locally.
         #[arg(long)]
-        task: Option<String>,
+        plan: Option<PathBuf>,
     },
     /// Shortcut: `crater <component> [flags]`.
     #[command(external_subcommand)]
@@ -144,7 +149,7 @@ async fn main() -> Result<()> {
         .init();
 
     match Cli::parse().cmd {
-        Cmd::Apply { file, apply } => apply_spec(&file, apply).await,
+        Cmd::Apply { file, dry_run } => apply_spec(&file, !dry_run).await,
         Cmd::Build { file, output } => build_bundle(&file, &output).await,
         Cmd::Deploy {
             bundle,
@@ -152,8 +157,8 @@ async fn main() -> Result<()> {
             user,
             password,
             port,
-            apply,
-        } => deploy_bundle(&bundle, host, &user, password, port, apply).await,
+            dry_run,
+        } => deploy_bundle(&bundle, host, &user, password, port, !dry_run).await,
         Cmd::Push {
             host,
             user,
@@ -179,10 +184,7 @@ async fn main() -> Result<()> {
             port,
             cmd,
         } => run_adhoc(&host, &user, password, port, &cmd.join(" ")).await,
-        Cmd::Agent { task } => {
-            println!("[agent] self-bootstrap mode (TODO M3+). task={task:?}");
-            Ok(())
-        }
+        Cmd::Agent { plan } => run_agent(plan).await,
         Cmd::Component(args) => deploy_shortcut(args).await,
     }
 }
@@ -197,6 +199,10 @@ struct ShortcutFlags {
     password: Option<String>,
     components_dir: PathBuf,
     do_apply: bool,
+    /// Execute via the self-bootstrap agent (push binary + plan, run on target).
+    agent: bool,
+    /// Override the binary shipped in agent mode (e.g. a musl static build).
+    agent_bin: Option<PathBuf>,
 }
 
 fn parse_flags(rest: &[String]) -> Result<ShortcutFlags> {
@@ -205,6 +211,7 @@ fn parse_flags(rest: &[String]) -> Result<ShortcutFlags> {
         port: 22,
         components_dir: PathBuf::from("components"),
         password: std::env::var("CRATER_SSH_PASSWORD").ok(),
+        do_apply: true, // execute by default; --dry-run flips it off
         ..Default::default()
     };
     let mut i = 0;
@@ -244,9 +251,17 @@ fn parse_flags(rest: &[String]) -> Result<ShortcutFlags> {
                 }
                 i += 2;
             }
-            "--apply" => {
-                f.do_apply = true;
+            "--dry-run" => {
+                f.do_apply = false;
                 i += 1;
+            }
+            "--agent" => {
+                f.agent = true;
+                i += 1;
+            }
+            "--agent-bin" => {
+                f.agent_bin = rest.get(i + 1).map(PathBuf::from);
+                i += 2;
             }
             other => return Err(anyhow!("unknown flag: {other}")),
         }
@@ -309,23 +324,39 @@ async fn push_file(
     Ok(())
 }
 
-/// Map user-friendly aliases to actual component directory names, so the
-/// literal examples `crater k8s` / `crater es` work even though the components
-/// are `k3s` / `elasticsearch`.
-fn resolve_alias(name: &str) -> &str {
-    match name {
-        "k8s" | "kubernetes" => "k3s",
-        "es" => "elasticsearch",
-        other => other,
+/// Resolve a user-typed name (which may be an alias) to a real component dir
+/// name. The engine holds ZERO product knowledge: aliases are declared in each
+/// component's `aliases:` field (data), and we build the map by scanning
+/// `components/`. `crater k8s` works because `k3s/component.yaml` declares it,
+/// not because the code knows what k8s is.
+fn resolve_component(name: &str, components_dir: &Path) -> String {
+    // Exact directory match wins — no scan needed.
+    if components_dir.join(name).join("component.yaml").is_file() {
+        return name.to_string();
     }
+    if let Ok(rd) = std::fs::read_dir(components_dir) {
+        for e in rd.flatten() {
+            let yaml = e.path().join("component.yaml");
+            if !yaml.is_file() {
+                continue;
+            }
+            if let Ok(desc) = ComponentDescriptor::from_yaml_file(&yaml) {
+                if desc.aliases.iter().any(|a| a == name) {
+                    return desc.name;
+                }
+            }
+        }
+    }
+    // No match: hand back the original so the caller fails with a clear error.
+    name.to_string()
 }
 
 async fn deploy_shortcut(args: Vec<String>) -> Result<()> {
     let mut it = args.into_iter();
     let raw = it.next().ok_or_else(|| anyhow!("missing component name"))?;
-    let name = resolve_alias(&raw).to_string();
     let rest: Vec<String> = it.collect();
     let f = parse_flags(&rest)?;
+    let name = resolve_component(&raw, &f.components_dir);
 
     let component_dir = f.components_dir.join(&name);
     let desc = ComponentDescriptor::from_yaml_file(&component_dir.join("component.yaml"))
@@ -363,21 +394,107 @@ async fn deploy_shortcut(args: Vec<String>) -> Result<()> {
     let ctx = PlanContext::new(osf, ver.clone(), component_dir);
     let plan = build_plan(&desc, &ctx)?;
 
+    let mode = if !f.do_apply {
+        "DRY-RUN"
+    } else if f.agent {
+        "APPLY (self-bootstrap agent)"
+    } else {
+        "APPLY"
+    };
     println!("Component : {}", desc.name);
     println!("Version   : {ver}");
     println!("Target    : {}", exec.label());
     println!("OS family : {}", osf.as_str());
-    println!("Mode      : {}", if f.do_apply { "APPLY" } else { "DRY-RUN" });
+    println!("Mode      : {mode}");
     println!("Steps     : {}", plan.len());
     println!("------------------------------------------");
     print_plan(&plan);
     println!("------------------------------------------");
 
-    if f.do_apply {
-        engine::execute(&plan, exec.as_ref()).await
-    } else {
-        println!("Dry-run only. Re-run with --apply to execute.");
+    if !f.do_apply {
+        println!("Dry-run only (--dry-run). Omit it to execute.");
         Ok(())
+    } else if f.agent {
+        run_via_agent(exec.as_ref(), &plan, f.agent_bin.as_deref()).await
+    } else {
+        engine::execute(&plan, exec.as_ref()).await
+    }
+}
+
+/// Self-bootstrap agent mode (D-019): push the crater binary + the lowered plan
+/// to the target, then run `crater agent --plan` THERE so the plan executes
+/// locally in one shot — fewer SSH round-trips, and the foundation for OCI
+/// unpack / richer local logic. A one-shot bootstrap: nothing is left running.
+async fn run_via_agent(exec: &dyn Executor, plan: &[Op], agent_bin: Option<&Path>) -> Result<()> {
+    // Which binary to ship. Default: the running control binary (works when
+    // control and target share OS/arch/libc); override with --agent-bin (e.g. a
+    // musl static build) for heterogeneous targets.
+    let bin_path = match agent_bin {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_exe()
+            .map_err(|e| anyhow!("cannot locate current crater binary: {e}"))?,
+    };
+    let bytes = std::fs::read(&bin_path)
+        .map_err(|e| anyhow!("read agent binary {}: {e}", bin_path.display()))?;
+
+    let remote_bin = "/tmp/crater-agent";
+    let remote_plan = "/tmp/crater-plan.yaml";
+    println!(
+        "Bootstrapping agent on {}: pushing binary ({} bytes from {}) + plan ...",
+        exec.label(),
+        bytes.len(),
+        bin_path.display()
+    );
+    exec.write_file(remote_bin, &bytes).await?;
+    exec.run(&format!("chmod +x {remote_bin}")).await?;
+    exec.write_file(remote_plan, engine::plan_to_yaml(plan)?.as_bytes())
+        .await?;
+
+    println!("--- agent output (executing locally on target) ---");
+    let out = exec
+        .run(&format!("{remote_bin} agent --plan {remote_plan}"))
+        .await?;
+    print!("{}", out.stdout);
+    if !out.stderr.trim().is_empty() {
+        eprintln!("{}", out.stderr.trim());
+    }
+    // Clean up the bootstrap artifacts — one-shot, nothing left behind.
+    let _ = exec
+        .run(&format!("rm -f {remote_bin} {remote_plan}"))
+        .await;
+    if !out.ok() {
+        anyhow::bail!("agent exited with code {}", out.code);
+    }
+    Ok(())
+}
+
+/// `crater agent --plan <file>`: run ON the target. Reads a lowered plan and
+/// executes it locally (the control machine pushed the plan + this binary).
+async fn run_agent(plan: Option<PathBuf>) -> Result<()> {
+    let plan_path = plan.ok_or_else(|| anyhow!("crater agent: --plan <file> is required"))?;
+    let text = std::fs::read_to_string(&plan_path)
+        .map_err(|e| anyhow!("read plan {}: {e}", plan_path.display()))?;
+    let ops = engine::plan_from_yaml(&text)?;
+    println!("[agent] executing {} step(s) locally", ops.len());
+    engine::execute(&ops, &LocalExecutor).await
+}
+
+/// Resolve a component ref to its descriptor + the directory used for template
+/// lookups. Inline recipes (Path B) need no `components/` entry; otherwise load
+/// `components/<name>/component.yaml` (`components/` is an optional reuse lib).
+fn resolve_descriptor(
+    cref: &crater_core::spec::ComponentRef,
+    components_dir: &Path,
+    spec_dir: &Path,
+) -> Result<(ComponentDescriptor, PathBuf)> {
+    if cref.is_inline() {
+        // Templates (if any) resolve relative to the spec file's directory.
+        Ok((cref.to_inline_descriptor(), spec_dir.to_path_buf()))
+    } else {
+        let dir = components_dir.join(&cref.name);
+        let desc = ComponentDescriptor::from_yaml_file(&dir.join("component.yaml"))
+            .map_err(|e| anyhow!("component '{}': {e}", cref.name))?;
+        Ok((desc, dir))
     }
 }
 
@@ -387,11 +504,16 @@ fn order_components(spec: &CraterSpec, components_dir: &Path) -> Result<Vec<Stri
     let selected: BTreeSet<String> = spec.components.iter().map(|c| c.name.clone()).collect();
     let mut nodes = Vec::new();
     for cref in &spec.components {
-        let desc = ComponentDescriptor::from_yaml_file(
-            &components_dir.join(&cref.name).join("component.yaml"),
-        )?;
-        let requires = desc
+        // `requires` comes from the inline recipe or the on-disk descriptor.
+        let requires_all = if cref.is_inline() {
+            cref.requires.clone()
+        } else {
+            ComponentDescriptor::from_yaml_file(
+                &components_dir.join(&cref.name).join("component.yaml"),
+            )?
             .requires
+        };
+        let requires = requires_all
             .into_iter()
             .filter(|r| selected.contains(r))
             .collect();
@@ -406,6 +528,8 @@ fn order_components(spec: &CraterSpec, components_dir: &Path) -> Result<Vec<Stri
 async fn apply_spec(file: &Path, do_apply: bool) -> Result<()> {
     let spec = CraterSpec::from_yaml_file(file)?;
     let components_dir = PathBuf::from("components");
+    // Inline recipes' relative template paths resolve against the spec's dir.
+    let spec_dir = file.parent().unwrap_or_else(|| Path::new("."));
     let ordered = order_components(&spec, &components_dir)?;
     let by_name: BTreeMap<String, &crater_core::spec::ComponentRef> =
         spec.components.iter().map(|c| (c.name.clone(), c)).collect();
@@ -420,8 +544,7 @@ async fn apply_spec(file: &Path, do_apply: bool) -> Result<()> {
     if spec.inventory.hosts.is_empty() {
         for cname in &ordered {
             let cref = by_name[cname];
-            let component_dir = components_dir.join(&cref.name);
-            let desc = ComponentDescriptor::from_yaml_file(&component_dir.join("component.yaml"))?;
+            let (desc, component_dir) = resolve_descriptor(cref, &components_dir, spec_dir)?;
             let ver = cref
                 .version
                 .clone()
@@ -459,8 +582,7 @@ async fn apply_spec(file: &Path, do_apply: bool) -> Result<()> {
             if !host.roles.is_empty() && !host.roles.contains(&cref.name) {
                 continue;
             }
-            let component_dir = components_dir.join(&cref.name);
-            let desc = ComponentDescriptor::from_yaml_file(&component_dir.join("component.yaml"))?;
+            let (desc, component_dir) = resolve_descriptor(cref, &components_dir, spec_dir)?;
             let ver = cref
                 .version
                 .clone()
@@ -476,7 +598,7 @@ async fn apply_spec(file: &Path, do_apply: bool) -> Result<()> {
         }
     }
     if !do_apply {
-        println!("\n(dry-run; re-run with --apply to execute over SSH.)");
+        println!("\n(dry-run; omit --dry-run to execute over SSH.)");
     }
     Ok(())
 }
@@ -499,16 +621,24 @@ async fn build_bundle(spec_file: &Path, out: &Path) -> Result<()> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
 
     println!("Building bundle from {} ...", spec_file.display());
+    let spec_dir = spec_file.parent().unwrap_or_else(|| Path::new("."));
     for cref in &spec.components {
-        let cdir = components_dir.join(&cref.name);
-        let desc = ComponentDescriptor::from_yaml_file(&cdir.join("component.yaml"))?;
+        let (desc, cdir) = resolve_descriptor(cref, &components_dir, spec_dir)?;
         let ver = cref
             .version
             .clone()
             .or_else(|| desc.version_default.clone())
             .unwrap_or_else(|| "latest".into());
 
-        copy_dir_all(&cdir, &stage.components_dir().join(&cref.name))?;
+        // Stage the recipe: inline recipes are serialized into the bundle;
+        // on-disk components copy their whole dir (templates included).
+        let staged = stage.components_dir().join(&cref.name);
+        if cref.is_inline() {
+            std::fs::create_dir_all(&staged)?;
+            std::fs::write(staged.join("component.yaml"), desc.to_yaml()?)?;
+        } else {
+            copy_dir_all(&cdir, &staged)?;
+        }
         manifest_components.push(ManifestComponent {
             name: cref.name.clone(),
             version: ver.clone(),
@@ -627,7 +757,7 @@ async fn deploy_bundle(
     }
     let _ = std::fs::remove_dir_all(&dest_root);
     if !do_apply {
-        println!("\n(dry-run; re-run with --apply to execute.)");
+        println!("\n(dry-run; omit --dry-run to execute.)");
     }
     Ok(())
 }
@@ -651,6 +781,27 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 // M4: AI copilot — natural language -> validated crater.yaml
 // ---------------------------------------------------------------------------
+
+/// All systemd unit names declared across every component under `components/`.
+/// `doctor` probes these instead of hardcoding `docker`/`k3s`: the unit names
+/// live in component data, so a new component is diagnosable without code edits.
+fn known_systemd_units(components_dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(components_dir) {
+        for e in rd.flatten() {
+            let yaml = e.path().join("component.yaml");
+            if !yaml.is_file() {
+                continue;
+            }
+            if let Ok(desc) = ComponentDescriptor::from_yaml_file(&yaml) {
+                out.extend(desc.systemd_units());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
 
 /// List component names available under `components/`.
 fn list_components(components_dir: &Path) -> Vec<String> {
@@ -705,7 +856,7 @@ async fn ai_generate(request: &str, output: Option<PathBuf>) -> Result<()> {
     if let Some(out) = output {
         std::fs::write(&out, &yaml)?;
         println!("Wrote {}", out.display());
-        println!("Next: crater apply -f {} (dry-run) then add --apply", out.display());
+        println!("Next: crater apply -f {} (add --dry-run to preview first)", out.display());
     } else {
         println!("(Tip: -o crater.yaml to save, then `crater apply -f crater.yaml`.)");
     }
@@ -735,12 +886,20 @@ async fn doctor(
             .or_else(|| std::env::var("CRATER_SSH_PASSWORD").ok())
             .ok_or_else(|| anyhow!("--password required for --host"))?;
         let exec = SshExecutor::connect(h, port, user, &pw).await?;
-        // Collect common failure signals from the box.
-        let probe = "echo '== journal: docker =='; journalctl -u docker --no-pager -n 50 2>/dev/null; \
-                     echo '== journal: k3s =='; journalctl -u k3s --no-pager -n 50 2>/dev/null; \
-                     echo '== disk =='; df -h 2>/dev/null; \
-                     echo '== apt =='; tail -n 50 /var/log/apt/term.log 2>/dev/null";
-        exec.run(probe).await?.stdout
+        // Collect failure signals. Per-unit journals are derived from component
+        // data (no hardcoded service names); the rest is product-agnostic.
+        let mut probe = String::new();
+        for unit in known_systemd_units(&PathBuf::from("components")) {
+            probe.push_str(&format!(
+                "echo '== journal: {unit} =='; journalctl -u {unit} --no-pager -n 50 2>/dev/null; "
+            ));
+        }
+        probe.push_str(
+            "echo '== recent errors =='; journalctl -p err --no-pager -n 100 2>/dev/null; \
+             echo '== disk =='; df -h 2>/dev/null; \
+             echo '== apt =='; tail -n 50 /var/log/apt/term.log 2>/dev/null",
+        );
+        exec.run(&probe).await?.stdout
     } else {
         return Err(anyhow!("provide --file <log> or --host <ip> to diagnose"));
     };

@@ -1,6 +1,6 @@
-# Crater 需求文档 v0.2
+# Crater 需求文档 v0.3
 
-> 状态：需求基线（已锁定 M1 范围）
+> 状态：需求基线（M1–M5 已实现验证；设计方向重整，见 [design.md](design.md)）
 > 最后更新：2026-05-31
 
 ---
@@ -23,13 +23,16 @@ crater redis / minio / nginx / etcd ...
 
 ## 1. 核心理念
 
+- **引擎零产品知识（第一性原理，D-017）**：引擎（Rust）只持有「通用原语」（download/extract/template/service/cmd…，类比 ansible-core 的 module），**不得持有任何具体产品的名字/服务名/别名/镜像源/诊断规则/依赖**——后者一律是数据（YAML）。加一个可部署对象 = 丢一个描述文件，绝不改 Rust 重编译。这条铁律是「装万物」可信的唯一保证，也让「类似 Ansible」与「装万物」合一。
 - **Deploy anything**：一切可部署对象都是一个 **Component（组件）**，遵循统一生命周期。
 - **统一抽象**：所有组件共享 install / start / stop / status / upgrade / uninstall / scale 生命周期。
-- **双形态**：
+- **双形态，单管线**：在线/离线**共用同一套组件与执行引擎**，只在「制品从哪来」（ArtifactSource）这一层分叉。
   - 在线：现场按需拉依赖（走国内镜像源加速）。
-  - 离线：先在在线环境制包，现场零网络一键部署。
+  - 离线：先在在线环境制包（**基于 OCI 镜像**，D-018），现场零网络一键部署。
 - **AI 副驾（后置）**：在线制包阶段重度用 AI，离线现场用固化产物 / 本地模型降级。AI 可完全关闭。
-- **Agentless**：借鉴 Ansible，目标机只需 SSH；复杂逻辑由推送过去的同一个二进制以 agent 模式执行。
+- **Agentless + 自举 agent（D-019）**：借鉴 Ansible，目标机只需 SSH；复杂逻辑/离线落地由推送过去的同一个二进制以**一次性自举 `crater agent`** 在本地执行（用完即走，不留常驻服务）。
+
+> 整体设计方向（引擎铁律 + 在线/离线单管线 + OCI 离线 + 自举 agent + ansible 化路线）见 [design.md](design.md)。
 
 ---
 
@@ -114,12 +117,12 @@ verify:
 - **F8** 国内镜像源加速：内置 registry.k8s.io→阿里云/中科大、github→ghproxy 等替换规则，多源 fallback。
 - **F9** 目标机按需下载依赖（镜像/二进制/系统包），断点续传 + 校验和。
 
-### 4.3 离线模式
-- **F10** 制包：`crater build --spec xxx.yaml -o crater-xxx.bundle`，在线环境拉全依赖打包。
-- **F11** 离线包格式：OCI layout 为底（镜像分层去重），可选 tar.zst 压缩；含 manifest + 校验和。
-- **F12** 离线部署：`crater deploy --bundle xxx.bundle`，现场零网络。
+### 4.3 离线模式（基于 OCI 镜像，D-018；详见 [offline-format.md](offline-format.md)）
+- **F10** 制包：`crater build -f xxx.yaml -o x.oci`，在线环境拉全依赖（制品 + **容器镜像**）打包。
+- **F11** 离线包格式：**OCI Image Layout**（序列化为单个 oci-archive tar）。制品与容器镜像均**内容寻址**存放（digest 即校验，去重免费）；crater 在其上加 `crater-manifest` 做逻辑索引。可选 zstd（先 gzip）。**取代早期 tar.gz**，渐进迁移。
+- **F12** 离线部署：`crater deploy --bundle x.oci`，现场零网络；目标机解包 OCI、digest 自校验、导入容器镜像、跑同一引擎。
 - **F13** 离线镜像分发：起临时 registry，多节点指过去，避免每台塞一份。
-- **F14** 制品完整性：sha256 校验、缺包检测、版本兼容校验（确定性规则，不靠 AI）。
+- **F14** 制品完整性：OCI 内容寻址 digest 自校验、缺包检测、版本兼容校验（确定性规则，不靠 AI）。哪些镜像/制品入包由组件数据（`images:` / `download:`）声明，引擎不内置（D-017）。
 
 ### 4.4 节点与执行
 - **F15** Inventory 管理：节点清单（IP/SSH 凭据/角色/标签）。
@@ -163,22 +166,36 @@ verify:
 
 ---
 
-## 7. CLI 设计草案
+## 7. CLI 设计草案（终极契约见 [design.md §7](design.md)，D-020/021/022）
 
+**主入口 `apply`（声明式幂等），动词分两组——吃 `<source>` / 吃 `<release>`：**
 ```
-crater <component> [action] [flags]      # 快捷式
-crater k8s                               # 默认 install
-crater mysql --version 8.0 --offline
-crater es status
+# —— 吃 <source>（recipe+制品来源：组件名 / ./x.yaml / oci://… / ./x.crater / -f spec.yaml）——
+crater plan    <source>      # 只生成执行计划（= apply --dry-run）
+crater apply   <source> --host X --password ***   # 部署：收敛到期望态(install+upgrade)，幂等
+crater apply   -f crater.yaml                      # source=spec 文件(inventory 内含，现状)
+crater bundle  <source> -o x.crater                # 打离线 OCI 包（= 现 build，别名保留）
+crater bundle  <source> --push oci://reg/x:1.0     # 推 registry（在线分发）
+crater inspect <source>      # 查看包内容（组件/制品/镜像/digest/签名），只读
+crater verify  <source>      # 校验依赖完整性 + 签名，只读
 
-crater apply -f crater.yaml              # 声明式
-crater build -f crater.yaml -o x.bundle  # 制离线包
-crater deploy --bundle x.bundle          # 离线部署
+# —— 吃 <release>（已部署实例：名字+修订历史+主机）——
+crater rollback <release> [--to rev]   # 回滚（重放旧期望态）
+crater remove   <release> [--purge]    # 卸载（声明式 uninstall: + 记录追踪兜底）
+crater ai diagnose <release>           # AI/规则诊断 + 智能修复建议
 
-crater ai "给我一个3主3从带MinIO的k8s集群"  # AI 生成 spec（后置）
-crater doctor                            # AI/规则 诊断（后置）
-crater agent ...                         # 内部：目标机自举模式
+# —— AI（保留接口，多数后置；副驾不司机，可 --ai off）——
+crater ai generate "给我一个3主3从带MinIO的k8s集群"   # NL→spec（确定性护栏）
+# 另：AI 还作为生命周期钩子（bundle 时析依赖 / apply 报错析日志 / apply 后 doctor+修复），见 §5、design.md §7.5
+
+# —— 内部 ——
+crater agent ...             # 目标机一次性自举执行（D-019）
+
+# 快捷式（糖）：crater <component> == crater apply <component>
+crater k8s --host X --password ***
 ```
+
+> 关键约定：**inventory 永远在镜像外**（CLI `--host`/`-i` 或 spec），不入可分发的 OCI 镜像；镜像内 recipe 是默认参数，`--set`/`--values` 覆盖。破坏性动词均支持 `--dry-run`。
 
 ---
 
@@ -254,8 +271,8 @@ crater agent ...                         # 内部：目标机自举模式
 
 ## 12. 待办 / 开放问题
 
-- [ ] 离线包格式定型：深入对比 sealos 的 OCI 方案 vs KubeKey 的 tar 方案
-- [ ] 组件描述 schema 正式定义（动作原语全集、参数规范）
+- [x] 离线包格式定型：**选 OCI 方案**（参考 sealos clusterimage），D-018 / [offline-format.md](offline-format.md)。
+- [ ] 组件描述 schema 正式定义（动作原语全集、参数规范；含 `aliases` / `images` 等数据字段）
 - [ ] `crater.yaml` 顶层 schema 设计（inventory + components + 全局配置 + 预留 AI/offline 字段）
 - [ ] 名称占用核查（crates.io / GitHub / npm）
 - [ ] 复杂组件（k8s）声明式表达力的逃生口设计

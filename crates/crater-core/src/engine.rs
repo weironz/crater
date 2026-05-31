@@ -10,20 +10,46 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::component::{Action, Check, ComponentDescriptor};
 use crate::executor::Executor;
 use crate::os::OsFamily;
 use crate::source::OnlineSource;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Phase {
     Preflight,
     Install,
     Verify,
 }
 
+/// Per-step outcome, reported ansible-style so re-runs are legible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepStatus {
+    /// Already in the desired state (or a passing read-only check) — no change.
+    Ok,
+    /// The step mutated the target.
+    Changed,
+    /// A soft (non-fatal) failure — surfaced but execution continues.
+    Warn,
+}
+
+impl StepStatus {
+    pub fn tag(&self) -> &'static str {
+        match self {
+            StepStatus::Ok => "ok",
+            StepStatus::Changed => "changed",
+            StepStatus::Warn => "warn",
+        }
+    }
+}
+
 /// A concrete, executor-dispatchable operation.
-#[derive(Debug, Clone)]
+///
+/// Serializable so a lowered plan can be shipped to a target and run there by
+/// the self-bootstrap agent (`crater agent --plan`, D-019).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Op {
     /// Run a shell command on the target.
     Shell {
@@ -33,6 +59,10 @@ pub enum Op {
         /// If true, a non-zero exit is a warning, not a hard failure
         /// (used by preflight checks so we surface issues without aborting).
         soft_fail: bool,
+        /// Idempotency probe for `Install` steps: if set and it exits 0, the
+        /// target is already in the desired state, so `cmd` is skipped and the
+        /// step reports `ok` instead of `changed`. Ignored for other phases.
+        check: Option<String>,
     },
     /// Write a file (rendered template or inline content) on the target.
     WriteFile {
@@ -170,6 +200,7 @@ fn check_op(c: &Check) -> Op {
         describe,
         cmd,
         soft_fail: true,
+        check: None,
     }
 }
 
@@ -177,11 +208,20 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
     let op = match a {
         Action::PkgInstall { packages } => {
             let pkgs = pick_packages(packages, ctx.os);
+            // Idempotency: skip the install if every package is already present.
+            let check = match ctx.os {
+                OsFamily::Debian => {
+                    Some(format!("dpkg -s {} >/dev/null 2>&1", pkgs.join(" ")))
+                }
+                OsFamily::Rhel => Some(format!("rpm -q {} >/dev/null 2>&1", pkgs.join(" "))),
+                OsFamily::Unknown => None,
+            };
             Op::Shell {
                 phase,
                 describe: format!("install packages: [{}]", pkgs.join(", ")),
                 cmd: ctx.os.install_cmd(&pkgs),
                 soft_fail: false,
+                check,
             }
         }
         Action::Download { url_tmpl, dest, .. } => {
@@ -206,6 +246,8 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                     describe: format!("download {url}"),
                     cmd: format!("curl -fL --retry 3 -o '{dest}' '{url}'"),
                     soft_fail: false,
+                    // Skip the download if the artifact is already present.
+                    check: Some(format!("test -s '{dest}'")),
                 }
             }
         }
@@ -223,6 +265,9 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                     strip = strip
                 ),
                 soft_fail: false,
+                // No reliable generic "already extracted" probe; re-extracting
+                // is harmless/overwrites, so we always run it (reports changed).
+                check: None,
             }
         }
         Action::RenderTemplate { src, dst } => {
@@ -254,25 +299,58 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
             if *start {
                 cmds.push(format!("systemctl restart {name}"));
             }
+            // Idempotency: skip if the unit is already in the wanted state.
+            let mut probes = Vec::new();
+            if *enable {
+                probes.push(format!("systemctl is-enabled --quiet {name}"));
+            }
+            if *start {
+                probes.push(format!("systemctl is-active --quiet {name}"));
+            }
+            let check = if probes.is_empty() {
+                None
+            } else {
+                Some(probes.join(" && "))
+            };
             Op::Shell {
                 phase,
                 describe: format!("systemd unit {name} (enable={enable}, start={start})"),
                 cmd: cmds.join(" && "),
                 soft_fail: false,
+                check,
             }
         }
-        Action::RunCmd { cmd } => Op::Shell {
+        Action::RunCmd { cmd, check } => Op::Shell {
             phase,
             describe: format!("run: {cmd}"),
             cmd: render(cmd, &ctx.vars),
             soft_fail: false,
+            // Author-supplied idempotency probe (data), rendered like the cmd.
+            check: check.as_ref().map(|c| render(c, &ctx.vars)),
         },
-        Action::LoadImage { reference } => Op::Shell {
-            phase,
-            describe: format!("load image {reference}"),
-            cmd: format!("docker pull '{reference}' || ctr image pull '{reference}'"),
-            soft_fail: false,
-        },
+        Action::LoadImage { reference, runtime } => {
+            let cmd = match runtime {
+                // Explicit runtime from data: use it verbatim.
+                Some(rt) => format!("{rt} pull '{reference}'"),
+                // No runtime declared: pick whichever generic OCI tool exists.
+                None => format!(
+                    "for rt in nerdctl docker podman ctr; do \
+                       if command -v $rt >/dev/null 2>&1; then \
+                         [ \"$rt\" = ctr ] && rt=\"ctr image\"; \
+                         exec $rt pull '{reference}'; \
+                       fi; \
+                     done; \
+                     echo 'no container runtime found' >&2; exit 1"
+                ),
+            };
+            Op::Shell {
+                phase,
+                describe: format!("load image {reference}"),
+                cmd,
+                soft_fail: false,
+                check: None,
+            }
+        }
     };
     Ok(op)
 }
@@ -295,47 +373,207 @@ fn pick_packages(by_os: &BTreeMap<String, Vec<String>>, os: OsFamily) -> Vec<Str
     Vec::new()
 }
 
+/// Serialize a lowered plan for shipping to the self-bootstrap agent (D-019).
+/// The wire format is internal (control writes, agent reads, same version), so
+/// the default serde representation is fine.
+pub fn plan_to_yaml(ops: &[Op]) -> crate::Result<String> {
+    Ok(serde_yaml::to_string(ops)?)
+}
+
+/// Parse a plan shipped to `crater agent --plan`.
+pub fn plan_from_yaml(text: &str) -> crate::Result<Vec<Op>> {
+    Ok(serde_yaml::from_str(text)?)
+}
+
 /// Execute a plan against a target. Stops on the first hard failure.
+///
+/// Each step reports `ok` / `changed` / `warn` ansible-style: read-only phases
+/// (preflight/verify) report `ok` or `warn`; install steps run their
+/// idempotency `check` first and report `ok` (already satisfied, skipped) or
+/// `changed` (acted). A re-run of an already-converged plan is all `ok`.
 pub async fn execute(ops: &[Op], exec: &dyn Executor) -> crate::Result<()> {
     let total = ops.len();
+    let (mut n_ok, mut n_changed, mut n_warn) = (0u32, 0u32, 0u32);
     for (i, op) in ops.iter().enumerate() {
         let n = i + 1;
-        println!("[{n}/{total}] {:?} {}", op.phase(), op.describe());
-        match op {
-            Op::Shell { cmd, soft_fail, .. } => {
-                let out = exec.run(cmd).await?;
-                let so = out.stdout.trim();
-                if !so.is_empty() {
-                    for line in so.lines() {
-                        println!("      | {line}");
-                    }
-                }
-                if !out.ok() {
-                    let se = out.stderr.trim();
-                    if !se.is_empty() {
-                        println!("      ! {se}");
-                    }
-                    if *soft_fail {
-                        println!("      (warning: exit {}, continuing)", out.code);
-                    } else {
-                        anyhow::bail!("step {n} failed (exit {}): {}", out.code, se);
-                    }
-                }
-            }
-            Op::WriteFile { path, content, .. } => {
-                exec.write_file(path, content.as_bytes()).await?;
-                println!("      | wrote {} bytes", content.len());
-            }
-            Op::PushFile {
-                local_path, dest, ..
-            } => {
-                let data = std::fs::read(local_path)
-                    .map_err(|e| anyhow::anyhow!("read local blob {}: {e}", local_path.display()))?;
-                exec.write_file(dest, &data).await?;
-                println!("      | pushed {} bytes -> {dest}", data.len());
-            }
+        print!("[{n}/{total}] {:?} {} ...", op.phase(), op.describe());
+        let status = exec_one(op, exec, n).await?;
+        println!(" {}", status.tag());
+        match status {
+            StepStatus::Ok => n_ok += 1,
+            StepStatus::Changed => n_changed += 1,
+            StepStatus::Warn => n_warn += 1,
         }
     }
-    println!("Done: {total} step(s) completed on {}.", exec.label());
+    println!(
+        "Done on {}: changed={n_changed} ok={n_ok} warn={n_warn} ({total} step(s)).",
+        exec.label()
+    );
     Ok(())
+}
+
+fn print_indented(prefix: char, text: &str) {
+    for line in text.trim().lines() {
+        println!("      {prefix} {line}");
+    }
+}
+
+/// Run one op, printing any details on their own indented lines, and return the
+/// step status. The caller prints the status tag and keeps the tally.
+async fn exec_one(op: &Op, exec: &dyn Executor, n: usize) -> crate::Result<StepStatus> {
+    match op {
+        Op::Shell {
+            phase,
+            cmd,
+            soft_fail,
+            check,
+            ..
+        } => {
+            // Install steps converge: if the idempotency probe passes, the
+            // target is already in the desired state — skip the command.
+            if *phase == Phase::Install {
+                if let Some(probe) = check {
+                    if exec.run(probe).await?.ok() {
+                        return Ok(StepStatus::Ok);
+                    }
+                }
+            }
+            let out = exec.run(cmd).await?;
+            print_indented('|', &out.stdout);
+            if out.ok() {
+                // Read-only phases didn't mutate anything; install did.
+                Ok(match phase {
+                    Phase::Install => StepStatus::Changed,
+                    Phase::Preflight | Phase::Verify => StepStatus::Ok,
+                })
+            } else {
+                print_indented('!', &out.stderr);
+                if *soft_fail {
+                    Ok(StepStatus::Warn)
+                } else {
+                    anyhow::bail!("step {n} failed (exit {}): {}", out.code, out.stderr.trim());
+                }
+            }
+        }
+        Op::WriteFile { path, content, .. } => {
+            // Idempotency: skip the write if the remote file already matches.
+            let want = crate::bundle::sha256_hex(content.as_bytes());
+            let probe = format!("sha256sum '{path}' 2>/dev/null | cut -d' ' -f1");
+            let cur = exec.run(&probe).await?;
+            if cur.ok() && cur.stdout.trim() == want {
+                return Ok(StepStatus::Ok);
+            }
+            exec.write_file(path, content.as_bytes()).await?;
+            print_indented('|', &format!("wrote {} bytes", content.len()));
+            Ok(StepStatus::Changed)
+        }
+        Op::PushFile {
+            local_path, dest, ..
+        } => {
+            let data = std::fs::read(local_path)
+                .map_err(|e| anyhow::anyhow!("read local blob {}: {e}", local_path.display()))?;
+            // Idempotency: skip the push if the remote blob already matches.
+            let want = crate::bundle::sha256_hex(&data);
+            let probe = format!("sha256sum '{dest}' 2>/dev/null | cut -d' ' -f1");
+            let cur = exec.run(&probe).await?;
+            if cur.ok() && cur.stdout.trim() == want {
+                return Ok(StepStatus::Ok);
+            }
+            exec.write_file(dest, &data).await?;
+            print_indented('|', &format!("pushed {} bytes -> {dest}", data.len()));
+            Ok(StepStatus::Changed)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::component::Action;
+
+    fn shell_check(op: &Op) -> Option<&str> {
+        match op {
+            Op::Shell { check, .. } => check.as_deref(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn install_actions_get_idempotency_checks() {
+        let ctx = PlanContext::new(OsFamily::Debian, "1.0".into(), PathBuf::from("."));
+
+        // download -> check that the artifact already exists
+        let dl = action_op(
+            Phase::Install,
+            &Action::Download {
+                url_tmpl: "https://example.com/x".into(),
+                sha256: None,
+                dest: Some(PathBuf::from("/usr/local/bin/x")),
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(shell_check(&dl), Some("test -s '/usr/local/bin/x'"));
+
+        // run_cmd carries the author-supplied probe from data
+        let rc = action_op(
+            Phase::Install,
+            &Action::RunCmd {
+                cmd: "chmod +x /usr/local/bin/x".into(),
+                check: Some("test -x /usr/local/bin/x".into()),
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(shell_check(&rc), Some("test -x /usr/local/bin/x"));
+    }
+
+    #[test]
+    fn verify_step_has_no_check_and_reports_read_only() {
+        let ctx = PlanContext::new(OsFamily::Debian, "1.0".into(), PathBuf::from("."));
+        let v = action_op(
+            Phase::Verify,
+            &Action::RunCmd {
+                cmd: "x --version".into(),
+                check: None,
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(shell_check(&v), None);
+        assert_eq!(v.phase(), Phase::Verify);
+    }
+
+    #[test]
+    fn plan_round_trips_through_yaml() {
+        // The agent wire format must survive serialize -> deserialize intact,
+        // including the idempotency `check` (D-019).
+        let ctx = PlanContext::new(OsFamily::Debian, "4.53.2".into(), PathBuf::from("."));
+        let plan = vec![
+            action_op(
+                Phase::Install,
+                &Action::Download {
+                    url_tmpl: "https://example.com/v{{version}}/x".into(),
+                    sha256: None,
+                    dest: Some(PathBuf::from("/usr/local/bin/x")),
+                },
+                &ctx,
+            )
+            .unwrap(),
+            action_op(
+                Phase::Verify,
+                &Action::RunCmd {
+                    cmd: "x --version".into(),
+                    check: None,
+                },
+                &ctx,
+            )
+            .unwrap(),
+        ];
+        let yaml = plan_to_yaml(&plan).unwrap();
+        let back = plan_from_yaml(&yaml).unwrap();
+        assert_eq!(back.len(), 2);
+        assert_eq!(shell_check(&back[0]), Some("test -s '/usr/local/bin/x'"));
+        assert_eq!(back[1].phase(), Phase::Verify);
+    }
 }

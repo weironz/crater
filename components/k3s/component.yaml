@@ -11,6 +11,7 @@
 # Offline/air-gap k3s (k3s binary + k3s-airgap-images preloaded into containerd)
 # is a larger follow-up — see docs/progress.md.
 name: k3s
+aliases: [k8s, kubernetes]
 version_default: "v1.30.5+k3s1"
 supported_os: [ubuntu, debian, rhel, centos, rocky]
 

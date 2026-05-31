@@ -6,6 +6,7 @@
 #
 # NOTE: ES wants ~2GB+ RAM. Heap pinned to a modest 512m for small demo boxes.
 name: elasticsearch
+aliases: [es]
 version_default: "8.15.0"
 supported_os: [ubuntu, debian, rhel, centos, rocky]
 
