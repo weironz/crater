@@ -116,17 +116,12 @@ install:
 
 ---
 
-## 7. 迁移：从 tar.gz 到 OCI
+## 7. 迁移：从 tar.gz 到 OCI（增量推进）
 
-现状（M2）：`bundle.rs` = tar.gz + 手写 Manifest/BlobEntry + sha256，已真机验证（node_exporter 10.6MB）。
-
-迁移策略（不推翻、渐进）：
-1. **抽象 ArtifactSource / BundleFormat**：把「bundle 怎么存/取 blob」抽到 trait，现有 tar.gz 作为一个实现，新增 OCI 实现。
-2. **先让制品走 OCI**（文件型，等价替换 tar.gz），保留现有 deploy 路径形状。
-3. **再加镜像支持**（容器型组件离线，k3s air-gap 首个落地目标）。
-4. **最后接临时 registry**（F13）做多节点分发。
-
-每步独立可验证；tar.gz 路径在 OCI 跑通前保留，避免回归。
+1. ✅ **增量 1（已落地，D-018 实现）**：`bundle.rs` 直接重写为 OCI Image Layout（制品/文件型），打包为 oci-archive（纯 tar）。`BundleStage` API 不变 → `build`/`deploy` 零改动；`serde_json` 手写 manifest/config/index（未引 `oci-spec`/`oci-client`，纯 Rust）。真机：node_exporter 离线部署 `:9100` OK，包结构经校验。**直接替换 tar.gz**（FORMAT_VERSION=2），未保留旧路径（无需要）。
+2. ⏳ **增量 2**：镜像支持——组件 `images:` → `oci-client` 拉镜像 blob 并入 layout → 目标机 `ctr image import`/`docker load`，解锁 k3s/mysql/es air-gap。
+3. ⏳ **增量 3**：临时 registry（F13）多节点分发。
+4. ⏳ **增量 4**：agent 解 OCI（D-019 接力，目标机本地解包/导入）。
 
 ---
 

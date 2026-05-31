@@ -240,3 +240,14 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **理由**:同 role 并行是最常见的提速场景(多 agent/多 web);组间串行守住 D-030(server 组先 register、agent 组后 join)。
 - **影响**:抽出 `run_host`(返回 `(host, Vec<(name,val)>)`);`group_hosts_by_role` + `forks_limit`(`CRATER_FORKS`，默认 10);组内用 `futures::stream::buffer_unordered(forks)` 并发(加 `futures` 依赖);组内任一 host 失败→整组跑完后返回首个错误。控制端日志加 `[host]`/`[root@ip]` 前缀;agent 转发输出为连续块(由前面的 `[host] agent: executing ↓` 标记)。真机:`examples/multi-node.yaml` 两台同 role `[yq]` 同时 07:12:57 启动、总时长≈max(各主机)。
 - **已知边界**:跨组顺序仍靠 role 首次出现序(未显式声明 role 依赖);组内 host 失败不停其对等(但整体 apply 失败);并发日志按行可能交错(块级连续、有 host 前缀)。
+
+---
+
+## 2026-05-31 · OCI 离线（D-018 增量 1）
+
+### D-018 落地（增量 1）：离线包转合规 OCI Image Layout（制品先行）
+- **背景**:D-018 决策离线转 OCI;M2 是 tar.gz + manifest.yaml。本批落地第一增量。
+- **决策/实现**:`bundle.rs` 重写为 **OCI Image Layout**——`oci-layout` + `index.json`(OCI image index，`org.crater.manifest` 注解指向 crater-manifest blob) + `blobs/sha256/<digest>`(内容寻址:OCI image manifest/config + components 层 tar + crater-manifest JSON + 各制品 blob，制品层带 `org.crater.source-url` 注解)。打包为 `oci-archive`(纯 tar，不再 gzip——制品本身已压缩)。`BundleStage` API 不变(`store_blob`/`blob_path`/`write_manifest`/`read_manifest`/`verify`)，故 `build_bundle`/`deploy_bundle` 几乎零改动。加 `serde_json` 依赖;`BUNDLE_FORMAT_VERSION`=2。
+- **理由**:内容寻址=校验免费(digest 即文件名);结构 skopeo/oras 可读;为容器镜像(嵌套 OCI blob)与临时 registry 铺路。守 D-017(引擎只懂打/解 OCI，装什么仍是数据)。
+- **真机验证**:`crater build -f node_exporter.yaml -o ne.oci`→ 解开确认 oci-layout/index.json/blobs/sha256 齐全、image manifest 引用 config+layers;`crater deploy --bundle ne.oci --host .12`→ `push (offline)` 推制品、node_exporter 1.8.2 `:9100` 出 metrics，`changed=4 ok=3`。+ 单测断言 OCI 结构。
+- **后续增量**:② 容器镜像打包(组件 `images:` → `oci-client` 拉取 → 嵌套 OCI blob → 目标机 `ctr image import`，解锁 k8s/mysql/es 离线);③ 临时 registry(F13)多节点分发;④ agent 解 OCI(D-019 接力)。deploy_bundle 仍 print_plan + 走 shell(未接 agent/去 dump)，后续统一。

@@ -75,6 +75,12 @@ examples/    crater.yaml node_exporter.yaml
 4. 不擅自中断、不找用户确认(已授权)。
 
 ## 工作日志（倒序）
+### 2026-05-31 续11（OCI 离线 D-018 增量 1）
+- `bundle.rs` 重写为**合规 OCI Image Layout**：`oci-layout` + `index.json`(注解 `org.crater.manifest`) + `blobs/sha256/<digest>`(image manifest/config + components 层 + crater-manifest + 制品 blob，制品带 `org.crater.source-url`)。打包为 oci-archive(纯 tar)。`BundleStage` API 不变→build/deploy 零改动。加 serde_json，FORMAT_VERSION=2。
+- 真机：`crater build -o ne.oci` 结构经 skopeo 式校验(oci-layout/index.json/blobs/sha256 齐全)；`crater deploy --bundle ne.oci --host .12` → push(offline) 制品、node_exporter 1.8.2 `:9100` 出 metrics，changed=4 ok=3。单测断言 OCI 结构。
+- 后续增量：② 容器镜像打包(组件 images: → oci-client 拉 → 目标机 ctr import，解锁 k8s/mysql 离线)；③ 临时 registry；④ agent 解 OCI。
+- **F17 并发 + k3s 集群已在前序提交**（见下）。
+
 ### 2026-05-31 续10（多节点实测 + 跨节点 register/hostvars 起步）
 - **多节点实测（两台真机）**：`examples/multi-node.yaml` 把 yq 铺到 192.168.73.11 + 192.168.73.12，逐主机独立幂等（n11 ok、n12 changed），各自走 agent。**基础多节点（fan-out 相同/不同组件到多台）已验证**。
 - **已知缺口**：跨节点 fact 传递（k3s join token 等真集群）、并发（F17，现串行）、主机分组/`--limit`、跨主机容错。

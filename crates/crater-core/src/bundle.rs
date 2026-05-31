@@ -1,29 +1,45 @@
-//! Offline bundle format (M2).
+//! Offline bundle format — **OCI Image Layout** (D-018).
 //!
-//! A bundle is a single `*.bundle` file (tar + gzip, pure-Rust backend) that
-//! carries everything needed to deploy a spec with **zero network access** on
-//! the target side:
+//! A bundle is a single file (an `oci-archive`: a plain tar of a spec-conformant
+//! OCI Image Layout) that carries everything to deploy a spec with **zero
+//! network on the target**:
 //!
 //! ```text
-//! manifest.yaml                      bundle metadata + blob index (sha256)
-//! components/<name>/component.yaml   component descriptors
-//! components/<name>/templates/*      templates
-//! blobs/<sha256>                     downloaded artifacts, content-addressed
+//! oci-layout                         {"imageLayoutVersion":"1.0.0"}
+//! index.json                         OCI image index → image manifest
+//!                                       (annotation org.crater.manifest → crater-manifest blob)
+//! blobs/sha256/<digest>              content-addressed:
+//!   ├─ crater-manifest (JSON)          spec metadata + blob index (source-url → sha256)
+//!   ├─ OCI config                      minimal config (rootfs.diff_ids)
+//!   ├─ OCI image manifest              config + layers (components + each artifact)
+//!   ├─ components layer (tar)          component.yaml + templates
+//!   └─ artifact blob(s)                downloaded files, annotated with their source URL
+//! components/<name>/...               crater convenience copy (deploy reads here; OCI tools ignore it)
 //! ```
 //!
-//! Build (online control machine): resolve a spec's components, fetch every
-//! `download` action's URL, hash it, and pack. Deploy (offline): unpack, then
-//! run the normal plan but feed pre-fetched blobs to the target instead of
-//! having it `curl`.
+//! Content-addressing means digests ARE the integrity check (no hand-written
+//! sha list). Container images (nested OCI blobs) + temp registry are the next
+//! increment; today's layout carries file artifacts. Build (online): fetch every
+//! `download` URL, hash, assemble the layout. Deploy (offline): unpack, verify
+//! by digest, run the plan feeding pre-fetched blobs instead of `curl`.
 
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
-pub const BUNDLE_FORMAT_VERSION: u32 = 1;
+pub const BUNDLE_FORMAT_VERSION: u32 = 2;
+
+const MT_INDEX: &str = "application/vnd.oci.image.index.v1+json";
+const MT_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
+const MT_CONFIG: &str = "application/vnd.oci.image.config.v1+json";
+const MT_LAYER: &str = "application/vnd.oci.image.layer.v1.tar";
+const MT_ARTIFACT: &str = "application/vnd.crater.artifact.v1";
+const ANN_CRATER_MANIFEST: &str = "org.crater.manifest";
+const ANN_SOURCE_URL: &str = "org.crater.source-url";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Manifest {
@@ -75,15 +91,12 @@ pub struct BundleStage {
 impl BundleStage {
     pub fn new(root: PathBuf) -> crate::Result<Self> {
         fs::create_dir_all(root.join("components"))?;
-        fs::create_dir_all(root.join("blobs"))?;
+        fs::create_dir_all(root.join("blobs").join("sha256"))?;
         Ok(Self { root })
     }
 
-    pub fn manifest_path(&self) -> PathBuf {
-        self.root.join("manifest.yaml")
-    }
     pub fn blobs_dir(&self) -> PathBuf {
-        self.root.join("blobs")
+        self.root.join("blobs").join("sha256")
     }
     pub fn components_dir(&self) -> PathBuf {
         self.root.join("components")
@@ -92,26 +105,87 @@ impl BundleStage {
         self.blobs_dir().join(sha256)
     }
 
-    pub fn write_manifest(&self, m: &Manifest) -> crate::Result<()> {
-        let yaml = serde_yaml::to_string(m)?;
-        fs::write(self.manifest_path(), yaml)?;
-        Ok(())
-    }
-
-    pub fn read_manifest(&self) -> crate::Result<Manifest> {
-        let text = fs::read_to_string(self.manifest_path())?;
-        Ok(serde_yaml::from_str(&text)?)
-    }
-
-    /// Store a blob by content hash; returns its [`BlobEntry`].
-    pub fn store_blob(&self, source_url: &str, data: &[u8]) -> crate::Result<BlobEntry> {
+    /// Store raw bytes content-addressed; returns (sha256_hex, size).
+    fn store_raw(&self, data: &[u8]) -> crate::Result<(String, u64)> {
         let sha = sha256_hex(data);
         fs::write(self.blob_path(&sha), data)?;
+        Ok((sha, data.len() as u64))
+    }
+
+    /// Store an artifact blob (keyed by its source URL); returns its [`BlobEntry`].
+    pub fn store_blob(&self, source_url: &str, data: &[u8]) -> crate::Result<BlobEntry> {
+        let (sha, size) = self.store_raw(data)?;
         Ok(BlobEntry {
             source_url: source_url.to_string(),
             sha256: sha,
-            size: data.len() as u64,
+            size,
         })
+    }
+
+    /// Assemble the OCI Image Layout: store the crater-manifest, components
+    /// layer, OCI config + image manifest as blobs, and write `index.json` +
+    /// `oci-layout`. (Named `write_manifest` for call-site stability.)
+    pub fn write_manifest(&self, m: &Manifest) -> crate::Result<()> {
+        // crater-manifest blob (our deploy metadata).
+        let cm = serde_json::to_vec_pretty(m)?;
+        let (cm_digest, _) = self.store_raw(&cm)?;
+
+        // components/ → a single tar layer (OCI conformance; deploy reads the
+        // real dir, this layer is for OCI tooling).
+        let layer = tar_dir_to_vec(&self.components_dir())?;
+        let (layer_digest, layer_size) = self.store_raw(&layer)?;
+
+        // OCI config.
+        let config = json!({
+            "architecture": "amd64", "os": "linux",
+            "rootfs": {"type": "layers", "diff_ids": [format!("sha256:{layer_digest}")]}
+        });
+        let (cfg_digest, cfg_size) = self.store_raw(&serde_json::to_vec(&config)?)?;
+
+        // OCI image manifest: config + components layer + one layer per artifact.
+        let mut layers = vec![json!({
+            "mediaType": MT_LAYER, "digest": format!("sha256:{layer_digest}"), "size": layer_size
+        })];
+        for b in &m.blobs {
+            layers.push(json!({
+                "mediaType": MT_ARTIFACT,
+                "digest": format!("sha256:{}", b.sha256),
+                "size": b.size,
+                "annotations": { ANN_SOURCE_URL: b.source_url }
+            }));
+        }
+        let manifest = json!({
+            "schemaVersion": 2, "mediaType": MT_MANIFEST,
+            "config": {"mediaType": MT_CONFIG, "digest": format!("sha256:{cfg_digest}"), "size": cfg_size},
+            "layers": layers
+        });
+        let (man_digest, man_size) = self.store_raw(&serde_json::to_vec(&manifest)?)?;
+
+        // index.json points at the manifest; the crater-manifest is found via annotation.
+        let index = json!({
+            "schemaVersion": 2, "mediaType": MT_INDEX,
+            "manifests": [{
+                "mediaType": MT_MANIFEST,
+                "digest": format!("sha256:{man_digest}"), "size": man_size,
+                "annotations": { ANN_CRATER_MANIFEST: format!("sha256:{cm_digest}") }
+            }]
+        });
+        fs::write(self.root.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
+        fs::write(self.root.join("oci-layout"), br#"{"imageLayoutVersion":"1.0.0"}"#)?;
+        Ok(())
+    }
+
+    /// Read the crater-manifest back out of the OCI layout (index → annotation → blob).
+    pub fn read_manifest(&self) -> crate::Result<Manifest> {
+        let index: serde_json::Value =
+            serde_json::from_slice(&fs::read(self.root.join("index.json"))?)?;
+        let ann = index["manifests"][0]["annotations"][ANN_CRATER_MANIFEST]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("index.json missing {ANN_CRATER_MANIFEST} annotation"))?;
+        let digest = ann.strip_prefix("sha256:").unwrap_or(ann);
+        let bytes = fs::read(self.blob_path(digest))
+            .map_err(|e| anyhow::anyhow!("read crater-manifest blob {digest}: {e}"))?;
+        Ok(serde_json::from_slice(&bytes)?)
     }
 
     /// Verify every blob on disk matches its manifest hash.
@@ -134,28 +208,28 @@ impl BundleStage {
     }
 }
 
-/// Pack a staged directory into a single `.bundle` (tar.gz) file.
-pub fn pack(stage_root: &Path, out_file: &Path) -> crate::Result<()> {
-    use flate2::write::GzEncoder;
-    use flate2::Compression;
+/// Tar a directory into an in-memory plain tar (used for the components layer).
+fn tar_dir_to_vec(dir: &Path) -> crate::Result<Vec<u8>> {
+    let mut tar = tar::Builder::new(Vec::new());
+    tar.append_dir_all(".", dir)?;
+    Ok(tar.into_inner()?)
+}
 
+/// Pack a staged OCI layout into a single file (an `oci-archive`: plain tar —
+/// blobs are already-compressed artifacts, so no outer gzip).
+pub fn pack(stage_root: &Path, out_file: &Path) -> crate::Result<()> {
     let f = fs::File::create(out_file)?;
-    let enc = GzEncoder::new(f, Compression::default());
-    let mut tar = tar::Builder::new(enc);
+    let mut tar = tar::Builder::new(f);
     tar.append_dir_all(".", stage_root)?;
-    let enc = tar.into_inner()?;
-    enc.finish()?;
+    tar.into_inner()?;
     Ok(())
 }
 
-/// Unpack a `.bundle` (tar.gz) into a directory, returning a [`BundleStage`].
+/// Unpack an `oci-archive` (plain tar) into a directory, returning a [`BundleStage`].
 pub fn unpack(bundle_file: &Path, dest_root: &Path) -> crate::Result<BundleStage> {
-    use flate2::read::GzDecoder;
-
     fs::create_dir_all(dest_root)?;
     let f = fs::File::open(bundle_file)?;
-    let dec = GzDecoder::new(f);
-    let mut ar = tar::Archive::new(dec);
+    let mut ar = tar::Archive::new(f);
     ar.unpack(dest_root)?;
     Ok(BundleStage {
         root: dest_root.to_path_buf(),
@@ -208,6 +282,11 @@ mod tests {
 
         let dest = tmp.join("unpacked");
         let stage2 = unpack(&bundle, &dest).unwrap();
+        // Conformant OCI Image Layout: oci-layout + index.json + blobs/sha256/.
+        assert!(dest.join("oci-layout").is_file());
+        assert!(dest.join("index.json").is_file());
+        assert!(dest.join("blobs").join("sha256").is_dir());
+
         let m2 = stage2.read_manifest().unwrap();
         assert_eq!(m2.name, "test");
         assert_eq!(m2.blobs.len(), 1);
