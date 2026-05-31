@@ -127,6 +127,20 @@ crater apply examples/install-yq.yaml -i inventory.yaml                 # 层3 i
 
 **真实 daemon 服务**(`crater apply docker --host <h>` → `tasks/docker.yaml`):`pkg_install` 装 docker.io + `write_file` daemon.json(CN mirror,`notify` 重启 handler)+ `service` started/enabled + verify。真机 n11:docker v29 active、mirror `docker.m.daocloud.io` 生效、cgroup=systemd;再跑 `changed=0 ok=4`、daemon 未变 → handler **不**触发。整套经自举 agent 在目标本地执行。
 
+## 离线打包(D-045)
+
+task 也能打成 B 类 OCI artifact 离线分发(recipe = task YAML 本身):
+
+```bash
+crater build -f tasks/yq.yaml -t <reg>/yq:1.0   # task → 本地库(recipe=task + materials)
+crater save <reg>/yq:1.0 -o yq.oci              # 导出文件(可选)
+# 目标侧(在线 registry 或离线文件):
+crater apply <reg>/yq:1.0 --host <h>            # pull → recipe-replay
+crater apply yq.oci --host <h>                  # .oci 文件 → recipe-replay
+```
+
+recipe-replay:apply 检测 artifact 的 recipe 是 task(`is_task_file`)→ 走 `plan_from_task`(离线 `place` 从包内 blob 推送)、控制端 `execute_task`(blobs 在控制端)。component recipe 仍走旧 `run_pipeline`(兼容)。
+
 ## 边界 / 后续(D-037-b)
 
 - 本期:`actions` + `needs` + `phase` + `when_os/when_offline` + materials + 三层 targeting。

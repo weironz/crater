@@ -512,3 +512,17 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - `run_task_on_host`:默认 `run_task_via_agent`,`do_shell`/`is_local` 走控制端 `execute_task`。register/hostvars 仍控制端组间串行采集(不变)。
   - 重建 bundled musl agent(`dist/crater-linux-x86_64`,含 `--task-plan`);sha256 变 → 自动重推。
 - **真机**:命名 task `apply yq --host`(推新 agent → executing task on target → yq v4.53.2);`d037b-demo --host`(ignore_errors/retry/handler 全在目标 agent 内,输出转发);`--shell`(控制端,无 agent)。33 tests 绿。
+
+---
+
+## 2026-06-01 · task 离线打包(收敛前提)
+
+### D-045 task → B 类 OCI artifact + recipe-replay(task 格式)
+- **build**:`crater build -f <task>.yaml [-t ref]` 检测 `is_task_file` → `build_task_to_store`:抓 `binary` materials(按 material 名)+ task YAML 作 recipe → `store_component_artifact`(run-mode "task")→ 本地库。component spec 仍走旧 build。
+- **recipe-replay**:apply 侧(`apply_image_ref` 的 registry/store ref + `apply_oci_bundle` 的 `.oci` 文件)materialize 后检测 recipe `is_task_file`:
+  - task → `apply_task(offline_blobmap=Some)`:`plan_from_task` 离线(`place` 从包内 blob 推)、控制端 `execute_task`(blobs 在控制端)。
+  - component → 旧 `run_pipeline`(兼容)。
+- **apply_task 加 `offline_blobmap` 参数**;`run_task_on_host` 据此设 `ctx.offline_blobs` 并走控制端(离线不走 agent,与 component 离线一致)。
+- **守 D-036/D-034**:materials 按名打包/取用;recipe 是声明数据。
+- **真机**:`build -f tasks/yq.yaml -t <zot>/yqtask:1.0`(recipe=task,含 actions/place)→ `push` → 清库 → `apply <ref>`(pull→recipe-replay→place offline)→ n12 yq v4.53.2;`save -o yq.oci` → `apply yq.oci`(offline task artifact)→ n12 yq。33 tests 绿。
+- **意义**:补上 task 模型最后短板(离线),为把 component 模型收敛到 task 扫清前提。

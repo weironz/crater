@@ -897,7 +897,7 @@ async fn apply_source(
             info!("apply: {src} → task");
             let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
             let groups = inventory_groups(inventory.as_deref())?;
-            return apply_task(&path, hosts, groups, !dry_run, shell).await;
+            return apply_task(&path, hosts, groups, None, !dry_run, shell).await;
         }
         info!("apply: {src} → online (spec)");
         return apply_spec(&path, !dry_run, shell).await;
@@ -914,7 +914,7 @@ async fn apply_source(
         info!("apply: {src} → named task (tasks/{src}.yaml)");
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
         let groups = inventory_groups(inventory.as_deref())?;
-        return apply_task(&named, hosts, groups, !dry_run, shell).await;
+        return apply_task(&named, hosts, groups, None, !dry_run, shell).await;
     }
     // Online: bare component name → shortcut (build its flag args). Comma-hosts
     // and key auth route through the unified pipeline instead (below) when given.
@@ -976,6 +976,7 @@ async fn apply_task(
     path: &Path,
     hosts: Vec<crater_core::spec::Host>,
     groups: BTreeMap<String, Vec<String>>,
+    offline_blobmap: Option<BTreeMap<String, PathBuf>>,
     do_apply: bool,
     do_shell: bool,
 ) -> Result<()> {
@@ -1011,7 +1012,7 @@ async fn apply_task(
 
     if !do_apply {
         for h in &hosts {
-            run_task_on_host(&task, h, &spec_dir, &hostvars, false, do_shell).await?;
+            run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), false, do_shell).await?;
         }
         info!("dry-run only; omit --dry-run to execute");
         return Ok(());
@@ -1022,7 +1023,7 @@ async fn apply_task(
         let results: Vec<Result<(String, Vec<(String, String)>)>> = futures::stream::iter(
             group
                 .iter()
-                .map(|h| run_task_on_host(&task, h, &spec_dir, &hostvars, true, do_shell)),
+                .map(|h| run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), true, do_shell)),
         )
         .buffer_unordered(forks)
         .collect()
@@ -1054,6 +1055,7 @@ async fn run_task_on_host(
     host: &crater_core::spec::Host,
     spec_dir: &Path,
     hostvars: &BTreeMap<String, BTreeMap<String, String>>,
+    offline_blobmap: Option<&BTreeMap<String, PathBuf>>,
     do_apply: bool,
     do_shell: bool,
 ) -> Result<(String, Vec<(String, String)>)> {
@@ -1086,6 +1088,10 @@ async fn run_task_on_host(
     for m in &task.materials {
         ctx.materials.insert(m.name.clone(), m.clone());
     }
+    // Offline (recipe-replay, D-045): `place` pushes packed blobs from control.
+    if let Some(bm) = offline_blobmap {
+        ctx.offline_blobs = Some(bm.clone());
+    }
     let steps = engine::plan_from_task(&task.actions, &ctx)?;
     let handlers = engine::plan_handlers(&task.handlers, &ctx)?;
     info!("[{}] task {} — {} step(s)", host.name, task.name, steps.len());
@@ -1094,10 +1100,9 @@ async fn run_task_on_host(
         print_plan(&ops);
         return Ok((host.name.clone(), Vec::new()));
     }
-    // Default: self-bootstrap agent runs the whole task plan locally on the
-    // target (D-044) — same model as components, fewer SSH round-trips. Local
-    // or --shell drives it from the control plane (agentless escape, D-027).
-    if do_shell || host.is_local() {
+    // Default: self-bootstrap agent runs the task plan on the target (D-044).
+    // Offline (blobs on control), --shell, or local → control-plane execute_task.
+    if offline_blobmap.is_some() || do_shell || host.is_local() {
         engine::execute_task(&steps, &handlers, exec.as_ref()).await?;
     } else {
         run_task_via_agent(exec.as_ref(), &steps, &handlers, None).await?;
@@ -1478,12 +1483,73 @@ async fn run_host(
 /// `crater build -f spec [-t ref]`: build the B 类 artifact(s) and store them in
 /// the local store (~/.crater/store), like `docker build`. Export with `save`.
 async fn build_to_store(file: &Path, tag: Option<String>) -> Result<()> {
+    // A task file builds a B 类 artifact whose recipe IS the task (D-045);
+    // a legacy component spec builds via the component path.
+    if crater_core::task::is_task_file(file) {
+        return build_task_to_store(file, tag).await;
+    }
     let tmp = std::env::temp_dir().join(format!("crater-build-{}.oci", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     build_image_bundle(file, &tmp, tag).await?;
     let store = ImageStore::open()?;
     let refs = store.import_all(&tmp)?;
     let _ = std::fs::remove_file(&tmp);
+    for r in &refs {
+        info!("built {r} → 本地库(~/.crater/store)");
+    }
+    Ok(())
+}
+
+/// Build a task into a B 类 OCI artifact (D-045): fetch its `binary` materials,
+/// store them + the task YAML as the recipe, tag, into the local store. Loaded
+/// by recipe-replay through `plan_from_task` (offline).
+async fn build_task_to_store(file: &Path, tag: Option<String>) -> Result<()> {
+    use crater_core::component::MaterialKind;
+    use crater_core::task::TaskFile;
+
+    let task = TaskFile::from_yaml_file(file)?;
+    let ver = task
+        .vars
+        .get("version")
+        .cloned()
+        .unwrap_or_else(|| "latest".into());
+    let reference = tag.unwrap_or_else(|| format!("crater/{}:{ver}", task.name));
+    let spec_dir = file.parent().unwrap_or_else(|| Path::new("."));
+    let online = OnlineSource::with_default_mirrors();
+
+    // Fetch binary materials, keyed by material NAME (D-034), same key `place`
+    // resolves offline.
+    let mut ctx = PlanContext::new(OsFamily::Unknown, ver.clone(), spec_dir.to_path_buf());
+    ctx.offline_blobs = Some(BTreeMap::new()); // rendered_url yields raw URLs
+    let mut materials: Vec<(String, Vec<u8>)> = Vec::new();
+    for m in &task.materials {
+        if m.kind == MaterialKind::Binary {
+            if let Some(tmpl) = &m.url_tmpl {
+                let raw = ctx.rendered_url(tmpl)?;
+                let url = online.rewrite(&raw);
+                info!("  fetch material {} <- {raw}", m.name);
+                let (data, _) = source::fetch_best(&url)
+                    .await
+                    .map_err(|e| anyhow!("fetch material {}: {e}", m.name))?;
+                materials.push((m.name.clone(), data));
+            }
+        }
+    }
+
+    // Recipe = the task YAML verbatim.
+    let recipe = std::fs::read(file)?;
+    let stage_root = std::env::temp_dir().join(format!("crater-taskimg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&stage_root);
+    let stage = bundle::BundleStage::new(stage_root.clone())?;
+    let ir = stage.store_component_artifact(&reference, &task.name, &ver, "task", &recipe, &materials)?;
+    info!("  {} → task artifact {reference}: recipe + {} material(s)", task.name, materials.len());
+    stage.write_artifact_index(&[ir])?;
+    let tmp_oci = std::env::temp_dir().join(format!("crater-taskbuild-{}.oci", std::process::id()));
+    bundle::pack(&stage_root, &tmp_oci)?;
+    let store = ImageStore::open()?;
+    let refs = store.import_all(&tmp_oci)?;
+    let _ = std::fs::remove_dir_all(&stage_root);
+    let _ = std::fs::remove_file(&tmp_oci);
     for r in &refs {
         info!("built {r} → 本地库(~/.crater/store)");
     }
@@ -1714,6 +1780,21 @@ async fn apply_oci_bundle(
     let recipe_dir = dest_root.join("__components");
     let mats = bundle::read_artifact_components(&dest_root, &recipe_dir)?;
     if !mats.is_empty() {
+        // Task-recipe artifacts (D-045) → replay via the task pipeline. (A bundle
+        // is homogeneous in practice: built from one task or one component spec.)
+        if mats
+            .iter()
+            .all(|mc| crater_core::task::is_task_file(&recipe_dir.join(&mc.name).join("component.yaml")))
+        {
+            info!("offline (task artifact): {} task(s)", mats.len());
+            for mc in mats {
+                let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
+                apply_task(&recipe_file, hosts.clone(), Default::default(), Some(mc.blobmap), do_apply, do_shell)
+                    .await?;
+            }
+            let _ = std::fs::remove_dir_all(&dest_root);
+            return Ok(());
+        }
         info!("offline (B 类 artifact): {} component(s)", mats.len());
         let mut art_blobmap: BTreeMap<String, PathBuf> = BTreeMap::new();
         let mut components: Vec<ComponentRef> = Vec::new();
@@ -1973,6 +2054,14 @@ async fn apply_image_ref(
     let recipe_dir = std::env::temp_dir().join(format!("crater-ref-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&recipe_dir);
     if let Some(mc) = bundle::materialize_component(&manifest, &store.blobs_dir(), &recipe_dir)? {
+        let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
+        // Task-recipe artifact (D-045) → recipe-replay via the task pipeline.
+        if crater_core::task::is_task_file(&recipe_file) {
+            info!("image {reference}: crater task artifact → recipe-replay");
+            let res = apply_task(&recipe_file, hosts, Default::default(), Some(mc.blobmap), do_apply, true).await;
+            let _ = std::fs::remove_dir_all(&recipe_dir);
+            return res;
+        }
         info!("image {reference}: crater component artifact → recipe-replay");
         let spec = CraterSpec {
             inventory: Inventory { hosts, groups: Default::default() },
