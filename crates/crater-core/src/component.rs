@@ -88,12 +88,14 @@ pub enum Action {
     /// system repo. For OFFLINE, set `material` to a `kind: os_package` material
     /// whose .deb/.rpm closure was packed at build (D-062): offline installs
     /// from the packed closure (`apt-get install ./*.deb` / `dnf install ./*.rpm`).
+    #[serde(rename = "package", alias = "pkg_install")]
     PkgInstall {
         #[serde(default)]
         packages: BTreeMap<String, Vec<String>>,
         #[serde(default)]
         material: Option<String>,
     },
+    #[serde(rename = "unarchive", alias = "extract")]
     Extract {
         to: PathBuf,
         #[serde(default)]
@@ -108,6 +110,7 @@ pub enum Action {
         #[serde(default)]
         creates: Option<PathBuf>,
     },
+    #[serde(rename = "template", alias = "render_template")]
     RenderTemplate {
         src: String,
         dst: PathBuf,
@@ -123,6 +126,9 @@ pub enum Action {
         #[serde(default)]
         start: bool,
     },
+    /// Run a command through the target's shell (ansible `shell` — pipes, `&&`,
+    /// redirects, env prefixes all work; aliased `command`/`run_cmd`).
+    #[serde(rename = "shell", alias = "run_cmd", alias = "command")]
     RunCmd {
         cmd: String,
         /// Optional idempotency probe (ansible `creates:`-style): if this shell
@@ -131,9 +137,11 @@ pub enum Action {
         #[serde(default)]
         check: Option<String>,
     },
-    /// Invoke a module (D-029). `uses` resolves to a data-defined module
-    /// `modules/<uses>.yaml`; `with` supplies its params. Lowers to a checked
-    /// shell op, so it inherits the idempotency contract.
+    /// Invoke a reusable role (D-029) — ansible's `role`. `uses` resolves to a
+    /// data-defined `roles/<uses>.yaml`; `with` supplies its params. Lowers to a
+    /// checked shell op, so it inherits the idempotency contract. (`module` is
+    /// kept as a back-compat alias for the old spelling.)
+    #[serde(rename = "role", alias = "module")]
     Module {
         uses: String,
         #[serde(default)]
@@ -267,14 +275,14 @@ impl Action {
     /// Short human label for build/deploy summaries.
     pub fn kind(&self) -> &'static str {
         match self {
-            Action::PkgInstall { .. } => "pkg_install",
-            Action::Extract { .. } => "extract",
-            Action::RenderTemplate { .. } => "render_template",
+            Action::PkgInstall { .. } => "package",
+            Action::Extract { .. } => "unarchive",
+            Action::RenderTemplate { .. } => "template",
             Action::WriteFile { .. } => "write_file",
             Action::SystemdUnit { .. } => "systemd_unit",
-            Action::RunCmd { .. } => "run_cmd",
+            Action::RunCmd { .. } => "shell",
             Action::Place { .. } => "place",
-            Action::Module { .. } => "module",
+            Action::Module { .. } => "role",
             Action::LoadImage { .. } => "load_image",
             Action::File { .. } => "file",
             Action::Copy { .. } => "copy",

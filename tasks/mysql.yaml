@@ -4,7 +4,7 @@ name: mysql
 hosts: all
 actions:
   - id: install
-    action: pkg_install
+    action: package
     packages:
       debian: [mysql-server]
       rhel: [mysql-server]
@@ -23,7 +23,7 @@ actions:
     when_os: [rhel]
     needs: [install]
   - id: verify
-    action: run_cmd
+    action: shell
     phase: verify
     cmd: "(mysql --version || mysqld --version) 2>&1 | head -1"
     needs: [install]

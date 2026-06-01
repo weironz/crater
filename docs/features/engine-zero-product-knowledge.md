@@ -48,5 +48,5 @@ crater apply yq --host <host> --password <pw> --dry-run   # 立即可用，无�
 
 ## 边界 / 后续
 
-- 通用原语集（Rust enum）本身是"模块库"，扩充走 [modules.md](modules.md) 的四层模型，多数情况零 Rust。
+- 通用原语集（Rust enum）就是[内置模块库](modules.md)（与 Ansible 对齐命名）；扩充走 [roles.md](roles.md) 的四层模型，多数情况零 Rust。
 - 镜像源默认值放 `crater-core/src/mirrors.default.yaml`（数据，`$CRATER_MIRRORS`/`./mirrors.yaml` 可覆盖）。

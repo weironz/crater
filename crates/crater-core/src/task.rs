@@ -143,6 +143,46 @@ actions:
     }
 
     #[test]
+    fn action_names_align_with_ansible_and_keep_aliases() {
+        // D-067: primitives renamed to ansible module names; old crater spellings
+        // stay as aliases.
+        use crate::component::Action;
+        let cases = [
+            ("shell", "RunCmd"),
+            ("command", "RunCmd"),
+            ("run_cmd", "RunCmd"),
+            ("package", "PkgInstall"),
+            ("pkg_install", "PkgInstall"),
+            ("unarchive", "Extract"),
+            ("extract", "Extract"),
+            ("template", "RenderTemplate"),
+            ("render_template", "RenderTemplate"),
+            ("role", "Module"),
+            ("module", "Module"),
+        ];
+        for (name, want) in cases {
+            let yaml = match want {
+                "RunCmd" => format!("action: {name}\ncmd: \"true\""),
+                "PkgInstall" => format!("action: {name}\npackages: {{ debian: [x] }}"),
+                "Extract" => format!("action: {name}\nto: /opt"),
+                "RenderTemplate" => format!("action: {name}\nsrc: a.j2\ndst: /etc/a"),
+                "Module" => format!("action: {name}\nuses: lineinfile"),
+                _ => unreachable!(),
+            };
+            let a: Action = serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let got = match a {
+                Action::RunCmd { .. } => "RunCmd",
+                Action::PkgInstall { .. } => "PkgInstall",
+                Action::Extract { .. } => "Extract",
+                Action::RenderTemplate { .. } => "RenderTemplate",
+                Action::Module { .. } => "Module",
+                _ => "other",
+            };
+            assert_eq!(got, want, "action: {name} should parse to {want}");
+        }
+    }
+
+    #[test]
     fn file_kind_accepts_binary_alias() {
         // D-065: `binary` renamed to `file`; the old spelling stays valid.
         use crate::component::MaterialKind;

@@ -24,7 +24,7 @@ actions:
   - id: extract
     # tarball 内是 docker/ 目录,strip 1 → 二进制直接落 /usr/local/bin。
     # creates: 已解出 dockerd 则跳过(幂等,D-048+)。
-    action: extract
+    action: unarchive
     from: /tmp/docker.tgz
     to: /usr/local/bin
     strip: 1
@@ -100,14 +100,14 @@ actions:
     enabled: true
     needs: [svc_containerd, docker_unit, daemon]
   - id: verify
-    action: run_cmd
+    action: shell
     phase: verify
     cmd: "docker --version && docker info --format '{{.ServerVersion}}'"
     needs: [svc_docker]
 handlers:
   # unit 文件变更才触发 reload(notify);unit 未变则不跑 → 幂等。
   - id: reload_systemd
-    action: run_cmd
+    action: shell
     cmd: "systemctl daemon-reload"
   - id: restart_docker
     action: service
@@ -176,6 +176,6 @@ teardown:
     state: absent
     needs: [stop_docker]
   - id: reload
-    action: run_cmd
+    action: shell
     cmd: "systemctl daemon-reload"
     needs: [rm_unit_docker, rm_unit_ctr]

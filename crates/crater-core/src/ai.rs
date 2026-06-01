@@ -160,12 +160,15 @@ Schema:
       when_os: [debian|rhel]      # optional closed-enum condition
       phase: install|verify       # optional
 
-Action primitives (use ONLY these):
-  pkg_install(packages:{debian:[..],rhel:[..]}), place(material,dest,mode),
-  extract(to,from,strip,creates), write_file(dst,content),
-  render_template(src,dst), run_cmd(cmd,check), file(path,state,mode),
+Modules (use ONLY these `action:` values — names match ansible where possible).
+ansible-aligned: shell(cmd,check), package(packages:{debian:[..],rhel:[..]}),
+  unarchive(to,from,strip,creates), template(src,dst), file(path,state,mode),
   copy(src,dest,mode), service(name,state,enabled), lineinfile(path,line,regexp),
-  user(name,...), group(name,...), systemd_unit(name,enable,start), module(uses,with).
+  user(name,...), group(name,...), role(uses,with).
+crater-specific (offline/material model): place(material,dest,mode),
+  load_image(material,namespace,runtime), write_file(dst,content),
+  systemd_unit(name,enable,start).
+Note: `shell` runs via a shell (pipes/&&/redirects/env ok). Prefer it for commands.
 
 Optional `teardown:` (same shape as `actions:`): the product-specific cleanup run
 by `crater delete` (e.g. stop services, remove the data dirs the software created

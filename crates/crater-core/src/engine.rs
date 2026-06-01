@@ -175,8 +175,9 @@ pub struct PlanContext {
     /// Declared materials by name (D-034), each entry holding the per-arch
     /// variants (D-048); `place` picks the one matching `target_arch`.
     pub materials: BTreeMap<String, Vec<crate::component::Material>>,
-    /// Directory holding data-defined modules (`modules/<name>.yaml`, D-029).
-    pub modules_dir: PathBuf,
+    /// Directory holding data-defined roles (`roles/<name>.yaml`, D-029; the old
+    /// `modules/` dir is still honored as a fallback).
+    pub roles_dir: PathBuf,
 }
 
 impl PlanContext {
@@ -192,7 +193,7 @@ impl PlanContext {
             source: OnlineSource::with_default_mirrors(),
             offline_blobs: None,
             materials: BTreeMap::new(),
-            modules_dir: PathBuf::from("modules"),
+            roles_dir: PathBuf::from("roles"),
         }
     }
 
@@ -684,9 +685,16 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
             check: check.as_ref().map(|c| render(c, &ctx.vars)).transpose()?,
         },
         Action::Module { uses, with } => {
-            // Data-defined module (D-029): load modules/<uses>.yaml, render its
+            // Data-defined role (D-029): load roles/<uses>.yaml, render its
             // check/act with `with` (+ ctx vars), lower to a checked shell op.
-            let path = ctx.modules_dir.join(format!("{uses}.yaml"));
+            // Back-compat: fall back to the old modules/ dir if roles/ has no file.
+            let mut path = ctx.roles_dir.join(format!("{uses}.yaml"));
+            if !path.exists() {
+                let legacy = PathBuf::from("modules").join(format!("{uses}.yaml"));
+                if legacy.exists() {
+                    path = legacy;
+                }
+            }
             let desc = crate::module::ModuleDescriptor::from_yaml_file(&path)?;
             let with_strings: BTreeMap<String, String> = with
                 .iter()
@@ -1466,7 +1474,7 @@ mod tests {
         )
         .unwrap();
         let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
-        ctx.modules_dir = dir;
+        ctx.roles_dir = dir;
 
         let mut with = BTreeMap::new();
         with.insert("path".into(), serde_yaml::Value::String("/etc/hosts".into()));
@@ -1495,7 +1503,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("needs.yaml"), "params: [a, b]\nact: 'echo {{a}} {{b}}'\n").unwrap();
         let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
-        ctx.modules_dir = dir;
+        ctx.roles_dir = dir;
         let mut with = BTreeMap::new();
         with.insert("a".into(), serde_yaml::Value::String("x".into()));
         let err = action_op(

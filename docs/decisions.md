@@ -808,3 +808,23 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **顺带修**:`build_task_to_store` **漏了把 task.vars 灌进渲染 ctx**(自 D-064 潜伏,当时只 dry-run 等价验证、未真机重建),导致 `{{containerd_ver}}` 等非 version/arch 变量原样漏进 url(404)。补上 `for (k,v) in &task.vars` 循环。
 - **k8s-offline 重写**:flannel→`kind: file` 官方 url(`.../v{{flannel_ver}}/kube-flannel.yml`);7 个人工文件移到 `tasks/files/` 声明成 `file`+`src`;8 处 `write_file` 全改 `place`。核对官方 v0.28.4 清单的镜像 tag(`flannel:v0.28.4`/`flannel-cni-plugin:v1.9.1-flannel1`)与 CIDR(`10.244.0.0/16`)和手列 image material、pod_cidr 逐一对上(无漂移,这正是暂缓自动扫 image 时要人工守的点)。
 - **验证**:`crater build`→25 material OCI(7 二进制+flannel清单+7 src 文件+sysdeps+9 镜像);**彻底擦净** .12(删二进制/配置/`/var/lib/containerd`)后离线 `apply` 40 步全过,7 个 src place + flannel place 全 changed,节点 Ready、8 个 Pod(含 kube-flannel)全 Running、kubeadm init 零联网拉。36 tests 绿。
+
+---
+
+## 2026-06-01 · task.yaml 改块式 + action 名对齐 Ansible
+
+### D-067a 去 flow-style:task.yaml 一律块式(block-style)YAML
+- **背景**:用户嫌每条动作 `- { ... }` 一行式「太难阅读太难编写」,问 `{}` 是不是 YAML 必须的。
+- **决策**:`{}`(flow style)不是必须,block style(缩进)是同一份 YAML、serde 解析完全一样。仓库所有 task / `ai.rs` 生成提示 / 文档示例的动作与物料**一律改块式**,字段全保留(零引擎改动)。例外保留 flow:inventory 每主机一行 `{name,address,roles}`、`needs:[..]`/`packages:{debian:[..]}` 这类短列表小映射。
+- **理由**:flow 对 AI 省事、对人难读;crater 用户是政企运维。
+- **影响**:`ai.rs` 加硬性要求「Always emit block-style」;新增用户偏好记忆。
+
+### D-067b action 名对齐 Ansible 模块名;原语统称「模块」,原 module 概念更名「角色」
+- **背景**:用户指出 action 名都是 crater 自造(`run_cmd` 等),要求能对齐 Ansible 的就对齐,降低学习成本;并提议像 Ansible 一样把原语叫「模块」、单独出文档分两类。
+- **术语反转**:Ansible 的 **module** = 任务原语;Ansible 的 **role** = 可复用参数化子程序。而 crater 原有的 `module`(`modules/*.yaml` + `action: module`,D-029)其实是 Ansible 的 role。故为真对齐:**原语→模块(module)**,**原 module 概念→角色(role)**。
+- **决策**:
+  - 原语改名(serde rename + 旧名 alias,非破坏):`run_cmd`→`shell`(alias `command`/`run_cmd`)、`pkg_install`→`package`、`extract`→`unarchive`、`render_template`→`template`。`run_cmd` 对齐的是 **`shell` 不是 `command`**——crater 命令经 shell(管道/`&&`/重定向/env 都用),叫 command 会误导 Ansible 老手。
+  - 原 `module` action → `role`(alias `module`);`modules/` 目录 → `roles/`(loader 回退兼容旧 `modules/`)。
+  - 已对齐的(`file`/`copy`/`service`/`lineinfile`/`user`/`group`)不动;crater 特有的(`place`/`load_image`/`write_file`/`systemd_unit`)保持原名,文档归入「crater 自有」类。
+- **影响**:`tasks/*.yaml` 全量改用规范名;`ai.rs` 模块清单重写并分两类;新文档 [features/modules.md](features/modules.md)(内置模块,两类)+ 旧 modules.md 更名 [roles.md](roles.md);新增回归测试 `action_names_align_with_ansible_and_keep_aliases`(11 个规范名+别名全解析正确)。37 tests 绿。
+- **未做**:`write_file` 未并入 `copy`(Ansible 用 `copy: content=`)——留作后续,避免本次扩面。

@@ -1,9 +1,10 @@
-//! Data-defined modules (`modules/<name>.yaml`) — layer 2 of the module model
-//! (D-029). A module is a reusable `check → act` template: zero Rust, dropped
-//! into `modules/` and referenced from a component via `action: module`.
+//! Data-defined roles (`roles/<name>.yaml`) — ansible's `role` (D-029). A role
+//! is a reusable `check → act` template: zero Rust, dropped into `roles/` and
+//! referenced from a task via `action: role` (the old `modules/` dir + `action:
+//! module` spelling still works as a back-compat fallback).
 //!
 //! It lowers to the same [`crate::engine::Op::Shell`] (with an idempotency
-//! `check`) that the built-in actions use, so it inherits the B1 contract —
+//! `check`) that the built-in modules use, so it inherits the B1 contract —
 //! `ok` when the check passes, `changed` when `act` runs.
 
 use serde::{Deserialize, Serialize};

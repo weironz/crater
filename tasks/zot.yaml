@@ -52,7 +52,7 @@ actions:
     enabled: true
     needs: [unit]
   - id: verify
-    action: run_cmd
+    action: shell
     phase: verify
     cmd: "for i in $(seq 1 15); do curl -sf http://localhost:5000/v2/ -o /dev/null && break; sleep 1; done; curl -s -o /dev/null -w 'zot /v2/ -> %{http_code}\\n' http://localhost:5000/v2/"
     needs: [svc]

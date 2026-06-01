@@ -21,7 +21,7 @@ actions:
     dest: /usr/local/bin/yq
     mode: "0755"
   - id: verify
-    action: run_cmd
+    action: shell
     phase: verify
     cmd: "/usr/local/bin/yq --version"
     needs: [place_yq]
