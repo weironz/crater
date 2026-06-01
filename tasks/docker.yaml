@@ -23,10 +23,12 @@ actions:
     dest: /tmp/docker.tgz
   - id: extract
     # tarball 内是 docker/ 目录,strip 1 → 二进制直接落 /usr/local/bin。
+    # creates: 已解出 dockerd 则跳过(幂等,D-048+)。
     action: extract
     from: /tmp/docker.tgz
     to: /usr/local/bin
     strip: 1
+    creates: /usr/local/bin/dockerd
     needs: [place_tgz]
   - id: containerd_unit
     action: write_file
@@ -46,6 +48,7 @@ actions:
       [Install]
       WantedBy=multi-user.target
     needs: [extract]
+    notify: [reload_systemd]
   - id: docker_unit
     action: write_file
     dst: /etc/systemd/system/docker.service
@@ -68,6 +71,7 @@ actions:
       [Install]
       WantedBy=multi-user.target
     needs: [extract]
+    notify: [reload_systemd]
   - id: daemon
     action: write_file
     dst: /etc/docker/daemon.json
@@ -81,29 +85,30 @@ actions:
       }
     needs: [extract]
     notify: [restart_docker]
-  - id: reload
-    # 写了新 unit,需 daemon-reload 让 systemd 看见(static 包不含 unit,自己装)。
-    action: run_cmd
-    cmd: "systemctl daemon-reload"
-    needs: [containerd_unit, docker_unit]
   - id: svc_containerd
+    # service 原语自带 daemon-reload && enable && start;首跑 unit 必变→其内 reload
+    # 让 systemd 看见新 unit。unit 未变时(重跑)is-active 命中→整步跳过,不重载(幂等)。
     action: service
     name: containerd
     state: started
     enabled: true
-    needs: [reload]
+    needs: [containerd_unit]
   - id: svc_docker
     action: service
     name: docker
     state: started
     enabled: true
-    needs: [svc_containerd, daemon]
+    needs: [svc_containerd, docker_unit, daemon]
   - id: verify
     action: run_cmd
     phase: verify
     cmd: "docker --version && docker info --format '{{.ServerVersion}}'"
     needs: [svc_docker]
 handlers:
+  # unit 文件变更才触发 reload(notify);unit 未变则不跑 → 幂等。
+  - id: reload_systemd
+    action: run_cmd
+    cmd: "systemctl daemon-reload"
   - id: restart_docker
     action: service
     name: docker

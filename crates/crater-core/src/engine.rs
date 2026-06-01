@@ -523,7 +523,7 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 }
             }
         }
-        Action::Extract { to, from, strip } => {
+        Action::Extract { to, from, strip, creates } => {
             let src = from
                 .as_ref()
                 .map(|p| p.display().to_string())
@@ -537,9 +537,11 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                     strip = strip
                 ),
                 soft_fail: false,
-                // No reliable generic "already extracted" probe; re-extracting
-                // is harmless/overwrites, so we always run it (reports changed).
-                check: None,
+                // Idempotent when the author declares `creates:` (the extract's
+                // expected product); else re-extract every run (overwrite-safe).
+                check: creates
+                    .as_ref()
+                    .map(|p| format!("test -e '{}'", p.display())),
             }
         }
         Action::RenderTemplate { src, dst } => {

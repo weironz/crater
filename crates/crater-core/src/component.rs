@@ -77,6 +77,12 @@ pub enum Action {
         /// tar --strip-components value.
         #[serde(default)]
         strip: u32,
+        /// Idempotency probe (ansible `unarchive: creates:` style): if this path
+        /// already exists, the archive is considered already extracted and the
+        /// step is skipped (reported `ok`). Data, not code — the author declares
+        /// what the extract produces (e.g. a key binary).
+        #[serde(default)]
+        creates: Option<PathBuf>,
     },
     RenderTemplate {
         src: String,
