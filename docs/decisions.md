@@ -849,3 +849,35 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **决策**:删除全部别名:material `kind` 的 `binary`;action 的 `run_cmd`/`command`(→`shell`)、`pkg_install`(→`package`)、`extract`(→`unarchive`)、`render_template`(→`template`)、`module`(→`role`)、`write_file`+`dst`(→`copy`+`dest`)、`systemd_unit`+`enable`/`start`(→`service`+`enabled`/`state`);role 的 `modules/` 目录回退。旧名写进 task 直接报错(`unknown variant`)。
 - **理由**:单一拼写、无歧义;文档/AI 提示不必再解释"两种写法"。这是 crater 自己的项目、仓库内已全部迁移,破坏性可控。
 - **影响**:`examples/*.yaml` 8 处 `run_cmd`→`shell`、`install-yq.yaml` 2 处 `kind: binary`→`file`;Service 删回 `{name,state,enabled}`(去掉 `start` 字段)、engine 去 `modules/` 回退;4 个别名测试改为"现名解析 + 旧名报错"断言;modules.md 别名表改"改名对照(已废弃)"、ai.rs 提示加"用这些确切名字"。38 tests 绿。**破坏性**:任何外部用旧名的 task 需手动迁移(对照表见 [features/modules.md](features/modules.md))。
+
+---
+
+## 2026-06-02 · 多节点 / HA Kubernetes —— when_role + groups + serial(D-071)
+
+### D-071 多节点能力:`when_role`、`{{ groups.<role> }}`、角色键 hostvars、`serial_roles`
+- **背景**:用户要一份 task 统一支持 单节点 / 1主N从 / HA多主多从。k8s 多节点角色不对称(control 跑 init、worker 跑 join、HA 还要额外 master control-plane join + VIP)。crater 此前只有 `when_os`/`when_offline`,且一个 task 所有 action 在所有匹配主机上都跑——无法按角色分流。
+- **已有的地基**(D-030/F17,无需重做):inventory 主机带 `roles`;`group_hosts_by_role`(按出现顺序**组间串行、组内并行**);`register`/`hostvars` 跨节点传值(上一组的 fact 下一组可读)。
+- **新增 4 件**:
+  1. **`ActionStep.when_role: [..]`** + **`RegisterSpec.when_role`**(闭合枚举,守 D-036):步骤/fact 只在持该角色的主机上跑。引擎在 `plan_from_task` 过滤(`PlanContext.host_roles`);register 在 `run_task_on_host` 过滤。
+  2. **`{{ groups.<role> }}`**:从 inventory 算出每角色成员地址(空格连接)注入渲染——haproxy backend = `{{ groups.controlplane }}`。
+  3. **角色键 hostvars**:某主机 register 的 fact 额外发布为 `hostvars.<role>.<name>`(给单例角色 bootstrap 用,免写死主机名)——master/worker 用 `{{ hostvars.bootstrap.join }}` 取 join 命令。
+  4. **`TaskFile.serial_roles: [..]`**:角色集命中的组用 `forks=1` 逐台跑——control-plane join 必须串行(防 etcd quorum 抢)。
+- **HA 入口设计**:keepalived + haproxy **co-located 在 controlplane 上、跑 systemd 服务**(不是 static pod:避免与 kubeadm init 的先有鸡蛋问题、不必额外打镜像;离线靠 `os_package` 装)。haproxy 前端 `*:8443` → 后端各 master `:6443`(L4 tcp,VIP:8443 = `--control-plane-endpoint`);keepalived VRRP 在 master 间浮 VIP(192.168.73.14),健康检查盯 haproxy 进程。VIP 先于 init 起来。
+- **统一拓扑(一份 `tasks/k8s-ha.yaml`)**:公共步骤无 when_role;`[controlplane]` 装 keepalived/haproxy;`[bootstrap]` init --upload-certs + flannel + 注册 join/certkey + 去污点;`[master]` control-plane join(serial);`[worker]` join。单节点=1 台 [controlplane,bootstrap];1主N从=+[worker];HA=+[controlplane,master]。全 material 离线、可 `crater build` 成 OCI。
+- **测试约束**:真 HA 要奇数 ≥3 master(etcd quorum);用 .11(bootstrap)+.12/.13(master)做 3-master、VIP .14。
+- **验证**:见下条(构建 + 真机)。新增测试 `when_role_filters_steps_by_host_roles`。39 tests 绿。
+
+### D-071 验证(真机 3-master HA,离线)
+- `crater build -f tasks/k8s-ha.yaml` → 26-material OCI;`crater apply -i inventory.yaml`(.11 bootstrap+controlplane、.12/.13 master+controlplane,VIP .14)。
+- 结果:3 节点全 Ready、**etcd 3 成员 quorum**、VIP .14 在 n11、apiserver 经 `https://192.168.73.14:8443` readyz passed、kubeconfig 指向 VIP、全部 Pod Running。**全程离线**(镜像/包/二进制都来自 OCID)。
+- 证明:when_role(n11=45 步、n12/n13=41 步)、`{{groups.controlplane}}`(haproxy 后端自动填 3 IP)、角色键 hostvars(cp_join 取 `{{hostvars.bootstrap.join}}`+certkey)、serial(n13 等 n12)。
+- **运行时注意**:containerd 不一定动态加载 flannel 写的 CNI 配置——脏状态(反复 reset/重跑)的节点会 NotReady,`systemctl restart containerd` 即恢复;干净首装(n13)无此问题。后续可在 task 里加固。
+
+## 2026-06-02 · SSH 传输提速:单 channel 流式取代分块 exec(D-072)
+
+### D-072 `write_file` 改为单 channel 原始字节流(去 base64、去 ~12k 次往返)
+- **背景**:离线 apply 推 530MB 物料耗时 ~7min,用户质疑「理论上应秒级」。
+- **根因**:SSH executor 的 `write_file` 把内容 base64 后**按 60KB 分块,每块一次独立 SSH `exec`**(`printf >> tmp`)——500MB → base64 ~707MB → **~12000 次串行往返**,延迟受限,有效 ~1MB/s(≈100× 慢于链路,网络几乎空闲),再 `base64 -d`。
+- **决策**:开**一个** channel `exec("mkdir -p ... && cat > path")`,把**原始字节**(无 base64——stdin 不是 shell 参数,不受 MAX_ARG_STRLEN 限)用 russh `channel.data()` 流给远端 stdin,`eof()` 收尾,等 exit。SSH 自带窗口流控,line-rate。
+- **理由**:crater 用纯 Rust 的 **russh**(不 shell-out 系统 ssh/scp,守单二进制零依赖),russh 的 channel 流式即可,无需 scp/sftp。
+- **影响**:530MB 从 ~7min → **~17s**(D-071 真机实测,干净节点全 material apply 17s 到 init)。文件二进制完整(集群正常起来即证)。删掉旧的分块+base64+临时文件逻辑。

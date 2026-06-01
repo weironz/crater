@@ -1,0 +1,519 @@
+# Kubernetes —— **统一拓扑 + 全 material 离线形态**(D-071)。
+#
+# 一份 task,拓扑由 inventory 角色决定:
+#   单节点      : 1 台 [controlplane, bootstrap]
+#   1 主 N 从    : 1 台 [controlplane, bootstrap] + N 台 [worker]
+#   HA 多主多从 : 1 台 [controlplane, bootstrap] + (M-1) 台 [controlplane, master] + N 台 [worker]
+#
+# 角色与动作(when_role 分流):
+#   公共(无 when_role)      : containerd/runc/cni/crictl/kubelet/二进制/sysctl/镜像导入
+#   controlplane            : keepalived + haproxy(co-located,VIP 前置 apiserver)
+#   bootstrap               : kubeadm init --upload-certs + flannel + 注册 join/certkey + 去污点
+#   master(非首)serial      : kubeadm join --control-plane(逐台,防 etcd 抢)
+#   worker                  : kubeadm join
+#
+# 高可用入口:VIP 192.168.73.14:8443 → 持 VIP 的 master 上的 haproxy → 轮询各 apiserver:6443。
+# keepalived(VRRP)在 controlplane 间浮动 VIP;haproxy backend = {{ groups.controlplane }}。
+# 离线:keepalived/haproxy 走 os_package(buildah);其余同 k8s-offline。目标 ubuntu 24.04/amd64。
+name: k8s-ha
+hosts: all
+serial_roles: [master]          # 额外 master 逐台 join(D-071)
+
+vars:
+  version: "1.31.14"
+  containerd_ver: "1.7.22"
+  runc_ver: "1.1.14"
+  cni_ver: "1.5.1"
+  crictl_ver: "1.31.1"
+  flannel_ver: "0.28.4"
+  flannel_cni_ver: "1.9.1-flannel1"
+  pod_cidr: "10.244.0.0/16"
+  image_repo: "registry.aliyuncs.com/google_containers"
+  vip: "192.168.73.14"
+  control_plane_endpoint: "192.168.73.14:8443"   # VIP:haproxy 前端口
+  subnet: "192.168.73.0/24"                       # keepalived 选 VIP 网卡用
+
+materials:
+  # —— 二进制 ——
+  - name: containerd
+    kind: file
+    arch: amd64
+    url_tmpl: "https://github.com/containerd/containerd/releases/download/v{{containerd_ver}}/containerd-{{containerd_ver}}-linux-{{arch}}.tar.gz"
+  - name: runc
+    kind: file
+    arch: amd64
+    url_tmpl: "https://github.com/opencontainers/runc/releases/download/v{{runc_ver}}/runc.{{arch}}"
+  - name: cni-plugins
+    kind: file
+    arch: amd64
+    url_tmpl: "https://github.com/containernetworking/plugins/releases/download/v{{cni_ver}}/cni-plugins-linux-{{arch}}-v{{cni_ver}}.tgz"
+  - name: crictl
+    kind: file
+    arch: amd64
+    url_tmpl: "https://github.com/kubernetes-sigs/cri-tools/releases/download/v{{crictl_ver}}/crictl-v{{crictl_ver}}-linux-{{arch}}.tar.gz"
+  - name: kubeadm
+    kind: file
+    arch: amd64
+    url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubeadm"
+  - name: kubelet
+    kind: file
+    arch: amd64
+    url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubelet"
+  - name: kubectl
+    kind: file
+    arch: amd64
+    url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubectl"
+
+  # —— flannel 清单(官方)——
+  - name: flannel-manifest
+    kind: file
+    url_tmpl: "https://github.com/flannel-io/flannel/releases/download/v{{flannel_ver}}/kube-flannel.yml"
+
+  # —— 人工维护配置(复用 k8s-offline 的 files/)——
+  - name: cfg-modules
+    kind: file
+    src: files/modules-k8s.conf
+  - name: cfg-sysctl
+    kind: file
+    src: files/sysctl-k8s.conf
+  - name: cfg-crictl
+    kind: file
+    src: files/crictl.yaml
+  - name: cfg-containerd
+    kind: file
+    src: files/containerd-config.toml
+  - name: unit-containerd
+    kind: file
+    src: files/containerd.service
+  - name: unit-kubelet
+    kind: file
+    src: files/kubelet.service
+  - name: dropin-kubeadm
+    kind: file
+    src: files/10-kubeadm.conf
+
+  # —— OS 包闭包 ——
+  - name: sysdeps
+    kind: os_package
+    base: "ubuntu:24.04"
+    arch: amd64
+    packages:
+      debian: [conntrack, socat, ipset, ethtool, ebtables]
+  - name: lb-pkgs                  # keepalived + haproxy(HA 入口)
+    kind: os_package
+    base: "ubuntu:24.04"
+    arch: amd64
+    packages:
+      debian: [keepalived, haproxy]
+
+  # —— 镜像(全节点导入到 k8s.io)——
+  - name: img-apiserver
+    kind: image
+    ref: "registry.aliyuncs.com/google_containers/kube-apiserver:v{{version}}"
+  - name: img-cm
+    kind: image
+    ref: "registry.aliyuncs.com/google_containers/kube-controller-manager:v{{version}}"
+  - name: img-scheduler
+    kind: image
+    ref: "registry.aliyuncs.com/google_containers/kube-scheduler:v{{version}}"
+  - name: img-proxy
+    kind: image
+    ref: "registry.aliyuncs.com/google_containers/kube-proxy:v{{version}}"
+  - name: img-coredns
+    kind: image
+    ref: "registry.aliyuncs.com/google_containers/coredns:v1.11.3"
+  - name: img-pause
+    kind: image
+    ref: "registry.aliyuncs.com/google_containers/pause:3.10"
+  - name: img-etcd
+    kind: image
+    ref: "registry.aliyuncs.com/google_containers/etcd:3.5.24-0"
+  - name: img-flannel
+    kind: image
+    ref: "ghcr.io/flannel-io/flannel:v{{flannel_ver}}"
+  - name: img-flannel-cni
+    kind: image
+    ref: "ghcr.io/flannel-io/flannel-cni-plugin:v{{flannel_cni_ver}}"
+
+# bootstrap 注册 join / certkey,供 master、worker 消费(D-071 角色键 hostvars)。
+register:
+  - name: join
+    when_role: [bootstrap]
+    cmd: "kubeadm token create --print-join-command"
+  - name: certkey
+    when_role: [bootstrap]
+    cmd: "kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1"
+
+actions:
+  # ========== 公共(所有节点)==========
+  - id: swapoff
+    action: shell
+    cmd: "swapoff -a"
+    check: "test -z \"$(swapon --show)\""
+  - id: swap_fstab
+    action: shell
+    needs: [swapoff]
+    cmd: "sed -ri '/\\sswap\\s/s/^([^#])/#\\1/' /etc/fstab"
+    check: "! grep -Eq '^[^#].*\\sswap\\s' /etc/fstab"
+  - id: modules_conf
+    action: place
+    material: cfg-modules
+    dest: /etc/modules-load.d/k8s.conf
+  - id: modprobe
+    action: shell
+    needs: [modules_conf]
+    cmd: "modprobe overlay && modprobe br_netfilter"
+    check: "lsmod | grep -q br_netfilter"
+  - id: sysctl_conf
+    action: place
+    material: cfg-sysctl
+    dest: /etc/sysctl.d/k8s.conf
+  - id: sysctl_apply
+    action: shell
+    needs: [sysctl_conf, modprobe]
+    cmd: "sysctl --system"
+    check: "test \"$(sysctl -n net.ipv4.ip_forward)\" = 1"
+
+  - id: deps
+    action: package
+    material: sysdeps
+    needs: [sysctl_apply]
+
+  # —— containerd / runc / cni / crictl ——
+  - id: ctd_tgz
+    action: place
+    material: containerd
+    dest: /tmp/containerd.tgz
+    needs: [deps]
+  - id: ctd_extract
+    action: unarchive
+    from: /tmp/containerd.tgz
+    to: /usr/local
+    strip: 0
+    creates: /usr/local/bin/containerd
+    needs: [ctd_tgz]
+  - id: runc
+    action: place
+    material: runc
+    dest: /usr/local/sbin/runc
+    mode: "0755"
+    needs: [deps]
+  - id: cni_tgz
+    action: place
+    material: cni-plugins
+    dest: /tmp/cni.tgz
+    needs: [deps]
+  - id: cni_dir
+    action: file
+    path: /opt/cni/bin
+    state: directory
+    needs: [cni_tgz]
+  - id: cni_extract
+    action: unarchive
+    from: /tmp/cni.tgz
+    to: /opt/cni/bin
+    strip: 0
+    creates: /opt/cni/bin/bridge
+    needs: [cni_dir]
+  - id: crictl_tgz
+    action: place
+    material: crictl
+    dest: /tmp/crictl.tgz
+    needs: [deps]
+  - id: crictl_extract
+    action: unarchive
+    from: /tmp/crictl.tgz
+    to: /usr/local/bin
+    strip: 0
+    creates: /usr/local/bin/crictl
+    needs: [crictl_tgz]
+  - id: crictl_cfg
+    action: place
+    material: cfg-crictl
+    dest: /etc/crictl.yaml
+  - id: ctd_cfg
+    action: place
+    material: cfg-containerd
+    dest: /etc/containerd/config.toml
+    needs: [ctd_extract]
+    notify: [restart_containerd]
+  - id: ctd_unit
+    action: place
+    material: unit-containerd
+    dest: /etc/systemd/system/containerd.service
+    needs: [ctd_extract]
+  - id: svc_ctd
+    action: service
+    name: containerd
+    state: started
+    enabled: true
+    needs: [ctd_cfg, ctd_unit, runc]
+
+  # —— kubeadm / kubelet / kubectl ——
+  - id: kubeadm
+    action: place
+    material: kubeadm
+    dest: /usr/local/bin/kubeadm
+    mode: "0755"
+    needs: [deps]
+  - id: kubelet_bin
+    action: place
+    material: kubelet
+    dest: /usr/local/bin/kubelet
+    mode: "0755"
+    needs: [deps]
+  - id: kubectl
+    action: place
+    material: kubectl
+    dest: /usr/local/bin/kubectl
+    mode: "0755"
+    needs: [deps]
+  - id: kubelet_unit
+    action: place
+    material: unit-kubelet
+    dest: /etc/systemd/system/kubelet.service
+    needs: [kubelet_bin]
+  - id: kubelet_dropin
+    action: place
+    material: dropin-kubeadm
+    dest: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+    needs: [kubelet_unit]
+  - id: svc_kubelet
+    action: service
+    name: kubelet
+    state: started
+    enabled: true
+    needs: [kubelet_dropin, svc_ctd]
+
+  # —— 镜像导入(全节点,worker 也要 proxy/pause/flannel)——
+  - id: load_apiserver
+    action: load_image
+    material: img-apiserver
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_cm
+    action: load_image
+    material: img-cm
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_scheduler
+    action: load_image
+    material: img-scheduler
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_proxy
+    action: load_image
+    material: img-proxy
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_coredns
+    action: load_image
+    material: img-coredns
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_pause
+    action: load_image
+    material: img-pause
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_etcd
+    action: load_image
+    material: img-etcd
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_flannel
+    action: load_image
+    material: img-flannel
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_flannelcni
+    action: load_image
+    material: img-flannel-cni
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+
+  # ========== controlplane:keepalived + haproxy(VIP 前置)==========
+  - id: lb_pkgs
+    action: package
+    material: lb-pkgs
+    when_role: [controlplane]
+    needs: [sysctl_apply]
+  - id: haproxy_cfg
+    action: shell
+    when_role: [controlplane]
+    needs: [lb_pkgs]
+    # backend = 所有 controlplane 的 apiserver:6443({{ groups.controlplane }} = 各 master IP)
+    cmd: |
+      mkdir -p /etc/haproxy
+      cat >/etc/haproxy/haproxy.cfg <<'HDR'
+      global
+        log /dev/log local0
+        maxconn 4000
+      defaults
+        log global
+        mode tcp
+        option tcplog
+        timeout connect 5s
+        timeout client 30s
+        timeout server 30s
+      frontend kube-apiserver
+        bind *:8443
+        default_backend kube-apiserver
+      backend kube-apiserver
+        balance roundrobin
+      HDR
+      i=0; for ip in {{groups.controlplane}}; do i=$((i+1)); echo "  server cp$i $ip:6443 check"; done >>/etc/haproxy/haproxy.cfg
+    check: "grep -q 'backend kube-apiserver' /etc/haproxy/haproxy.cfg"
+  - id: keepalived_cfg
+    action: shell
+    when_role: [controlplane]
+    needs: [lb_pkgs]
+    # VRRP 浮 VIP;网卡按子网自动探测;健康检查盯 haproxy 进程
+    cmd: |
+      mkdir -p /etc/keepalived
+      IFACE=$(ip -o -4 addr show | awk '$4 ~ /^192\.168\.73\./ {print $2; exit}')
+      [ -z "$IFACE" ] && IFACE=$(ip -o -4 route show to {{subnet}} 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+      cat >/etc/keepalived/keepalived.conf <<EOF
+      vrrp_script chk_haproxy {
+        script "/usr/bin/killall -0 haproxy"
+        interval 2
+        weight 2
+      }
+      vrrp_instance VI_1 {
+        state BACKUP
+        interface $IFACE
+        virtual_router_id 14
+        priority 100
+        advert_int 1
+        nopreempt
+        authentication {
+          auth_type PASS
+          auth_pass crater42
+        }
+        virtual_ipaddress {
+          {{vip}}/24
+        }
+        track_script {
+          chk_haproxy
+        }
+      }
+      EOF
+    check: "grep -q '{{vip}}' /etc/keepalived/keepalived.conf"
+  # restarted(非 started):包安装时 haproxy 已带默认配置起来了,必须重启加载我们
+  # 写入的 :8443 配置 —— 且要在 init 之前(handler 在末尾太晚),故直接 restarted。
+  - id: svc_haproxy
+    action: service
+    name: haproxy
+    state: restarted
+    enabled: true
+    when_role: [controlplane]
+    needs: [haproxy_cfg]
+  - id: svc_keepalived
+    action: service
+    name: keepalived
+    state: restarted
+    enabled: true
+    when_role: [controlplane]
+    needs: [keepalived_cfg, svc_haproxy]
+
+  # ========== bootstrap:第一个 master ==========
+  - id: kubeadm_init
+    action: shell
+    when_role: [bootstrap]
+    needs: [svc_kubelet, svc_keepalived, load_apiserver, load_cm, load_scheduler, load_proxy, load_coredns, load_pause, load_etcd]
+    cmd: "kubeadm init --control-plane-endpoint {{control_plane_endpoint}} --upload-certs --pod-network-cidr={{pod_cidr}} --image-repository {{image_repo}} --kubernetes-version v{{version}} --node-name {{inventory_hostname}} --cri-socket=unix:///run/containerd/containerd.sock"
+    check: "test -f /etc/kubernetes/admin.conf"
+  - id: kubeconfig
+    action: shell
+    when_role: [bootstrap]
+    needs: [kubeadm_init]
+    cmd: "mkdir -p /root/.kube && cp -f /etc/kubernetes/admin.conf /root/.kube/config"
+    check: "test -f /root/.kube/config"
+  - id: flannel_manifest
+    action: place
+    material: flannel-manifest
+    dest: /etc/kubernetes/kube-flannel.yml
+    when_role: [bootstrap]
+    needs: [kubeconfig]
+  - id: cni
+    action: shell
+    when_role: [bootstrap]
+    needs: [flannel_manifest]
+    cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f /etc/kubernetes/kube-flannel.yml"
+    check: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl -n kube-flannel get ds/kube-flannel-ds"
+  - id: untaint
+    action: shell
+    when_role: [bootstrap]
+    needs: [cni]
+    cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || true"
+
+  # ========== master(非首):control-plane join(serial)==========
+  - id: cp_join
+    action: shell
+    when_role: [master]
+    needs: [svc_kubelet, svc_keepalived, load_apiserver, load_cm, load_scheduler, load_proxy, load_coredns, load_pause, load_etcd]
+    cmd: "{{hostvars.bootstrap.join}} --control-plane --certificate-key {{hostvars.bootstrap.certkey}} --node-name {{inventory_hostname}} --cri-socket=unix:///run/containerd/containerd.sock"
+    check: "test -f /etc/kubernetes/kubelet.conf"
+  - id: master_kubeconfig
+    action: shell
+    when_role: [master]
+    needs: [cp_join]
+    cmd: "mkdir -p /root/.kube && cp -f /etc/kubernetes/admin.conf /root/.kube/config"
+    check: "test -f /root/.kube/config"
+
+  # ========== worker:join ==========
+  - id: worker_join
+    action: shell
+    when_role: [worker]
+    needs: [svc_kubelet, load_proxy, load_pause, load_flannel, load_flannelcni]
+    cmd: "{{hostvars.bootstrap.join}} --node-name {{inventory_hostname}} --cri-socket=unix:///run/containerd/containerd.sock"
+    check: "test -f /etc/kubernetes/kubelet.conf"
+
+  # ========== 验证(bootstrap 上看全局)==========
+  - id: verify
+    action: shell
+    phase: verify
+    when_role: [bootstrap]
+    needs: [untaint]
+    cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes -o wide"
+
+handlers:
+  - id: restart_containerd
+    action: service
+    name: containerd
+    state: restarted
+
+teardown:
+  - id: reset
+    action: shell
+    cmd: "kubeadm reset -f --cri-socket=unix:///run/containerd/containerd.sock || true"
+  - id: stop_keepalived
+    action: service
+    name: keepalived
+    state: stopped
+    enabled: false
+    when_role: [controlplane]
+    needs: [reset]
+  - id: stop_haproxy
+    action: service
+    name: haproxy
+    state: stopped
+    enabled: false
+    when_role: [controlplane]
+    needs: [reset]
+  - id: rm_cni
+    action: file
+    path: /etc/cni/net.d
+    state: absent
+    needs: [reset]
+  - id: rm_kube
+    action: file
+    path: /etc/kubernetes
+    state: absent
+    needs: [reset]
+  - id: stop_kubelet
+    action: service
+    name: kubelet
+    state: stopped
+    enabled: false
+    needs: [reset]

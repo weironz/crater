@@ -175,47 +175,41 @@ impl SshExecutor {
 
 #[async_trait]
 impl Executor for SshExecutor {
-    /// Override the default base64-in-one-shot writer: large blobs (e.g. a
-    /// 10 MB offline artifact) produce a command too big for a single SSH exec
-    /// (the channel returns no exit status -> code -1). Stream the base64 text
-    /// in chunks appended to a temp file, then decode once on the target.
+    /// Stream the blob to the target over a SINGLE channel: `cat > path` with the
+    /// raw bytes on stdin. No base64 (stdin is binary-safe — it's not a shell
+    /// argument, so MAX_ARG_STRLEN doesn't apply) and no per-chunk round trips.
+    ///
+    /// The old writer appended base64 in 60 KB chunks, one SSH `exec` per chunk —
+    /// ~12k sequential round trips for a 500 MB blob, latency-bound at ~1 MB/s
+    /// (≈100× slower than the link, network idle). russh streams a single channel
+    /// with SSH-level windowing, so this runs at line rate.
     async fn write_file(&self, path: &str, content: &[u8]) -> crate::Result<()> {
-        let b64 = base64::engine::general_purpose::STANDARD.encode(content);
-        let tmp = format!("{path}.crater-b64");
+        let mut channel = self.handle.channel_open_session().await?;
+        let cmd = format!("mkdir -p \"$(dirname '{path}')\" && cat > '{path}'");
+        channel.exec(true, cmd.as_str()).await?;
+        channel
+            .data(content)
+            .await
+            .map_err(|e| anyhow::anyhow!("stream to {path} failed: {e}"))?;
+        channel.eof().await?;
 
-        // Ensure parent dir exists and start a fresh temp file.
-        let prep = format!("mkdir -p \"$(dirname '{path}')\" && : > '{tmp}'");
-        let out = self.run(&prep).await?;
-        if !out.ok() {
-            anyhow::bail!("prepare {tmp} failed (code {}): {}", out.code, out.stderr.trim());
-        }
-
-        // Append base64 in chunks. The chunk travels as a single shell
-        // argument, so it must stay under Linux MAX_ARG_STRLEN (~128 KB).
-        // 60 KB is safely below that.
-        const CHUNK: usize = 60_000; // base64 chars per round trip
-        let bytes = b64.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            let end = (i + CHUNK).min(bytes.len());
-            let chunk = &b64[i..end];
-            let cmd = format!("printf %s '{chunk}' >> '{tmp}'");
-            let out = self.run(&cmd).await?;
-            if !out.ok() {
-                anyhow::bail!(
-                    "append chunk to {tmp} failed (code {}): {}",
-                    out.code,
-                    out.stderr.trim()
-                );
+        let mut code: Option<i32> = None;
+        let mut stderr: Vec<u8> = Vec::new();
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                ChannelMsg::ExtendedData { ref data, ext } if ext == 1 => {
+                    stderr.extend_from_slice(data)
+                }
+                ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status as i32),
+                _ => {}
             }
-            i = end;
         }
-
-        // Decode once, then clean up the temp file.
-        let fin = format!("base64 -d '{tmp}' > '{path}' && rm -f '{tmp}'");
-        let out = self.run(&fin).await?;
-        if !out.ok() {
-            anyhow::bail!("decode {path} failed (code {}): {}", out.code, out.stderr.trim());
+        let code = code.unwrap_or(-1);
+        if code != 0 {
+            anyhow::bail!(
+                "write_file {path} failed (code {code}): {}",
+                String::from_utf8_lossy(&stderr).trim()
+            );
         }
         Ok(())
     }

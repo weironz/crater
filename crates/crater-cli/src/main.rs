@@ -902,9 +902,25 @@ async fn apply_task(
 
     let mut hostvars: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
+    // Role → space-joined member addresses, exposed to templates as
+    // `{{ groups.<role> }}` (D-071) — e.g. haproxy backend = all control-plane IPs.
+    let role_addrs: BTreeMap<String, String> = {
+        let mut acc: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for h in &hosts {
+            for r in &h.roles {
+                acc.entry(r.clone()).or_default().push(h.address.clone());
+            }
+        }
+        acc.into_iter().map(|(k, v)| (k, v.join(" "))).collect()
+    };
+    // host name → roles, so a host's registered facts can also be published under
+    // its roles (`hostvars.<role>.<name>`, D-071) for singleton roles like bootstrap.
+    let name_roles: BTreeMap<String, Vec<String>> =
+        hosts.iter().map(|h| (h.name.clone(), h.roles.clone())).collect();
+
     if !do_apply {
         for h in &hosts {
-            run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), false, do_shell, teardown, source, &deployment).await?;
+            run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, offline_blobmap.as_ref(), false, do_shell, teardown, source, &deployment).await?;
         }
         info!("dry-run only; omit --dry-run to execute");
         return Ok(());
@@ -913,20 +929,35 @@ async fn apply_task(
     let mut applied_hosts: Vec<String> = Vec::new();
     let forks = forks_limit();
     for group in group_hosts_by_role(&hosts) {
+        // serial_roles (D-071): a group whose hosts hold a serial role runs one at
+        // a time (forks=1) — e.g. control-plane joins must not race on etcd quorum.
+        let group_forks = if group
+            .iter()
+            .any(|h| h.roles.iter().any(|r| task.serial_roles.contains(r)))
+        {
+            1
+        } else {
+            forks
+        };
         let results: Vec<Result<(String, Vec<(String, String)>)>> = futures::stream::iter(
             group
                 .iter()
-                .map(|h| run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), true, do_shell, teardown, source, &deployment)),
+                .map(|h| run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, offline_blobmap.as_ref(), true, do_shell, teardown, source, &deployment)),
         )
-        .buffer_unordered(forks)
+        .buffer_unordered(group_forks)
         .collect()
         .await;
         let mut first_err = None;
         for r in results {
             match r {
                 Ok((host_name, regs)) => {
+                    let roles = name_roles.get(&host_name).cloned().unwrap_or_default();
                     for (k, v) in regs {
-                        hostvars.entry(host_name.clone()).or_default().insert(k, v);
+                        hostvars.entry(host_name.clone()).or_default().insert(k.clone(), v.clone());
+                        // Also publish under each role (singleton roles like bootstrap).
+                        for r in &roles {
+                            hostvars.entry(r.clone()).or_default().insert(k.clone(), v.clone());
+                        }
                     }
                     applied_hosts.push(host_name);
                 }
@@ -1273,6 +1304,7 @@ async fn run_task_on_host(
     host: &crater_core::spec::Host,
     spec_dir: &Path,
     hostvars: &BTreeMap<String, BTreeMap<String, String>>,
+    role_addrs: &BTreeMap<String, String>,
     offline_blobmap: Option<&BTreeMap<String, PathBuf>>,
     do_apply: bool,
     do_shell: bool,
@@ -1309,6 +1341,16 @@ async fn run_task_on_host(
             ctx.vars.insert(format!("hostvars.{h}.{k}"), v.clone());
         }
     }
+    // Role membership (D-071): `{{ groups.<role> }}` = member addresses; the
+    // target's own roles drive `when_role` step filtering.
+    for (role, addrs) in role_addrs {
+        ctx.vars.insert(format!("groups.{role}"), addrs.clone());
+    }
+    ctx.host_roles = host.roles.clone();
+    // The target's own inventory identity, for templates that need a stable
+    // unique per-host value (e.g. kubeadm `--node-name`, D-071).
+    ctx.vars.insert("inventory_hostname".to_string(), host.name.clone());
+    ctx.vars.insert("inventory_addr".to_string(), host.address.clone());
     for m in &task.materials {
         ctx.add_material(m.clone());
     }
@@ -1361,6 +1403,11 @@ async fn run_task_on_host(
     // Capture this host's facts for later groups (D-030).
     let mut registered: Vec<(String, String)> = Vec::new();
     for reg in &task.register {
+        // when_role (D-071): only gather this fact on hosts holding the role
+        // (e.g. the join command is produced on [bootstrap], not on workers).
+        if !reg.when_role.is_empty() && !reg.when_role.iter().any(|r| host.roles.contains(r)) {
+            continue;
+        }
         let out = exec.run(&engine::render(&reg.cmd, &ctx.vars)?).await?;
         if !out.ok() {
             anyhow::bail!(

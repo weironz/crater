@@ -33,6 +33,11 @@ pub struct TaskFile {
     /// host groups as `hostvars.<host>.<name>` (D-030, now in the task model).
     #[serde(default)]
     pub register: Vec<RegisterSpec>,
+    /// Roles whose host group runs **one host at a time** (D-071). A role-group
+    /// holding any of these gets `forks=1` — e.g. control-plane `kubeadm join`
+    /// must be serial so additional masters don't race on etcd quorum.
+    #[serde(default)]
+    pub serial_roles: Vec<String>,
     /// Ordered actions. Dependencies via `needs`; the engine topo-sorts.
     #[serde(default)]
     pub actions: Vec<ActionStep>,
@@ -71,6 +76,11 @@ pub struct ActionStep {
     /// Closed-enum condition: run only on these OS families (empty = all).
     #[serde(default)]
     pub when_os: Vec<String>,
+    /// Closed-enum condition (D-071): run only on hosts holding one of these
+    /// inventory roles (empty = all). Drives asymmetric multi-node topologies —
+    /// e.g. `kubeadm init` on `[bootstrap]`, `kubeadm join` on `[worker]`.
+    #[serde(default)]
+    pub when_role: Vec<String>,
     /// Closed-enum condition: run only offline (`true`) / only online (`false`).
     #[serde(default)]
     pub when_offline: Option<bool>,

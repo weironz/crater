@@ -152,13 +152,21 @@ Schema:
     #     kind: file
     #     arch: amd64
     #     url_tmpl: ".../app_x86_64"
+  serial_roles: [<role>...]       # optional; role-groups run one host at a time
   actions:
     - id: <id>
       action: <primitive>
       <params...>
       needs: [<id>...]            # ordering (the engine topo-sorts)
       when_os: [debian|rhel]      # optional closed-enum condition
+      when_role: [<role>...]      # optional; run only on hosts holding a role (D-071)
       phase: install|verify       # optional
+
+Multi-node (D-071): inventory hosts carry `roles: [..]`. `when_role` filters a step
+to those roles (e.g. `kubeadm init` on [bootstrap], `kubeadm join` on [worker]).
+`{{ groups.<role> }}` renders to that role's member addresses (space-joined). A
+host's `register:` fact is also published as `hostvars.<role>.<name>` (use for a
+singleton role like bootstrap). `register:` entries take `when_role` too.
 
 Modules (use ONLY these `action:` values — names match ansible where possible).
 ansible-aligned: shell(cmd,check), package(packages:{debian:[..],rhel:[..]}),

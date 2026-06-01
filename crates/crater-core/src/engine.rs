@@ -177,6 +177,9 @@ pub struct PlanContext {
     pub materials: BTreeMap<String, Vec<crate::component::Material>>,
     /// Directory holding data-defined roles (`roles/<name>.yaml`, D-029).
     pub roles_dir: PathBuf,
+    /// The target host's inventory roles (D-071), used by `when_role` step
+    /// filtering. Empty = host has no roles (matches every `when_role`).
+    pub host_roles: Vec<String>,
 }
 
 impl PlanContext {
@@ -193,6 +196,7 @@ impl PlanContext {
             offline_blobs: None,
             materials: BTreeMap::new(),
             roles_dir: PathBuf::from("roles"),
+            host_roles: Vec::new(),
         }
     }
 
@@ -339,7 +343,10 @@ pub fn plan_from_task(
         let os_ok = s.when_os.is_empty()
             || os.match_keys().iter().any(|k| s.when_os.iter().any(|w| w == k));
         let off_ok = s.when_offline.map_or(true, |w| w == offline);
-        if os_ok && off_ok {
+        // when_role (D-071): run only on hosts holding one of these roles.
+        let role_ok = s.when_role.is_empty()
+            || s.when_role.iter().any(|r| ctx.host_roles.iter().any(|h| h == r));
+        if os_ok && off_ok && role_ok {
             items.push(Item { id, step: s });
         } else {
             filtered.insert(id);
@@ -1280,6 +1287,35 @@ fn sanitize(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::component::Action;
+
+    #[test]
+    fn when_role_filters_steps_by_host_roles() {
+        // D-071: a step with when_role runs only on hosts holding the role.
+        let step = |id: &str, role: &str| crate::task::ActionStep {
+            id: Some(id.into()),
+            needs: vec![],
+            phase: Phase::Install,
+            when_os: vec![],
+            when_role: if role.is_empty() { vec![] } else { vec![role.into()] },
+            when_offline: None,
+            retries: 0,
+            ignore_errors: false,
+            notify: vec![],
+            action: Action::RunCmd { cmd: "true".into(), check: None },
+        };
+        let actions = vec![step("common", ""), step("init", "bootstrap"), step("join", "worker")];
+
+        let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
+        ctx.host_roles = vec!["bootstrap".into()];
+        // bootstrap host: common + init run, join filtered out.
+        assert_eq!(plan_from_task(&actions, &ctx).unwrap().len(), 2);
+
+        ctx.host_roles = vec!["worker".into()];
+        assert_eq!(plan_from_task(&actions, &ctx).unwrap().len(), 2); // common+join
+
+        ctx.host_roles = vec![]; // no roles → only the unconditional step
+        assert_eq!(plan_from_task(&actions, &ctx).unwrap().len(), 1);
+    }
 
     fn test_material(name: &str, url: &str) -> crate::component::Material {
         crate::component::Material {

@@ -17,6 +17,11 @@ use std::path::PathBuf;
 pub struct RegisterSpec {
     pub name: String,
     pub cmd: String,
+    /// Run this fact-gathering only on hosts holding one of these roles (D-071;
+    /// empty = all). E.g. register the kubeadm join command only on `[bootstrap]`
+    /// so workers don't run `kubeadm token create` (which would fail + abort).
+    #[serde(default)]
+    pub when_role: Vec<String>,
 }
 
 /// One declared material in a component's offline closure (D-034). The build
