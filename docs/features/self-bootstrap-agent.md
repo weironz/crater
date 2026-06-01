@@ -4,7 +4,7 @@
 
 ## 这是什么
 
-**默认**把 crater 二进制 + lower 出的计划推到目标机，由 `crater agent` 在目标机**本地执行**（少 SSH 往返、为离线/复杂逻辑铺路）。crater 是单一二进制多子命令——目标机上跑的就是同一个 crater（`crater agent --plan`），不是另一个程序。
+**默认**把 crater 二进制 + lower 出的计划推到目标机，由 `crater agent` 在目标机**本地执行**（少 SSH 往返、为离线/复杂逻辑铺路）。crater 是单一二进制多子命令——目标机上跑的就是同一个 crater（`crater agent --task-plan`，内部命令、对人隐藏），不是另一个程序。
 
 - 二进制按 **sha256 缓存** 在目标机 `/var/lib/crater/crater`，推一次/版本。
 - **`--shell` 逃生**：强制纯 agentless shell（每步 SSH，目标机零 crater，任何机器都行）。

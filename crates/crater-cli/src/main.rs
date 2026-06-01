@@ -5,12 +5,13 @@
 //!   crater apply <name>                       # named task → tasks/<name>.yaml
 //!   crater <name> [flags]                      # shorthand for `crater apply <name>`
 //!   crater apply <image-ref|x.oci> --host H    # deploy an image / offline artifact
+//!   crater delete <source> [--host|-i]         # uninstall via the task's teardown: (D-049)
 //!   crater build -f task.yaml [-t ref]         # → B 类 OCI artifact in the local store
 //!   crater save <ref> -o x.oci                 # export a stored artifact to a file
 //!   crater ai "<request>" [-o task.yaml]       # NL → validated task
 //!   crater doctor --file log.txt | --host H    # offline rule-based diagnosis
 //!   crater run --host H --password P -- <cmd>  # ad-hoc (ansible -m shell style)
-//!   crater agent --plan|--task-plan <file>     # internal (runs on the target node)
+//!   crater agent --task-plan <file>            # internal (runs on the target node)
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -130,23 +131,6 @@ enum Cmd {
         #[arg(short, long)]
         output: PathBuf,
     },
-    /// Deploy an offline `.oci` task artifact to a target (= `crater apply
-    /// <x.oci>`; zero network on the target).
-    Deploy {
-        #[arg(long)]
-        bundle: PathBuf,
-        #[arg(long)]
-        host: Option<String>,
-        #[arg(long, default_value = "root")]
-        user: String,
-        #[arg(long)]
-        password: Option<String>,
-        #[arg(long, default_value_t = 22)]
-        port: u16,
-        /// Print the plan without executing.
-        #[arg(long)]
-        dry_run: bool,
-    },
     /// AI copilot: natural language -> a validated task yaml.
     /// Configure via CRATER_AI_ENDPOINT / CRATER_AI_KEY / CRATER_AI_MODEL.
     Ai {
@@ -244,14 +228,14 @@ enum Cmd {
         what: CreateWhat,
     },
     /// Internal: self-bootstrap agent. Runs ON the target node, executing a
-    /// lowered plan locally (pushed here by the control machine). D-019.
+    /// lowered task plan locally (pushed here by the control machine). Not for
+    /// humans — invoked as `crater agent --task-plan <file>` by `apply`/`delete`
+    /// over the agent path (D-019/D-044). Hidden from help.
+    #[command(hide = true)]
     Agent {
-        /// Path to a serialized component plan (Vec<Op>) to execute locally.
-        #[arg(long)]
-        plan: Option<PathBuf>,
         /// Path to a serialized task plan (steps + handlers, D-044) to run locally.
         #[arg(long)]
-        task_plan: Option<PathBuf>,
+        task_plan: PathBuf,
     },
     /// Shortcut: `crater <component> [flags]`.
     #[command(external_subcommand)]
@@ -370,14 +354,6 @@ async fn main() -> Result<()> {
             info!("saved {reference} → {}", output.display());
             Ok(())
         }
-        Cmd::Deploy {
-            bundle,
-            host,
-            user,
-            password,
-            port,
-            dry_run,
-        } => deploy_bundle(&bundle, host, &user, password, port, !dry_run).await,
         Cmd::Cp {
             host,
             user,
@@ -430,7 +406,7 @@ async fn main() -> Result<()> {
             port,
             cmd,
         } => run_adhoc(&host, &user, password, port, &cmd.join(" ")).await,
-        Cmd::Agent { plan, task_plan } => run_agent(plan, task_plan).await,
+        Cmd::Agent { task_plan } => run_agent(&task_plan).await,
         Cmd::Component(args) => component_shortcut(args).await,
     }
 }
@@ -687,23 +663,15 @@ async fn run_task_via_agent(
     forward_agent_output(&out)
 }
 
-/// `crater agent --plan <file>`: run ON the target. Reads a lowered plan and
-/// executes it locally (the control machine pushed the plan + this binary).
-async fn run_agent(plan: Option<PathBuf>, task_plan: Option<PathBuf>) -> Result<()> {
-    // Task plan (D-044): steps + handlers, run via execute_task locally.
-    if let Some(tp) = task_plan {
-        let text = std::fs::read_to_string(&tp)
-            .map_err(|e| anyhow!("read task plan {}: {e}", tp.display()))?;
-        let plan = engine::task_plan_from_yaml(&text)?;
-        info!("agent: executing task ({} step(s)) locally", plan.steps.len());
-        return engine::execute_task(&plan.steps, &plan.handlers, &LocalExecutor).await;
-    }
-    let plan_path = plan.ok_or_else(|| anyhow!("crater agent: --plan or --task-plan required"))?;
-    let text = std::fs::read_to_string(&plan_path)
-        .map_err(|e| anyhow!("read plan {}: {e}", plan_path.display()))?;
-    let ops = engine::plan_from_yaml(&text)?;
-    info!("agent: executing {} step(s) locally", ops.len());
-    engine::execute(&ops, &LocalExecutor).await
+/// `crater agent --task-plan <file>`: run ON the target. Reads a lowered task
+/// plan (steps + handlers, D-044) and executes it locally via `execute_task`
+/// (the control machine pushed the plan + this binary).
+async fn run_agent(task_plan: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(task_plan)
+        .map_err(|e| anyhow!("read task plan {}: {e}", task_plan.display()))?;
+    let plan = engine::task_plan_from_yaml(&text)?;
+    info!("agent: executing task ({} step(s)) locally", plan.steps.len());
+    engine::execute_task(&plan.steps, &plan.handlers, &LocalExecutor).await
 }
 
 
@@ -1218,19 +1186,6 @@ async fn apply_oci_bundle(
     }
     let _ = std::fs::remove_dir_all(&dest_root);
     Ok(())
-}
-
-/// Back-compat `crater deploy --bundle x --host H`: single-host offline apply.
-async fn deploy_bundle(
-    bundle_file: &Path,
-    host: Option<String>,
-    user: &str,
-    password: Option<String>,
-    port: u16,
-    do_apply: bool,
-) -> Result<()> {
-    let hosts = target_hosts(None, host, user, password, None, port)?;
-    apply_oci_bundle(bundle_file, hosts, do_apply, false, false).await
 }
 
 /// The inventory's named `groups:` (from `-i`), else empty (D-043).

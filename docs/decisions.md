@@ -581,3 +581,14 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **实现**:CLI 加 `Cmd::Delete`(镜像 `Apply` 的 source/targeting);`teardown: bool` 贯穿 `apply_source → apply_task → run_task_on_host`,真则选 `task.teardown`、空则提前 bail;`apply_oci_bundle`/`apply_image_ref` 同步带参(artifact/离线也能 delete,recipe 含 teardown)。
 - **tasks/docker.yaml** 加 `teardown:`:stop+disable docker/containerd → 删 `/var/lib/docker`+`/var/lib/containerd`(**运行时状态,作者声明**)→ 删 binary/unit/`/etc/docker` → daemon-reload。
 - **真机/验证**:`delete yq` → 报错(yq 无 teardown,opt-in 生效);`delete docker --dry-run` → 12 步拓扑有序;`delete docker --host .12`(已装 docker)→ changed=12,docker/containerd inactive、`/var/lib/docker` 等全清;再删幂等 `changed=1 ok=11`(仅 daemon-reload 重跑)。34+2 tests 绿。
+
+---
+
+## 2026-06-01 · 删 `deploy` 子命令、`agent` 隐藏并精简
+
+### D-050 `deploy` 删除(被 `apply <x.oci>` 覆盖);`agent` 转内部隐藏、只留 `--task-plan`
+- **背景**:盘点 CLI 冗余。`crater deploy --bundle x.oci --host` 与 `crater apply x.oci --host` 走同一个 `apply_oci_bundle`,且 deploy 还少 `-i`/`--key` → 是 apply 的子集。`agent` 是自举执行的**内部入口**(控制机推二进制后在目标跑 `crater agent --task-plan`),不是给人用的;其 `--plan`(component Op 计划)分支自 D-046 删 component 模型后已成死代码。
+- **决策**:① **删 `Cmd::Deploy` + `deploy_bundle`**——离线部署统一走 `crater apply x.oci`。② `agent` 加 `#[command(hide = true)]` 从 `--help` 隐去(对人不可见,仍可被控制机调用);删死的 `--plan`,`run_agent` 精简为只收 `--task-plan`。
+- **理由**:单一入口(apply 即部署,守 D-020 在线/离线单管线);CLI 表面更小、更诚实(内部命令不暴露给用户);清死代码。`engine::plan_from_yaml/plan_to_yaml/execute`(Op 级)保留——引擎测试仍用。
+- **影响**:`apply_oci_bundle`/`apply_image_ref` 不变(apply 路径仍用);mod 顶部用法、`offline-format §5`、`requirements F12`、`self-bootstrap-agent.md` 刷成 `apply x.oci` / `agent --task-plan`;`progress.md` 历史日志保留 deploy 记录。
+- **验证**:`crater deploy` 已无;`--help` 不含 deploy/agent;`crater agent` 仍在(要求 `--task-plan`);`apply yq --host .12` 经 agent 路径执行成功(yq 重装)。34+2 tests 绿,0 警告。

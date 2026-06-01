@@ -124,7 +124,7 @@ verify:
 ### 4.3 离线模式（基于 OCI 镜像，D-018；详见 [offline-format.md](offline-format.md)）
 - **F10** 制包：`crater build -f xxx.yaml -o x.oci`，在线环境拉全依赖（制品 + **容器镜像**）打包。
 - **F11** 离线包格式：**OCI Image Layout**（序列化为单个 oci-archive tar）。制品与容器镜像均**内容寻址**存放（digest 即校验，去重免费）；crater 在其上加 `crater-manifest` 做逻辑索引。可选 zstd（先 gzip）。**取代早期 tar.gz**，渐进迁移。
-- **F12** 离线部署：`crater deploy --bundle x.oci`，现场零网络；目标机解包 OCI、digest 自校验、导入容器镜像、跑同一引擎。
+- **F12** 离线部署：`crater apply x.oci`（D-050:`deploy` 子命令已删,apply 统一入口），现场零网络；目标机解包 OCI、digest 自校验、导入容器镜像、跑同一引擎。
 - **F13** 离线镜像分发：起临时 registry，多节点指过去，避免每台塞一份。
 - **F14** 制品完整性：OCI 内容寻址 digest 自校验、缺包检测、版本兼容校验（确定性规则，不靠 AI）。哪些镜像/制品入包由组件数据（`images:` / `download:`）声明，引擎不内置（D-017）。
 

@@ -96,7 +96,7 @@ actions:
 
 ## 5. deploy 流程（隔离目标机，零网络）
 
-`crater deploy --bundle x.oci --host <ip> --password <pw> --apply`
+`crater apply x.oci --host <ip> --password <pw>`（D-050:专用 `deploy` 子命令已删,`apply <x.oci>` 即离线部署）
 
 1. **上传**：分块 base64 over SSH 推送 `x.oci`（D-009，已验证 10MB+ 可行）。
 2. **解包**：目标机侧 crater（agent 模式）展开 OCI Layout；按 digest **自校验**（内容寻址，无需额外 sha256 步骤）。
