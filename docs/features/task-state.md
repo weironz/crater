@@ -9,51 +9,53 @@ crater 本来**无状态/agentless**——跑完不留痕,不知道"什么装在
 
 > DB 选了 **Turso**(纯 Rust 重写的 SQLite,守 N1 免 C;`pure-rust-crypto`、关 mimalloc/sync)。详见 [D-051](../decisions.md)。
 
-## "task" 的语义(D-052)
+## 身份与视图(D-052/D-053,受 AWX 启发)
 
-一次 `crater apply yq -i inv` 是**一个 task**(逻辑部署单元),落在 N 台机器上——**hosts 是它的属性**,不是把每台摊成一行(对标 `helm list` 的 release 维度)。所以:
+关键认识:**`apply`/`delete` 是无状态收敛 `(配方, 主机)`,本身不需要任何身份**;唯一性是 `task list` 才逼出来的**分组**问题。参考 AWX(同样无状态的 Ansible):它是 **run/活动中心**(Jobs 主屏),没有 release 对象,身份 = 命名的 playbook+inventory 绑定(Job Template)。crater 照此:
 
-- `crater task list` = **task 维度**,一行一个 task,hosts 聚合。
-- `crater task show <name>` = 下钻看该 task 的 per-host 实例。
-- per-host marker 仍是真相源,只是默认不平铺展示。
+- **`task history` 是主视图**(不可变活动流);**`task list` 是当前部署快照**(crater 因有 marker 才能给出,AWX 没有);`task show` 下钻。
+- **可选 deployment 名(默认 = task 名)** 作纯分组标签:`crater apply <name> <source>`。**只影响 list 分组,apply/delete 行为不变**。区分"同一 task 在不同机器组的独立部署"(A/B)就靠它。
 
 ## 命令
 
 | 命令 | 作用 |
 |---|---|
-| `crater task list` | **一行一个 task**(hosts 聚合);默认读控制端 DB |
-| `crater task list --host H` / `-i inv.yaml` | 同上,但读**目标机权威 marker** |
-| `crater task show <name> [--host/-i]` | 该 task 的 per-host 明细(version/applied/source) |
-| `crater task history [--limit N]` | 最近的 apply/delete 记录(控制端 DB) |
+| `crater task history [--limit N]` | **主视图**:最近 apply/delete 活动流(谁/何时/部署/task/主机/结果) |
+| `crater task list [--host/-i]` | 当前部署快照——**一行一个 deployment**(HOSTS 计数);默认读控制 DB,`--host/-i` 读目标机权威 marker |
+| `crater task show <name> [--host/-i]` | 该 deployment 的 per-host 明细 |
 
-`apply`/`delete` 自动维护状态:成功后目标机写/删 marker + 控制端 DB upsert/delete + 记一条 job_run。**都是 best-effort**——部署已成功,状态记录失败只 warn,不回滚(marker 才是真相,DB 只是缓存)。
+`apply`/`delete` 自动维护状态(best-effort):marker(目标机,真相)+ 控制 DB(聚合/历史)。
 
 ## 基本 demo
 
+A/B:同一份 `tasks/yq.yaml`,两个独立部署:
+
 ```bash
-crater apply yq -i inventory.yaml                # 一个 task,部署到 inventory 各机
-crater task list                                 # task 维度
-#  TASK   VERSION   HOSTS           LAST APPLIED (UTC)
-#  yq     4.53.2    n11,n12 (2)     2026-06-01 08:10:56
-crater task show yq                              # 下钻 per-host
-#  HOST   VERSION   APPLIED (UTC)        SOURCE
-#  n11    4.53.2    2026-06-01 08:10:55  yq
-#  n12    4.53.2    2026-06-01 08:10:56  yq
+crater apply yq-a yq --host 192.168.73.11 --password 123456   # deployment yq-a
+crater apply yq-b yq --host 192.168.73.12 --password 123456   # deployment yq-b
 
-crater task list -i inventory.yaml               # 读目标机权威 marker(同样 task 维度)
-crater task history
-#  WHEN (UTC)           ACTION  TASK  HOST   RESULT
-#  2026-06-01 08:10:56  apply   yq    n12    ok
+crater task list
+#  DEPLOYMENT  TASK  VERSION  HOSTS  LAST APPLIED (UTC)
+#  yq-a        yq    4.53.2       1  2026-06-01 08:43:58
+#  yq-b        yq    4.53.2       1  2026-06-01 08:44:38      ← 两个独立单元,主机只给计数
 
-crater delete yq -i inventory.yaml               # 删 marker + DB delete + 记 history
+crater task show yq-a                            # 下钻(主机名在这看)
+#  HOST            TASK  VERSION  APPLIED (UTC)        SOURCE
+#  192.168.73.11   yq    4.53.2   2026-06-01 08:43:58  yq
+
+crater task history                              # 主视图
+#  WHEN (UTC)           ACTION  DEPLOYMENT  TASK  HOST            RESULT
+#  2026-06-01 08:44:38  apply   yq-b        yq    192.168.73.12   ok
+
+crater apply yq -i inventory.yaml                # 不给名 → deployment 默认 "yq"(合并视图)
 ```
-版本各主机不一致时 `list` 显示 `4.53.2,4.54.0 (mixed)`。
+HOSTS 只给**计数**(大批量不平铺,主机名去 `task show`);版本各机不一致显示 `… (mixed)`。
 
-## 验证（真机 192.168.73.12）
+## 验证（真机 .11/.12）
 
-- `apply yq` 本机 + `--host .12` → `task list` 两条、`history` 两条 apply。
-- `task list --host .12` 读到 `/var/lib/crater/state/yq.json`(JSON 内容核对一致)。
-- `delete yq --host .12` → marker 删、DB 删、list 中 .12 消失、history 多一条 `delete`。
+- `apply yq-a yq --host .11` + `apply yq-b yq --host .12`(同一 task.yaml)→ `task list` 两行 yq-a/yq-b;`task show yq-a` → .11;`history` DEPLOYMENT 列区分两者。
+- `apply yq`(无名)→ deployment 默认 `yq`。
+- schema 变更过 → 升级后需清旧 `~/.crater/state.db`。
 
 ## 边界 / 后续
 

@@ -50,8 +50,10 @@ enum Cmd {
     /// reference, or an `.oci` artifact. `--host`/`-i`/none picks targets. Same
     /// engine & idempotency online or offline (offline replays the artifact).
     Apply {
-        /// `<source>`, or a `<name>` label when a second positional `<source>`
-        /// follows: `crater apply app01 docker.io/library/app01:v1.0`.
+        /// `<source>`, or a `<name>` deployment label when a second positional
+        /// `<source>` follows: `crater apply yq-a yq -i invA` deploys task `yq`
+        /// under deployment `yq-a` (D-052: distinguishes independent rollouts of
+        /// the same task in `task list`; default deployment = task name).
         arg1: Option<String>,
         /// `<source>` (image ref | x.oci | spec.yaml | component) when the first
         /// positional is a name.
@@ -780,7 +782,7 @@ async fn apply_source(
         // — `-i inventory.yaml`, `--host a,b`, or none → local.
         info!("{verb}: {src} → offline (OCI bundle)");
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
-        return apply_oci_bundle(&path, hosts, !dry_run, shell, teardown, &src).await;
+        return apply_oci_bundle(&path, hosts, !dry_run, shell, teardown, &src, name.as_deref()).await;
     }
     if path.is_file() {
         // A task file (top-level `actions:`, D-037). Component specs are gone.
@@ -788,7 +790,7 @@ async fn apply_source(
             info!("{verb}: {src} → task");
             let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
             let groups = inventory_groups(inventory.as_deref())?;
-            return apply_task(&path, hosts, groups, None, !dry_run, shell, teardown, &src).await;
+            return apply_task(&path, hosts, groups, None, !dry_run, shell, teardown, &src, name.as_deref()).await;
         }
         anyhow::bail!(
             "{src}: not a task file (needs top-level `actions:`). Component specs are no \
@@ -799,7 +801,7 @@ async fn apply_source(
     if src.contains('/') || src.contains(':') {
         info!("{verb}: {src} → image (local store / registry)");
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
-        return apply_image_ref(&src, hosts, !dry_run, teardown, &src).await;
+        return apply_image_ref(&src, hosts, !dry_run, teardown, &src, name.as_deref()).await;
     }
     // Named task in the library: `crater apply <name>` → tasks/<name>.yaml
     // (D-043). This is the only bare-name path now (D-046): component shortcut
@@ -809,7 +811,7 @@ async fn apply_source(
         info!("{verb}: {src} → named task (tasks/{src}.yaml)");
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
         let groups = inventory_groups(inventory.as_deref())?;
-        return apply_task(&named, hosts, groups, None, !dry_run, shell, teardown, &src).await;
+        return apply_task(&named, hosts, groups, None, !dry_run, shell, teardown, &src, name.as_deref()).await;
     }
     anyhow::bail!(
         "'{src}': not a file, image ref, or named task. Put a task at tasks/{src}.yaml, \
@@ -832,9 +834,13 @@ async fn apply_task(
     do_shell: bool,
     teardown: bool,
     source: &str,
+    name: Option<&str>,
 ) -> Result<()> {
     use crater_core::task::TaskFile;
     let task = TaskFile::from_yaml_file(path)?;
+    // Optional deployment/grouping label (D-052), default = task name. Only used
+    // for `task list` grouping; apply/delete behavior is identical regardless.
+    let deployment = name.unwrap_or(&task.name).to_string();
     // Delete is opt-in (D-049): a task only has delete capability if it authored
     // a `teardown:`. No auto-inversion of `actions:` — real cleanup targets
     // runtime state the install steps never created.
@@ -876,7 +882,7 @@ async fn apply_task(
 
     if !do_apply {
         for h in &hosts {
-            run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), false, do_shell, teardown, source).await?;
+            run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), false, do_shell, teardown, source, &deployment).await?;
         }
         info!("dry-run only; omit --dry-run to execute");
         return Ok(());
@@ -888,7 +894,7 @@ async fn apply_task(
         let results: Vec<Result<(String, Vec<(String, String)>)>> = futures::stream::iter(
             group
                 .iter()
-                .map(|h| run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), true, do_shell, teardown, source)),
+                .map(|h| run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), true, do_shell, teardown, source, &deployment)),
         )
         .buffer_unordered(forks)
         .collect()
@@ -916,7 +922,7 @@ async fn apply_task(
 
     // Record to the control-side aggregate DB (D-051). Best-effort: the markers
     // on the targets are authoritative; the DB is a cache/history for list/UI.
-    if let Err(e) = record_deployments(&task, source, teardown, &applied_hosts).await {
+    if let Err(e) = record_deployments(&task, source, &deployment, teardown, &applied_hosts).await {
         warn!("state DB update failed (targets' markers are authoritative): {e}");
     }
     Ok(())
@@ -942,7 +948,8 @@ async fn gather_deployments(
             for m in state::read_markers(exec.as_ref()).await.unwrap_or_default() {
                 out.push(Deployment {
                     host: h.name.clone(),
-                    name: m.name,
+                    name: m.name.clone(),
+                    deployment: if m.deployment.is_empty() { m.name } else { m.deployment },
                     version: m.version,
                     source: m.source,
                     applied_at: m.applied_at,
@@ -975,25 +982,33 @@ async fn task_list(
         }
         return Ok(());
     }
-    // Aggregate by task name: version set, host set, latest applied_at.
-    let mut by_task: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>, i64)> = BTreeMap::new();
+    // Aggregate by **deployment** label (D-052): task set, version set, host set,
+    // latest applied_at. Default deployment == task name, so usually one task.
+    type Agg = (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>, i64);
+    let mut by_dep: BTreeMap<String, Agg> = BTreeMap::new();
     for d in deps {
-        let e = by_task.entry(d.name).or_insert_with(|| (BTreeSet::new(), BTreeSet::new(), 0));
-        e.0.insert(d.version);
-        e.1.insert(d.host);
-        e.2 = e.2.max(d.applied_at);
+        let e = by_dep.entry(d.deployment).or_default();
+        e.0.insert(d.name);
+        e.1.insert(d.version);
+        e.2.insert(d.host);
+        e.3 = e.3.max(d.applied_at);
     }
-    println!("{:<14} {:<14} {:<20} {}", "TASK", "VERSION", "HOSTS", "LAST APPLIED (UTC)");
-    for (task, (versions, hosts, last)) in by_task {
-        let version = if versions.len() == 1 {
-            versions.into_iter().next().unwrap()
+    let join_or_mixed = |s: BTreeSet<String>| {
+        if s.len() == 1 {
+            s.into_iter().next().unwrap()
         } else {
-            format!("{} (mixed)", versions.into_iter().collect::<Vec<_>>().join(","))
-        };
-        let host_list = hosts.iter().cloned().collect::<Vec<_>>().join(",");
-        let hosts_col = format!("{host_list} ({})", hosts.len());
-        println!("{:<14} {:<14} {:<20} {}", task, version, hosts_col, state::fmt_epoch(last));
+            format!("{} (mixed)", s.into_iter().collect::<Vec<_>>().join(","))
+        }
+    };
+    println!("{:<16} {:<12} {:<14} {:>6}  {}", "DEPLOYMENT", "TASK", "VERSION", "HOSTS", "LAST APPLIED (UTC)");
+    for (dep, (tasks, versions, hosts, last)) in by_dep {
+        // Count only — scales to large fleets; `task show <name>` lists the hosts.
+        println!(
+            "{:<16} {:<12} {:<14} {:>6}  {}",
+            dep, join_or_mixed(tasks), join_or_mixed(versions), hosts.len(), state::fmt_epoch(last)
+        );
     }
+    info!("(host names: crater task show <deployment>)");
     Ok(())
 }
 
@@ -1008,16 +1023,17 @@ async fn task_show(
     port: u16,
 ) -> Result<()> {
     let mut deps = gather_deployments(inventory, host, user, password, key, port).await?;
-    deps.retain(|d| d.name == name);
+    // Match the deployment label (default == task name), or the task name.
+    deps.retain(|d| d.deployment == name || d.name == name);
     if deps.is_empty() {
-        info!("task '{name}' has no recorded deployments");
+        info!("deployment '{name}' has no recorded instances");
         return Ok(());
     }
-    println!("{:<16} {:<10} {:<20} {}", "HOST", "VERSION", "APPLIED (UTC)", "SOURCE");
+    println!("{:<16} {:<12} {:<10} {:<20} {}", "HOST", "TASK", "VERSION", "APPLIED (UTC)", "SOURCE");
     for d in deps {
         println!(
-            "{:<16} {:<10} {:<20} {}",
-            d.host, d.version, state::fmt_epoch(d.applied_at), d.source
+            "{:<16} {:<12} {:<10} {:<20} {}",
+            d.host, d.name, d.version, state::fmt_epoch(d.applied_at), d.source
         );
     }
     Ok(())
@@ -1031,11 +1047,11 @@ async fn task_history(limit: usize) -> Result<()> {
         info!("no history recorded in the control DB (~/.crater/state.db)");
         return Ok(());
     }
-    println!("{:<20} {:<8} {:<14} {:<16} {}", "WHEN (UTC)", "ACTION", "TASK", "HOST", "RESULT");
+    println!("{:<20} {:<8} {:<14} {:<12} {:<16} {}", "WHEN (UTC)", "ACTION", "DEPLOYMENT", "TASK", "HOST", "RESULT");
     for r in runs {
         println!(
-            "{:<20} {:<8} {:<14} {:<16} {}",
-            state::fmt_epoch(r.ts), r.action, r.task, r.host, r.result
+            "{:<20} {:<8} {:<14} {:<12} {:<16} {}",
+            state::fmt_epoch(r.ts), r.action, r.deployment, r.task, r.host, r.result
         );
     }
     Ok(())
@@ -1045,6 +1061,7 @@ async fn task_history(limit: usize) -> Result<()> {
 async fn record_deployments(
     task: &crater_core::task::TaskFile,
     source: &str,
+    deployment: &str,
     teardown: bool,
     hosts: &[String],
 ) -> Result<()> {
@@ -1060,6 +1077,7 @@ async fn record_deployments(
         } else {
             let m = Marker {
                 name: task.name.clone(),
+                deployment: deployment.to_string(),
                 version: ver.clone(),
                 source: source.to_string(),
                 applied_at: ts,
@@ -1080,6 +1098,7 @@ async fn run_task_on_host(
     do_shell: bool,
     teardown: bool,
     source: &str,
+    deployment: &str,
 ) -> Result<(String, Vec<(String, String)>)> {
     if host.is_local() {
         info!("▶ host {} (local)", host.name);
@@ -1148,6 +1167,7 @@ async fn run_task_on_host(
     } else {
         let m = Marker {
             name: task.name.clone(),
+            deployment: deployment.to_string(),
             version: ctx.version.clone(),
             source: source.to_string(),
             applied_at: state::now_epoch(),
@@ -1398,6 +1418,7 @@ async fn apply_oci_bundle(
     do_shell: bool,
     teardown: bool,
     source: &str,
+    name: Option<&str>,
 ) -> Result<()> {
     let dest_root = std::env::temp_dir().join(format!("crater-deploy-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dest_root);
@@ -1428,7 +1449,7 @@ async fn apply_oci_bundle(
     info!("offline (task artifact): {} task(s)", mats.len());
     for mc in mats {
         let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
-        apply_task(&recipe_file, hosts.clone(), Default::default(), Some(mc.blobmap), do_apply, do_shell, teardown, source)
+        apply_task(&recipe_file, hosts.clone(), Default::default(), Some(mc.blobmap), do_apply, do_shell, teardown, source, name)
             .await?;
     }
     let _ = std::fs::remove_dir_all(&dest_root);
@@ -1586,6 +1607,7 @@ async fn apply_image_ref(
     do_apply: bool,
     teardown: bool,
     source: &str,
+    name: Option<&str>,
 ) -> Result<()> {
     let store = ImageStore::open()?;
     if !store.has(reference) {
@@ -1601,7 +1623,7 @@ async fn apply_image_ref(
         let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
         if crater_core::task::is_task_file(&recipe_file) {
             info!("image {reference}: crater task artifact → recipe-replay");
-            let res = apply_task(&recipe_file, hosts, Default::default(), Some(mc.blobmap), do_apply, true, teardown, source).await;
+            let res = apply_task(&recipe_file, hosts, Default::default(), Some(mc.blobmap), do_apply, true, teardown, source, name).await;
             let _ = std::fs::remove_dir_all(&recipe_dir);
             return res;
         }

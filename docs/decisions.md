@@ -621,3 +621,16 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **影响**:`gather_deployments` 统一从控制 DB 或目标机 marker 取实例;`task_list` 聚合渲染、`task_show` 过滤渲染。`list`/`show` 都支持 `--host`/`-i`(读权威 marker)。
 - **真机验证**:`apply yq -i inventory(n11/n12)` → `task list` 一行 `yq 4.53.2 n11,n12 (2)`;`task show yq` 两行 per-host;本机再 apply → list 聚合成 `localhost,n11,n12 (3)`。34+2 tests 绿。
 - **Phase 1b 顺延**:漂移用 `list --verify`/`show <name> --verify`,不单开 `status`(用户定)。
+
+---
+
+## 2026-06-01 · AWX 启示:run 历史为主视图,可选部署名作分组身份
+
+### D-053 唯一性是 list 的分组问题(非 apply 概念);history 主视图,部署名可选分组
+- **背景**:追问"apply 里哪个是唯一值"→ 厘清:**apply/delete 是无状态收敛 `(配方, 主机)`,本身不需要任何身份**;唯一性是 `task list` 才逼出来的**分组/展示**问题。参考 **AWX**:Ansible 同样无状态,AWX 是 **run/活动中心**(Jobs 主屏),**没有 release/部署对象**;其"身份"= **Job Template**(命名的 playbook+inventory 绑定),A/B 用两个命名模板区分。
+- **决策**:
+  - **apply/delete 不引入身份**——保持无状态收敛,一行不为身份改。
+  - **可选部署名(deployment,默认=task 名)**作为**纯分组标签**:`apply <name> <source>`(复用已有两段式),只影响 `task list` 分组,apply/delete 行为不变。对标 AWX 的"命名绑定"。
+  - **`task history` 是主视图**(AWX Jobs 式,不可变活动流);**`task list` 是 crater 的额外福利**(当前部署快照,AWX 都没有——因 crater 有 marker;可漂移,留 `--verify`);`task show <name>` 下钻。
+- **实现**:`Marker`/`Deployment`/`JobRun` + DB 三表加 `deployment` 列(默认=task 名,marker 仍按 task 名存一份/host);`apply` 的 `name` 串入 `apply_task→run_task_on_host/record_deployments`;`task list` 按 deployment 聚合(`DEPLOYMENT｜TASK｜VERSION｜HOSTS 计数｜LAST APPLIED`),`history` 加 DEPLOYMENT 列。**HOSTS 改计数**(大批量不平铺,主机名去 `task show`)。
+- **真机验证**:`apply yq-a yq --host .11` + `apply yq-b yq --host .12`(同一 task.yaml)→ `task list` 两行 yq-a/yq-b 各 1 host;`task show yq-a` → .11;`history` DEPLOYMENT 列区分;`apply yq`(无名)→ deployment 默认 `yq`。schema 变更需清旧 `~/.crater/state.db`。34+2 tests 绿。

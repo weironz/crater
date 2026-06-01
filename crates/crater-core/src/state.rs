@@ -22,7 +22,13 @@ pub const MARKER_DIR: &str = "/var/lib/crater/state";
 /// On-target deployment marker (one JSON file per task).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Marker {
+    /// Task name (which recipe ran). Identifies the per-host fact.
     pub name: String,
+    /// Optional deployment/grouping label (default = task name, D-052). Purely a
+    /// reporting label so `task list` can distinguish independent rollouts of the
+    /// same task (group A vs B); `apply`/`delete` never branch on it.
+    #[serde(default)]
+    pub deployment: String,
     pub version: String,
     /// What was applied: a task path, named task, or artifact ref.
     pub source: String,
@@ -35,17 +41,19 @@ pub struct Marker {
 pub struct Deployment {
     pub host: String,
     pub name: String,
+    pub deployment: String,
     pub version: String,
     pub source: String,
     pub applied_at: i64,
 }
 
-/// One job-run history entry (apply or delete on a host).
+/// One job-run history entry (apply or delete on a host) — the primary view.
 #[derive(Debug, Clone)]
 pub struct JobRun {
     pub ts: i64,
     pub action: String, // "apply" | "delete"
     pub task: String,
+    pub deployment: String,
     pub host: String,
     pub result: String, // "ok" | "failed"
 }
@@ -125,6 +133,7 @@ impl TursoStore {
             "CREATE TABLE IF NOT EXISTS deployments(
                  host TEXT NOT NULL,
                  task TEXT NOT NULL,
+                 deployment TEXT NOT NULL,
                  version TEXT NOT NULL,
                  source TEXT NOT NULL,
                  applied_at INTEGER NOT NULL,
@@ -134,6 +143,7 @@ impl TursoStore {
                  ts INTEGER NOT NULL,
                  action TEXT NOT NULL,
                  task TEXT NOT NULL,
+                 deployment TEXT NOT NULL,
                  host TEXT NOT NULL,
                  result TEXT NOT NULL
              );",
@@ -149,17 +159,18 @@ impl StateStore for TursoStore {
     async fn record_apply(&self, host: &str, m: &Marker) -> crate::Result<()> {
         let conn = self.db.connect().map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
         conn.execute(
-            "INSERT INTO deployments(host, task, version, source, applied_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO deployments(host, task, deployment, version, source, applied_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(host, task) DO UPDATE SET
-                 version=excluded.version, source=excluded.source, applied_at=excluded.applied_at",
-            (host, m.name.clone(), m.version.clone(), m.source.clone(), m.applied_at),
+                 deployment=excluded.deployment, version=excluded.version,
+                 source=excluded.source, applied_at=excluded.applied_at",
+            (host, m.name.clone(), m.deployment.clone(), m.version.clone(), m.source.clone(), m.applied_at),
         )
         .await
         .map_err(|e| anyhow::anyhow!("record apply: {e}"))?;
         conn.execute(
-            "INSERT INTO job_runs(ts, action, task, host, result) VALUES (?1, 'apply', ?2, ?3, 'ok')",
-            (m.applied_at, m.name.clone(), host),
+            "INSERT INTO job_runs(ts, action, task, deployment, host, result) VALUES (?1, 'apply', ?2, ?3, ?4, 'ok')",
+            (m.applied_at, m.name.clone(), m.deployment.clone(), host),
         )
         .await
         .map_err(|e| anyhow::anyhow!("record job: {e}"))?;
@@ -175,7 +186,7 @@ impl StateStore for TursoStore {
         .await
         .map_err(|e| anyhow::anyhow!("record delete: {e}"))?;
         conn.execute(
-            "INSERT INTO job_runs(ts, action, task, host, result) VALUES (?1, 'delete', ?2, ?3, 'ok')",
+            "INSERT INTO job_runs(ts, action, task, deployment, host, result) VALUES (?1, 'delete', ?2, ?2, ?3, 'ok')",
             (ts, task, host),
         )
         .await
@@ -187,7 +198,7 @@ impl StateStore for TursoStore {
         let conn = self.db.connect().map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
         let mut rows = conn
             .query(
-                "SELECT host, task, version, source, applied_at FROM deployments
+                "SELECT host, task, deployment, version, source, applied_at FROM deployments
                  ORDER BY host, task",
                 (),
             )
@@ -198,9 +209,10 @@ impl StateStore for TursoStore {
             out.push(Deployment {
                 host: r.get::<String>(0).map_err(|e| anyhow::anyhow!("col: {e}"))?,
                 name: r.get::<String>(1).map_err(|e| anyhow::anyhow!("col: {e}"))?,
-                version: r.get::<String>(2).map_err(|e| anyhow::anyhow!("col: {e}"))?,
-                source: r.get::<String>(3).map_err(|e| anyhow::anyhow!("col: {e}"))?,
-                applied_at: r.get::<i64>(4).map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                deployment: r.get::<String>(2).map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                version: r.get::<String>(3).map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                source: r.get::<String>(4).map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                applied_at: r.get::<i64>(5).map_err(|e| anyhow::anyhow!("col: {e}"))?,
             });
         }
         Ok(out)
@@ -210,7 +222,7 @@ impl StateStore for TursoStore {
         let conn = self.db.connect().map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
         let mut rows = conn
             .query(
-                "SELECT ts, action, task, host, result FROM job_runs
+                "SELECT ts, action, task, deployment, host, result FROM job_runs
                  ORDER BY ts DESC LIMIT ?1",
                 (limit as i64,),
             )
@@ -222,8 +234,9 @@ impl StateStore for TursoStore {
                 ts: r.get::<i64>(0).map_err(|e| anyhow::anyhow!("col: {e}"))?,
                 action: r.get::<String>(1).map_err(|e| anyhow::anyhow!("col: {e}"))?,
                 task: r.get::<String>(2).map_err(|e| anyhow::anyhow!("col: {e}"))?,
-                host: r.get::<String>(3).map_err(|e| anyhow::anyhow!("col: {e}"))?,
-                result: r.get::<String>(4).map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                deployment: r.get::<String>(3).map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                host: r.get::<String>(4).map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                result: r.get::<String>(5).map_err(|e| anyhow::anyhow!("col: {e}"))?,
             });
         }
         Ok(out)
