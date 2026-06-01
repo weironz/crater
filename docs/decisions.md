@@ -752,3 +752,20 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **代价**:构建机需装 buildah(仅构建时、daemonless;目标机仍纯净)。跨 arch 需 qemu(v1 同 arch)。
 - **真机验证**:buildah 解 conntrack+socat 闭包(含 libmnl0/libnetfilter-conntrack3/libnfnetlink0/libwrap0)→ 530KB tar;`apply --host .12`(原无这俩)离线 → `apt-get install ./*.deb` → conntrack v1.4.8 + socat 装上。34+2 tests 绿,0 警告。
 - **里程碑**:三种 material 全接线(binary D-048 / image D-061 / os_package D-062)——离线打包能力闭合,k8s 全 material 离线形态已无阻塞。
+
+---
+
+## 2026-06-01 · 离线 k8s 全 material 形态(终极验证)
+
+### D-063 tasks/k8s-offline.yaml:一个 OCI 包离线装 k8s(干净节点真机验证通过)
+- **做了什么**:把 k8s 改成全 material 离线形态,三种 material 协同:
+  - **binary**:containerd/runc/cni-plugins/crictl/kubeadm/kubelet/kubectl 静态二进制 + systemd unit + kubeadm drop-in。
+  - **image**:7 控制面镜像(CN 镜像源 registry.aliyuncs.com)+ flannel×2(ghcr);build pull 进包、apply `ctr -n k8s.io import` 预载。
+  - **os_package**:conntrack/socat/ipset/ethtool/ebtables(buildah 解闭包)。
+  - 内联 flannel 清单;`kubeadm init --image-repository <CN源>`(镜像预载 → 零联网拉)。
+- **修 store.pull(D-061 续)**:① 多 arch manifest list 子 manifest 走 manifests 端点(非 /blobs,aliyun/harbor 404);② accepted 加 OCI image/index 媒体类型(ghcr 是 OCI index)。
+- **build 验证**:`crater build` → recipe + 17 material(s),**488MB** .oci;9 镜像全 pull+打包。
+- **干净节点离线部署验证通过**:清理 .12(去遗留 containerd)→ `apply crater/k8s-offline:1.31.14 --host .12`(488MB 经 SSH base64 推送 ~7min)→ 40 步全过 → `kubectl get nodes` **ubuntu Ready control-plane v1.31.14**,所有系统 Pod(etcd/apiserver/cm/scheduler/kube-proxy/coredns×2/flannel)Running,镜像全来自本地导入,kubeadm init **零联网拉**。**离线 k8s 完整闭环。**
+- **已知限制**:大 artifact(488MB)经 SSH base64 分块推送慢(~7min)——后续可加压缩/更快传输;镜像/os_package 单 arch(amd64);单节点(多节点需 when_role,D-060)。
+- **用户后续重构(待做)**:① 二进制 version/arch 抽成 vars;② flannel 清单从官方途径下载打包 + 分析 yaml 里的镜像自动入 materials(避免手列+版本漂移)。
+- **里程碑**:crater 实现"一个 OCI 包离线装 k8s"——三种 material 协同的终极兑现。
