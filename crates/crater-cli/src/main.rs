@@ -1256,12 +1256,36 @@ async fn list_images() -> Result<()> {
         info!("no images in local store ({})", store.root.display());
         return Ok(());
     }
-    println!("{:<48} {:<20} {}", "REFERENCE", "DIGEST", "SIZE");
+    println!(
+        "{:<48} {:<16} {:>11} {:>13}",
+        "REFERENCE", "DIGEST", "DISK USAGE", "CONTENT SIZE"
+    );
     for i in imgs {
         let short = i.digest.trim_start_matches("sha256:").chars().take(12).collect::<String>();
-        println!("{:<48} {:<20} {}", i.reference, short, i.size);
+        println!(
+            "{:<48} {:<16} {:>11} {:>13}",
+            i.reference,
+            short,
+            human_size(i.disk_usage),
+            human_size(i.content_size)
+        );
     }
     Ok(())
+}
+
+/// Human-readable byte size, docker-style decimal units (1000-based: B/kB/MB/GB).
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
+    if bytes < 1000 {
+        return format!("{bytes}B");
+    }
+    let mut v = bytes as f64;
+    let mut u = 0;
+    while v >= 1000.0 && u < UNITS.len() - 1 {
+        v /= 1000.0;
+        u += 1;
+    }
+    format!("{v:.1}{}", UNITS[u])
 }
 
 async fn pull_image(reference: &str) -> Result<()> {

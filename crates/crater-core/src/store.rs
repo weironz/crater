@@ -21,7 +21,13 @@ const ANN_REF: &str = "org.opencontainers.image.ref.name";
 pub struct StoredImage {
     pub reference: String,
     pub digest: String,
+    /// The manifest descriptor size (index entry). Kept for back-compat.
     pub size: u64,
+    /// Logical content size = config + all layers (what a registry transfers).
+    pub content_size: u64,
+    /// Actual on-disk bytes of this artifact's blobs (manifest + config +
+    /// layers). For crater (uncompressed material layers) ≈ content_size.
+    pub disk_usage: u64,
 }
 
 pub struct ImageStore {
@@ -78,14 +84,41 @@ impl ImageStore {
         let mut out = Vec::new();
         if let Some(ms) = idx["manifests"].as_array() {
             for m in ms {
+                let digest = m["digest"].as_str().unwrap_or("").to_string();
+                let (content_size, disk_usage) = self.artifact_sizes(&digest).unwrap_or((0, 0));
                 out.push(StoredImage {
                     reference: m["annotations"][ANN_REF].as_str().unwrap_or("<untagged>").to_string(),
-                    digest: m["digest"].as_str().unwrap_or("").to_string(),
+                    digest,
                     size: m["size"].as_u64().unwrap_or(0),
+                    content_size,
+                    disk_usage,
                 });
             }
         }
         Ok(out)
+    }
+
+    /// Sum an artifact's real sizes from its manifest: `content_size` = config +
+    /// layers (declared); `disk_usage` = on-disk bytes of manifest + config +
+    /// layer blobs (what it actually costs locally).
+    fn artifact_sizes(&self, manifest_digest: &str) -> crate::Result<(u64, u64)> {
+        let on_disk = |digest: &str| -> u64 {
+            std::fs::metadata(self.blob_path(strip(digest)))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        };
+        let man_path = self.blob_path(strip(manifest_digest));
+        let man: serde_json::Value = serde_json::from_slice(&std::fs::read(&man_path)?)?;
+        let mut content = man["config"]["size"].as_u64().unwrap_or(0);
+        let mut disk = on_disk(manifest_digest)
+            + man["config"]["digest"].as_str().map(on_disk).unwrap_or(0);
+        if let Some(layers) = man["layers"].as_array() {
+            for l in layers {
+                content += l["size"].as_u64().unwrap_or(0);
+                disk += l["digest"].as_str().map(on_disk).unwrap_or(0);
+            }
+        }
+        Ok((content, disk))
     }
 
     pub fn has(&self, reference: &str) -> bool {
