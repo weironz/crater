@@ -67,10 +67,18 @@ OCI 只管「字节按 digest 存好」；crater-manifest 管「这些字节是�
 ```yaml
 name: app
 materials:
-  - { name: app-bin, kind: file, url_tmpl: "https://.../app-{{version}}" }
-  - { name: app-img, kind: image,  ref: "docker.io/library/app:{{version}}" }   # 待接线
+  - name: app-bin
+    kind: file
+    url_tmpl: "https://.../app-{{version}}"
+  - name: app-img
+    kind: image
+    ref: "docker.io/library/app:{{version}}"
 actions:
-  - { id: place, action: place, material: app-bin, dest: /usr/local/bin/app, mode: "0755" }
+  - id: place
+    action: place
+    material: app-bin
+    dest: /usr/local/bin/app
+    mode: "0755"
 ```
 
 引擎只做「把 `materials:` 列的东西拉下来塞进 artifact、apply 时落地/import」——**不知道它们属于谁**。

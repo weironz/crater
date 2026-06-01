@@ -43,9 +43,14 @@ install:
 
 ```yaml
 materials:
-  - { name: unit-containerd, kind: file, src: files/containerd.service }
+  - name: unit-containerd
+    kind: file
+    src: files/containerd.service
 actions:
-  - { id: ctd_unit, action: place, material: unit-containerd, dest: /etc/systemd/system/containerd.service }
+  - id: ctd_unit
+    action: place
+    material: unit-containerd
+    dest: /etc/systemd/system/containerd.service
 ```
 
 - **build**:从 `<task 目录>/files/...` 读取,和 url 下载的物料一样打成 blob(同 key)。
@@ -62,8 +67,14 @@ URL 里 arch 命名各项目不一（docker `x86_64`、yq `amd64`），故**每�
 
 ```yaml
 materials:
-  - { name: yq-bin, kind: file, arch: amd64, url_tmpl: ".../yq_linux_amd64" }
-  - { name: yq-bin, kind: file, arch: arm64, url_tmpl: ".../yq_linux_arm64" }
+  - name: yq-bin
+    kind: file
+    arch: amd64
+    url_tmpl: ".../yq_linux_amd64"
+  - name: yq-bin
+    kind: file
+    arch: arm64
+    url_tmpl: ".../yq_linux_arm64"
 ```
 
 解析规则（给定 name + 目标 arch）：精确匹配 arch 的变体 → 用它；否则用 `arch` 省略的

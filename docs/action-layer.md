@@ -47,7 +47,9 @@ hosts: all                 # targeting:组名 / all(声明式;引擎按 inventor
 vars:                      # 静态数据,可被 {{ }} 纯取值
   version: "4.53.2"
 materials:                 # 物料闭包(D-034),build 据此打离线包
-  - { name: yq-bin, kind: file, url_tmpl: "https://.../v{{version}}/yq_linux_amd64" }
+  - name: yq-bin
+    kind: file
+    url_tmpl: "https://.../v{{version}}/yq_linux_amd64"
 actions:                   # 动作清单;依赖用 needs 声明,排序由引擎做
   - id: place_yq
     action: place

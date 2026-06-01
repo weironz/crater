@@ -41,7 +41,9 @@ hosts: all                     # targeting:组名/all(声明式,引擎解析)
 vars:
   version: "4.53.2"
 materials:                     # 物料闭包(D-034),crater build 据此打离线包
-  - { name: yq-bin, kind: file, url_tmpl: ".../v{{version}}/yq_linux_amd64" }
+  - name: yq-bin
+    kind: file
+    url_tmpl: ".../v{{version}}/yq_linux_amd64"
 actions:
   - id: place_yq
     action: place
@@ -105,9 +107,11 @@ role 分组(`group_hosts_by_role`):**组间串行、组内并行**;每组完成�
 ```yaml
 hosts: all
 register:
-  - { name: ip, cmd: "hostname -I | awk '{print $1}'" }
+  - name: ip
+    cmd: "hostname -I | awk '{print $1}'"
 actions:
-  - { action: run_cmd, cmd: "echo peer={{ hostvars.n11.ip }}" }   # 后续组取前组的 fact
+  - action: run_cmd
+    cmd: "echo peer={{ hostvars.n11.ip }}"   # 后续组取前组的 fact
 ```
 
 排序/分组/合并全在引擎(D-036);`{{ hostvars.* }}` 只是取值,尚无值时(更早的组、

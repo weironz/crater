@@ -12,6 +12,7 @@
 # task.yaml 不再内联任何文件内容 —— 一切要么 url 下载、要么 files/ 维护(无 YAML 爆炸)。
 name: k8s-offline
 hosts: all
+
 vars:
   version: "1.31.14"           # kubeadm/kubelet/kubectl(也是 image tag)
   containerd_ver: "1.7.22"
@@ -22,91 +23,356 @@ vars:
   flannel_cni_ver: "1.9.1-flannel1"
   pod_cidr: "10.244.0.0/16"    # 与官方 kube-flannel.yml 的 net-conf.json 默认一致
   image_repo: "registry.aliyuncs.com/google_containers"
+
 # {{arch}} 在渲染 material url 时自动绑定该 material 的 arch 字段(D-064),单一来源。
 materials:
   # —— 二进制(file/url,按 arch 选变体)——
-  - { name: containerd, kind: file, arch: amd64, url_tmpl: "https://github.com/containerd/containerd/releases/download/v{{containerd_ver}}/containerd-{{containerd_ver}}-linux-{{arch}}.tar.gz" }
-  - { name: runc, kind: file, arch: amd64, url_tmpl: "https://github.com/opencontainers/runc/releases/download/v{{runc_ver}}/runc.{{arch}}" }
-  - { name: cni-plugins, kind: file, arch: amd64, url_tmpl: "https://github.com/containernetworking/plugins/releases/download/v{{cni_ver}}/cni-plugins-linux-{{arch}}-v{{cni_ver}}.tgz" }
-  - { name: crictl, kind: file, arch: amd64, url_tmpl: "https://github.com/kubernetes-sigs/cri-tools/releases/download/v{{crictl_ver}}/crictl-v{{crictl_ver}}-linux-{{arch}}.tar.gz" }
-  - { name: kubeadm, kind: file, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubeadm" }
-  - { name: kubelet, kind: file, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubelet" }
-  - { name: kubectl, kind: file, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubectl" }
+  - name: containerd
+    kind: file
+    arch: amd64
+    url_tmpl: "https://github.com/containerd/containerd/releases/download/v{{containerd_ver}}/containerd-{{containerd_ver}}-linux-{{arch}}.tar.gz"
+  - name: runc
+    kind: file
+    arch: amd64
+    url_tmpl: "https://github.com/opencontainers/runc/releases/download/v{{runc_ver}}/runc.{{arch}}"
+  - name: cni-plugins
+    kind: file
+    arch: amd64
+    url_tmpl: "https://github.com/containernetworking/plugins/releases/download/v{{cni_ver}}/cni-plugins-linux-{{arch}}-v{{cni_ver}}.tgz"
+  - name: crictl
+    kind: file
+    arch: amd64
+    url_tmpl: "https://github.com/kubernetes-sigs/cri-tools/releases/download/v{{crictl_ver}}/crictl-v{{crictl_ver}}-linux-{{arch}}.tar.gz"
+  - name: kubeadm
+    kind: file
+    arch: amd64
+    url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubeadm"
+  - name: kubelet
+    kind: file
+    arch: amd64
+    url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubelet"
+  - name: kubectl
+    kind: file
+    arch: amd64
+    url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubectl"
+
   # —— flannel 清单:官方 release 下载(file/url),其引用镜像见下方 image material ——
-  - { name: flannel-manifest, kind: file, url_tmpl: "https://github.com/flannel-io/flannel/releases/download/v{{flannel_ver}}/kube-flannel.yml" }
+  - name: flannel-manifest
+    kind: file
+    url_tmpl: "https://github.com/flannel-io/flannel/releases/download/v{{flannel_ver}}/kube-flannel.yml"
+
   # —— 人工维护的本地文件(file/src):官方不提供,放在 files/ ——
-  - { name: cfg-modules, kind: file, src: files/modules-k8s.conf }
-  - { name: cfg-sysctl, kind: file, src: files/sysctl-k8s.conf }
-  - { name: cfg-crictl, kind: file, src: files/crictl.yaml }
-  - { name: cfg-containerd, kind: file, src: files/containerd-config.toml }
-  - { name: unit-containerd, kind: file, src: files/containerd.service }
-  - { name: unit-kubelet, kind: file, src: files/kubelet.service }
-  - { name: dropin-kubeadm, kind: file, src: files/10-kubeadm.conf }
+  - name: cfg-modules
+    kind: file
+    src: files/modules-k8s.conf
+  - name: cfg-sysctl
+    kind: file
+    src: files/sysctl-k8s.conf
+  - name: cfg-crictl
+    kind: file
+    src: files/crictl.yaml
+  - name: cfg-containerd
+    kind: file
+    src: files/containerd-config.toml
+  - name: unit-containerd
+    kind: file
+    src: files/containerd.service
+  - name: unit-kubelet
+    kind: file
+    src: files/kubelet.service
+  - name: dropin-kubeadm
+    kind: file
+    src: files/10-kubeadm.conf
+
   # —— OS 包闭包(os_package,buildah)——
-  - { name: sysdeps, kind: os_package, base: "ubuntu:24.04", arch: amd64, packages: { debian: [conntrack, socat, ipset, ethtool, ebtables] } }
+  - name: sysdeps
+    kind: os_package
+    base: "ubuntu:24.04"
+    arch: amd64
+    packages:
+      debian: [conntrack, socat, ipset, ethtool, ebtables]
+
   # —— 容器镜像(image,build pull 进包、apply import 到 k8s.io)——
-  - { name: img-apiserver, kind: image, ref: "registry.aliyuncs.com/google_containers/kube-apiserver:v{{version}}" }
-  - { name: img-cm, kind: image, ref: "registry.aliyuncs.com/google_containers/kube-controller-manager:v{{version}}" }
-  - { name: img-scheduler, kind: image, ref: "registry.aliyuncs.com/google_containers/kube-scheduler:v{{version}}" }
-  - { name: img-proxy, kind: image, ref: "registry.aliyuncs.com/google_containers/kube-proxy:v{{version}}" }
-  - { name: img-coredns, kind: image, ref: "registry.aliyuncs.com/google_containers/coredns:v1.11.3" }
-  - { name: img-pause, kind: image, ref: "registry.aliyuncs.com/google_containers/pause:3.10" }
-  - { name: img-etcd, kind: image, ref: "registry.aliyuncs.com/google_containers/etcd:3.5.24-0" }
-  - { name: img-flannel, kind: image, ref: "ghcr.io/flannel-io/flannel:v{{flannel_ver}}" }
-  - { name: img-flannel-cni, kind: image, ref: "ghcr.io/flannel-io/flannel-cni-plugin:v{{flannel_cni_ver}}" }
+  - name: img-apiserver
+    kind: image
+    ref: "registry.aliyuncs.com/google_containers/kube-apiserver:v{{version}}"
+  - name: img-cm
+    kind: image
+    ref: "registry.aliyuncs.com/google_containers/kube-controller-manager:v{{version}}"
+  - name: img-scheduler
+    kind: image
+    ref: "registry.aliyuncs.com/google_containers/kube-scheduler:v{{version}}"
+  - name: img-proxy
+    kind: image
+    ref: "registry.aliyuncs.com/google_containers/kube-proxy:v{{version}}"
+  - name: img-coredns
+    kind: image
+    ref: "registry.aliyuncs.com/google_containers/coredns:v1.11.3"
+  - name: img-pause
+    kind: image
+    ref: "registry.aliyuncs.com/google_containers/pause:3.10"
+  - name: img-etcd
+    kind: image
+    ref: "registry.aliyuncs.com/google_containers/etcd:3.5.24-0"
+  - name: img-flannel
+    kind: image
+    ref: "ghcr.io/flannel-io/flannel:v{{flannel_ver}}"
+  - name: img-flannel-cni
+    kind: image
+    ref: "ghcr.io/flannel-io/flannel-cni-plugin:v{{flannel_cni_ver}}"
+
 actions:
-  - { id: swapoff, action: run_cmd, cmd: "swapoff -a", check: "test -z \"$(swapon --show)\"" }
-  - { id: swap_fstab, action: run_cmd, needs: [swapoff], cmd: "sed -ri '/\\sswap\\s/s/^([^#])/#\\1/' /etc/fstab", check: "! grep -Eq '^[^#].*\\sswap\\s' /etc/fstab" }
-  - { id: modules_conf, action: place, material: cfg-modules, dest: /etc/modules-load.d/k8s.conf }
-  - { id: modprobe, action: run_cmd, needs: [modules_conf], cmd: "modprobe overlay && modprobe br_netfilter", check: "lsmod | grep -q br_netfilter" }
-  - { id: sysctl_conf, action: place, material: cfg-sysctl, dest: /etc/sysctl.d/k8s.conf }
-  - { id: sysctl_apply, action: run_cmd, needs: [sysctl_conf, modprobe], cmd: "sysctl --system", check: "test \"$(sysctl -n net.ipv4.ip_forward)\" = 1" }
+  # —— 内核/系统前置 ——
+  - id: swapoff
+    action: run_cmd
+    cmd: "swapoff -a"
+    check: "test -z \"$(swapon --show)\""
+  - id: swap_fstab
+    action: run_cmd
+    needs: [swapoff]
+    cmd: "sed -ri '/\\sswap\\s/s/^([^#])/#\\1/' /etc/fstab"
+    check: "! grep -Eq '^[^#].*\\sswap\\s' /etc/fstab"
+  - id: modules_conf
+    action: place
+    material: cfg-modules
+    dest: /etc/modules-load.d/k8s.conf
+  - id: modprobe
+    action: run_cmd
+    needs: [modules_conf]
+    cmd: "modprobe overlay && modprobe br_netfilter"
+    check: "lsmod | grep -q br_netfilter"
+  - id: sysctl_conf
+    action: place
+    material: cfg-sysctl
+    dest: /etc/sysctl.d/k8s.conf
+  - id: sysctl_apply
+    action: run_cmd
+    needs: [sysctl_conf, modprobe]
+    cmd: "sysctl --system"
+    check: "test \"$(sysctl -n net.ipv4.ip_forward)\" = 1"
 
-  - { id: deps, action: pkg_install, material: sysdeps, needs: [sysctl_apply] }
+  # —— 依赖包(离线闭包)——
+  - id: deps
+    action: pkg_install
+    material: sysdeps
+    needs: [sysctl_apply]
 
-  - { id: ctd_tgz, action: place, material: containerd, dest: /tmp/containerd.tgz, needs: [deps] }
-  - { id: ctd_extract, action: extract, from: /tmp/containerd.tgz, to: /usr/local, strip: 0, creates: /usr/local/bin/containerd, needs: [ctd_tgz] }
-  - { id: runc, action: place, material: runc, dest: /usr/local/sbin/runc, mode: "0755", needs: [deps] }
-  - { id: cni_tgz, action: place, material: cni-plugins, dest: /tmp/cni.tgz, needs: [deps] }
-  - { id: cni_dir, action: file, path: /opt/cni/bin, state: directory, needs: [cni_tgz] }
-  - { id: cni_extract, action: extract, from: /tmp/cni.tgz, to: /opt/cni/bin, strip: 0, creates: /opt/cni/bin/bridge, needs: [cni_dir] }
-  - { id: crictl_tgz, action: place, material: crictl, dest: /tmp/crictl.tgz, needs: [deps] }
-  - { id: crictl_extract, action: extract, from: /tmp/crictl.tgz, to: /usr/local/bin, strip: 0, creates: /usr/local/bin/crictl, needs: [crictl_tgz] }
-  - { id: crictl_cfg, action: place, material: cfg-crictl, dest: /etc/crictl.yaml }
+  # —— containerd / runc / cni / crictl ——
+  - id: ctd_tgz
+    action: place
+    material: containerd
+    dest: /tmp/containerd.tgz
+    needs: [deps]
+  - id: ctd_extract
+    action: extract
+    from: /tmp/containerd.tgz
+    to: /usr/local
+    strip: 0
+    creates: /usr/local/bin/containerd
+    needs: [ctd_tgz]
+  - id: runc
+    action: place
+    material: runc
+    dest: /usr/local/sbin/runc
+    mode: "0755"
+    needs: [deps]
+  - id: cni_tgz
+    action: place
+    material: cni-plugins
+    dest: /tmp/cni.tgz
+    needs: [deps]
+  - id: cni_dir
+    action: file
+    path: /opt/cni/bin
+    state: directory
+    needs: [cni_tgz]
+  - id: cni_extract
+    action: extract
+    from: /tmp/cni.tgz
+    to: /opt/cni/bin
+    strip: 0
+    creates: /opt/cni/bin/bridge
+    needs: [cni_dir]
+  - id: crictl_tgz
+    action: place
+    material: crictl
+    dest: /tmp/crictl.tgz
+    needs: [deps]
+  - id: crictl_extract
+    action: extract
+    from: /tmp/crictl.tgz
+    to: /usr/local/bin
+    strip: 0
+    creates: /usr/local/bin/crictl
+    needs: [crictl_tgz]
+  - id: crictl_cfg
+    action: place
+    material: cfg-crictl
+    dest: /etc/crictl.yaml
 
-  - { id: ctd_cfg, action: place, material: cfg-containerd, dest: /etc/containerd/config.toml, needs: [ctd_extract], notify: [restart_containerd] }
-  - { id: ctd_unit, action: place, material: unit-containerd, dest: /etc/systemd/system/containerd.service, needs: [ctd_extract] }
-  - { id: svc_ctd, action: service, name: containerd, state: started, enabled: true, needs: [ctd_cfg, ctd_unit, runc] }
+  - id: ctd_cfg
+    action: place
+    material: cfg-containerd
+    dest: /etc/containerd/config.toml
+    needs: [ctd_extract]
+    notify: [restart_containerd]
+  - id: ctd_unit
+    action: place
+    material: unit-containerd
+    dest: /etc/systemd/system/containerd.service
+    needs: [ctd_extract]
+  - id: svc_ctd
+    action: service
+    name: containerd
+    state: started
+    enabled: true
+    needs: [ctd_cfg, ctd_unit, runc]
 
-  - { id: kubeadm, action: place, material: kubeadm, dest: /usr/local/bin/kubeadm, mode: "0755", needs: [deps] }
-  - { id: kubelet_bin, action: place, material: kubelet, dest: /usr/local/bin/kubelet, mode: "0755", needs: [deps] }
-  - { id: kubectl, action: place, material: kubectl, dest: /usr/local/bin/kubectl, mode: "0755", needs: [deps] }
-  - { id: kubelet_unit, action: place, material: unit-kubelet, dest: /etc/systemd/system/kubelet.service, needs: [kubelet_bin] }
-  - { id: kubelet_dropin, action: place, material: dropin-kubeadm, dest: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf, needs: [kubelet_unit] }
-  - { id: svc_kubelet, action: service, name: kubelet, state: started, enabled: true, needs: [kubelet_dropin, svc_ctd] }
+  # —— kubeadm / kubelet / kubectl ——
+  - id: kubeadm
+    action: place
+    material: kubeadm
+    dest: /usr/local/bin/kubeadm
+    mode: "0755"
+    needs: [deps]
+  - id: kubelet_bin
+    action: place
+    material: kubelet
+    dest: /usr/local/bin/kubelet
+    mode: "0755"
+    needs: [deps]
+  - id: kubectl
+    action: place
+    material: kubectl
+    dest: /usr/local/bin/kubectl
+    mode: "0755"
+    needs: [deps]
+  - id: kubelet_unit
+    action: place
+    material: unit-kubelet
+    dest: /etc/systemd/system/kubelet.service
+    needs: [kubelet_bin]
+  - id: kubelet_dropin
+    action: place
+    material: dropin-kubeadm
+    dest: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+    needs: [kubelet_unit]
+  - id: svc_kubelet
+    action: service
+    name: kubelet
+    state: started
+    enabled: true
+    needs: [kubelet_dropin, svc_ctd]
 
-  - { id: load_apiserver, action: load_image, material: img-apiserver, namespace: "k8s.io", needs: [svc_ctd] }
-  - { id: load_cm, action: load_image, material: img-cm, namespace: "k8s.io", needs: [svc_ctd] }
-  - { id: load_scheduler, action: load_image, material: img-scheduler, namespace: "k8s.io", needs: [svc_ctd] }
-  - { id: load_proxy, action: load_image, material: img-proxy, namespace: "k8s.io", needs: [svc_ctd] }
-  - { id: load_coredns, action: load_image, material: img-coredns, namespace: "k8s.io", needs: [svc_ctd] }
-  - { id: load_pause, action: load_image, material: img-pause, namespace: "k8s.io", needs: [svc_ctd] }
-  - { id: load_etcd, action: load_image, material: img-etcd, namespace: "k8s.io", needs: [svc_ctd] }
-  - { id: load_flannel, action: load_image, material: img-flannel, namespace: "k8s.io", needs: [svc_ctd] }
-  - { id: load_flannelcni, action: load_image, material: img-flannel-cni, namespace: "k8s.io", needs: [svc_ctd] }
+  # —— 离线导入镜像到 k8s.io(kubeadm init 不再联网拉)——
+  - id: load_apiserver
+    action: load_image
+    material: img-apiserver
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_cm
+    action: load_image
+    material: img-cm
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_scheduler
+    action: load_image
+    material: img-scheduler
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_proxy
+    action: load_image
+    material: img-proxy
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_coredns
+    action: load_image
+    material: img-coredns
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_pause
+    action: load_image
+    material: img-pause
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_etcd
+    action: load_image
+    material: img-etcd
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_flannel
+    action: load_image
+    material: img-flannel
+    namespace: "k8s.io"
+    needs: [svc_ctd]
+  - id: load_flannelcni
+    action: load_image
+    material: img-flannel-cni
+    namespace: "k8s.io"
+    needs: [svc_ctd]
 
-  - { id: kubeadm_init, action: run_cmd, needs: [svc_kubelet, kubeadm, load_apiserver, load_cm, load_scheduler, load_proxy, load_coredns, load_pause, load_etcd], cmd: "kubeadm init --pod-network-cidr={{pod_cidr}} --image-repository {{image_repo}} --kubernetes-version v{{version}} --cri-socket=unix:///run/containerd/containerd.sock", check: "test -f /etc/kubernetes/admin.conf" }
-  - { id: kubeconfig, action: run_cmd, needs: [kubeadm_init], cmd: "mkdir -p /root/.kube && cp -f /etc/kubernetes/admin.conf /root/.kube/config", check: "test -f /root/.kube/config" }
+  # —— 起集群 ——
+  - id: kubeadm_init
+    action: run_cmd
+    needs: [svc_kubelet, kubeadm, load_apiserver, load_cm, load_scheduler, load_proxy, load_coredns, load_pause, load_etcd]
+    cmd: "kubeadm init --pod-network-cidr={{pod_cidr}} --image-repository {{image_repo}} --kubernetes-version v{{version}} --cri-socket=unix:///run/containerd/containerd.sock"
+    check: "test -f /etc/kubernetes/admin.conf"
+  - id: kubeconfig
+    action: run_cmd
+    needs: [kubeadm_init]
+    cmd: "mkdir -p /root/.kube && cp -f /etc/kubernetes/admin.conf /root/.kube/config"
+    check: "test -f /root/.kube/config"
 
-  - { id: flannel_manifest, action: place, material: flannel-manifest, dest: /etc/kubernetes/kube-flannel.yml, needs: [kubeconfig] }
-  - { id: cni, action: run_cmd, needs: [flannel_manifest], cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f /etc/kubernetes/kube-flannel.yml", check: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl -n kube-flannel get ds/kube-flannel-ds" }
-  - { id: untaint, action: run_cmd, needs: [cni], cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || true" }
-  - { id: verify, action: run_cmd, phase: verify, needs: [untaint], cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes -o wide" }
+  # —— CNI(flannel,官方清单)——
+  - id: flannel_manifest
+    action: place
+    material: flannel-manifest
+    dest: /etc/kubernetes/kube-flannel.yml
+    needs: [kubeconfig]
+  - id: cni
+    action: run_cmd
+    needs: [flannel_manifest]
+    cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f /etc/kubernetes/kube-flannel.yml"
+    check: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl -n kube-flannel get ds/kube-flannel-ds"
+  - id: untaint
+    action: run_cmd
+    needs: [cni]
+    cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || true"
+  - id: verify
+    action: run_cmd
+    phase: verify
+    needs: [untaint]
+    cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes -o wide"
+
 handlers:
-  - { id: restart_containerd, action: service, name: containerd, state: restarted }
+  - id: restart_containerd
+    action: service
+    name: containerd
+    state: restarted
+
 teardown:
-  - { id: reset, action: run_cmd, cmd: "kubeadm reset -f --cri-socket=unix:///run/containerd/containerd.sock || true" }
-  - { id: rm_cni, action: file, path: /etc/cni/net.d, state: absent, needs: [reset] }
-  - { id: rm_kube, action: file, path: /etc/kubernetes, state: absent, needs: [reset] }
-  - { id: stop_kubelet, action: service, name: kubelet, state: stopped, enabled: false, needs: [reset] }
-  - { id: stop_ctd, action: service, name: containerd, state: stopped, enabled: false, needs: [reset] }
+  - id: reset
+    action: run_cmd
+    cmd: "kubeadm reset -f --cri-socket=unix:///run/containerd/containerd.sock || true"
+  - id: rm_cni
+    action: file
+    path: /etc/cni/net.d
+    state: absent
+    needs: [reset]
+  - id: rm_kube
+    action: file
+    path: /etc/kubernetes
+    state: absent
+    needs: [reset]
+  - id: stop_kubelet
+    action: service
+    name: kubelet
+    state: stopped
+    enabled: false
+    needs: [reset]
+  - id: stop_ctd
+    action: service
+    name: containerd
+    state: stopped
+    enabled: false
+    needs: [reset]

@@ -131,18 +131,27 @@ pub fn system_prompt() -> String {
     r#"You are crater's deployment planner. Convert the user's request into a
 crater TASK yaml. Output ONLY the YAML (optionally in a ```yaml block), no prose.
 
+Always emit block-style YAML (one field per indented line). Do NOT use flow style
+({...} inline maps) — it is valid but hard for operators to read and diff.
+
 Schema:
   name: <task name>
   hosts: all                      # or an inventory group name
-  vars: { <key>: <value> }        # optional; used as {{ key }} (plain substitution)
+  vars:                           # optional; used as {{ key }} (plain substitution)
+    <key>: <value>
   materials:                      # optional; things to fetch/pack
-    - { name: <id>, kind: file, url_tmpl: <url, may contain {{version}}> }
-    # `kind: file` downloads any file (binary, tarball, YAML manifest, config).
+    - name: <id>
+      kind: file                  # downloads any file (binary, tarball, YAML manifest, config)
+      url_tmpl: <url, may contain {{version}}>
+    # `kind: file` has two sources: `url_tmpl` (download) OR `src` (a task-relative
+    # local file, e.g. files/foo.conf, for content official sources don't provide).
     # multi-arch: repeat the SAME name with distinct `arch` (amd64/arm64);
     # `place` picks the variant matching the target host. Omit arch only for
     # arch-neutral files (scripts/configs):
-    #   - { name: app, kind: file, arch: amd64, url_tmpl: ".../app_x86_64" }
-    #   - { name: app, kind: file, arch: arm64, url_tmpl: ".../app_aarch64" }
+    #   - name: app
+    #     kind: file
+    #     arch: amd64
+    #     url_tmpl: ".../app_x86_64"
   actions:
     - id: <id>
       action: <primitive>

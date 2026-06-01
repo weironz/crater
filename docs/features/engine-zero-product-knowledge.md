@@ -20,12 +20,23 @@ crater 的第一性原理：**引擎（Rust）只懂「怎么做」（通用原�
 cat > tasks/yq.yaml <<'YAML'
 name: yq
 hosts: all
-vars: { version: "4.53.2" }
+vars:
+  version: "4.53.2"
 materials:
-  - { name: yq-bin, kind: file, url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64" }
+  - name: yq-bin
+    kind: file
+    url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64"
 actions:
-  - { id: place,  action: place,   material: yq-bin, dest: /usr/local/bin/yq, mode: "0755" }
-  - { id: verify, action: run_cmd, phase: verify, cmd: "/usr/local/bin/yq --version", needs: [place] }
+  - id: place
+    action: place
+    material: yq-bin
+    dest: /usr/local/bin/yq
+    mode: "0755"
+  - id: verify
+    action: run_cmd
+    phase: verify
+    cmd: "/usr/local/bin/yq --version"
+    needs: [place]
 YAML
 
 crater apply yq --host <host> --password <pw> --dry-run   # 立即可用，无需编译

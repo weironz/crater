@@ -117,17 +117,65 @@ handlers:
 # /var/lib/docker、/var/lib/containerd 是 docker 运行期自己长出来的(镜像/容器/卷),
 # install 步骤从没创建过,逆推 actions 永远碰不到;这是产品知识,只能作者声明。
 teardown:
-  - { id: stop_docker,     action: service, name: docker,     state: stopped, enabled: false }
-  - { id: stop_containerd, action: service, name: containerd, state: stopped, enabled: false, needs: [stop_docker] }
+  - id: stop_docker
+    action: service
+    name: docker
+    state: stopped
+    enabled: false
+  - id: stop_containerd
+    action: service
+    name: containerd
+    state: stopped
+    enabled: false
+    needs: [stop_docker]
   # 运行时数据(作者才知道在哪):
-  - { id: rm_docker_data,     action: file, path: /var/lib/docker,     state: absent, needs: [stop_docker] }
-  - { id: rm_containerd_data, action: file, path: /var/lib/containerd, state: absent, needs: [stop_containerd] }
+  - id: rm_docker_data
+    action: file
+    path: /var/lib/docker
+    state: absent
+    needs: [stop_docker]
+  - id: rm_containerd_data
+    action: file
+    path: /var/lib/containerd
+    state: absent
+    needs: [stop_containerd]
   # 我们装的物料 + 配置:
-  - { id: rm_bin_dockerd, action: file, path: /usr/local/bin/dockerd,    state: absent, needs: [stop_docker] }
-  - { id: rm_bin_docker,  action: file, path: /usr/local/bin/docker,     state: absent, needs: [stop_docker] }
-  - { id: rm_bin_ctr,     action: file, path: /usr/local/bin/containerd, state: absent, needs: [stop_containerd] }
-  - { id: rm_bin_runc,    action: file, path: /usr/local/bin/runc,       state: absent, needs: [stop_containerd] }
-  - { id: rm_unit_docker, action: file, path: /etc/systemd/system/docker.service,     state: absent, needs: [stop_docker] }
-  - { id: rm_unit_ctr,    action: file, path: /etc/systemd/system/containerd.service, state: absent, needs: [stop_containerd] }
-  - { id: rm_etc_docker,  action: file, path: /etc/docker,               state: absent, needs: [stop_docker] }
-  - { id: reload, action: run_cmd, cmd: "systemctl daemon-reload", needs: [rm_unit_docker, rm_unit_ctr] }
+  - id: rm_bin_dockerd
+    action: file
+    path: /usr/local/bin/dockerd
+    state: absent
+    needs: [stop_docker]
+  - id: rm_bin_docker
+    action: file
+    path: /usr/local/bin/docker
+    state: absent
+    needs: [stop_docker]
+  - id: rm_bin_ctr
+    action: file
+    path: /usr/local/bin/containerd
+    state: absent
+    needs: [stop_containerd]
+  - id: rm_bin_runc
+    action: file
+    path: /usr/local/bin/runc
+    state: absent
+    needs: [stop_containerd]
+  - id: rm_unit_docker
+    action: file
+    path: /etc/systemd/system/docker.service
+    state: absent
+    needs: [stop_docker]
+  - id: rm_unit_ctr
+    action: file
+    path: /etc/systemd/system/containerd.service
+    state: absent
+    needs: [stop_containerd]
+  - id: rm_etc_docker
+    action: file
+    path: /etc/docker
+    state: absent
+    needs: [stop_docker]
+  - id: reload
+    action: run_cmd
+    cmd: "systemctl daemon-reload"
+    needs: [rm_unit_docker, rm_unit_ctr]
