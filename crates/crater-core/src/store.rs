@@ -184,10 +184,39 @@ impl ImageStore {
             .await
             .map_err(|e| anyhow::anyhow!("pull manifest '{reference}': {e}"))?;
 
+        let top: serde_json::Value = serde_json::from_slice(&raw)?;
+        // Multi-arch images are a manifest list / image index — resolve to a
+        // single-platform image manifest (default linux/amd64) so we pack a
+        // concrete, importable image (D-061). crater B 类 artifacts are single
+        // manifests (no `manifests:` array) → used as-is, unchanged.
+        let manifest_raw = if top.get("manifests").and_then(|v| v.as_array()).is_some() {
+            let entries = top["manifests"].as_array().unwrap();
+            let sub = entries
+                .iter()
+                .find(|e| {
+                    e["platform"]["os"].as_str() == Some("linux")
+                        && e["platform"]["architecture"].as_str() == Some("amd64")
+                })
+                .or_else(|| entries.iter().find(|e| e["platform"]["architecture"].is_string()))
+                .ok_or_else(|| anyhow::anyhow!("manifest list '{reference}' has no linux/amd64 entry"))?;
+            let sub_dig = sub["digest"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("manifest list entry missing digest"))?
+                .to_string();
+            let mut buf: Vec<u8> = Vec::new();
+            client
+                .pull_blob(&r, sub_dig.as_str(), &mut buf)
+                .await
+                .map_err(|e| anyhow::anyhow!("pull sub-manifest {sub_dig} of '{reference}': {e}"))?;
+            buf
+        } else {
+            raw.to_vec()
+        };
+
         // Fetch config + each layer blob by digest. We use `pull_blob` (not the
         // high-level `pull`, which rejects non-image layer mediaTypes like our
         // crater.recipe/material) so artifacts pull cleanly.
-        let m: serde_json::Value = serde_json::from_slice(&raw)?;
+        let m: serde_json::Value = serde_json::from_slice(&manifest_raw)?;
         let mut digests: Vec<String> = Vec::new();
         if let Some(d) = m["config"]["digest"].as_str() {
             digests.push(d.to_string());
@@ -207,7 +236,7 @@ impl ImageStore {
                 .map_err(|e| anyhow::anyhow!("pull blob {d} of '{reference}': {e}"))?;
             self.store_raw(&buf)?;
         }
-        let (md, ms) = self.store_raw(&raw)?;
+        let (md, ms) = self.store_raw(&manifest_raw)?;
         self.tag(reference, &md, ms)?;
         Ok(())
     }

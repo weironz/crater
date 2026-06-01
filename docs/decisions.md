@@ -724,3 +724,17 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **真机验证(.11,Ubuntu 24.04)**:首跑在 `kubeadm init` preflight 挂在 `conntrack not found` → 补 conntrack/socat/ethtool → 重跑(幂等续跑)→ 19 步全过,`kubeadm init` ~76s,`kubectl get nodes` → `ubuntu Ready control-plane v1.31.14 / containerd 1.7.22`,flannel/coredns Running。`crater task list` 同时记录 k8s + yq 部署。
 - **范围与诚实**:**单节点 + 在线**。离线需 kind:image(拉控制面镜像进包)+ os_package(D-034 待做)。
 - **多节点缺口 → 提案 `when_role`**:真 k8s 多节点角色不对称(control 跑 `kubeadm init` 出 join token,worker 跑 `kubeadm join`)。crater 的 action 只有 `when_os`/`when_offline`,**没有 `when_role`**,且任务内所有 action 在所有匹配主机上都跑——无法在一个 task 里区分 control/worker。提案:给 `ActionStep` 加 **`when_role: [..]`**(闭合枚举开关,和 when_os 同性质,守 D-036),配合已有 **register/hostvars + group_hosts_by_role(serial-between/parallel-within)**,即可:control 角色跑 init + `register` join 命令,worker 角色跑 `kubeadm join {{ hostvars.<control>.join }}`。这是把 crater 推到"能装 k8s 集群"的关键一小步,后续单独做。
+
+---
+
+## 2026-06-01 · 接线 kind: image —— 镜像作为 oci-archive material 打包/离线导入
+
+### D-061 kind:image 全链路:build 打镜像进包,apply 运行时导入
+- **背景**:离线 k8s/mysql 需要把容器镜像装进 OCI 包(D-047/D-060 暴露:run_cmd/pkg_install/镜像都进不了包;唯有 materials 进包)。kind:image 此前留位未接线(D-034)。
+- **模型(最简)**:**一个镜像 = 一个自包含 oci-archive blob,当 material 打包**(和 binary 同 material 层机制,bytes 是 oci-archive)。无需新 bundle 层类型。
+- **build**(`build_task_to_store`):`kind: image` → `store.pull(ref)` → `export_oci_archive` → 读 tar bytes → 按 `name`(或 `name@arch`)打成 material。
+- **修 `store.pull` 解多 arch**:多 arch 镜像是 manifest list/index,原 pull 只读 `config`/`layers`(list 没有)→ 只打了 14KB 空壳。现先解析 list → 选 linux/amd64 子 manifest → pull 它的 config+layers,打成完整镜像(B 类 artifact 是单 manifest,不受影响)。
+- **apply**:新 `Op::ImageImport`(reference / local_archive / namespace / runtime)。`exec_one`:探测运行时(nerdctl/ctr/docker/podman);**离线**=推 oci-archive 到目标 + `ctr -n <ns> images import` / `<rt> load -i`;**在线**=`<rt> pull <ref>`。`namespace`(如 k8s.io)给 ctr/nerdctl 用。
+- **action**:`load_image` 改为**引用 material**(`{material, namespace, runtime}`,弃写死 ref);在线取 material 的 `ref` pull、离线导入打进包的 blob——与 `place` 双态语义一致。
+- **真机验证(.11,containerd)**:`build`(pull alpine 解 list→amd64,打 **3.6MB** oci-archive)→ `apply --host .11` 离线 → `ctr -n k8s.io images import` → `ctr -n k8s.io images ls` 出 `docker.io/library/alpine:3.20`。34+2 tests 绿,0 警告。
+- **边界**:目前镜像按 build 机/amd64 单 arch 打(多 arch 镜像复用原生 index 留待);幂等(已存在则跳)未做,每次 import(无害)。

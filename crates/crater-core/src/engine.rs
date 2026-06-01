@@ -92,21 +92,38 @@ pub enum Op {
         #[serde(default)]
         mode: Option<String>,
     },
+    /// Load a container image into the target's runtime (D-061). Offline:
+    /// `local_archive` is a control-side oci-archive (pushed + `import`ed);
+    /// online: `reference` is pulled by the runtime. Runtime is probed unless
+    /// `runtime` is set; `namespace` is passed to ctr/nerdctl (e.g. k8s.io).
+    ImageImport {
+        phase: Phase,
+        describe: String,
+        reference: String,
+        #[serde(default)]
+        local_archive: Option<PathBuf>,
+        #[serde(default)]
+        namespace: Option<String>,
+        #[serde(default)]
+        runtime: Option<String>,
+    },
 }
 
 impl Op {
     pub fn phase(&self) -> Phase {
         match self {
-            Op::Shell { phase, .. } | Op::WriteFile { phase, .. } | Op::PushFile { phase, .. } => {
-                *phase
-            }
+            Op::Shell { phase, .. }
+            | Op::WriteFile { phase, .. }
+            | Op::PushFile { phase, .. }
+            | Op::ImageImport { phase, .. } => *phase,
         }
     }
     pub fn describe(&self) -> &str {
         match self {
             Op::Shell { describe, .. }
             | Op::WriteFile { describe, .. }
-            | Op::PushFile { describe, .. } => describe,
+            | Op::PushFile { describe, .. }
+            | Op::ImageImport { describe, .. } => describe,
         }
     }
     /// Shell command / path preview for dry-run, if any.
@@ -115,6 +132,7 @@ impl Op {
             Op::Shell { cmd, .. } => Some(cmd),
             Op::WriteFile { path, .. } => Some(path),
             Op::PushFile { dest, .. } => Some(dest),
+            Op::ImageImport { reference, .. } => Some(reference),
         }
     }
 }
@@ -624,27 +642,34 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 check: desc.check.as_ref().map(|c| render(c, &vars)).transpose()?,
             }
         }
-        Action::LoadImage { reference, runtime } => {
-            let cmd = match runtime {
-                // Explicit runtime from data: use it verbatim.
-                Some(rt) => format!("{rt} pull '{reference}'"),
-                // No runtime declared: pick whichever generic OCI tool exists.
-                None => format!(
-                    "for rt in nerdctl docker podman ctr; do \
-                       if command -v $rt >/dev/null 2>&1; then \
-                         [ \"$rt\" = ctr ] && rt=\"ctr image\"; \
-                         exec $rt pull '{reference}'; \
-                       fi; \
-                     done; \
-                     echo 'no container runtime found' >&2; exit 1"
-                ),
+        Action::LoadImage { material, namespace, runtime } => {
+            // Resolve the kind:image material (D-061): online → runtime pulls its
+            // `ref`; offline → import the packed oci-archive blob.
+            let m = ctx.resolve_material(material)?;
+            let reference = m
+                .reference
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("load_image: material '{material}' has no `ref` (kind: image)"))?;
+            let reference = render(reference, &ctx.vars)?;
+            let local_archive = if let Some(blobs) = &ctx.offline_blobs {
+                let key = PlanContext::material_blob_key(m);
+                Some(
+                    blobs
+                        .get(&key)
+                        .or_else(|| blobs.get(material))
+                        .ok_or_else(|| anyhow::anyhow!("offline bundle missing image material '{key}'"))?
+                        .clone(),
+                )
+            } else {
+                None
             };
-            Op::Shell {
+            Op::ImageImport {
                 phase,
                 describe: format!("load image {reference}"),
-                cmd,
-                soft_fail: false,
-                check: None,
+                reference,
+                local_archive,
+                namespace: namespace.clone(),
+                runtime: runtime.clone(),
             }
         }
         Action::File {
@@ -1103,7 +1128,68 @@ async fn exec_one(
             tracing::debug!("      pushed {} bytes -> {dest}", data.len());
             Ok((StepStatus::Changed, Vec::new()))
         }
+        Op::ImageImport {
+            reference,
+            local_archive,
+            namespace,
+            runtime,
+            ..
+        } => {
+            // Pick a container runtime: explicit, else probe (D-061).
+            let rt = match runtime {
+                Some(r) => r.clone(),
+                None => {
+                    let probe = "for r in nerdctl ctr docker podman; do command -v $r >/dev/null 2>&1 && { echo $r; break; }; done";
+                    let out = exec.run(probe).await?;
+                    let r = out.stdout.trim().to_string();
+                    if r.is_empty() {
+                        anyhow::bail!("step {n}: no container runtime (nerdctl/ctr/docker/podman) on target for image '{reference}'");
+                    }
+                    r
+                }
+            };
+            // namespace only applies to ctr/nerdctl (`-n`); ignored for docker/podman.
+            let ns = match namespace {
+                Some(n) if rt == "ctr" || rt == "nerdctl" => format!(" -n {n}"),
+                _ => String::new(),
+            };
+            let cmd = if let Some(archive) = local_archive {
+                // Offline: push the oci-archive, then import it.
+                let data = std::fs::read(archive)
+                    .map_err(|e| anyhow::anyhow!("read image archive {}: {e}", archive.display()))?;
+                let remote = format!("/tmp/crater-img-{}.tar", sanitize(reference));
+                exec.write_file(&remote, &data).await?;
+                tracing::debug!("      pushed {} bytes oci-archive -> {remote}", data.len());
+                match rt.as_str() {
+                    "ctr" => format!("ctr{ns} images import {remote} && rm -f {remote}"),
+                    "nerdctl" => format!("nerdctl{ns} load -i {remote} && rm -f {remote}"),
+                    _ => format!("{rt} load -i {remote} && rm -f {remote}"),
+                }
+            } else {
+                // Online: runtime pulls the reference.
+                match rt.as_str() {
+                    "ctr" => format!("ctr{ns} images pull {reference}"),
+                    _ => format!("{rt} pull {reference}"),
+                }
+            };
+            let out = exec.run(&cmd).await?;
+            if out.ok() {
+                Ok((StepStatus::Changed, Vec::new()))
+            } else {
+                for l in out.stderr.trim().lines() {
+                    tracing::debug!("      ! {l}");
+                }
+                anyhow::bail!("step {n} image import '{reference}' failed (exit {}): {}", out.code, out.stderr.trim());
+            }
+        }
     }
+}
+
+/// Make an image reference safe for a temp filename.
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 #[cfg(test)]

@@ -129,12 +129,16 @@ pub enum Action {
         #[serde(default)]
         mode: Option<String>,
     },
-    /// Load/pull a container image. The runtime is NOT assumed: when `runtime`
-    /// is set we use it verbatim; otherwise we probe for whatever generic OCI
-    /// tool is on the box (nerdctl/docker/podman/ctr). Reserved for offline
-    /// image loading (M2+).
+    /// Load a container image declared as a `kind: image` material (D-061).
+    /// References the material by logical name (like `place`). Online: the
+    /// target runtime pulls the material's `ref`. Offline: the control side
+    /// pushes the packed oci-archive blob and the runtime imports it. The
+    /// runtime is NOT assumed — `runtime` if set, else probe nerdctl/ctr/docker/
+    /// podman. `namespace` (e.g. `k8s.io`) is passed to ctr/nerdctl for k8s.
     LoadImage {
-        reference: String,
+        material: String,
+        #[serde(default)]
+        namespace: Option<String>,
         #[serde(default)]
         runtime: Option<String>,
     },

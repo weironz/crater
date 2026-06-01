@@ -1519,6 +1519,11 @@ async fn build_to_store(file: &Path, tag: Option<String>, arch_filter: &[String]
 /// Build a task into a B 类 OCI artifact (D-045): fetch its `binary` materials,
 /// store them + the task YAML as the recipe, tag, into the local store. Loaded
 /// by recipe-replay through `plan_from_task` (offline).
+/// Make an image ref safe as a temp-file fragment.
+fn sanitize_ref(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
+}
+
 async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[String]) -> Result<()> {
     use crater_core::component::MaterialKind;
     use crater_core::task::TaskFile;
@@ -1561,6 +1566,24 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
                     .map_err(|e| anyhow!("fetch material {key}: {e}"))?;
                 materials.push((key, data));
             }
+        } else if m.kind == MaterialKind::Image {
+            // kind: image (D-061) — pull the image and pack it as a self-
+            // contained oci-archive blob; apply imports it into the runtime.
+            let reference = m
+                .reference
+                .as_ref()
+                .ok_or_else(|| anyhow!("image material '{}' has no `ref`", m.name))?;
+            let reference = ctx.rendered_url(reference)?; // substitute {{version}} (offline ctx → no mirror rewrite)
+            let key = PlanContext::material_blob_key(m);
+            info!("  pull image material {key} <- {reference}");
+            let store = ImageStore::open()?;
+            store.pull(&reference).await.map_err(|e| anyhow!("pull image {reference}: {e}"))?;
+            let tmp = std::env::temp_dir().join(format!("crater-img-{}-{}.tar", std::process::id(), sanitize_ref(&key)));
+            store.export_oci_archive(&reference, &tmp).map_err(|e| anyhow!("export image {reference}: {e}"))?;
+            let data = std::fs::read(&tmp)?;
+            let _ = std::fs::remove_file(&tmp);
+            info!("    packed {} ({} bytes)", reference, data.len());
+            materials.push((key, data));
         }
     }
 
