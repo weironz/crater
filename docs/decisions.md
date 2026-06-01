@@ -894,3 +894,11 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **背景**:k8s 任务里 9 个 `load_image` 几乎一模一样,只有 material 名不同——同样暴露「批量」缺口(同 D-073)。
 - **决策**:`LoadImage` 加 `materials: [..]`(与单数 `material` 并存,合并去重);`action_op` 产出一个 `Op::ImageImport{ images: Vec<ImageItem>, namespace, runtime }`(`ImageItem{reference, local_archive}`)。`exec` 里**只探测一次运行时**,然后顺序导入每个镜像(离线 push+import、在线 pull)。不是 YAML 循环(守 D-036),只是「一个动作吃一个列表」,同 `package` 吃包列表。
 - **影响**:`tasks/{k8s-ha,k8s-offline}.yaml` 的 9 个 load_image → 1 个 `load_image materials:[..]`,相关 `needs` 改引 `load_images`。`ai.rs` 同步。新增测试 `load_image_takes_a_materials_list`。42 tests 绿。`material:` 单数保留。未重建 OCI(同 D-073)。
+
+## 2026-06-02 · 模板层引入 minijinja(D-036 修正)+ haproxy 模板化(D-075)
+
+### D-075 `template` 动作用 minijinja 渲染;D-036 修正为「模板层允许声明式迭代」
+- **背景**:haproxy backend 的 server 列表原来靠「place 占位模板 + shell `for` 循环 sed 拼接」,丑陋。用户要 Jinja 式 `{% for node in masters %}server {{node.name}} {{node.ip}}…{% endfor %}`。
+- **D-036 修正**:原 D-036「render 残废,只 `{{ bare.path }}`,所有逻辑在 Rust」收窄为——**`cmd`/`content`/`url_tmpl` 等仍只做字面 `{{ }}` 替换**(`render()` 不变,守住「shell 命令里不藏逻辑」);但 **`template` 动作这一层允许声明式迭代**(`{% for %}`/`{{ }}`,minijinja)。业务决策(when/needs/拓扑)仍在 Rust。理由:配置文件按 inventory 成员展开是数据模板,不是业务逻辑;一路向 Ansible 对齐,模板循环是合理且高频的诉求。
+- **实现**:加 `minijinja`(纯 Rust,契合单二进制/离线)。`RenderTemplate` 动作改为 `{ material, dst }`——模板是一个 `kind: file` 物料(`.j2`),**打进 OCI**(离线自洽);`action_op` 在控制端读其字节(离线→打进的 blob、在线→task 目录 src),用 minijinja + 结构化上下文渲染,lower 成普通 `Op::WriteFile`(随 recipe 走、离线可replay)。上下文:所有标量 task var + **`groups.<role>` = `[{name, ip}]`**(新增 `PlanContext.groups`,main 从 inventory 填)。开 `trim_blocks`/`lstrip_blocks` 让配置文件不留空行。
+- **影响**:`tasks/templates/haproxy.cfg.j2`(`{% for node in groups.controlplane %}server …{% endfor %}`);k8s-ha 的 haproxy「place+shell 循环」两步 → 一步 `action: template`;删 `files/haproxy.cfg.tmpl`;加 `apiserver_port` var。keepalived 仍 place+sed(网卡是运行时探测,非循环)。新增测试 `template_renders_minijinja_loop_over_groups`。43 tests 绿。**未重建 OCI/真机复验**(改了 recipe + 新增离线读模板 blob 路径;下次 build+apply 时验证)。

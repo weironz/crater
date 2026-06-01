@@ -169,7 +169,7 @@ actions:
                 "RunCmd" => format!("action: {name}\ncmd: \"true\""),
                 "PkgInstall" => format!("action: {name}\npackages: {{ debian: [x] }}"),
                 "Extract" => format!("action: {name}\nto: /opt"),
-                "RenderTemplate" => format!("action: {name}\nsrc: a.j2\ndst: /etc/a"),
+                "RenderTemplate" => format!("action: {name}\nmaterial: a\ndst: /etc/a"),
                 "Module" => format!("action: {name}\nuses: lineinfile"),
                 _ => unreachable!(),
             };

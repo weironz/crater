@@ -120,9 +120,14 @@ pub enum Action {
         #[serde(default)]
         creates: Option<PathBuf>,
     },
+    /// Render a `kind: file` template material with minijinja (D-075) and write
+    /// it to `dst`. The template's bytes travel in the OCI (packed material), so
+    /// it's offline-safe; rendering happens on control with the inventory context
+    /// (`groups.<role>` etc.), supporting `{% for %}`/`{{ }}`.
     #[serde(rename = "template")]
     RenderTemplate {
-        src: String,
+        /// A `kind: file` material whose content is the template (e.g. a `.j2`).
+        material: String,
         dst: PathBuf,
     },
     /// Run a command through the target's shell (ansible `shell` — pipes, `&&`,

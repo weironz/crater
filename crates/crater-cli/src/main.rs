@@ -902,17 +902,22 @@ async fn apply_task(
 
     let mut hostvars: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
-    // Role → space-joined member addresses, exposed to templates as
-    // `{{ groups.<role> }}` (D-071) — e.g. haproxy backend = all control-plane IPs.
-    let role_addrs: BTreeMap<String, String> = {
-        let mut acc: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // Role → member hosts. `role_members` (name+addr) feeds the template layer's
+    // structured `groups.<role>` (D-075); `role_addrs` is the space-joined-address
+    // form for the simple `{{ groups.<role> }}` substitution in cmds (D-071).
+    let role_members: BTreeMap<String, Vec<(String, String)>> = {
+        let mut acc: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
         for h in &hosts {
             for r in &h.roles {
-                acc.entry(r.clone()).or_default().push(h.address.clone());
+                acc.entry(r.clone()).or_default().push((h.name.clone(), h.address.clone()));
             }
         }
-        acc.into_iter().map(|(k, v)| (k, v.join(" "))).collect()
+        acc
     };
+    let role_addrs: BTreeMap<String, String> = role_members
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().map(|(_, ip)| ip.clone()).collect::<Vec<_>>().join(" ")))
+        .collect();
     // host name → roles, so a host's registered facts can also be published under
     // its roles (`hostvars.<role>.<name>`, D-071) for singleton roles like bootstrap.
     let name_roles: BTreeMap<String, Vec<String>> =
@@ -920,7 +925,7 @@ async fn apply_task(
 
     if !do_apply {
         for h in &hosts {
-            run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, offline_blobmap.as_ref(), false, do_shell, teardown, source, &deployment).await?;
+            run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, &role_members, offline_blobmap.as_ref(), false, do_shell, teardown, source, &deployment).await?;
         }
         info!("dry-run only; omit --dry-run to execute");
         return Ok(());
@@ -942,7 +947,7 @@ async fn apply_task(
         let results: Vec<Result<(String, Vec<(String, String)>)>> = futures::stream::iter(
             group
                 .iter()
-                .map(|h| run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, offline_blobmap.as_ref(), true, do_shell, teardown, source, &deployment)),
+                .map(|h| run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, &role_members, offline_blobmap.as_ref(), true, do_shell, teardown, source, &deployment)),
         )
         .buffer_unordered(group_forks)
         .collect()
@@ -1305,6 +1310,7 @@ async fn run_task_on_host(
     spec_dir: &Path,
     hostvars: &BTreeMap<String, BTreeMap<String, String>>,
     role_addrs: &BTreeMap<String, String>,
+    role_members: &BTreeMap<String, Vec<(String, String)>>,
     offline_blobmap: Option<&BTreeMap<String, PathBuf>>,
     do_apply: bool,
     do_shell: bool,
@@ -1346,6 +1352,7 @@ async fn run_task_on_host(
     for (role, addrs) in role_addrs {
         ctx.vars.insert(format!("groups.{role}"), addrs.clone());
     }
+    ctx.groups = role_members.clone(); // structured groups for the template layer (D-075)
     ctx.host_roles = host.roles.clone();
     // The target's own inventory identity, for templates that need a stable
     // unique per-host value (e.g. kubeadm `--node-name`, D-071).

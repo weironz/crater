@@ -19,6 +19,7 @@ tracing-subscriber = "0.3"
 clap = { version = "4", features = ["derive"] }
 russh = "0.45"             # M1: SSH executor (pure Rust; API pinned to 0.45.x)
 base64 = "0.22"            # M1: push rendered files to target via base64
+minijinja = "2"            # D-075: template-layer rendering (declarative iteration)
 # M2: offline bundle build/deploy + M4 AI (reqwest shared)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tar = "0.4"                # bundle packing (tar layer)

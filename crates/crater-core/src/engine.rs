@@ -206,6 +206,10 @@ pub struct PlanContext {
     /// The target host's inventory roles (D-071), used by `when_role` step
     /// filtering. Empty = host has no roles (matches every `when_role`).
     pub host_roles: Vec<String>,
+    /// Role → its member hosts as (name, address) (D-075), exposed to the
+    /// `template` action's minijinja context as `groups.<role>` = list of
+    /// `{name, ip}`. Drives declarative iteration (e.g. haproxy server list).
+    pub groups: BTreeMap<String, Vec<(String, String)>>,
 }
 
 impl PlanContext {
@@ -223,6 +227,7 @@ impl PlanContext {
             materials: BTreeMap::new(),
             roles_dir: PathBuf::from("roles"),
             host_roles: Vec::new(),
+            groups: BTreeMap::new(),
         }
     }
 
@@ -690,15 +695,33 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 }
             }
         }
-        Action::RenderTemplate { src, dst } => {
-            let tpl_path = ctx.component_dir.join("templates").join(src);
-            let raw = std::fs::read_to_string(&tpl_path)
-                .map_err(|e| anyhow::anyhow!("read template {}: {e}", tpl_path.display()))?;
+        Action::RenderTemplate { material, dst } => {
+            // D-075: the template is a packed `kind: file` material. Read its bytes
+            // on control (offline → the packed blob; online → its `src` on disk),
+            // render with minijinja + inventory context, lower to a plain WriteFile
+            // (so it ships in the recipe and works offline).
+            let m = ctx.resolve_material(material)?;
+            let raw = if let Some(blobs) = &ctx.offline_blobs {
+                let key = PlanContext::material_blob_key(m);
+                let path = blobs
+                    .get(&key)
+                    .or_else(|| blobs.get(material))
+                    .ok_or_else(|| anyhow::anyhow!("offline bundle missing template material '{key}'"))?;
+                std::fs::read_to_string(path)
+                    .map_err(|e| anyhow::anyhow!("read template blob {}: {e}", path.display()))?
+            } else {
+                let src = m.src.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("template: material '{material}' has no `src` (a local .j2)")
+                })?;
+                let path = ctx.component_dir.join(src);
+                std::fs::read_to_string(&path)
+                    .map_err(|e| anyhow::anyhow!("read template {}: {e}", path.display()))?
+            };
             Op::WriteFile {
                 phase,
-                describe: format!("render {} -> {}", src, dst.display()),
+                describe: format!("render template {material} -> {}", dst.display()),
                 path: dst.display().to_string(),
-                content: render(&raw, &ctx.vars)?,
+                content: render_template_str(&raw, ctx)?,
                 mode: None,
             }
         }
@@ -1049,6 +1072,47 @@ pub fn render(tpl: &str, vars: &BTreeMap<String, String>) -> crate::Result<Strin
     }
     out.push_str(rest);
     Ok(out)
+}
+
+/// Render a `template` action's source with minijinja (D-075 — the **template
+/// layer** allows declarative iteration `{% for %}`/`{{ }}`; business logic still
+/// lives in Rust per D-036). Context: every scalar task var, plus structured
+/// `groups.<role>` = list of `{name, ip}` for iterating inventory members.
+pub fn render_template_str(tpl: &str, ctx: &PlanContext) -> crate::Result<String> {
+    use serde_json::{Map, Value};
+    let mut data = Map::new();
+    // Scalar vars (skip the dotted keys — `groups.x`/`hostvars.x.y` are flattened
+    // for the simple `render()` path; here `groups` is exposed structured below).
+    for (k, v) in &ctx.vars {
+        if !k.contains('.') {
+            data.insert(k.clone(), Value::String(v.clone()));
+        }
+    }
+    // groups.<role> = [{name, ip}, ...]
+    let groups: Map<String, Value> = ctx
+        .groups
+        .iter()
+        .map(|(role, members)| {
+            let arr = members
+                .iter()
+                .map(|(name, ip)| {
+                    let mut m = Map::new();
+                    m.insert("name".into(), Value::String(name.clone()));
+                    m.insert("ip".into(), Value::String(ip.clone()));
+                    Value::Object(m)
+                })
+                .collect();
+            (role.clone(), Value::Array(arr))
+        })
+        .collect();
+    data.insert("groups".into(), Value::Object(groups));
+
+    let mut env = minijinja::Environment::new();
+    // Line-oriented config files: don't leave blank lines where `{% %}` blocks were.
+    env.set_trim_blocks(true);
+    env.set_lstrip_blocks(true);
+    env.render_str(tpl, Value::Object(data))
+        .map_err(|e| anyhow::anyhow!("render template (minijinja): {e}"))
 }
 
 /// A bare dotted variable path (`version`, `hostvars.server.token`, `.Field`):
@@ -1426,6 +1490,21 @@ mod tests {
             }
             other => panic!("expected UnarchiveMaterial, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn template_renders_minijinja_loop_over_groups() {
+        // D-075: the template layer supports {% for %} over structured groups.
+        let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
+        ctx.vars.insert("apiserver_port".into(), "6443".into());
+        ctx.groups.insert(
+            "controlplane".into(),
+            vec![("n11".into(), "10.0.0.11".into()), ("n12".into(), "10.0.0.12".into())],
+        );
+        let tpl = "backend kube-apiserver\n{% for node in groups.controlplane %}  server {{ node.name }} {{ node.ip }}:{{ apiserver_port }} check\n{% endfor %}";
+        let out = render_template_str(tpl, &ctx).unwrap();
+        assert!(out.contains("server n11 10.0.0.11:6443 check"), "got:\n{out}");
+        assert!(out.contains("server n12 10.0.0.12:6443 check"), "got:\n{out}");
     }
 
     #[test]

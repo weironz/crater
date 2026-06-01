@@ -13,4 +13,6 @@ frontend kube-apiserver
   default_backend kube-apiserver
 backend kube-apiserver
   balance roundrobin
-__SERVERS__
+{% for node in groups.controlplane %}
+  server {{ node.name }} {{ node.ip }}:{{ apiserver_port }} check
+{% endfor %}

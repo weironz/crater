@@ -30,6 +30,7 @@ vars:
   pod_cidr: "10.244.0.0/16"
   image_repo: "registry.aliyuncs.com/google_containers"
   vip: "192.168.73.14"
+  apiserver_port: "6443"                          # haproxy 后端各 master 的 apiserver 口
   control_plane_endpoint: "192.168.73.14:8443"   # VIP:haproxy 前端口
   subnet: "192.168.73.0/24"                       # keepalived 选 VIP 网卡用
 
@@ -94,9 +95,9 @@ materials:
   - name: cfg-keepalived          # 模板,占位 __IFACE__/__VIP__
     kind: file
     src: files/keepalived.conf.tmpl
-  - name: cfg-haproxy             # 模板,占位 __SERVERS__
+  - name: cfg-haproxy             # minijinja 模板(server 列表 {% for %} 渲染)
     kind: file
-    src: files/haproxy.cfg.tmpl
+    src: templates/haproxy.cfg.j2
 
   # —— OS 包闭包 ——
   - name: sysdeps
@@ -281,23 +282,14 @@ actions:
     material: lb-pkgs
     when_role: [controlplane]
     needs: [sysctl_apply]
-  # 模板进 files/(见 files/haproxy.cfg.tmpl);这里只 place + 填动态 server 列表。
-  - id: haproxy_tmpl
-    action: place
+  # haproxy.cfg:minijinja 模板渲染(server 列表 {% for %} 遍历 groups.controlplane,D-075)。
+  - id: haproxy_cfg
+    action: template
     material: cfg-haproxy
-    dest: /etc/haproxy/haproxy.cfg.tmpl
+    dst: /etc/haproxy/haproxy.cfg
     when_role: [controlplane]
     needs: [lb_pkgs]
-  - id: haproxy_cfg
-    action: shell
-    when_role: [controlplane]
-    needs: [haproxy_tmpl]
-    # 去掉 __SERVERS__ 占位行,按 {{ groups.controlplane }} 追加各 master:6443
-    cmd: |
-      sed '/__SERVERS__/d' /etc/haproxy/haproxy.cfg.tmpl > /etc/haproxy/haproxy.cfg
-      i=0; for ip in {{groups.controlplane}}; do i=$((i+1)); echo "  server cp$i $ip:6443 check"; done >> /etc/haproxy/haproxy.cfg
-    check: "grep -q ':6443 check' /etc/haproxy/haproxy.cfg"
-  # 模板进 files/(见 files/keepalived.conf.tmpl);这里 place + 填网卡/VIP。
+  # keepalived:仍 place 模板 + sed 填网卡(运行时探测)/VIP。
   - id: keepalived_tmpl
     action: place
     material: cfg-keepalived
