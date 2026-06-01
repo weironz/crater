@@ -1,8 +1,8 @@
-//! `crater ui` (D-054, Phase 2): a read-only web dashboard over the deployment
-//! state DB. Axum backend + htmx frontend (server-rendered HTML fragments,
-//! polled every few seconds). Pure Rust (hyper/tower/tokio, no C); htmx.js is
-//! embedded in the binary so it works air-gapped. The UI is a *view* — all
-//! logic stays in the engine/CLI (D-036 spirit); it never holds product logic.
+//! `crater ui` (D-054/056): a read-only web dashboard over the deployment state
+//! DB. Axum backend + htmx frontend (server-rendered fragments, polled). Pure
+//! Rust (hyper/tower/tokio, no C); htmx.js + all styling are embedded so it
+//! works air-gapped (no CDN/toolchain). Modern dark theme. The UI is a *view* —
+//! logic stays in the engine/CLI (D-036); handlers only read the state DB.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -21,12 +21,13 @@ use crater_core::state::{self, StateStore, TursoStore};
 const HTMX_JS: &[u8] = include_bytes!("../assets/htmx.min.js");
 
 pub async fn serve(bind: &str, port: u16) -> Result<()> {
-    // Validate the DB is openable up front; handlers re-open per request so
-    // they always see the latest writes from the CLI process (Turso cross-
-    // process visibility — a fresh handle reads committed state, D-055).
+    // Validate the DB is openable up front; handlers re-open per request so they
+    // always see the latest writes from the CLI process (Turso cross-process
+    // visibility — a fresh handle reads committed state, D-056).
     TursoStore::open().await?;
     let app = Router::new()
         .route("/", get(index))
+        .route("/api/stats", get(stats_fragment))
         .route("/api/deployments", get(deployments_fragment))
         .route("/api/history", get(history_fragment))
         .route("/htmx.min.js", get(htmx_js));
@@ -47,51 +48,143 @@ fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-async fn index() -> Html<String> {
-    Html(format!(
-        r#"<!doctype html>
+/// Full page shell — static, so no `format!` (CSS braces stay literal).
+const INDEX_HTML: &str = r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>crater · deployments</title>
+<title>crater · control</title>
 <script src="/htmx.min.js"></script>
 <style>
-  body {{ font: 14px/1.5 -apple-system, system-ui, sans-serif; margin: 2rem auto; max-width: 1000px; color: #1a1a2e; }}
-  h1 {{ font-size: 1.4rem; }} h2 {{ font-size: 1.1rem; margin-top: 2rem; color: #444; }}
-  table {{ border-collapse: collapse; width: 100%; }}
-  th, td {{ text-align: left; padding: .4rem .7rem; border-bottom: 1px solid #eee; }}
-  th {{ color: #888; font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; }}
-  td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
-  .ok {{ color: #137333; }} .fail {{ color: #c5221f; }}
-  .muted {{ color: #999; }} code {{ background: #f3f3f7; padding: 0 .3rem; border-radius: 3px; }}
-  .hdr {{ display: flex; align-items: baseline; gap: .8rem; }}
+  :root{
+    --bg:#0c0e15; --surface:#151823; --surface-2:#1d2130; --border:#272c3b;
+    --text:#e7e9f0; --muted:#8990a3; --faint:#5a6076;
+    --accent:#ff6b35; --accent-2:#ffa94d;
+    --ok:#34d399; --ok-bg:rgba(52,211,153,.13);
+    --drift:#f87171; --drift-bg:rgba(248,113,113,.14);
+    --unknown:#9aa0b3; --unknown-bg:rgba(154,160,179,.10);
+    --radius:14px; --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.18);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,rgba(255,107,53,.08),transparent 60%),var(--bg);
+       color:var(--text);font:14px/1.55 "Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
+       -webkit-font-smoothing:antialiased;min-height:100vh}
+  .topbar{display:flex;align-items:center;justify-content:space-between;padding:.95rem 1.6rem;
+          border-bottom:1px solid var(--border);background:rgba(13,15,22,.7);backdrop-filter:blur(8px);
+          position:sticky;top:0;z-index:10}
+  .brand{font-weight:750;font-size:1.08rem;letter-spacing:.01em;display:flex;align-items:center;gap:.55rem}
+  .brand .mark{color:var(--accent);font-size:1.2rem;filter:drop-shadow(0 0 6px rgba(255,107,53,.5))}
+  .brand .sub{color:var(--muted);font-weight:500;font-size:.85rem;border-left:1px solid var(--border);padding-left:.55rem;margin-left:.2rem}
+  .meta{color:var(--muted);font-size:.78rem;display:flex;align-items:center;gap:.5rem}
+  .live{display:inline-flex;align-items:center;gap:.4rem;color:var(--ok)}
+  .live .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 0 rgba(52,211,153,.5);animation:pulse 2s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(52,211,153,.5)}70%{box-shadow:0 0 0 6px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
+  main{max-width:1140px;margin:1.6rem auto;padding:0 1.6rem;display:flex;flex-direction:column;gap:1.4rem}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+        padding:1.05rem 1.25rem;box-shadow:var(--shadow);position:relative;overflow:hidden}
+  .card::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--accent);opacity:.0}
+  .card.ok::before{background:var(--ok);opacity:.7}
+  .card.drift::before{background:var(--drift);opacity:.85}
+  .card .label{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.07em}
+  .card .value{font-size:2rem;font-weight:750;margin-top:.35rem;font-variant-numeric:tabular-nums;line-height:1}
+  .card.drift .value{color:var(--drift)} .card.ok .value{color:var(--ok)}
+  .panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+         overflow:hidden;box-shadow:var(--shadow)}
+  .panel>h2{margin:0;padding:.85rem 1.25rem;font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;
+            color:var(--muted);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.5rem}
+  .panel>h2 .mk{color:var(--accent)}
+  table{width:100%;border-collapse:collapse;font-size:.875rem}
+  th{text-align:left;padding:.6rem 1.25rem;color:var(--faint);font-size:.7rem;text-transform:uppercase;
+     letter-spacing:.05em;font-weight:600}
+  td{padding:.72rem 1.25rem;border-top:1px solid var(--border);white-space:nowrap}
+  tbody tr{transition:background .12s} tbody tr:hover{background:var(--surface-2)}
+  .num{text-align:right;font-variant-numeric:tabular-nums}
+  .muted{color:var(--muted)} .mono{font-family:ui-monospace,"SF Mono",Menlo,monospace}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;background:var(--surface-2);
+       padding:.12rem .45rem;border-radius:7px;font-size:.85em;color:var(--accent-2);border:1px solid var(--border)}
+  .pill{display:inline-flex;align-items:center;gap:.35rem;padding:.18rem .6rem;border-radius:999px;
+        font-size:.72rem;font-weight:650;letter-spacing:.02em}
+  .pill .d{width:6px;height:6px;border-radius:50%;background:currentColor}
+  .pill.ok{color:var(--ok);background:var(--ok-bg)}
+  .pill.drift{color:var(--drift);background:var(--drift-bg)}
+  .pill.unknown{color:var(--unknown);background:var(--unknown-bg)}
+  .pill.apply{color:var(--accent-2);background:rgba(255,169,77,.12)}
+  .pill.delete{color:var(--unknown);background:var(--unknown-bg)}
+  .empty{padding:2rem 1.25rem;color:var(--faint);text-align:center}
+  .fail{color:var(--drift)}
+  @media(max-width:760px){.stats{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head>
 <body>
-<div class="hdr"><h1>crater · deployments</h1><span class="muted">read-only · auto-refresh 5s</span></div>
-<div hx-get="/api/deployments" hx-trigger="load, every 5s">loading…</div>
-<h2>history</h2>
-<div hx-get="/api/history" hx-trigger="load, every 5s">loading…</div>
+<header class="topbar">
+  <div class="brand"><span class="mark">▲</span> crater <span class="sub">control</span></div>
+  <div class="meta"><span class="live"><span class="dot"></span>live</span> · read-only · refresh 5s</div>
+</header>
+<main>
+  <section class="stats" hx-get="/api/stats" hx-trigger="load, every 5s" hx-swap="innerHTML"></section>
+  <section class="panel">
+    <h2><span class="mk">◆</span> Deployments</h2>
+    <div hx-get="/api/deployments" hx-trigger="load, every 5s" hx-swap="innerHTML"><div class="empty">loading…</div></div>
+  </section>
+  <section class="panel">
+    <h2><span class="mk">◷</span> Activity</h2>
+    <div hx-get="/api/history" hx-trigger="load, every 5s" hx-swap="innerHTML"><div class="empty">loading…</div></div>
+  </section>
+</main>
 </body>
-</html>"#
+</html>"#;
+
+async fn index() -> Html<&'static str> {
+    Html(INDEX_HTML)
+}
+
+fn card(label: &str, value: usize, kind: &str) -> String {
+    format!(
+        "<div class='card {kind}'><div class='label'>{label}</div><div class='value'>{value}</div></div>"
+    )
+}
+
+async fn stats_fragment() -> Html<String> {
+    let store = match TursoStore::open().await {
+        Ok(s) => s,
+        Err(e) => return Html(format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string()))),
+    };
+    let deps = store.list_deployments().await.unwrap_or_default();
+    let mut deployments: BTreeSet<String> = BTreeSet::new();
+    let mut hosts: BTreeSet<String> = BTreeSet::new();
+    let (mut ok, mut drift) = (0usize, 0usize);
+    for d in &deps {
+        deployments.insert(d.deployment.clone());
+        hosts.insert(d.host.clone());
+        match d.status.as_str() {
+            "ok" => ok += 1,
+            "drift" => drift += 1,
+            _ => {}
+        }
+    }
+    Html(format!(
+        "{}{}{}{}",
+        card("Deployments", deployments.len(), ""),
+        card("Hosts", hosts.len(), ""),
+        card("Healthy", ok, "ok"),
+        card("Drift", drift, if drift > 0 { "drift" } else { "" }),
     ))
 }
 
 async fn deployments_fragment() -> Html<String> {
     let store = match TursoStore::open().await {
         Ok(s) => s,
-        Err(e) => return Html(format!("<p class='fail'>db error: {}</p>", esc(&e.to_string()))),
+        Err(e) => return Html(format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string()))),
     };
     let deps = match store.list_deployments().await {
         Ok(d) => d,
-        Err(e) => return Html(format!("<p class='fail'>db error: {}</p>", esc(&e.to_string()))),
+        Err(e) => return Html(format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string()))),
     };
     if deps.is_empty() {
-        return Html("<p class='muted'>no deployments recorded</p>".into());
+        return Html("<div class='empty'>no deployments recorded</div>".into());
     }
-    // Aggregate by deployment label (D-052/053): tasks, versions, host count,
-    // latest applied, drift status (D-055), latest check time.
     #[derive(Default)]
     struct Agg {
         tasks: BTreeSet<String>,
@@ -121,42 +214,47 @@ async fn deployments_fragment() -> Html<String> {
     };
     let mut rows = String::new();
     for (dep, a) in by {
-        let (cls, status) = if a.drift > 0 {
-            ("fail", format!("DRIFT {}/{}", a.drift, a.hosts))
+        let pill = if a.drift > 0 {
+            format!("<span class='pill drift'><span class='d'></span>DRIFT {}/{}</span>", a.drift, a.hosts)
         } else if a.ok == a.hosts && a.hosts > 0 {
-            ("ok", format!("ok {}/{}", a.ok, a.hosts))
+            format!("<span class='pill ok'><span class='d'></span>ok {}/{}</span>", a.ok, a.hosts)
         } else {
-            ("muted", "unknown".to_string())
+            "<span class='pill unknown'><span class='d'></span>unknown</span>".to_string()
         };
         let checked = if a.checked > 0 { state::fmt_epoch(a.checked) } else { "—".to_string() };
         rows.push_str(&format!(
-            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td class='num'>{}</td><td class='{}'>{}</td><td class='muted'>{}</td><td class='muted'>{}</td></tr>",
-            esc(&dep), esc(&join(a.tasks)), esc(&join(a.versions)), a.hosts, cls, status, checked, state::fmt_epoch(a.last)
+            "<tr><td><code>{}</code></td><td>{}</td><td class='mono muted'>{}</td><td class='num'>{}</td><td>{}</td><td class='muted mono'>{}</td><td class='muted mono'>{}</td></tr>",
+            esc(&dep), esc(&join(a.tasks)), esc(&join(a.versions)), a.hosts, pill, checked, state::fmt_epoch(a.last)
         ));
     }
     Html(format!(
-        "<table><thead><tr><th>Deployment</th><th>Task</th><th>Version</th><th>Hosts</th><th>Status</th><th>Checked (UTC)</th><th>Last applied (UTC)</th></tr></thead><tbody>{rows}</tbody></table>"
+        "<table><thead><tr><th>Deployment</th><th>Task</th><th>Version</th><th class='num'>Hosts</th><th>Status</th><th>Checked (UTC)</th><th>Last applied (UTC)</th></tr></thead><tbody>{rows}</tbody></table>"
     ))
 }
 
 async fn history_fragment() -> Html<String> {
     let store = match TursoStore::open().await {
         Ok(s) => s,
-        Err(e) => return Html(format!("<p class='fail'>db error: {}</p>", esc(&e.to_string()))),
+        Err(e) => return Html(format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string()))),
     };
     let runs = match store.history(50).await {
         Ok(r) => r,
-        Err(e) => return Html(format!("<p class='fail'>db error: {}</p>", esc(&e.to_string()))),
+        Err(e) => return Html(format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string()))),
     };
     if runs.is_empty() {
-        return Html("<p class='muted'>no history</p>".into());
+        return Html("<div class='empty'>no activity yet</div>".into());
     }
     let mut rows = String::new();
     for r in runs {
-        let cls = if r.result == "ok" { "ok" } else { "fail" };
+        let action = format!("<span class='pill {a}'>{a}</span>", a = esc(&r.action));
+        let res = if r.result == "ok" {
+            "<span class='pill ok'><span class='d'></span>ok</span>"
+        } else {
+            "<span class='pill drift'><span class='d'></span>failed</span>"
+        };
         rows.push_str(&format!(
-            "<tr><td class='muted'>{}</td><td>{}</td><td><code>{}</code></td><td>{}</td><td>{}</td><td class='{}'>{}</td></tr>",
-            state::fmt_epoch(r.ts), esc(&r.action), esc(&r.deployment), esc(&r.task), esc(&r.host), cls, esc(&r.result)
+            "<tr><td class='muted mono'>{}</td><td>{}</td><td><code>{}</code></td><td>{}</td><td class='mono'>{}</td><td>{}</td></tr>",
+            state::fmt_epoch(r.ts), action, esc(&r.deployment), esc(&r.task), esc(&r.host), res
         ));
     }
     Html(format!(

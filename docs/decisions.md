@@ -672,3 +672,17 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - `crater ui` 部署表加 **Status 列(DRIFT 标红 / ok 绿 / unknown 灰)+ Checked 列**;聚合 `ok N/M` / `DRIFT x/M`。
   - **UI handler 每请求重开 DB**(Turso 跨进程写可见性:长期句柄看不到 CLI 进程的新写入;fresh open 读到已提交状态)。
 - **真机验证(.11/.12)**:`apply yq -i inv` → UI `ok 2/2`(绿);`rm yq@.12` + `task list --verify -i inv` → UI **`DRIFT 1/2`(红)**+ checked 时间;`apply` 自愈 → UI 回 `ok`。34+2 tests 绿,0 警告。schema 变更需清旧 `~/.crater/state.db`。
+
+---
+
+## 2026-06-01 · crater ui 改现代深色主题(D-057)
+
+### D-057 Web 看板重设计:深色 + 熔岩橙强调 + 统计卡片 + 状态 pill
+- **背景**:初版 UI 过于朴素。参考 Uptime Kuma / Portainer / Teleport / Signal Dashboard 等现代 infra 看板。
+- **决策/实现**:全部纯 CSS 内联(离线嵌入,无构建工具链/CDN,守 N1):
+  - 深色主题(`#0c0e15`)+ **crater 熔岩橙强调 `#ff6b35`**(呼应 crater);顶栏毛玻璃 + 脉动 live 点。
+  - 顶部**统计卡片**(`/api/stats`):Deployments / Hosts / Healthy / Drift(Drift>0 标红 + 左色条)。
+  - **状态 pill 徽章**:ok 绿 / DRIFT 红 / unknown 灰 / apply·delete 动作 / result;带圆点。
+  - 现代表格(行 hover、mono 技术字段、`<code>` 名)、卡片化 panel、响应式。
+  - 新增 `/api/stats`;`index` 改静态 const(CSS 大括号免转义);htmx 轮询不变。
+- **验证**:`/api/stats` 4 卡片、`/api/deployments` pill、页面含新主题。musl 静态 31.8MB,34+2 tests 绿,0 警告。
