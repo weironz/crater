@@ -8,7 +8,7 @@
 
 | 层 | 形态 | 改 Rust |
 |---|---|---|
-| 1 内置类型化 | Rust enum（download/pkg/systemd…） | 是（精选） |
+| 1 内置类型化 | Rust enum（place/pkg/systemd…） | 是（精选） |
 | **2 数据定义** | `modules/<name>.yaml`（params+check+act 模板） | **否**（已实现的契约地基） |
 | 3 外部 module | 脚本/静态二进制 + JSON 契约（agent 送达） | 否（后续） |
 | 4 `run_cmd`+`check` | 裸命令 + 探针 | 否 |

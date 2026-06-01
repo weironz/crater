@@ -55,7 +55,7 @@ OCI 只管「字节按 digest 存好」；crater-manifest 管「这些字节是�
 }
 ```
 
-> **D-017 守则**：`crater-manifest` 由 `crater build` 从**组件数据**生成；引擎不内置任何镜像名/制品名。`artifacts` 来自组件的 `download:` 原语，`images` 来自组件新增的 `images:` 声明。
+> **D-017 守则**：清单由 `crater build` 从 **task 数据**生成；引擎不内置任何镜像名/制品名。物料来自 task 的 `materials:` 段（`kind: binary/image/os_package`），绝不扫描 actions。
 
 ---
 
@@ -80,14 +80,16 @@ actions:
 
 ## 4. build 流程（在线控制机）
 
-`crater build -f spec.yaml -o x.oci`
+`crater build -f task.yaml -t ref`（→ 本地库；`crater save -o x.oci` 导出文件）
 
-1. 解析 spec → 组件 → DAG。
-2. 逐组件收集：
-   - **制品**：`collect_downloads` 得到 (url, dest)；`fetch_best` 拉取（直连→CN 镜像 fallback，复用现有逻辑）。
-   - **镜像**：读组件 `images:`；用 OCI distribution 客户端从 registry 拉 manifest+layers（纯 Rust，见 §6）。
-3. 写入 OCI Layout：每个 blob 内容寻址落 `blobs/sha256/`；组件目录打成 components 层；制品打成 artifacts 层；镜像作为嵌套 OCI blob 直接并入。
-4. 生成 crater-manifest（§2.1）→ 写 image manifest / config / index.json。
+1. 解析 task。
+2. **只读 task 的 `materials:` 段**（D-034/D-047）收集物料——**绝不扫 actions**，藏在 `run_cmd`
+   里的依赖不会进包也不会被误扫；`download` 动作已删，获取外部文件的唯一途径就是声明 `material`：
+   - **二进制/tarball**（`kind: binary`）：`fetch_best` 拉取（直连→CN 镜像 fallback）。
+   - **镜像**（`kind: image`，待接线）：用 OCI distribution 客户端从 registry 拉 manifest+layers（纯 Rust，见 §6）。
+3. 写入 OCI Layout：recipe = task YAML 打成 recipe 层；每个物料打成一层 `vnd.crater.material.v1`，
+   按 **material 名**（`org.crater.material.name`）标注；镜像作为嵌套 OCI blob 直接并入。
+4. 写 `artifactType` manifest / config / index.json（B 类 artifact，D-033）。
 5. 导出为 oci-archive tar（可选 zstd 压缩层；现有 flate2 先用 gzip，zstd 后续）。
 
 ---
@@ -98,10 +100,10 @@ actions:
 
 1. **上传**：分块 base64 over SSH 推送 `x.oci`（D-009，已验证 10MB+ 可行）。
 2. **解包**：目标机侧 crater（agent 模式）展开 OCI Layout；按 digest **自校验**（内容寻址，无需额外 sha256 步骤）。
-3. **制品落地**：
-   - 文件制品 → 按 crater-manifest `place` 放置（等价于在线的 download 产物）。
+3. **物料落地**：
+   - 文件物料 → `place` 按 **material 名**从包内 blob 推到 `dest`（与在线 `place` 同一动作，仅来源不同）。
    - 容器镜像 → 探测本地运行时（`nerdctl/docker/podman/ctr`，复用 `LoadImage` 的探测，D-017）`image import` / `load`；**或**推送到目标网内的**临时 registry**（F13），多节点指过去，避免每台塞一份。
-4. **执行计划**：跑同一套引擎，离线模式下 `download` Op → push-from-blob Op（现状 `engine.rs offline_blobs` 的自然延伸，把 blob 来源从 tar.gz 换成 OCI Layout）。
+4. **执行计划**：跑同一套 task 引擎，离线模式下 `place` 解析为 push-from-blob（`engine.rs offline_blobs` 按 material 名索引），与在线唯一区别是字节来自包内而非 `curl`。
 
 ---
 

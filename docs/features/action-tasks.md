@@ -81,8 +81,8 @@ action 项字段(全是引擎读得懂的封闭词汇,**无需执行即可静态
 
 ## 内置 action 原语(Rust 白盒)
 
-`pkg_install` `download` `extract` `render_template` `write_file` `systemd_unit`
-`run_cmd` `place` `load_image` `module`,以及 D-037-b 补齐的:
+`pkg_install` `place` `extract` `render_template` `write_file` `systemd_unit`
+`run_cmd` `load_image` `module`,以及 D-037-b 补齐的:
 
 | 原语 | 参数 | 引擎语义(幂等) |
 |---|---|---|

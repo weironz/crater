@@ -127,13 +127,13 @@ pub struct PlanContext {
     pub component_dir: PathBuf,
     /// Template variables (`version` plus user params).
     pub vars: BTreeMap<String, String>,
-    /// Mirror rewriter for download URLs (online mode, China-friendly).
+    /// Mirror rewriter for material URLs (online mode, China-friendly).
     pub source: OnlineSource,
-    /// Offline mode: maps a key -> local pre-fetched blob. Download actions key
-    /// by rendered URL; `place` actions key by material name (D-034).
+    /// Offline mode: maps a material name -> local pre-fetched blob, so `place`
+    /// resolves the packed blob by material name (D-034).
     pub offline_blobs: Option<BTreeMap<String, PathBuf>>,
-    /// Declared materials by name (D-034), populated from the descriptor in
-    /// `build_plan` so `place` can resolve a material's URL for online fetch.
+    /// Declared materials by name (D-034), populated from the task so `place`
+    /// can resolve a material's URL for online fetch.
     pub materials: BTreeMap<String, crate::component::Material>,
     /// Directory holding data-defined modules (`modules/<name>.yaml`, D-029).
     pub modules_dir: PathBuf,
@@ -161,7 +161,7 @@ impl PlanContext {
         self
     }
 
-    /// The rendered download URL for an action.
+    /// The rendered URL for a material's `url_tmpl` (online fetch / build).
     /// Offline mode skips mirror rewrite (the raw URL is the manifest key).
     pub fn rendered_url(&self, url_tmpl: &str) -> crate::Result<String> {
         let raw = render(url_tmpl, &self.vars)?;
@@ -417,34 +417,6 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 cmd: ctx.os.install_cmd(&pkgs),
                 soft_fail: false,
                 check,
-            }
-        }
-        Action::Download { url_tmpl, dest, .. } => {
-            let url = ctx.rendered_url(url_tmpl)?;
-            let dest = dest
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "/tmp/crater-dl".to_string());
-            if let Some(blobs) = &ctx.offline_blobs {
-                let local = blobs
-                    .get(&url)
-                    .ok_or_else(|| anyhow::anyhow!("offline bundle missing blob for {url}"))?;
-                Op::PushFile {
-                    phase,
-                    describe: format!("push (offline) -> {dest}"),
-                    local_path: local.clone(),
-                    dest,
-                    mode: None,
-                }
-            } else {
-                Op::Shell {
-                    phase,
-                    describe: format!("download {url}"),
-                    cmd: format!("curl -fL --retry 3 -o '{dest}' '{url}'"),
-                    soft_fail: false,
-                    // Skip the download if the artifact is already present.
-                    check: Some(format!("test -s '{dest}'")),
-                }
             }
         }
         Action::Place { material, dest, mode } => {
@@ -1069,6 +1041,17 @@ mod tests {
     use super::*;
     use crate::component::Action;
 
+    fn test_material(name: &str, url: &str) -> crate::component::Material {
+        crate::component::Material {
+            name: name.into(),
+            kind: crate::component::MaterialKind::Binary,
+            url_tmpl: Some(url.into()),
+            reference: None,
+            packages: Default::default(),
+            sha256: None,
+        }
+    }
+
     fn shell_check(op: &Op) -> Option<&str> {
         match op {
             Op::Shell { check, .. } => check.as_deref(),
@@ -1078,15 +1061,16 @@ mod tests {
 
     #[test]
     fn install_actions_get_idempotency_checks() {
-        let ctx = PlanContext::new(OsFamily::Debian, "1.0".into(), PathBuf::from("."));
+        let mut ctx = PlanContext::new(OsFamily::Debian, "1.0".into(), PathBuf::from("."));
+        ctx.materials.insert("x".into(), test_material("x", "https://example.com/x"));
 
-        // download -> check that the artifact already exists
+        // place (online) -> check that the artifact already exists
         let dl = action_op(
             Phase::Install,
-            &Action::Download {
-                url_tmpl: "https://example.com/x".into(),
-                sha256: None,
-                dest: Some(PathBuf::from("/usr/local/bin/x")),
+            &Action::Place {
+                material: "x".into(),
+                dest: PathBuf::from("/usr/local/bin/x"),
+                mode: None,
             },
             &ctx,
         )
@@ -1223,14 +1207,16 @@ mod tests {
     fn plan_round_trips_through_yaml() {
         // The agent wire format must survive serialize -> deserialize intact,
         // including the idempotency `check` (D-019).
-        let ctx = PlanContext::new(OsFamily::Debian, "4.53.2".into(), PathBuf::from("."));
+        let mut ctx = PlanContext::new(OsFamily::Debian, "4.53.2".into(), PathBuf::from("."));
+        ctx.materials
+            .insert("x".into(), test_material("x", "https://example.com/v{{version}}/x"));
         let plan = vec![
             action_op(
                 Phase::Install,
-                &Action::Download {
-                    url_tmpl: "https://example.com/v{{version}}/x".into(),
-                    sha256: None,
-                    dest: Some(PathBuf::from("/usr/local/bin/x")),
+                &Action::Place {
+                    material: "x".into(),
+                    dest: PathBuf::from("/usr/local/bin/x"),
+                    mode: None,
                 },
                 &ctx,
             )

@@ -540,3 +540,15 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **结果**:单一 task 模型。`crater apply`(本机/`--host`/`-i`)、命名 task、镜像、离线 artifact 全归 task;自举 agent 贯穿;`Action` 16 原语保留。
 - **残留**(后续):`bundle.rs` legacy(`Manifest`/`store_blob`/`store_rootfs_layer` 等,仅 bundle 单测用);`README`/`docs/features` 历史 component 描述待刷新。
 - **真机**:2a–2c 各步已真机验证;2d 后命名 task agent 冒烟通过。33 tests 绿,0 警告。
+
+---
+
+## 2026-06-01 · 删除 `action: download`,materials 成为获取外部内容的唯一途径
+
+### D-047 删 `download` 原语,外部文件统一走 `materials:` + `place`
+- **背景**:讨论 docker/arch 离线打包时澄清——`build_task_to_store` 实际**只读 `task.materials`**(`main.rs`),早已不扫 actions(component 时代的 `collect_downloads` 在 D-046 随 `build_plan` 删除)。但 `Action::Download` 仍在,它是个「写了能在线 `curl`、但永远进不了离线包」的原语:build 不打它,离线 `apply` 必挂。这违反「打什么进包」的唯一真相源 = `materials:`。
+- **决策**:**删除 `Action::Download`**。凡需获取外部文件(二进制/tarball)一律声明 `materials:` 条目 + `action: place`。`place` 在线 `curl` material 的 `url_tmpl`、离线从包内 blob 取(按 material 名),一份数据两态通吃。
+- **理由**:① 唯一真相源——「需要外部内容」⇔「必须声明 material」,build 永不漏、也永不需扫 action 反推依赖;② 消除离线陷阱(download 在离线静默失败);③ 把 arch 维度收敛到 `Material` 一处(download 的 arch 问题随之消失);④ 守 D-034「依赖与动作解耦」、D-017「引擎零产品知识」。
+- **影响**:`component.rs` 删 `Download` 变体 + `produces_files`(已无引用,`build --image` 早删);`engine.rs` 删 `action_op` 的 download 分支,两处测试改用 `place`;`ai.rs` 系统提示去掉 `download`;`bundle.rs`/`engine.rs` 注释刷成 material/place 口径;文档(action-tasks/modules/idempotency/action-layer/engine-zero/design/offline-format §4)的原语清单与 `collect_downloads` 描述一并刷新。现有 task/example 无一使用 `action: download`,数据零改动。
+- **现存原语 9 个**:`pkg_install`/`place`/`extract`/`render_template`/`write_file`/`systemd_unit`/`run_cmd`/`load_image`/`module`(+ D-037-b 的 file/copy/service/lineinfile/user/group)。
+- **结果**:30 tests 绿,0 警告。为下一步 binary 物料的 **arch 维度**(per-host `uname -m` 探测 + `Material.arch` + build 多 arch 出 OCI index)扫清前提。

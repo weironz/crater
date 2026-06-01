@@ -147,7 +147,7 @@ Schema:
 
 Action primitives (use ONLY these):
   pkg_install(packages:{debian:[..],rhel:[..]}), place(material,dest,mode),
-  download(url_tmpl,dest), extract(to,from,strip), write_file(dst,content),
+  extract(to,from,strip), write_file(dst,content),
   render_template(src,dst), run_cmd(cmd,check), file(path,state,mode),
   copy(src,dest,mode), service(name,state,enabled), lineinfile(path,line,regexp),
   user(name,...), group(name,...), systemd_unit(name,enable,start), module(uses,with).

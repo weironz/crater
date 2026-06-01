@@ -25,7 +25,7 @@ Crater 是一个**领域无关的、跑在 SSH 上的声明式远程执行引擎
 
 | 允许在代码里 | 禁止在代码里（必须是数据） |
 |---|---|
-| 通用原语：`download`/`extract`/`render_template`/`write_file`/`systemd_unit`/`run_cmd`/`pkg_install`/`load_image`… | 产品名、服务名、别名、镜像源、诊断规则、依赖关系 |
+| 通用原语：`place`/`extract`/`render_template`/`write_file`/`systemd_unit`/`run_cmd`/`pkg_install`/`load_image`… | 产品名、服务名、别名、镜像源、诊断规则、依赖关系 |
 | 幂等契约、DAG 排序、SSH 执行、OCI 打包/解包、镜像导入机制 | 「es 其实是 elasticsearch」「docker 的服务叫 docker」「装 mysql 要哪些 OS 包」 |
 
 **判据**：新增一个可部署对象 = 写一个 `tasks/<name>.yaml`（task：原语 + 物料），**绝不改 Rust 重编译**。
@@ -70,7 +70,7 @@ Crater 是一个**领域无关的、跑在 SSH 上的声明式远程执行引擎
           │                                │
   目标机自己拉(curl/apt/                目标机零联网：制品来自
   runtime pull)，CN 镜像               推送过来的 OCI 包，
-  源 fallback                          download→push-from-blob,
+  源 fallback                          place→push-from-blob,
           │                            镜像→本地导入/临时 registry
           └───────────────┬────────────────┘
                    同一个 Executor（SSH/Local）执行
@@ -216,7 +216,7 @@ crater 有两种把动作落到目标机的方式。**agent 是默认执行模�
 
 | 层 | 形态 | 何时用 | 改 Rust? | 类比 ansible |
 |---|---|---|---|---|
-| **1 内置类型化** | Rust enum 变体（download/pkg_install/systemd_unit…，将来 file/copy/template/service/user/lineinfile/cron），typed + 幂等 + OS 抽象，lower 成 shell | 通用高频、需幂等/OS 抽象的核心 | 是（刻意精选 ~15-20） | ansible-core 模块 |
+| **1 内置类型化** | Rust enum 变体（place/pkg_install/systemd_unit/file/copy/service/user/lineinfile…），typed + 幂等 + OS 抽象，lower 成 shell | 通用高频、需幂等/OS 抽象的核心 | 是（刻意精选 ~15-20） | ansible-core 模块 |
 | **2 数据定义** | `modules/<name>.yaml`：`params` + `check:` + `act:` 模板，引擎渲染后 lower 成 `Op::Shell{check,cmd}` | 简单可复用幂等操作，零代码 | 否（放目录即加载） | — (crater 特有，最轻) |
 | **3 外部 module** | 脚本/静态二进制 + JSON 契约（收 params+check_mode，吐 `{status,changed,msg}`），agent 送到目标机跑 | 复杂逻辑、第三方生态 | 否（开放生态） | collection / Galaxy |
 | **4 `run_cmd`+`check`** | 裸命令 + 幂等探针 | 一次性长尾、逃生口 | 否 | command/shell |
@@ -305,7 +305,7 @@ crater ai generate "<大白话>"     # NL→spec（确定性护栏校验）— �
 
 | 阶段 | 钩子 | 干什么 | 对应需求 |
 |---|---|---|---|
-| **bundle 时** | 依赖分析 | 分析 yaml 里声明的 `requires`/`images`/`download`，**推断隐性依赖**（内核参数、系统包、缺失镜像），建议补进包 | AI2 |
+| **bundle 时** | 依赖分析 | 分析 yaml 里声明的 `materials`/`images`，**推断隐性依赖**（内核参数、系统包、缺失镜像），建议补进包 | AI2 |
 | **apply 报错时** | 日志分析 | 部署中某步非零退出 → 抓该步 stderr/journal → 规则引擎先行，`--ai` 叠加模型给根因+修复命令 | AI5/AI6 |
 | **apply 完成后** | doctor + 智能修复 | 部署后跑 `ai diagnose <release>` 健康检查；发现问题给修复建议（**仅建议，人工确认才执行**） | AI10 |
 

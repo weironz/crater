@@ -13,15 +13,15 @@
 //!   ├─ OCI config                      minimal config (rootfs.diff_ids)
 //!   ├─ OCI image manifest              config + layers (components + each artifact)
 //!   ├─ components layer (tar)          component.yaml + templates
-//!   └─ artifact blob(s)                downloaded files, annotated with their source URL
+//!   └─ material blob(s)                fetched files, annotated with their material name
 //! components/<name>/...               crater convenience copy (deploy reads here; OCI tools ignore it)
 //! ```
 //!
 //! Content-addressing means digests ARE the integrity check (no hand-written
 //! sha list). Container images (nested OCI blobs) + temp registry are the next
-//! increment; today's layout carries file artifacts. Build (online): fetch every
-//! `download` URL, hash, assemble the layout. Deploy (offline): unpack, verify
-//! by digest, run the plan feeding pre-fetched blobs instead of `curl`.
+//! increment; today's layout carries file materials. Build (online): fetch every
+//! declared `material` URL, hash, assemble the layout. Deploy (offline): unpack,
+//! verify by digest, run the plan feeding pre-fetched blobs instead of `curl`.
 
 use std::fs;
 use std::io::Read;
@@ -48,7 +48,7 @@ pub const AT_COMPONENT: &str = "application/vnd.crater.component.v1";
 const MT_COMPONENT_CONFIG: &str = "application/vnd.crater.component.config.v1+json";
 /// Layer carrying the component recipe (component.yaml).
 const MT_RECIPE: &str = "application/vnd.crater.recipe.v1+yaml";
-/// Layer carrying a downloaded material (binary/tarball), annotated with its
+/// Layer carrying a fetched material (binary/tarball), annotated with its
 /// logical material name (D-034) so `place` resolves it offline by name.
 const MT_MATERIAL: &str = "application/vnd.crater.material.v1";
 const ANN_MATERIAL_NAME: &str = "org.crater.material.name";
@@ -58,8 +58,8 @@ const ANN_RUN_MODE: &str = "org.crater.run-mode";
 
 /// A crater component artifact materialized for install: the recipe is written
 /// under `components/<name>/component.yaml`, and `blobmap` maps each material's
-/// source-url to its local blob (so the recipe's `download` actions resolve
-/// offline). Drives `run_pipeline` in offline mode — no fake rootfs extraction.
+/// logical name to its local blob (so the recipe's `place` actions resolve
+/// offline). Drives the task engine in offline mode — no fake rootfs extraction.
 #[derive(Debug, Clone)]
 pub struct MaterializedComponent {
     pub name: String,
@@ -248,11 +248,11 @@ impl BundleStage {
         self.image_from_layer(reference, &layer)
     }
 
-    /// Build a **B 类 OCI artifact** for a crater component (D-032): a recipe
-    /// layer + one material layer per downloaded artifact (annotated source-url)
-    /// + a small component config, under an `artifactType` manifest. NOT a
-    /// runnable image. Loaded by recipe-replay (materials feed the recipe's
-    /// `download` actions offline), not by extracting a rootfs.
+    /// Build a **B 类 OCI artifact** for a crater task (D-032): a recipe
+    /// layer + one material layer per material (annotated by material name)
+    /// + a small config, under an `artifactType` manifest. NOT a runnable
+    /// image. Loaded by recipe-replay (materials feed the recipe's `place`
+    /// actions offline), not by extracting a rootfs.
     pub fn store_component_artifact(
         &self,
         reference: &str,

@@ -90,14 +90,14 @@ actions:                   # 动作清单;依赖用 needs 声明,排序由引擎
 
 新增标准(三条全满足才加):**高频** + **run_cmd 表达别扭** + **值得引擎白盒理解(为了幂等/dry-run)**。否则一律 `run_cmd` 组合。
 
-- **现有(10)**:`pkg_install`、`download`、`extract`、`render_template`、`write_file`、`systemd_unit`、`run_cmd`、`place`、`load_image`、`module`。
+- **现有(9)**:`pkg_install`、`place`、`extract`、`render_template`、`write_file`、`systemd_unit`、`run_cmd`、`load_image`、`module`(`download` 已删,获取外部文件统一走 `place`+`materials`,D-047)。
 - **建议补齐(Ansible 高频,白盒收益大)**:
   - `file`(建/删/权限/属主/软链,幂等)
   - `copy`(推控制端文件到目标,幂等 sha256 比对)
   - `service`(`systemd_unit` 泛化:start/stop/restart/enable)
   - `lineinfile`(幂等改一行配置)
   - `user` / `group`
-- **不新增、用现有**:`command/shell`=`run_cmd`,`template`=`render_template`,`get_url`=`download`,`unarchive`=`extract`(只做别名映射,不增种类)。
+- **不新增、用现有**:`command/shell`=`run_cmd`,`template`=`render_template`,`get_url`=`place`(声明 material),`unarchive`=`extract`(只做别名映射,不增种类)。
 
 总数控制在 ~15–20,远未触及 30 上限——上限是给"真高频白盒需求"留的,不是用来堆的。
 

@@ -10,7 +10,7 @@ crater 的第一性原理：**引擎（Rust）只懂「怎么做」（通用原�
 
 | 允许在代码 | 必须是数据 |
 |---|---|
-| place/run_cmd/file/copy/service/download/extract/template/module… 通用原语 | 产品名/服务名/镜像源/诊断规则/依赖 |
+| place/run_cmd/file/copy/service/extract/template/module… 通用原语 | 产品名/服务名/镜像源/诊断规则/依赖 |
 
 ## 基本 demo
 
