@@ -9,13 +9,11 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 use axum::{
-    extract::State,
     http::header,
     response::{Html, IntoResponse},
     routing::get,
     Router,
 };
-use std::sync::Arc;
 
 use crater_core::state::{self, StateStore, TursoStore};
 
@@ -23,13 +21,15 @@ use crater_core::state::{self, StateStore, TursoStore};
 const HTMX_JS: &[u8] = include_bytes!("../assets/htmx.min.js");
 
 pub async fn serve(bind: &str, port: u16) -> Result<()> {
-    let store = Arc::new(TursoStore::open().await?);
+    // Validate the DB is openable up front; handlers re-open per request so
+    // they always see the latest writes from the CLI process (Turso cross-
+    // process visibility — a fresh handle reads committed state, D-055).
+    TursoStore::open().await?;
     let app = Router::new()
         .route("/", get(index))
         .route("/api/deployments", get(deployments_fragment))
         .route("/api/history", get(history_fragment))
-        .route("/htmx.min.js", get(htmx_js))
-        .with_state(store);
+        .route("/htmx.min.js", get(htmx_js));
     let addr: SocketAddr = format!("{bind}:{port}")
         .parse()
         .map_err(|e| anyhow::anyhow!("bad bind address {bind}:{port}: {e}"))?;
@@ -78,7 +78,11 @@ async fn index() -> Html<String> {
     ))
 }
 
-async fn deployments_fragment(State(store): State<Arc<TursoStore>>) -> Html<String> {
+async fn deployments_fragment() -> Html<String> {
+    let store = match TursoStore::open().await {
+        Ok(s) => s,
+        Err(e) => return Html(format!("<p class='fail'>db error: {}</p>", esc(&e.to_string()))),
+    };
     let deps = match store.list_deployments().await {
         Ok(d) => d,
         Err(e) => return Html(format!("<p class='fail'>db error: {}</p>", esc(&e.to_string()))),
@@ -86,32 +90,60 @@ async fn deployments_fragment(State(store): State<Arc<TursoStore>>) -> Html<Stri
     if deps.is_empty() {
         return Html("<p class='muted'>no deployments recorded</p>".into());
     }
-    // Aggregate by deployment label (D-052/D-053): tasks, versions, host count, latest.
-    type Agg = (BTreeSet<String>, BTreeSet<String>, usize, i64);
+    // Aggregate by deployment label (D-052/053): tasks, versions, host count,
+    // latest applied, drift status (D-055), latest check time.
+    #[derive(Default)]
+    struct Agg {
+        tasks: BTreeSet<String>,
+        versions: BTreeSet<String>,
+        hosts: usize,
+        last: i64,
+        ok: usize,
+        drift: usize,
+        checked: i64,
+    }
     let mut by: BTreeMap<String, Agg> = BTreeMap::new();
     for d in deps {
-        let e = by.entry(d.deployment).or_insert_with(|| (BTreeSet::new(), BTreeSet::new(), 0, 0));
-        e.0.insert(d.name);
-        e.1.insert(d.version);
-        e.2 += 1;
-        e.3 = e.3.max(d.applied_at);
+        let e = by.entry(d.deployment).or_default();
+        e.tasks.insert(d.name);
+        e.versions.insert(d.version);
+        e.hosts += 1;
+        e.last = e.last.max(d.applied_at);
+        e.checked = e.checked.max(d.checked_at);
+        match d.status.as_str() {
+            "ok" => e.ok += 1,
+            "drift" => e.drift += 1,
+            _ => {}
+        }
     }
     let join = |s: BTreeSet<String>| {
         if s.len() == 1 { s.into_iter().next().unwrap() } else { format!("{} (mixed)", s.into_iter().collect::<Vec<_>>().join(",")) }
     };
     let mut rows = String::new();
-    for (dep, (tasks, versions, hosts, last)) in by {
+    for (dep, a) in by {
+        let (cls, status) = if a.drift > 0 {
+            ("fail", format!("DRIFT {}/{}", a.drift, a.hosts))
+        } else if a.ok == a.hosts && a.hosts > 0 {
+            ("ok", format!("ok {}/{}", a.ok, a.hosts))
+        } else {
+            ("muted", "unknown".to_string())
+        };
+        let checked = if a.checked > 0 { state::fmt_epoch(a.checked) } else { "—".to_string() };
         rows.push_str(&format!(
-            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td class='num'>{}</td><td class='muted'>{}</td></tr>",
-            esc(&dep), esc(&join(tasks)), esc(&join(versions)), hosts, state::fmt_epoch(last)
+            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td class='num'>{}</td><td class='{}'>{}</td><td class='muted'>{}</td><td class='muted'>{}</td></tr>",
+            esc(&dep), esc(&join(a.tasks)), esc(&join(a.versions)), a.hosts, cls, status, checked, state::fmt_epoch(a.last)
         ));
     }
     Html(format!(
-        "<table><thead><tr><th>Deployment</th><th>Task</th><th>Version</th><th>Hosts</th><th>Last applied (UTC)</th></tr></thead><tbody>{rows}</tbody></table>"
+        "<table><thead><tr><th>Deployment</th><th>Task</th><th>Version</th><th>Hosts</th><th>Status</th><th>Checked (UTC)</th><th>Last applied (UTC)</th></tr></thead><tbody>{rows}</tbody></table>"
     ))
 }
 
-async fn history_fragment(State(store): State<Arc<TursoStore>>) -> Html<String> {
+async fn history_fragment() -> Html<String> {
+    let store = match TursoStore::open().await {
+        Ok(s) => s,
+        Err(e) => return Html(format!("<p class='fail'>db error: {}</p>", esc(&e.to_string()))),
+    };
     let runs = match store.history(50).await {
         Ok(r) => r,
         Err(e) => return Html(format!("<p class='fail'>db error: {}</p>", esc(&e.to_string()))),

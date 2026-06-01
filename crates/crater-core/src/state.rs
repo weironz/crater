@@ -45,6 +45,11 @@ pub struct Deployment {
     pub version: String,
     pub source: String,
     pub applied_at: i64,
+    /// Last known drift status (D-055): "ok" | "drift" | "unknown". Set to "ok"
+    /// on apply (apply runs the verify phase); refreshed by `--verify`.
+    pub status: String,
+    /// When `status` was last established (epoch secs; 0 = never).
+    pub checked_at: i64,
 }
 
 /// One job-run history entry (apply or delete on a host) — the primary view.
@@ -103,6 +108,10 @@ pub async fn read_markers(exec: &dyn Executor) -> crate::Result<Vec<Marker>> {
 pub trait StateStore {
     async fn record_apply(&self, host: &str, m: &Marker) -> crate::Result<()>;
     async fn record_delete(&self, host: &str, task: &str, ts: i64) -> crate::Result<()>;
+    /// Update a deployment's drift status (D-055), set by `--verify`. `ok`:
+    /// Some(true)=ok, Some(false)=drift, None=unknown. No-op if the row is
+    /// absent (the deployment was applied from another control machine).
+    async fn record_verify(&self, host: &str, task: &str, ok: Option<bool>, checked_at: i64) -> crate::Result<()>;
     async fn list_deployments(&self) -> crate::Result<Vec<Deployment>>;
     async fn history(&self, limit: usize) -> crate::Result<Vec<JobRun>>;
 }
@@ -137,6 +146,8 @@ impl TursoStore {
                  version TEXT NOT NULL,
                  source TEXT NOT NULL,
                  applied_at INTEGER NOT NULL,
+                 status TEXT NOT NULL DEFAULT 'unknown',
+                 checked_at INTEGER NOT NULL DEFAULT 0,
                  PRIMARY KEY(host, task)
              );
              CREATE TABLE IF NOT EXISTS job_runs(
@@ -158,12 +169,14 @@ impl TursoStore {
 impl StateStore for TursoStore {
     async fn record_apply(&self, host: &str, m: &Marker) -> crate::Result<()> {
         let conn = self.db.connect().map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
+        // apply runs the verify phase, so a successful apply ⇒ status ok.
         conn.execute(
-            "INSERT INTO deployments(host, task, deployment, version, source, applied_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO deployments(host, task, deployment, version, source, applied_at, status, checked_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'ok', ?6)
              ON CONFLICT(host, task) DO UPDATE SET
                  deployment=excluded.deployment, version=excluded.version,
-                 source=excluded.source, applied_at=excluded.applied_at",
+                 source=excluded.source, applied_at=excluded.applied_at,
+                 status='ok', checked_at=excluded.applied_at",
             (host, m.name.clone(), m.deployment.clone(), m.version.clone(), m.source.clone(), m.applied_at),
         )
         .await
@@ -194,12 +207,28 @@ impl StateStore for TursoStore {
         Ok(())
     }
 
+    async fn record_verify(&self, host: &str, task: &str, ok: Option<bool>, checked_at: i64) -> crate::Result<()> {
+        let status = match ok {
+            Some(true) => "ok",
+            Some(false) => "drift",
+            None => "unknown",
+        };
+        let conn = self.db.connect().map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
+        conn.execute(
+            "UPDATE deployments SET status=?1, checked_at=?2 WHERE host=?3 AND task=?4",
+            (status, checked_at, host, task),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("record verify: {e}"))?;
+        Ok(())
+    }
+
     async fn list_deployments(&self) -> crate::Result<Vec<Deployment>> {
         let conn = self.db.connect().map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
         let mut rows = conn
             .query(
-                "SELECT host, task, deployment, version, source, applied_at FROM deployments
-                 ORDER BY host, task",
+                "SELECT host, task, deployment, version, source, applied_at, status, checked_at
+                 FROM deployments ORDER BY host, task",
                 (),
             )
             .await
@@ -213,6 +242,8 @@ impl StateStore for TursoStore {
                 version: r.get::<String>(3).map_err(|e| anyhow::anyhow!("col: {e}"))?,
                 source: r.get::<String>(4).map_err(|e| anyhow::anyhow!("col: {e}"))?,
                 applied_at: r.get::<i64>(5).map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                status: r.get::<String>(6).map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                checked_at: r.get::<i64>(7).map_err(|e| anyhow::anyhow!("col: {e}"))?,
             });
         }
         Ok(out)

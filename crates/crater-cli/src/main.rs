@@ -973,14 +973,26 @@ async fn gather_deployments(
     use crater_core::state::Deployment;
     if inventory.is_some() || host.is_some() {
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
+        // Persist verify results so the read-only UI can show drift (D-055).
+        let store = if verify { state::TursoStore::open().await.ok() } else { None };
+        let now = state::now_epoch();
         let mut out = Vec::new();
         for h in &hosts {
             let exec = connect_executor(h, true).await?;
             for m in state::read_markers(exec.as_ref()).await.unwrap_or_default() {
                 let status = if verify {
-                    verify_on_host(exec.as_ref(), &m.source).await
+                    let s = verify_on_host(exec.as_ref(), &m.source).await;
+                    if let Some(st) = &store {
+                        let _ = st.record_verify(&h.name, &m.name, s, now).await;
+                    }
+                    s
                 } else {
                     None
+                };
+                let (status_str, checked) = match status {
+                    Some(true) => ("ok".to_string(), now),
+                    Some(false) => ("drift".to_string(), now),
+                    None => ("unknown".to_string(), 0),
                 };
                 out.push(DepRow {
                     dep: Deployment {
@@ -990,6 +1002,8 @@ async fn gather_deployments(
                         version: m.version,
                         source: m.source,
                         applied_at: m.applied_at,
+                        status: status_str,
+                        checked_at: checked,
                     },
                     status,
                 });

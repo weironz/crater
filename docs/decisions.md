@@ -658,3 +658,17 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **"然后"= re-apply 自愈**:检测只读;要修就 `crater apply`(幂等收敛,changed 即修复的漂移)。
 - **真机验证(.11/.12)**:`list --verify` → `ok 2/2`;`rm /usr/local/bin/yq` on .12 → `show yq --verify` → n11=ok/n12=DRIFT,`list --verify` → `DRIFT 1/2`;`apply yq -i inv` → .12 changed=1 自愈;`list --verify` → 回到 `ok 2/2`。34+2 tests 绿,0 警告。
 - **后续**:`--verify` 状态进 `crater ui` 看板;artifact-source 的 verify(拉 recipe)。
+
+---
+
+## 2026-06-01 · 漂移状态接进 crater ui 看板
+
+### D-056 `--verify` 结果持久化到 DB,`crater ui` 只读显示漂移
+- **背景**:UI 是被动只读、无凭据、不连主机;而 `--verify` 要连机器跑。所以**不能让 UI 去 verify**——而是 **`--verify`(CLI,有凭据)把结果写进 DB,UI 只读显示**(契合"CLI 改/查、UI 是视图")。
+- **决策/实现**:
+  - `deployments` 表加 `status`(ok/drift/unknown)+ `checked_at`;`Deployment` 加同名字段。
+  - **apply 成功 → status='ok'、checked_at=applied_at**(apply 本就跑了 verify 阶段)。
+  - 新 `StateStore::record_verify(host,task,ok,checked_at)`(UPDATE);`task list/show --verify` 在连机器 verify 的同时**把每台结果写回 DB**。
+  - `crater ui` 部署表加 **Status 列(DRIFT 标红 / ok 绿 / unknown 灰)+ Checked 列**;聚合 `ok N/M` / `DRIFT x/M`。
+  - **UI handler 每请求重开 DB**(Turso 跨进程写可见性:长期句柄看不到 CLI 进程的新写入;fresh open 读到已提交状态)。
+- **真机验证(.11/.12)**:`apply yq -i inv` → UI `ok 2/2`(绿);`rm yq@.12` + `task list --verify -i inv` → UI **`DRIFT 1/2`(红)**+ checked 时间;`apply` 自愈 → UI 回 `ok`。34+2 tests 绿,0 警告。schema 变更需清旧 `~/.crater/state.db`。
