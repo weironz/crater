@@ -241,57 +241,17 @@ actions:
     enabled: true
     needs: [kubelet_dropin, svc_ctd]
 
-  # —— 离线导入镜像到 k8s.io(kubeadm init 不再联网拉)——
-  - id: load_apiserver
+  # —— 离线导入镜像到 k8s.io(一步导入全部,kubeadm init 不再联网拉,D-074)——
+  - id: load_images
     action: load_image
-    material: img-apiserver
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_cm
-    action: load_image
-    material: img-cm
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_scheduler
-    action: load_image
-    material: img-scheduler
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_proxy
-    action: load_image
-    material: img-proxy
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_coredns
-    action: load_image
-    material: img-coredns
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_pause
-    action: load_image
-    material: img-pause
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_etcd
-    action: load_image
-    material: img-etcd
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_flannel
-    action: load_image
-    material: img-flannel
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_flannelcni
-    action: load_image
-    material: img-flannel-cni
+    materials: [img-apiserver, img-cm, img-scheduler, img-proxy, img-coredns, img-pause, img-etcd, img-flannel, img-flannel-cni]
     namespace: "k8s.io"
     needs: [svc_ctd]
 
   # —— 起集群 ——
   - id: kubeadm_init
     action: shell
-    needs: [svc_kubelet, kubeadm, load_apiserver, load_cm, load_scheduler, load_proxy, load_coredns, load_pause, load_etcd]
+    needs: [svc_kubelet, kubeadm, load_images]
     cmd: "kubeadm init --pod-network-cidr={{pod_cidr}} --image-repository {{image_repo}} --kubernetes-version v{{version}} --cri-socket=unix:///run/containerd/containerd.sock"
     check: "test -f /etc/kubernetes/admin.conf"
   - id: kubeconfig

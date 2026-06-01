@@ -52,6 +52,15 @@ impl StepStatus {
     }
 }
 
+/// One image in an [`Op::ImageImport`] batch (D-074): a reference plus, offline,
+/// the control-side oci-archive blob to push+import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageItem {
+    pub reference: String,
+    #[serde(default)]
+    pub local_archive: Option<PathBuf>,
+}
+
 /// A concrete, executor-dispatchable operation.
 ///
 /// Serializable so a lowered plan can be shipped to a target and run there by
@@ -92,16 +101,14 @@ pub enum Op {
         #[serde(default)]
         mode: Option<String>,
     },
-    /// Load a container image into the target's runtime (D-061). Offline:
-    /// `local_archive` is a control-side oci-archive (pushed + `import`ed);
-    /// online: `reference` is pulled by the runtime. Runtime is probed unless
-    /// `runtime` is set; `namespace` is passed to ctr/nerdctl (e.g. k8s.io).
+    /// Load one or more container images into the target's runtime (D-061/074).
+    /// Each [`ImageItem`]: offline → `local_archive` (pushed + `import`ed),
+    /// online → `reference` pulled. One runtime probe + `namespace` for the
+    /// whole batch. Runtime is probed unless `runtime` is set.
     ImageImport {
         phase: Phase,
         describe: String,
-        reference: String,
-        #[serde(default)]
-        local_archive: Option<PathBuf>,
+        images: Vec<ImageItem>,
         #[serde(default)]
         namespace: Option<String>,
         #[serde(default)]
@@ -167,7 +174,7 @@ impl Op {
             Op::Shell { cmd, .. } => Some(cmd),
             Op::WriteFile { path, .. } => Some(path),
             Op::PushFile { dest, .. } => Some(dest),
-            Op::ImageImport { reference, .. } => Some(reference),
+            Op::ImageImport { describe, .. } => Some(describe),
             Op::UnarchiveMaterial { to, .. } => Some(to),
             Op::PackageInstall { describe, .. } => Some(describe),
         }
@@ -723,32 +730,43 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 check: desc.check.as_ref().map(|c| render(c, &vars)).transpose()?,
             }
         }
-        Action::LoadImage { material, namespace, runtime } => {
-            // Resolve the kind:image material (D-061): online → runtime pulls its
-            // `ref`; offline → import the packed oci-archive blob.
-            let m = ctx.resolve_material(material)?;
-            let reference = m
-                .reference
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("load_image: material '{material}' has no `ref` (kind: image)"))?;
-            let reference = render(reference, &ctx.vars)?;
-            let local_archive = if let Some(blobs) = &ctx.offline_blobs {
-                let key = PlanContext::material_blob_key(m);
-                Some(
-                    blobs
-                        .get(&key)
-                        .or_else(|| blobs.get(material))
-                        .ok_or_else(|| anyhow::anyhow!("offline bundle missing image material '{key}'"))?
-                        .clone(),
-                )
+        Action::LoadImage { material, materials, namespace, runtime } => {
+            // Resolve one or more kind:image materials (D-061/074): online →
+            // runtime pulls each `ref`; offline → import each packed oci-archive.
+            let names: Vec<&String> = material.iter().chain(materials.iter()).collect();
+            if names.is_empty() {
+                anyhow::bail!("load_image: needs `material` or `materials`");
+            }
+            let mut images = Vec::with_capacity(names.len());
+            for name in &names {
+                let m = ctx.resolve_material(name)?;
+                let reference = m.reference.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("load_image: material '{name}' has no `ref` (kind: image)")
+                })?;
+                let reference = render(reference, &ctx.vars)?;
+                let local_archive = if let Some(blobs) = &ctx.offline_blobs {
+                    let key = PlanContext::material_blob_key(m);
+                    Some(
+                        blobs
+                            .get(&key)
+                            .or_else(|| blobs.get(name.as_str()))
+                            .ok_or_else(|| anyhow::anyhow!("offline bundle missing image material '{key}'"))?
+                            .clone(),
+                    )
+                } else {
+                    None
+                };
+                images.push(ImageItem { reference, local_archive });
+            }
+            let describe = if images.len() == 1 {
+                format!("load image {}", images[0].reference)
             } else {
-                None
+                format!("load {} images", images.len())
             };
             Op::ImageImport {
                 phase,
-                describe: format!("load image {reference}"),
-                reference,
-                local_archive,
+                describe,
+                images,
                 namespace: namespace.clone(),
                 runtime: runtime.clone(),
             }
@@ -1263,13 +1281,13 @@ async fn exec_one(
             }
         }
         Op::ImageImport {
-            reference,
-            local_archive,
+            images,
             namespace,
             runtime,
             ..
         } => {
-            // Pick a container runtime: explicit, else probe (D-061).
+            // Pick a container runtime ONCE for the whole batch: explicit, else
+            // probe (D-061/074).
             let rt = match runtime {
                 Some(r) => r.clone(),
                 None => {
@@ -1277,7 +1295,7 @@ async fn exec_one(
                     let out = exec.run(probe).await?;
                     let r = out.stdout.trim().to_string();
                     if r.is_empty() {
-                        anyhow::bail!("step {n}: no container runtime (nerdctl/ctr/docker/podman) on target for image '{reference}'");
+                        anyhow::bail!("step {n}: no container runtime (nerdctl/ctr/docker/podman) on target");
                     }
                     r
                 }
@@ -1287,34 +1305,37 @@ async fn exec_one(
                 Some(n) if rt == "ctr" || rt == "nerdctl" => format!(" -n {n}"),
                 _ => String::new(),
             };
-            let cmd = if let Some(archive) = local_archive {
-                // Offline: push the oci-archive, then import it.
-                let data = std::fs::read(archive)
-                    .map_err(|e| anyhow::anyhow!("read image archive {}: {e}", archive.display()))?;
-                let remote = format!("/tmp/crater-img-{}.tar", sanitize(reference));
-                exec.write_file(&remote, &data).await?;
-                tracing::debug!("      pushed {} bytes oci-archive -> {remote}", data.len());
-                match rt.as_str() {
-                    "ctr" => format!("ctr{ns} images import {remote} && rm -f {remote}"),
-                    "nerdctl" => format!("nerdctl{ns} load -i {remote} && rm -f {remote}"),
-                    _ => format!("{rt} load -i {remote} && rm -f {remote}"),
+            for img in images {
+                let reference = &img.reference;
+                let cmd = if let Some(archive) = &img.local_archive {
+                    // Offline: push the oci-archive, then import it.
+                    let data = std::fs::read(archive)
+                        .map_err(|e| anyhow::anyhow!("read image archive {}: {e}", archive.display()))?;
+                    let remote = format!("/tmp/crater-img-{}.tar", sanitize(reference));
+                    exec.write_file(&remote, &data).await?;
+                    tracing::debug!("      pushed {} bytes oci-archive -> {remote}", data.len());
+                    match rt.as_str() {
+                        "ctr" => format!("ctr{ns} images import {remote} && rm -f {remote}"),
+                        "nerdctl" => format!("nerdctl{ns} load -i {remote} && rm -f {remote}"),
+                        _ => format!("{rt} load -i {remote} && rm -f {remote}"),
+                    }
+                } else {
+                    // Online: runtime pulls the reference.
+                    match rt.as_str() {
+                        "ctr" => format!("ctr{ns} images pull {reference}"),
+                        _ => format!("{rt} pull {reference}"),
+                    }
+                };
+                let out = exec.run(&cmd).await?;
+                if !out.ok() {
+                    for l in out.stderr.trim().lines() {
+                        tracing::debug!("      ! {l}");
+                    }
+                    anyhow::bail!("step {n} image import '{reference}' failed (exit {}): {}", out.code, out.stderr.trim());
                 }
-            } else {
-                // Online: runtime pulls the reference.
-                match rt.as_str() {
-                    "ctr" => format!("ctr{ns} images pull {reference}"),
-                    _ => format!("{rt} pull {reference}"),
-                }
-            };
-            let out = exec.run(&cmd).await?;
-            if out.ok() {
-                Ok((StepStatus::Changed, Vec::new()))
-            } else {
-                for l in out.stderr.trim().lines() {
-                    tracing::debug!("      ! {l}");
-                }
-                anyhow::bail!("step {n} image import '{reference}' failed (exit {}): {}", out.code, out.stderr.trim());
+                tracing::debug!("      imported {reference}");
             }
+            Ok((StepStatus::Changed, Vec::new()))
         }
         Op::PackageInstall {
             packages,
@@ -1404,6 +1425,34 @@ mod tests {
                 assert_eq!(creates.as_deref(), Some("/usr/local/bin/app"));
             }
             other => panic!("expected UnarchiveMaterial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_image_takes_a_materials_list() {
+        // D-074: one load_image with `materials: [..]` → one ImageImport op
+        // carrying all of them (single runtime probe).
+        let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
+        for n in ["a", "b", "c"] {
+            let mut m = test_material(n, "unused");
+            m.kind = crate::component::MaterialKind::Image;
+            m.reference = Some(format!("repo/{n}:1"));
+            m.url_tmpl = None;
+            ctx.add_material(m);
+        }
+        let act = Action::LoadImage {
+            material: None,
+            materials: vec!["a".into(), "b".into(), "c".into()],
+            namespace: Some("k8s.io".into()),
+            runtime: None,
+        };
+        match action_op(Phase::Install, &act, &ctx).unwrap() {
+            Op::ImageImport { images, namespace, .. } => {
+                assert_eq!(images.len(), 3);
+                assert_eq!(images[0].reference, "repo/a:1");
+                assert_eq!(namespace.as_deref(), Some("k8s.io"));
+            }
+            other => panic!("expected ImageImport, got {other:?}"),
         }
     }
 

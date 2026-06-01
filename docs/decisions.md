@@ -889,3 +889,8 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **决策**:`Extract`(action `unarchive`)加 `material` 字段(与 `from` 互斥)。引擎 `action_op` 解析:离线→该 material 的 blob 路径,在线→其 `url_tmpl`(同 `place` 注入 `{{arch}}`),产出新 Op `UnarchiveMaterial{to,strip,creates,local_archive,url}`。`exec` 里一步搞定:`creates` 已存在则跳过(**连取都不取**);否则离线把 blob 流到 `/tmp/crater-arc-*.tar`、在线 `curl` 下载,再 `tar -xf … -C to` 并删临时文件。与 `package`/`load_image` 的 `local_archive` 模式同构。
 - **理由**:声明意图(把这个压缩包解到这)而非手写中转步骤;少一个临时文件、少一步、`creates` 幂等还能省掉传输。
 - **影响**:`tasks/{k8s-ha,k8s-offline,docker}.yaml` 的 place+unarchive 对(及 cni 的 mkdir)收口成单条 `unarchive material:`(k8s 每个少 1~2 步、docker 少 1 步)。`ai.rs` 改 `unarchive(to, material, strip, creates)`。新增测试 `unarchive_takes_material_directly`。41 tests 绿。`from:`(已在目标上的路径)仍保留。**未重建 OCI**(用户:不着急;改动经单测验证,既有集群不受影响)。
+
+### D-074 `load_image` 支持 material 列表(一步导入多镜像)
+- **背景**:k8s 任务里 9 个 `load_image` 几乎一模一样,只有 material 名不同——同样暴露「批量」缺口(同 D-073)。
+- **决策**:`LoadImage` 加 `materials: [..]`(与单数 `material` 并存,合并去重);`action_op` 产出一个 `Op::ImageImport{ images: Vec<ImageItem>, namespace, runtime }`(`ImageItem{reference, local_archive}`)。`exec` 里**只探测一次运行时**,然后顺序导入每个镜像(离线 push+import、在线 pull)。不是 YAML 循环(守 D-036),只是「一个动作吃一个列表」,同 `package` 吃包列表。
+- **影响**:`tasks/{k8s-ha,k8s-offline}.yaml` 的 9 个 load_image → 1 个 `load_image materials:[..]`,相关 `needs` 改引 `load_images`。`ai.rs` 同步。新增测试 `load_image_takes_a_materials_list`。42 tests 绿。`material:` 单数保留。未重建 OCI(同 D-073)。

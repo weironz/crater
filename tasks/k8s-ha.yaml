@@ -268,50 +268,10 @@ actions:
     enabled: true
     needs: [kubelet_dropin, svc_ctd]
 
-  # —— 镜像导入(全节点,worker 也要 proxy/pause/flannel)——
-  - id: load_apiserver
+  # —— 镜像导入(全节点;一步导入全部,D-074)——
+  - id: load_images
     action: load_image
-    material: img-apiserver
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_cm
-    action: load_image
-    material: img-cm
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_scheduler
-    action: load_image
-    material: img-scheduler
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_proxy
-    action: load_image
-    material: img-proxy
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_coredns
-    action: load_image
-    material: img-coredns
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_pause
-    action: load_image
-    material: img-pause
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_etcd
-    action: load_image
-    material: img-etcd
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_flannel
-    action: load_image
-    material: img-flannel
-    namespace: "k8s.io"
-    needs: [svc_ctd]
-  - id: load_flannelcni
-    action: load_image
-    material: img-flannel-cni
+    materials: [img-apiserver, img-cm, img-scheduler, img-proxy, img-coredns, img-pause, img-etcd, img-flannel, img-flannel-cni]
     namespace: "k8s.io"
     needs: [svc_ctd]
 
@@ -375,7 +335,7 @@ actions:
   - id: kubeadm_init
     action: shell
     when_role: [bootstrap]
-    needs: [svc_kubelet, svc_keepalived, load_apiserver, load_cm, load_scheduler, load_proxy, load_coredns, load_pause, load_etcd]
+    needs: [svc_kubelet, svc_keepalived, load_images]
     cmd: "kubeadm init --control-plane-endpoint {{control_plane_endpoint}} --upload-certs --pod-network-cidr={{pod_cidr}} --image-repository {{image_repo}} --kubernetes-version v{{version}} --node-name {{inventory_hostname}} --cri-socket=unix:///run/containerd/containerd.sock"
     check: "test -f /etc/kubernetes/admin.conf"
   - id: kubeconfig
@@ -406,7 +366,7 @@ actions:
   - id: cp_join
     action: shell
     when_role: [master]
-    needs: [svc_kubelet, svc_keepalived, load_apiserver, load_cm, load_scheduler, load_proxy, load_coredns, load_pause, load_etcd]
+    needs: [svc_kubelet, svc_keepalived, load_images]
     cmd: "{{hostvars.bootstrap.join}} --control-plane --certificate-key {{hostvars.bootstrap.certkey}} --node-name {{inventory_hostname}} --cri-socket=unix:///run/containerd/containerd.sock"
     check: "test -f /etc/kubernetes/kubelet.conf"
   - id: master_kubeconfig
@@ -420,7 +380,7 @@ actions:
   - id: worker_join
     action: shell
     when_role: [worker]
-    needs: [svc_kubelet, load_proxy, load_pause, load_flannel, load_flannelcni]
+    needs: [svc_kubelet, load_images]
     cmd: "{{hostvars.bootstrap.join}} --node-name {{inventory_hostname}} --cri-socket=unix:///run/containerd/containerd.sock"
     check: "test -f /etc/kubernetes/kubelet.conf"
 
