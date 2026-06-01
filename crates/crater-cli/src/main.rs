@@ -2008,9 +2008,7 @@ fn known_systemd_units(tasks_dir: &Path) -> Vec<String> {
             if let Ok(t) = crater_core::task::TaskFile::from_yaml_file(&p) {
                 for step in &t.actions {
                     match &step.action {
-                        Action::Service { name, .. } | Action::SystemdUnit { name, .. } => {
-                            out.push(name.clone())
-                        }
+                        Action::Service { name, .. } => out.push(name.clone()),
                         _ => {}
                     }
                 }

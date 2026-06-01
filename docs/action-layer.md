@@ -94,7 +94,7 @@ actions:                   # 动作清单;依赖用 needs 声明,排序由引擎
 
 > 模块名 D-067 起对齐 Ansible(`run_cmd→shell`、`pkg_install→package`、`extract→unarchive`、`render_template→template`、`write_file` 并入 `copy`、`module→role`),旧名全留别名。完整清单见 [features/modules.md](features/modules.md)。
 
-- **内置模块**:`shell`、`place`、`unarchive`、`template`、`copy`(内联 content 或 src 文件)、`systemd_unit`、`package`、`load_image`、`role`、`file`、`service`、`lineinfile`、`user`、`group`(`download` 已删,获取外部文件统一走 `place`+`materials`,D-047)。
+- **内置模块**:`shell`、`place`、`unarchive`、`template`、`copy`(内联 content 或 src 文件)、`package`、`load_image`、`role`、`file`、`service`、`lineinfile`、`user`、`group`(`download` 已删,获取外部文件统一走 `place`+`materials`,D-047;`systemd_unit` 已并入 `service`,D-069)。
 - **建议补齐(Ansible 高频,白盒收益大)**:
   - `file`(建/删/权限/属主/软链,幂等)
   - `copy`(推控制端文件到目标,幂等 sha256 比对)

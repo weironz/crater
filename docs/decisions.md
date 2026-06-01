@@ -832,4 +832,10 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 ### D-068 `write_file` 并入 `copy`(ansible 形态:content= 或 src=)
 - **背景**:D-067 把原语对齐 Ansible 后,只剩 `write_file`(写内联内容)和 `copy`(拷控制端文件)是分开的;Ansible 是**同一个 `copy`** 用 `content:` 或 `src:` 区分。
 - **决策**:删除 `WriteFile` 变体,`Copy` 改为 `{ dest, src?, content?, mode? }` —— 二选一(都给/都不给则报错)。`write_file` 留作 `copy` 的 tag 别名、`dst` 留作 `dest` 的字段别名,旧 task 零破坏。两条路径都 lower 成同一个 `Op::WriteFile`(content 渲染 {{var}};src 读控制端文件内联进 plan,文本 only,二进制走 `place`)。
-- **影响**:`tasks/*.yaml`(docker/k8s/zot)8 处 `write_file`+`dst` 改 `copy`+`dest`;`ai.rs`、modules.md、action-layer/action-tasks 文档同步;新增测试 `copy_merges_write_file`(content/src/write_file 别名都解析为 `Copy`)。`place`/`load_image`/`systemd_unit` 仍为 crater 自有模块。38 tests 绿。
+- **影响**:`tasks/*.yaml`(docker/k8s/zot)8 处 `write_file`+`dst` 改 `copy`+`dest`;`ai.rs`、modules.md、action-layer/action-tasks 文档同步;新增测试 `copy_merges_write_file`(content/src/write_file 别名都解析为 `Copy`)。38 tests 绿。
+
+### D-069 `systemd_unit` 并入 `service`
+- **背景**:D-068 后 crater 自有模块只剩 `place`/`load_image`/`systemd_unit`;而 `systemd_unit`(daemon-reload + enable + start)其实是 `service`(ansible `service`/`systemd`)的子集——`service` 同样先 daemon-reload,且能 start/stop/restart + enable/disable,幂等更全。
+- **决策**:删除 `SystemdUnit` 变体。`service` 加 tag 别名 `systemd_unit`、字段别名 `enable`→`enabled`,并保留 back-compat 字段 `start: Option<bool>`(`start: true` 在引擎里等价 `state: started`)。旧 `systemd_unit` task 零破坏。
+- **理由**:无任务在用 `systemd_unit`;合并后「crater 自有模块」只剩 `place`/`load_image` 两个真·物料模型特有的,其余全部对齐 Ansible。
+- **影响**:engine 删 SystemdUnit arm、Service arm 折入 `start`;`kind()`、main.rs(gather hosts 的 match)、ai.rs、modules.md(从自有表移除 + 别名表加行)、action-layer/action-tasks 同步;新增测试 `service_subsumes_systemd_unit`。39 tests 绿。

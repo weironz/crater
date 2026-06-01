@@ -202,6 +202,34 @@ actions:
     }
 
     #[test]
+    fn service_subsumes_systemd_unit() {
+        // D-069: systemd_unit merged into service; old spelling + enable/start
+        // fields stay as aliases.
+        use crate::component::{Action, ServiceState};
+        let legacy: Action =
+            serde_yaml::from_str("action: systemd_unit\nname: foo\nenable: true\nstart: true")
+                .unwrap();
+        match legacy {
+            Action::Service { name, enabled, start, .. } => {
+                assert_eq!(name, "foo");
+                assert_eq!(enabled, Some(true));
+                assert_eq!(start, Some(true));
+            }
+            _ => panic!("systemd_unit should parse to Service"),
+        }
+        let modern: Action =
+            serde_yaml::from_str("action: service\nname: foo\nstate: restarted\nenabled: false")
+                .unwrap();
+        match modern {
+            Action::Service { state, enabled, .. } => {
+                assert_eq!(state, Some(ServiceState::Restarted));
+                assert_eq!(enabled, Some(false));
+            }
+            _ => panic!("service should parse to Service"),
+        }
+    }
+
+    #[test]
     fn file_kind_accepts_binary_alias() {
         // D-065: `binary` renamed to `file`; the old spelling stays valid.
         use crate::component::MaterialKind;

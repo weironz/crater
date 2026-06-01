@@ -636,39 +636,6 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 mode: None,
             }
         }
-        Action::SystemdUnit {
-            name,
-            enable,
-            start,
-        } => {
-            let mut cmds = vec!["systemctl daemon-reload".to_string()];
-            if *enable {
-                cmds.push(format!("systemctl enable {name}"));
-            }
-            if *start {
-                cmds.push(format!("systemctl restart {name}"));
-            }
-            // Idempotency: skip if the unit is already in the wanted state.
-            let mut probes = Vec::new();
-            if *enable {
-                probes.push(format!("systemctl is-enabled --quiet {name}"));
-            }
-            if *start {
-                probes.push(format!("systemctl is-active --quiet {name}"));
-            }
-            let check = if probes.is_empty() {
-                None
-            } else {
-                Some(probes.join(" && "))
-            };
-            Op::Shell {
-                phase,
-                describe: format!("systemd unit {name} (enable={enable}, start={start})"),
-                cmd: cmds.join(" && "),
-                soft_fail: false,
-                check,
-            }
-        }
         Action::RunCmd { cmd, check } => Op::Shell {
             phase,
             describe: format!("run: {cmd}"),
@@ -816,8 +783,16 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
             name,
             state,
             enabled,
+            start,
         } => {
             use crate::component::ServiceState;
+            // Back-compat: old `systemd_unit`'s `start: true` == `state: started`.
+            let state = (*state).or(if *start == Some(true) {
+                Some(ServiceState::Started)
+            } else {
+                None
+            });
+            let state = &state;
             let mut cmds = vec!["systemctl daemon-reload".to_string()];
             match enabled {
                 Some(true) => cmds.push(format!("systemctl enable {name}")),

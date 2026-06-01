@@ -115,13 +115,6 @@ pub enum Action {
         src: String,
         dst: PathBuf,
     },
-    SystemdUnit {
-        name: String,
-        #[serde(default)]
-        enable: bool,
-        #[serde(default)]
-        start: bool,
-    },
     /// Run a command through the target's shell (ansible `shell` — pipes, `&&`,
     /// redirects, env prefixes all work; aliased `command`/`run_cmd`).
     #[serde(rename = "shell", alias = "run_cmd", alias = "command")]
@@ -199,14 +192,21 @@ pub enum Action {
         #[serde(default)]
         mode: Option<String>,
     },
-    /// Manage a systemd service (D-037-b): a generalization of `systemd_unit`
-    /// adding stop/restart. Idempotent for started/stopped (probe is-active).
+    /// Manage a systemd service — ansible `service`/`systemd` (D-037-b / D-069).
+    /// Does daemon-reload, then enable/disable + start/stop/restart. Idempotent
+    /// for started/stopped/enabled (is-active / is-enabled probes). Subsumes the
+    /// old `systemd_unit` action, kept as a back-compat alias: `enable:`→`enabled:`,
+    /// `start: true`→`state: started`.
+    #[serde(alias = "systemd_unit")]
     Service {
         name: String,
         #[serde(default)]
         state: Option<ServiceState>,
-        #[serde(default)]
+        #[serde(default, alias = "enable")]
         enabled: Option<bool>,
+        /// Back-compat for `systemd_unit`'s `start:` bool (== `state: started`).
+        #[serde(default)]
+        start: Option<bool>,
     },
     /// Ensure a single line is present/absent in a file (D-037-b). Idempotent in
     /// the engine via a grep probe. `regexp` (if set) matches the line to
@@ -282,7 +282,6 @@ impl Action {
             Action::PkgInstall { .. } => "package",
             Action::Extract { .. } => "unarchive",
             Action::RenderTemplate { .. } => "template",
-            Action::SystemdUnit { .. } => "systemd_unit",
             Action::RunCmd { .. } => "shell",
             Action::Place { .. } => "place",
             Action::Module { .. } => "role",

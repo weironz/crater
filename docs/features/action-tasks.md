@@ -84,7 +84,7 @@ action 项字段(全是引擎读得懂的封闭词汇,**无需执行即可静态
 ## 内置模块(Rust 白盒)
 
 模块名 D-067 起对齐 Ansible;完整两类清单(与 Ansible 对齐 / crater 自有)+ 别名表见
-[modules.md](modules.md)。`shell` `place` `unarchive` `template` `copy` `systemd_unit`
+[modules.md](modules.md)。`shell` `place` `unarchive` `template` `copy`
 `package` `load_image` `role`,以及 D-037-b 补齐的:
 
 | 模块 | 参数 | 引擎语义(幂等) |

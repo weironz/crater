@@ -167,7 +167,7 @@ ansible-aligned: shell(cmd,check), package(packages:{debian:[..],rhel:[..]}),
   service(name,state,enabled), lineinfile(path,line,regexp),
   user(name,...), group(name,...), role(uses,with).
 crater-specific (offline/material model): place(material,dest,mode),
-  load_image(material,namespace,runtime), systemd_unit(name,enable,start).
+  load_image(material,namespace,runtime).
 Note: `copy` writes a file — give `content` (inline text) or `src` (a control-side
 file); for inline content prefer `copy: {dest, content}` (the old `write_file` name
 still works). `shell` runs via a shell (pipes/&&/redirects/env ok) — prefer it for commands.

@@ -31,7 +31,7 @@ task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible �
 | `template` | `src`, `dst` | 渲染 `templates/<src>`({{var}} 替换)写到 `dst` | `template` |
 | `copy` | `dest`, `content` 或 `src`, `mode` | 写文件到目标:`content` 写内联内容(渲染 {{var}}),或 `src` 拷控制端文件(内联进 plan,文本,sha256 幂等)。二选一 | `copy`(content= / src=) |
 | `file` | `path`, `state`(directory/absent/touch), `mode`, `owner`, `group` | 管路径状态:建目录 / 删 / touch | `file` |
-| `service` | `name`, `state`(started/stopped/restarted), `enabled` | 管 systemd 服务(自带 daemon-reload + enable + start,is-active 幂等) | `service`/`systemd` |
+| `service` | `name`, `state`(started/stopped/restarted), `enabled` | 管 systemd 服务(自带 daemon-reload + enable + start/stop/restart,is-active/is-enabled 幂等) | `service`/`systemd` |
 | `lineinfile` | `path`, `line`, `regexp`, `state`, `create` | 确保某行存在/不存在(grep 探针幂等) | `lineinfile` |
 | `user` | `name`, `state`, `system`, `shell`, `home`, `groups` | 确保系统用户存在/不存在(`id` 探针) | `user` |
 | `group` | `name`, `state`, `system` | 确保系统组存在/不存在(`getent` 探针) | `group` |
@@ -47,7 +47,6 @@ task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible �
 |---|---|---|---|
 | `place` | `material`, `dest`, `mode` | 放置一个 `materials:` 声明的物料:在线目标机自己下载 `url_tmpl`,离线控制端推打进 OCI 的 blob(D-034) | Ansible 把"下载"`get_url` 与"拷贝"`copy` 分开;crater 用物料逻辑名统一,在线/离线由后端定 |
 | `load_image` | `material`, `namespace`, `runtime` | 导入 `kind: image` 物料:离线推 oci-archive 并 `ctr import`,在线运行时 pull(D-061) | Ansible 无内置镜像导入(社区模块) |
-| `systemd_unit` | `name`, `enable`, `start` | 轻量地 enable/start 一个已存在的 unit | 多数场景用更全的 `service` 即可 |
 
 ## 别名对照(旧 crater 名 → 现规范名)
 
@@ -58,6 +57,7 @@ task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible �
 | `extract` | `unarchive` |
 | `render_template` | `template` |
 | `write_file`(`dst`+`content`) | `copy`(`dest`+`content`) |
+| `systemd_unit`(`enable`/`start`) | `service`(`enabled`/`state: started`) |
 | `module`(调用角色) | `role`(见 [roles.md](roles.md)) |
 
 旧名全部保留为 serde 别名,既有 task 零改动;新 task / `crater ai` 生成的用规范名。
