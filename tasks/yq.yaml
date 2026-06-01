@@ -7,11 +7,11 @@ vars:
 # build 默认全打(--arch 可收窄),apply/离线按 arch 取对应 blob。
 materials:
   - name: yq-bin
-    kind: binary
+    kind: file
     arch: amd64
     url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64"
   - name: yq-bin
-    kind: binary
+    kind: file
     arch: arm64
     url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_arm64"
 actions:

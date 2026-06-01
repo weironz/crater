@@ -1605,7 +1605,7 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
     ctx.offline_blobs = Some(BTreeMap::new()); // rendered_url yields raw URLs
     let mut materials: Vec<(String, Vec<u8>)> = Vec::new();
     for m in &task.materials {
-        if m.kind == MaterialKind::Binary {
+        if m.kind == MaterialKind::File {
             // Skip variants outside an explicit --arch filter (neutral always kept).
             if !want_arch.is_empty() {
                 if let Some(a) = m.arch {

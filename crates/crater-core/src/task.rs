@@ -141,4 +141,20 @@ actions:
         assert_eq!(t.actions[1].phase, Phase::Verify);
         assert_eq!(t.actions[1].needs, vec!["place_yq".to_string()]);
     }
+
+    #[test]
+    fn file_kind_accepts_binary_alias() {
+        // D-065: `binary` renamed to `file`; the old spelling stays valid.
+        use crate::component::MaterialKind;
+        let yaml = r#"
+name: t
+materials:
+  - { name: a, kind: file, url_tmpl: "https://x/a" }
+  - { name: b, kind: binary, url_tmpl: "https://x/b" }
+actions: []
+"#;
+        let t: TaskFile = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(t.materials[0].kind, MaterialKind::File);
+        assert_eq!(t.materials[1].kind, MaterialKind::File);
+    }
 }

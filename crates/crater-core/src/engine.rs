@@ -1300,7 +1300,7 @@ mod tests {
     fn test_material(name: &str, url: &str) -> crate::component::Material {
         crate::component::Material {
             name: name.into(),
-            kind: crate::component::MaterialKind::Binary,
+            kind: crate::component::MaterialKind::File,
             arch: None,
             url_tmpl: Some(url.into()),
             reference: None,

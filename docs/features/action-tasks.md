@@ -41,7 +41,7 @@ hosts: all                     # targeting:组名/all(声明式,引擎解析)
 vars:
   version: "4.53.2"
 materials:                     # 物料闭包(D-034),crater build 据此打离线包
-  - { name: yq-bin, kind: binary, url_tmpl: ".../v{{version}}/yq_linux_amd64" }
+  - { name: yq-bin, kind: file, url_tmpl: ".../v{{version}}/yq_linux_amd64" }
 actions:
   - id: place_yq
     action: place

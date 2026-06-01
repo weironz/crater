@@ -780,3 +780,19 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **实现**:build 循环渲染前 `ctx.vars["arch"]=m.arch`;place online 用注入 arch 的临时 vars 渲染。`tasks/k8s-offline.yaml` 加 `containerd_ver/runc_ver/cni_ver/crictl_ver/flannel_ver/flannel_cni_ver` vars,url 用 `{{*_ver}}`+`{{arch}}`。
 - **验证**:dry-run 渲染出的 url 与改前逐字一致(containerd-1.7.22-linux-amd64.tar.gz / runc.amd64 / dl.k8s.io/.../amd64/kubeadm …),产物等价(离线 k8s 已 D-063 端到端验证)。34+2 tests 绿。
 - **遗留**:flannel 内联清单里的镜像 tag 仍写死(与 vars 默认值一致)——用户重构②(flannel 从官方拉+分析镜像)会一并解决。
+
+---
+
+## 2026-06-01 · `kind: binary` 统一为 `kind: file`;暂缓 yaml 镜像解析
+
+### D-065 material 的 `kind: binary` 更名为 `kind: file`(`binary` 保留为别名)
+- **背景**:重构②要把 flannel 清单也当 material 走「下载一个文件」的同一套逻辑。用户指出 kube-flannel.yml 和二进制本质都是「下载一个文件」,download 逻辑是统一的;`binary` 这个名字把它窄化成了「可执行二进制」,而实际上下载的可以是 tarball、YAML 清单、配置文件。
+- **决策**:`MaterialKind::Binary` → `MaterialKind::File`,`kind: file` 为规范写法;`#[serde(alias = "binary")]` 保留旧拼写,既有 task(yq/docker/zot/k8s-offline)零破坏。`kind` 的语义明确为「**怎么获取**这份内容」:`file`(url 下载任意文件)/ `image`(pull 容器镜像成 oci-archive)/ `os_package`(buildah 解依赖闭包)。
+- **理由**:概念收口——material 是「外部内容 + 获取方式」,获取方式只有三类,与「内容是不是可执行」无关。flannel.yml、10-kubeadm.conf 这类配置/清单天然落进 `file`,无需新 kind。
+- **影响**:仓库 4 个 task 的 `kind: binary` 全部迁到 `file`;ai.rs 生成提示同步;新增回归测试 `file_kind_accepts_binary_alias`(两种拼写都 → `File`)。35+0 tests 绿。
+
+### D-065b 暂缓「解析 yaml 自动提取镜像入 materials」
+- **背景**:重构②原计划让 build 扫 flannel.yml 里的 `image:` 字段,自动把镜像加进 materials,免手列、防漂移。
+- **决策**:**暂不实现**,等用户想清边界。
+- **理由**:(1) 还有 **Helm chart** ——镜像在 values/模板里,不是字面 `image:`,扫不到;(2) crater **无法可靠判断一个下载下来的 yaml 是 k8s 清单、还是普通配置文件**,盲目按 k8s 规则提 `image:` 会误伤。自动化的收益抵不过误判风险。
+- **现状**:镜像仍由 task 显式声明 `kind: image` material(手列,如 k8s-offline 的 9 个镜像)。flannel.yml 走 `kind: file` 下载,其引用的镜像单独声明为 `kind: image`。

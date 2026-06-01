@@ -54,13 +54,19 @@ pub struct Material {
     pub sha256: Option<String>,
 }
 
-/// The three kinds of material a component can declare (D-034). Only `binary`
-/// is wired end-to-end today (yq closed loop); `image`/`os_package` are the
-/// designed next stage for container/OS-dependent components (mysql/docker).
+/// The three kinds of material a component can declare (D-034), distinguished by
+/// **how the content is acquired** at build time. All three are wired end-to-end:
+/// `file` (download an arbitrary file by `url_tmpl` — binaries, tarballs, YAML
+/// manifests, configs; arch-variant aware), `image` (pull a container image into
+/// a self-contained oci-archive), `os_package` (resolve a .deb/.rpm closure via
+/// buildah). `binary` is accepted as a back-compat alias for `file` (D-065).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaterialKind {
-    Binary,
+    /// Download an arbitrary file via `url_tmpl`. Canonical name `file`; the old
+    /// `binary` spelling still parses (alias) so existing tasks keep working.
+    #[serde(alias = "binary")]
+    File,
     Image,
     OsPackage,
 }

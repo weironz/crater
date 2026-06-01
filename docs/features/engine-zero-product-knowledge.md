@@ -22,7 +22,7 @@ name: yq
 hosts: all
 vars: { version: "4.53.2" }
 materials:
-  - { name: yq-bin, kind: binary, url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64" }
+  - { name: yq-bin, kind: file, url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64" }
 actions:
   - { id: place,  action: place,   material: yq-bin, dest: /usr/local/bin/yq, mode: "0755" }
   - { id: verify, action: run_cmd, phase: verify, cmd: "/usr/local/bin/yq --version", needs: [place] }

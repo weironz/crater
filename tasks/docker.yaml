@@ -9,11 +9,11 @@ vars:
 materials:
   # docker 官方静态包:url 里 amd64=x86_64、arm64=aarch64(命名各异,故每变体写全 url)。
   - name: docker-tgz
-    kind: binary
+    kind: file
     arch: amd64
     url_tmpl: "https://download.docker.com/linux/static/stable/x86_64/docker-{{version}}.tgz"
   - name: docker-tgz
-    kind: binary
+    kind: file
     arch: arm64
     url_tmpl: "https://download.docker.com/linux/static/stable/aarch64/docker-{{version}}.tgz"
 actions:

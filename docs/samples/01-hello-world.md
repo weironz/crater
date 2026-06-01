@@ -24,7 +24,7 @@ supported_os: [ubuntu, debian, rhel, centos, rocky]
 # `crater build` reads THIS to know what to pack — it never scrapes install.
 materials:
   - name: yq-bin
-    kind: binary
+    kind: file
     url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64"
 
 install:

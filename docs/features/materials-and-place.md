@@ -17,7 +17,7 @@
 ```yaml
 materials:                 # ← build 读这一段，绝不扫 install
   - name: yq-bin
-    kind: binary           # binary | image | os_package
+    kind: file             # file | image | os_package（kind = 「怎么获取」；binary 是 file 的旧别名）
     url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64"
 
 install:
@@ -38,15 +38,15 @@ install:
 
 ## 多 arch material（D-048）
 
-二进制是按 CPU arch 编的，所以 `kind: binary` 带一个 **arch 维度**：同名 material 各声明
+二进制是按 CPU arch 编的，所以 `kind: file` 带一个 **arch 维度**：同名 material 各声明
 一个 `arch`，`place` 按目标机 `uname -m`（归一化 `x86_64→amd64`/`aarch64→arm64`）选变体。
 URL 里 arch 命名各项目不一（docker `x86_64`、yq `amd64`），故**每变体写全自己的 url**，
 不用 `{{arch}}` 占位（引擎不塞命名映射表）。
 
 ```yaml
 materials:
-  - { name: yq-bin, kind: binary, arch: amd64, url_tmpl: ".../yq_linux_amd64" }
-  - { name: yq-bin, kind: binary, arch: arm64, url_tmpl: ".../yq_linux_arm64" }
+  - { name: yq-bin, kind: file, arch: amd64, url_tmpl: ".../yq_linux_amd64" }
+  - { name: yq-bin, kind: file, arch: arm64, url_tmpl: ".../yq_linux_arm64" }
 ```
 
 解析规则（给定 name + 目标 arch）：精确匹配 arch 的变体 → 用它；否则用 `arch` 省略的
@@ -102,7 +102,7 @@ CRATER_INSECURE_REGISTRIES=<registry> crater apply <registry>/yq:4.53.2 --host <
 
 ## 边界 / 后续
 
-- 本期 `kind: binary` 全链路打通（yq + docker static），含 **arch 维度**（D-048，见上节）。
+- 本期 `kind: file` 全链路打通（yq + docker static），含 **arch 维度**（D-048，见上节）。
 - `kind: image`（容器镜像，build 时 pull 进 OCI、离线 import）与 `kind: os_package`
   （build 时下 deb/rpm、离线本地装）**已在数据模型留位、尚未接线**——它们的 arch
   分别复用「镜像原生 index」「os×arch 矩阵」，随接线一并做。

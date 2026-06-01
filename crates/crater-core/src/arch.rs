@@ -1,5 +1,5 @@
 //! CPU architecture abstraction (D-048). A target property detected per host
-//! (`uname -m`) and a material-selection axis: a `kind: binary` material may
+//! (`uname -m`) and a material-selection axis: a `kind: file` material may
 //! declare per-arch variants, and `place` picks the one matching the target.
 //!
 //! Naming: we canonicalize on the OCI `platform.architecture` spelling

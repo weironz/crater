@@ -55,26 +55,26 @@ OCI 只管「字节按 digest 存好」；crater-manifest 管「这些字节是�
 }
 ```
 
-> **D-017 守则**：清单由 `crater build` 从 **task 数据**生成；引擎不内置任何镜像名/制品名。物料来自 task 的 `materials:` 段（`kind: binary/image/os_package`），绝不扫描 actions。
+> **D-017 守则**：清单由 `crater build` 从 **task 数据**生成；引擎不内置任何镜像名/制品名。物料来自 task 的 `materials:` 段（`kind: file/image/os_package`），绝不扫描 actions。
 
 ---
 
 ## 3. task 物料扩展：`materials:`（数据，非代码）
 
-离线时要带走的东西是**数据**，写在 task 的 `materials:`（D-034）：`kind: binary`(二进制/tarball)、
+离线时要带走的东西是**数据**，写在 task 的 `materials:`（D-034）：`kind: file`(二进制/tarball)、
 `kind: image`(容器镜像,build 拉 blob 进包、目标 import)、`kind: os_package`(deb/rpm)。
 
 ```yaml
 name: app
 materials:
-  - { name: app-bin, kind: binary, url_tmpl: "https://.../app-{{version}}" }
+  - { name: app-bin, kind: file, url_tmpl: "https://.../app-{{version}}" }
   - { name: app-img, kind: image,  ref: "docker.io/library/app:{{version}}" }   # 待接线
 actions:
   - { id: place, action: place, material: app-bin, dest: /usr/local/bin/app, mode: "0755" }
 ```
 
 引擎只做「把 `materials:` 列的东西拉下来塞进 artifact、apply 时落地/import」——**不知道它们属于谁**。
-(注:`kind: binary` 已全链路;`image`/`os_package` 为待接线项,见下文与 D-034。)
+(注:`kind: file` 已全链路;`image`/`os_package` 为待接线项,见下文与 D-034。)
 
 ---
 
@@ -85,7 +85,7 @@ actions:
 1. 解析 task。
 2. **只读 task 的 `materials:` 段**（D-034/D-047）收集物料——**绝不扫 actions**，藏在 `run_cmd`
    里的依赖不会进包也不会被误扫；`download` 动作已删，获取外部文件的唯一途径就是声明 `material`：
-   - **二进制/tarball**（`kind: binary`）：`fetch_best` 拉取（直连→CN 镜像 fallback）。
+   - **二进制/tarball**（`kind: file`）：`fetch_best` 拉取（直连→CN 镜像 fallback）。
    - **镜像**（`kind: image`，待接线）：用 OCI distribution 客户端从 registry 拉 manifest+layers（纯 Rust，见 §6）。
 3. 写入 OCI Layout：recipe = task YAML 打成 recipe 层；每个物料打成一层 `vnd.crater.material.v1`，
    按 **material 名**（`org.crater.material.name`）标注；镜像作为嵌套 OCI blob 直接并入。

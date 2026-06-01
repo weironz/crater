@@ -19,13 +19,13 @@ vars:
   image_repo: "registry.aliyuncs.com/google_containers"
 # {{arch}} 在渲染 material url 时自动绑定该 material 的 arch 字段(D-064),单一来源。
 materials:
-  - { name: containerd, kind: binary, arch: amd64, url_tmpl: "https://github.com/containerd/containerd/releases/download/v{{containerd_ver}}/containerd-{{containerd_ver}}-linux-{{arch}}.tar.gz" }
-  - { name: runc, kind: binary, arch: amd64, url_tmpl: "https://github.com/opencontainers/runc/releases/download/v{{runc_ver}}/runc.{{arch}}" }
-  - { name: cni-plugins, kind: binary, arch: amd64, url_tmpl: "https://github.com/containernetworking/plugins/releases/download/v{{cni_ver}}/cni-plugins-linux-{{arch}}-v{{cni_ver}}.tgz" }
-  - { name: crictl, kind: binary, arch: amd64, url_tmpl: "https://github.com/kubernetes-sigs/cri-tools/releases/download/v{{crictl_ver}}/crictl-v{{crictl_ver}}-linux-{{arch}}.tar.gz" }
-  - { name: kubeadm, kind: binary, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubeadm" }
-  - { name: kubelet, kind: binary, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubelet" }
-  - { name: kubectl, kind: binary, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubectl" }
+  - { name: containerd, kind: file, arch: amd64, url_tmpl: "https://github.com/containerd/containerd/releases/download/v{{containerd_ver}}/containerd-{{containerd_ver}}-linux-{{arch}}.tar.gz" }
+  - { name: runc, kind: file, arch: amd64, url_tmpl: "https://github.com/opencontainers/runc/releases/download/v{{runc_ver}}/runc.{{arch}}" }
+  - { name: cni-plugins, kind: file, arch: amd64, url_tmpl: "https://github.com/containernetworking/plugins/releases/download/v{{cni_ver}}/cni-plugins-linux-{{arch}}-v{{cni_ver}}.tgz" }
+  - { name: crictl, kind: file, arch: amd64, url_tmpl: "https://github.com/kubernetes-sigs/cri-tools/releases/download/v{{crictl_ver}}/crictl-v{{crictl_ver}}-linux-{{arch}}.tar.gz" }
+  - { name: kubeadm, kind: file, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubeadm" }
+  - { name: kubelet, kind: file, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubelet" }
+  - { name: kubectl, kind: file, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubectl" }
   - { name: sysdeps, kind: os_package, base: "ubuntu:24.04", arch: amd64, packages: { debian: [conntrack, socat, ipset, ethtool, ebtables] } }
   - { name: img-apiserver, kind: image, ref: "registry.aliyuncs.com/google_containers/kube-apiserver:v{{version}}" }
   - { name: img-cm, kind: image, ref: "registry.aliyuncs.com/google_containers/kube-controller-manager:v{{version}}" }
