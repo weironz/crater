@@ -714,3 +714,13 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - 主机视图来自**状态 DB**(crater 已部署的主机,不依赖配置文件);主机组来自 inventory 数据(无则提示创建)。
 - **验证**:shell 出侧边栏 4 项;`/view/dashboard|hosts|groups|tasks` 各自渲染;`/api/hosts` DB 透视;`/view/groups` 读 inventory 出 n11/n12;`/api/deployments` 始终带 Verify now+heal;浅色默认 + 切换。musl 静态,34+2 tests 绿,0 警告。
 - **遗留**:主机组目前只读 inventory 文件(crater 尚未把 inventory 作为受管数据存库);未来可把 hosts/groups 纳入状态库作一等对象。
+
+---
+
+## 2026-06-01 · 硬核 task:单节点 Kubernetes(kubeadm)+ 多节点的 when_role 缺口
+
+### D-060 tasks/k8s.yaml(单节点 control-plane,真机验证)+ when_role 提案
+- **做了什么**:`tasks/k8s.yaml` —— 用 crater 原语表达完整 kubeadm 单节点:关 swap(run_cmd+check)、内核模块(write_file+modprobe)、sysctl、containerd+SystemdCgroup+CN pause(pkg_install+sed)、pkgs.k8s.io apt 源(file/run_cmd/write_file)、kubeadm·kubelet·kubectl+conntrack/socat/ethtool(pkg_install)、`kubeadm init`(幂等 check=admin.conf)、kubeconfig、flannel CNI、去 control-plane 污点、verify;handlers reload;**teardown=`kubeadm reset`+删 etcd/CNI/iptables**(D-049 的活例子)。CN 友好:`--image-repository registry.aliyuncs.com/...` + containerd sandbox_image 同改。
+- **真机验证(.11,Ubuntu 24.04)**:首跑在 `kubeadm init` preflight 挂在 `conntrack not found` → 补 conntrack/socat/ethtool → 重跑(幂等续跑)→ 19 步全过,`kubeadm init` ~76s,`kubectl get nodes` → `ubuntu Ready control-plane v1.31.14 / containerd 1.7.22`,flannel/coredns Running。`crater task list` 同时记录 k8s + yq 部署。
+- **范围与诚实**:**单节点 + 在线**。离线需 kind:image(拉控制面镜像进包)+ os_package(D-034 待做)。
+- **多节点缺口 → 提案 `when_role`**:真 k8s 多节点角色不对称(control 跑 `kubeadm init` 出 join token,worker 跑 `kubeadm join`)。crater 的 action 只有 `when_os`/`when_offline`,**没有 `when_role`**,且任务内所有 action 在所有匹配主机上都跑——无法在一个 task 里区分 control/worker。提案:给 `ActionStep` 加 **`when_role: [..]`**(闭合枚举开关,和 when_os 同性质,守 D-036),配合已有 **register/hostvars + group_hosts_by_role(serial-between/parallel-within)**,即可:control 角色跑 init + `register` join 命令,worker 角色跑 `kubeadm join {{ hostvars.<control>.join }}`。这是把 crater 推到"能装 k8s 集群"的关键一小步,后续单独做。
