@@ -107,6 +107,21 @@ pub enum Op {
         #[serde(default)]
         runtime: Option<String>,
     },
+    /// Install OS packages (D-062). Online: install `packages` from the system
+    /// repo. Offline: `local_archive` is a control-side tar of the .deb/.rpm
+    /// dependency closure (built via buildah) — pushed, extracted, and installed
+    /// locally (`apt-get install ./*.deb` / `dnf install ./*.rpm`).
+    PackageInstall {
+        phase: Phase,
+        describe: String,
+        packages: Vec<String>,
+        /// "debian" | "rhel" — picks apt vs dnf.
+        family: String,
+        #[serde(default)]
+        local_archive: Option<PathBuf>,
+        #[serde(default)]
+        check: Option<String>,
+    },
 }
 
 impl Op {
@@ -115,7 +130,8 @@ impl Op {
             Op::Shell { phase, .. }
             | Op::WriteFile { phase, .. }
             | Op::PushFile { phase, .. }
-            | Op::ImageImport { phase, .. } => *phase,
+            | Op::ImageImport { phase, .. }
+            | Op::PackageInstall { phase, .. } => *phase,
         }
     }
     pub fn describe(&self) -> &str {
@@ -123,7 +139,8 @@ impl Op {
             Op::Shell { describe, .. }
             | Op::WriteFile { describe, .. }
             | Op::PushFile { describe, .. }
-            | Op::ImageImport { describe, .. } => describe,
+            | Op::ImageImport { describe, .. }
+            | Op::PackageInstall { describe, .. } => describe,
         }
     }
     /// Shell command / path preview for dry-run, if any.
@@ -133,6 +150,7 @@ impl Op {
             Op::WriteFile { path, .. } => Some(path),
             Op::PushFile { dest, .. } => Some(dest),
             Op::ImageImport { reference, .. } => Some(reference),
+            Op::PackageInstall { describe, .. } => Some(describe),
         }
     }
 }
@@ -486,21 +504,45 @@ pub async fn execute_task(
 
 fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
     let op = match a {
-        Action::PkgInstall { packages } => {
-            let pkgs = pick_packages(packages, ctx.os);
-            // Idempotency: skip the install if every package is already present.
+        Action::PkgInstall { packages, material } => {
+            // Resolve package list: the referenced os_package material's, else inline.
+            let pkgs = if let Some(name) = material {
+                let m = ctx.resolve_material(name)?;
+                pick_packages(&m.packages, ctx.os)
+            } else {
+                pick_packages(packages, ctx.os)
+            };
+            let family = match ctx.os {
+                OsFamily::Debian => "debian",
+                OsFamily::Rhel => "rhel",
+                OsFamily::Unknown => "unknown",
+            };
             let check = match ctx.os {
-                OsFamily::Debian => {
-                    Some(format!("dpkg -s {} >/dev/null 2>&1", pkgs.join(" ")))
-                }
+                OsFamily::Debian => Some(format!("dpkg -s {} >/dev/null 2>&1", pkgs.join(" "))),
                 OsFamily::Rhel => Some(format!("rpm -q {} >/dev/null 2>&1", pkgs.join(" "))),
                 OsFamily::Unknown => None,
             };
-            Op::Shell {
+            // Offline + an os_package material → install from the packed closure.
+            let local_archive = match (material, &ctx.offline_blobs) {
+                (Some(name), Some(blobs)) => {
+                    let m = ctx.resolve_material(name)?;
+                    let key = PlanContext::material_blob_key(m);
+                    Some(
+                        blobs
+                            .get(&key)
+                            .or_else(|| blobs.get(name))
+                            .ok_or_else(|| anyhow::anyhow!("offline bundle missing os_package '{key}'"))?
+                            .clone(),
+                    )
+                }
+                _ => None,
+            };
+            Op::PackageInstall {
                 phase,
                 describe: format!("install packages: [{}]", pkgs.join(", ")),
-                cmd: ctx.os.install_cmd(&pkgs),
-                soft_fail: false,
+                packages: pkgs,
+                family: family.to_string(),
+                local_archive,
                 check,
             }
         }
@@ -1182,6 +1224,56 @@ async fn exec_one(
                 anyhow::bail!("step {n} image import '{reference}' failed (exit {}): {}", out.code, out.stderr.trim());
             }
         }
+        Op::PackageInstall {
+            packages,
+            family,
+            local_archive,
+            check,
+            ..
+        } => {
+            // Idempotency: all packages already present → skip.
+            if let Some(probe) = check {
+                if exec.run(probe).await?.ok() {
+                    return Ok((StepStatus::Ok, Vec::new()));
+                }
+            }
+            let cmd = if let Some(archive) = local_archive {
+                // Offline: push the closure tar, extract, install local packages.
+                let data = std::fs::read(archive)
+                    .map_err(|e| anyhow::anyhow!("read package archive {}: {e}", archive.display()))?;
+                let dir = format!("/tmp/crater-pkgs-{}", sanitize(&packages.join("-")));
+                let tar = format!("{dir}.tar");
+                exec.write_file(&tar, &data).await?;
+                tracing::debug!("      pushed {} bytes pkg closure -> {tar}", data.len());
+                match family.as_str() {
+                    "rhel" => format!(
+                        "mkdir -p {dir} && tar -xf {tar} -C {dir} && dnf install -y {dir}/*.rpm || yum install -y {dir}/*.rpm; rm -rf {dir} {tar}"
+                    ),
+                    _ => format!(
+                        "mkdir -p {dir} && tar -xf {tar} -C {dir} && DEBIAN_FRONTEND=noninteractive apt-get install -y {dir}/*.deb; rc=$?; rm -rf {dir} {tar}; exit $rc"
+                    ),
+                }
+            } else {
+                // Online: install from the system repo.
+                match family.as_str() {
+                    "rhel" => format!("dnf install -y {p} || yum install -y {p}", p = packages.join(" ")),
+                    "debian" => format!(
+                        "apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y {}",
+                        packages.join(" ")
+                    ),
+                    _ => format!("echo 'unknown OS family: cannot install {}'; exit 1", packages.join(" ")),
+                }
+            };
+            let out = exec.run(&cmd).await?;
+            if out.ok() {
+                Ok((StepStatus::Changed, Vec::new()))
+            } else {
+                for l in out.stderr.trim().lines() {
+                    tracing::debug!("      ! {l}");
+                }
+                anyhow::bail!("step {n} package install failed (exit {}): {}", out.code, out.stderr.trim());
+            }
+        }
     }
 }
 
@@ -1205,6 +1297,7 @@ mod tests {
             url_tmpl: Some(url.into()),
             reference: None,
             packages: Default::default(),
+            base: None,
             sha256: None,
         }
     }

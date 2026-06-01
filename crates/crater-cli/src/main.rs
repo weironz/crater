@@ -1524,6 +1524,64 @@ fn sanitize_ref(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
 }
 
+/// Resolve an OS-package dependency closure in `base` via **buildah** (daemonless)
+/// and return it as a tar of the .deb/.rpm files (D-062). Mirrors KubeKey's
+/// recipe but daemonless and without ISO/repo-metadata (apply uses
+/// `apt-get install ./*.deb`). Requires `buildah` on the build machine.
+fn build_os_package_repo(base: &str, family: &str, pkgs: &[String]) -> Result<Vec<u8>> {
+    use std::process::Command;
+    if Command::new("buildah").arg("--version").output().is_err() {
+        anyhow::bail!("buildah not found — install it on the build machine for os_package (daemonless, no dockerd)");
+    }
+    let run = |args: &[&str]| -> Result<std::process::Output> {
+        let out = Command::new("buildah").args(args).output()?;
+        Ok(out)
+    };
+    let ctr = String::from_utf8(run(&["from", base])?.stdout)?.trim().to_string();
+    if ctr.is_empty() {
+        anyhow::bail!("buildah from {base} failed");
+    }
+    let cleanup = |c: &str| {
+        let _ = Command::new("buildah").args(["umount", c]).output();
+        let _ = Command::new("buildah").args(["rm", c]).output();
+    };
+    let pkglist = pkgs.join(" ");
+    // Resolve closure → download .deb/.rpm into /repo inside the container.
+    let script = if family == "debian" {
+        format!(
+            "set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq; \
+             apt-get install -y --no-install-recommends dpkg-dev wget >/dev/null; \
+             mkdir -p /repo; cd /repo; \
+             apt-get install --reinstall --print-uris -y {pkglist} | awk -F\"'\" '{{print $2}}' | grep -v '^$' | sort -u > /urls; \
+             wget -q -i /urls"
+        )
+    } else {
+        format!(
+            "set -e; mkdir -p /repo; yum install -y yum-utils createrepo >/dev/null 2>&1 || true; \
+             (repotrack -p /repo {pkglist} || yumdownloader --resolve --destdir=/repo {pkglist})"
+        )
+    };
+    let st = Command::new("buildah").args(["run", &ctr, "--", "bash", "-c", &script]).status()?;
+    if !st.success() {
+        cleanup(&ctr);
+        anyhow::bail!("buildah closure resolution failed in {base}");
+    }
+    let mnt = String::from_utf8(run(&["mount", &ctr])?.stdout)?.trim().to_string();
+    if mnt.is_empty() {
+        cleanup(&ctr);
+        anyhow::bail!("buildah mount failed");
+    }
+    let tar = std::env::temp_dir().join(format!("crater-osrepo-{}-{}.tar", std::process::id(), sanitize_ref(base)));
+    let st = Command::new("tar").args(["cf", tar.to_str().unwrap(), "-C", &format!("{mnt}/repo"), "."]).status()?;
+    cleanup(&ctr);
+    if !st.success() {
+        anyhow::bail!("tar of package closure failed");
+    }
+    let data = std::fs::read(&tar)?;
+    let _ = std::fs::remove_file(&tar);
+    Ok(data)
+}
+
 async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[String]) -> Result<()> {
     use crater_core::component::MaterialKind;
     use crater_core::task::TaskFile;
@@ -1583,6 +1641,25 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
             let data = std::fs::read(&tmp)?;
             let _ = std::fs::remove_file(&tmp);
             info!("    packed {} ({} bytes)", reference, data.len());
+            materials.push((key, data));
+        } else if m.kind == MaterialKind::OsPackage {
+            // kind: os_package (D-062) — resolve the .deb/.rpm dependency closure
+            // in the target OS via buildah (daemonless), pack as a tar blob;
+            // apply installs it locally (apt-get install ./*.deb / dnf ./*.rpm).
+            let base = m
+                .base
+                .as_ref()
+                .ok_or_else(|| anyhow!("os_package material '{}' has no `base` (OS image, e.g. ubuntu:24.04)", m.name))?;
+            // pick the package list matching the base OS family.
+            let family = if base.contains("ubuntu") || base.contains("debian") { "debian" } else { "rhel" };
+            let pkgs = m.packages.get(family).cloned().unwrap_or_default();
+            if pkgs.is_empty() {
+                anyhow::bail!("os_package material '{}' has no packages for family '{family}'", m.name);
+            }
+            let key = PlanContext::material_blob_key(m);
+            info!("  build os_package {key} <- {base} [{}] (buildah)", pkgs.join(" "));
+            let data = build_os_package_repo(base, family, &pkgs)?;
+            info!("    packed closure ({} bytes)", data.len());
             materials.push((key, data));
         }
     }

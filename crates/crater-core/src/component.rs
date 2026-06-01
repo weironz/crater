@@ -44,6 +44,11 @@ pub struct Material {
     /// `os_package`: OS-family-keyed package name lists (deb vs rpm fork).
     #[serde(default)]
     pub packages: BTreeMap<String, Vec<String>>,
+    /// `os_package`: base OS image (e.g. "ubuntu:24.04") that `crater build`
+    /// resolves the .deb/.rpm dependency closure in, via buildah (D-062). Pins
+    /// this material's offline support to that OS×version (× `arch`).
+    #[serde(default)]
+    pub base: Option<String>,
     /// Optional content digest (sha256 hex, no prefix). Verified if present.
     #[serde(default)]
     pub sha256: Option<String>,
@@ -66,9 +71,15 @@ pub enum MaterialKind {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Action {
-    /// OS-family-keyed package lists under `packages:`.
+    /// OS-family-keyed package lists under `packages:`. Online installs from the
+    /// system repo. For OFFLINE, set `material` to a `kind: os_package` material
+    /// whose .deb/.rpm closure was packed at build (D-062): offline installs
+    /// from the packed closure (`apt-get install ./*.deb` / `dnf install ./*.rpm`).
     PkgInstall {
+        #[serde(default)]
         packages: BTreeMap<String, Vec<String>>,
+        #[serde(default)]
+        material: Option<String>,
     },
     Extract {
         to: PathBuf,

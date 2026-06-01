@@ -738,3 +738,17 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **action**:`load_image` 改为**引用 material**(`{material, namespace, runtime}`,弃写死 ref);在线取 material 的 `ref` pull、离线导入打进包的 blob——与 `place` 双态语义一致。
 - **真机验证(.11,containerd)**:`build`(pull alpine 解 list→amd64,打 **3.6MB** oci-archive)→ `apply --host .11` 离线 → `ctr -n k8s.io images import` → `ctr -n k8s.io images ls` 出 `docker.io/library/alpine:3.20`。34+2 tests 绿,0 警告。
 - **边界**:目前镜像按 build 机/amd64 单 arch 打(多 arch 镜像复用原生 index 留待);幂等(已存在则跳)未做,每次 import(无害)。
+
+---
+
+## 2026-06-01 · 接线 kind: os_package —— buildah 自建依赖闭包,离线本地装
+
+### D-062 os_package:buildah(无daemon)解闭包打 tar,apply `apt-get install ./*.deb`
+- **背景**:离线 k8s 的最后一块——conntrack/socat 等发行版包必须进 OCI(D-060)。研究 KubeKey 离线 ISO 机制(`hack/gen-repository-iso`:`apt-get install --print-uris` 解闭包→wget→dpkg-scanpackages→genisoimage;use 端 mount ISO + file:// 本地源 + 装 + 还原)后,与用户敲定两点简化:
+  - **不消费预构建 blob,而是 crater 自己用 buildah 在目标 OS 容器里解闭包**(daemonless,不要 dockerd;用户要求"收集依赖要在环境里")。
+  - **不打 ISO、不挂载、不改 apt 源**:直接打 .deb 闭包 tar,apply 用 `apt-get install ./*.deb`(apt 在本地集合内解依赖序、只装缺的,闭包完整则全程离线)——比 KubeKey 那套 mount/改源/还原/umount 简一大截(用户:"不是有 dpkg -i 吗")。
+- **OS×版本×arch 维度**:闭包是 `base`(如 ubuntu:24.04)× arch 绑定的;artifact 离线支持 = 打进的 base 集合;apply 选匹配的,缺则报错(沿用 arch 的"声明变体+选+响亮失败")。v1 目标 ubuntu 24.04/amd64。
+- **实现**:`Material` 加 `base`;`pkg_install` 加 `material`(引用 os_package);build `build_os_package_repo`(buildah from→run 解闭包+wget→mount→tar);新 `Op::PackageInstall`(离线推 tar+解+`apt-get install ./*.deb`/`dnf ./*.rpm`,在线 apt/yum 装 names;dpkg-s/rpm-q 幂等)。
+- **代价**:构建机需装 buildah(仅构建时、daemonless;目标机仍纯净)。跨 arch 需 qemu(v1 同 arch)。
+- **真机验证**:buildah 解 conntrack+socat 闭包(含 libmnl0/libnetfilter-conntrack3/libnfnetlink0/libwrap0)→ 530KB tar;`apply --host .12`(原无这俩)离线 → `apt-get install ./*.deb` → conntrack v1.4.8 + socat 装上。34+2 tests 绿,0 警告。
+- **里程碑**:三种 material 全接线(binary D-048 / image D-061 / os_package D-062)——离线打包能力闭合,k8s 全 material 离线形态已无阻塞。
