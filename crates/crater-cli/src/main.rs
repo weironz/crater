@@ -1615,6 +1615,11 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
                 }
             }
             if let Some(tmpl) = &m.url_tmpl {
+                // Expose the material's own arch as {{arch}} so url_tmpl has a
+                // single source of truth for arch (D-064).
+                if let Some(a) = m.arch {
+                    ctx.vars.insert("arch".to_string(), a.as_str().to_string());
+                }
                 let raw = ctx.rendered_url(tmpl)?;
                 let url = online.rewrite(&raw);
                 let key = PlanContext::material_blob_key(m);

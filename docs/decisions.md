@@ -769,3 +769,14 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **已知限制**:大 artifact(488MB)经 SSH base64 分块推送慢(~7min)——后续可加压缩/更快传输;镜像/os_package 单 arch(amd64);单节点(多节点需 when_role,D-060)。
 - **用户后续重构(待做)**:① 二进制 version/arch 抽成 vars;② flannel 清单从官方途径下载打包 + 分析 yaml 里的镜像自动入 materials(避免手列+版本漂移)。
 - **里程碑**:crater 实现"一个 OCI 包离线装 k8s"——三种 material 协同的终极兑现。
+
+---
+
+## 2026-06-01 · material url 的 {{arch}} 自动注入 + 版本抽 vars
+
+### D-064 渲染 material url 时自动注入 {{arch}}=该 material 的 arch 字段;二进制版本抽成 task vars
+- **背景**:用户重构①——二进制 version/arch 不该写死在 url 里。
+- **决策**:① 渲染某 material 的 `url_tmpl` 时(build 端 `build_task_to_store`、apply-online 端 `place`),**把该 material 声明的 `arch:` 字段作为 `{{arch}}` 注入**——arch 单一来源(material 的 arch 字段同时驱动选择 + url),多 arch 变体天然正确;② 版本抽成 task `vars`。
+- **实现**:build 循环渲染前 `ctx.vars["arch"]=m.arch`;place online 用注入 arch 的临时 vars 渲染。`tasks/k8s-offline.yaml` 加 `containerd_ver/runc_ver/cni_ver/crictl_ver/flannel_ver/flannel_cni_ver` vars,url 用 `{{*_ver}}`+`{{arch}}`。
+- **验证**:dry-run 渲染出的 url 与改前逐字一致(containerd-1.7.22-linux-amd64.tar.gz / runc.amd64 / dl.k8s.io/.../amd64/kubeadm …),产物等价(离线 k8s 已 D-063 端到端验证)。34+2 tests 绿。
+- **遗留**:flannel 内联清单里的镜像 tag 仍写死(与 vars 默认值一致)——用户重构②(flannel 从官方拉+分析镜像)会一并解决。

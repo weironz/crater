@@ -8,17 +8,24 @@
 name: k8s-offline
 hosts: all
 vars:
-  version: "1.31.14"
+  version: "1.31.14"           # kubeadm/kubelet/kubectl(也是 image tag)
+  containerd_ver: "1.7.22"
+  runc_ver: "1.1.14"
+  cni_ver: "1.5.1"
+  crictl_ver: "1.31.1"
+  flannel_ver: "0.28.4"
+  flannel_cni_ver: "1.9.1-flannel1"
   pod_cidr: "10.244.0.0/16"
   image_repo: "registry.aliyuncs.com/google_containers"
+# {{arch}} 在渲染 material url 时自动绑定该 material 的 arch 字段(D-064),单一来源。
 materials:
-  - { name: containerd, kind: binary, arch: amd64, url_tmpl: "https://github.com/containerd/containerd/releases/download/v1.7.22/containerd-1.7.22-linux-amd64.tar.gz" }
-  - { name: runc, kind: binary, arch: amd64, url_tmpl: "https://github.com/opencontainers/runc/releases/download/v1.1.14/runc.amd64" }
-  - { name: cni-plugins, kind: binary, arch: amd64, url_tmpl: "https://github.com/containernetworking/plugins/releases/download/v1.5.1/cni-plugins-linux-amd64-v1.5.1.tgz" }
-  - { name: crictl, kind: binary, arch: amd64, url_tmpl: "https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.31.1/crictl-v1.31.1-linux-amd64.tar.gz" }
-  - { name: kubeadm, kind: binary, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/amd64/kubeadm" }
-  - { name: kubelet, kind: binary, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/amd64/kubelet" }
-  - { name: kubectl, kind: binary, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/amd64/kubectl" }
+  - { name: containerd, kind: binary, arch: amd64, url_tmpl: "https://github.com/containerd/containerd/releases/download/v{{containerd_ver}}/containerd-{{containerd_ver}}-linux-{{arch}}.tar.gz" }
+  - { name: runc, kind: binary, arch: amd64, url_tmpl: "https://github.com/opencontainers/runc/releases/download/v{{runc_ver}}/runc.{{arch}}" }
+  - { name: cni-plugins, kind: binary, arch: amd64, url_tmpl: "https://github.com/containernetworking/plugins/releases/download/v{{cni_ver}}/cni-plugins-linux-{{arch}}-v{{cni_ver}}.tgz" }
+  - { name: crictl, kind: binary, arch: amd64, url_tmpl: "https://github.com/kubernetes-sigs/cri-tools/releases/download/v{{crictl_ver}}/crictl-v{{crictl_ver}}-linux-{{arch}}.tar.gz" }
+  - { name: kubeadm, kind: binary, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubeadm" }
+  - { name: kubelet, kind: binary, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubelet" }
+  - { name: kubectl, kind: binary, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubectl" }
   - { name: sysdeps, kind: os_package, base: "ubuntu:24.04", arch: amd64, packages: { debian: [conntrack, socat, ipset, ethtool, ebtables] } }
   - { name: img-apiserver, kind: image, ref: "registry.aliyuncs.com/google_containers/kube-apiserver:v{{version}}" }
   - { name: img-cm, kind: image, ref: "registry.aliyuncs.com/google_containers/kube-controller-manager:v{{version}}" }
@@ -27,8 +34,8 @@ materials:
   - { name: img-coredns, kind: image, ref: "registry.aliyuncs.com/google_containers/coredns:v1.11.3" }
   - { name: img-pause, kind: image, ref: "registry.aliyuncs.com/google_containers/pause:3.10" }
   - { name: img-etcd, kind: image, ref: "registry.aliyuncs.com/google_containers/etcd:3.5.24-0" }
-  - { name: img-flannel, kind: image, ref: "ghcr.io/flannel-io/flannel:v0.28.4" }
-  - { name: img-flannel-cni, kind: image, ref: "ghcr.io/flannel-io/flannel-cni-plugin:v1.9.1-flannel1" }
+  - { name: img-flannel, kind: image, ref: "ghcr.io/flannel-io/flannel:v{{flannel_ver}}" }
+  - { name: img-flannel-cni, kind: image, ref: "ghcr.io/flannel-io/flannel-cni-plugin:v{{flannel_cni_ver}}" }
 actions:
   - { id: swapoff, action: run_cmd, cmd: "swapoff -a", check: "test -z \"$(swapon --show)\"" }
   - { id: swap_fstab, action: run_cmd, needs: [swapoff], cmd: "sed -ri '/\\sswap\\s/s/^([^#])/#\\1/' /etc/fstab", check: "! grep -Eq '^[^#].*\\sswap\\s' /etc/fstab" }

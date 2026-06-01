@@ -569,7 +569,15 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 let tmpl = m.url_tmpl.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("place: material '{material}' has no url_tmpl for online fetch")
                 })?;
-                let url = ctx.rendered_url(tmpl)?;
+                // {{arch}} = the resolved material's arch (single source, D-064).
+                let raw = if let Some(a) = m.arch {
+                    let mut vars = ctx.vars.clone();
+                    vars.insert("arch".to_string(), a.as_str().to_string());
+                    render(tmpl, &vars)?
+                } else {
+                    render(tmpl, &ctx.vars)?
+                };
+                let url = if ctx.offline_blobs.is_some() { raw } else { ctx.source.rewrite(&raw) };
                 let mut cmd = format!("curl -fL --retry 3 -o '{dest}' '{url}'");
                 if let Some(mode) = mode {
                     cmd.push_str(&format!(" && chmod {mode} '{dest}'"));
