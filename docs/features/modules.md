@@ -2,11 +2,9 @@
 
 ## 这是什么 / 解决什么
 
-task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible 一样的叫法。模块是
-引擎内置的最小操作原语(跑命令、装包、写文件、起服务…)。
+task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible 一样的叫法。模块是引擎内置的最小操作原语(跑命令、装包、写文件、起服务…)。
 
-设计原则:**能和 Ansible 对齐的模块,就用 Ansible 的模块名**,让已经会 Ansible 的运维零
-学习成本迁移过来;只有 crater 特有(离线/物料模型)的能力才自造名字,并在文档里诚实标注。
+设计原则:**能和 Ansible 对齐的模块,就用 Ansible 的模块名**,让已经会 Ansible 的运维零学习成本迁移过来;只有 crater 特有(离线/物料模型)的能力才自造名字,并在文档里诚实标注。
 
 > 术语:Ansible 把任务原语叫 **module**、把可复用的参数化子程序叫 **role**。crater 与此
 > 对齐——原语 = 模块(本文),可复用子程序 = 角色([roles.md](roles.md))。
@@ -31,7 +29,7 @@ task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible �
 | `package` | `packages: {debian:[..], rhel:[..]}`, `material` | 装系统包。在线走系统源;离线设 `material` 指向 `kind: os_package` 物料(D-062) | `package`/`apt`/`yum` |
 | `unarchive` | `to`, `from`, `strip`, `creates` | 解压 tar/tgz 到 `to`。`creates` 已存在则跳过(幂等) | `unarchive` |
 | `template` | `src`, `dst` | 渲染 `templates/<src>`({{var}} 替换)写到 `dst` | `template` |
-| `copy` | `src`, `dest`, `mode` | 把控制端文件拷到目标(内容内联进 plan,sha256 幂等) | `copy`(src=) |
+| `copy` | `dest`, `content` 或 `src`, `mode` | 写文件到目标:`content` 写内联内容(渲染 {{var}}),或 `src` 拷控制端文件(内联进 plan,文本,sha256 幂等)。二选一 | `copy`(content= / src=) |
 | `file` | `path`, `state`(directory/absent/touch), `mode`, `owner`, `group` | 管路径状态:建目录 / 删 / touch | `file` |
 | `service` | `name`, `state`(started/stopped/restarted), `enabled` | 管 systemd 服务(自带 daemon-reload + enable + start,is-active 幂等) | `service`/`systemd` |
 | `lineinfile` | `path`, `line`, `regexp`, `state`, `create` | 确保某行存在/不存在(grep 探针幂等) | `lineinfile` |
@@ -49,7 +47,6 @@ task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible �
 |---|---|---|---|
 | `place` | `material`, `dest`, `mode` | 放置一个 `materials:` 声明的物料:在线目标机自己下载 `url_tmpl`,离线控制端推打进 OCI 的 blob(D-034) | Ansible 把"下载"`get_url` 与"拷贝"`copy` 分开;crater 用物料逻辑名统一,在线/离线由后端定 |
 | `load_image` | `material`, `namespace`, `runtime` | 导入 `kind: image` 物料:离线推 oci-archive 并 `ctr import`,在线运行时 pull(D-061) | Ansible 无内置镜像导入(社区模块) |
-| `write_file` | `dst`, `content` | 写内联内容文件(渲染 {{var}}) | ≈ Ansible `copy` 的 `content=`;crater 拆成独立模块 |
 | `systemd_unit` | `name`, `enable`, `start` | 轻量地 enable/start 一个已存在的 unit | 多数场景用更全的 `service` 即可 |
 
 ## 别名对照(旧 crater 名 → 现规范名)
@@ -60,6 +57,7 @@ task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible �
 | `pkg_install` | `package` |
 | `extract` | `unarchive` |
 | `render_template` | `template` |
+| `write_file`(`dst`+`content`) | `copy`(`dest`+`content`) |
 | `module`(调用角色) | `role`(见 [roles.md](roles.md)) |
 
 旧名全部保留为 serde 别名,既有 task 零改动;新 task / `crater ai` 生成的用规范名。

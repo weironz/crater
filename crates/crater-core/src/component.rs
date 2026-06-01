@@ -115,10 +115,6 @@ pub enum Action {
         src: String,
         dst: PathBuf,
     },
-    WriteFile {
-        dst: PathBuf,
-        content: String,
-    },
     SystemdUnit {
         name: String,
         #[serde(default)]
@@ -186,12 +182,20 @@ pub enum Action {
         #[serde(default)]
         group: Option<String>,
     },
-    /// Copy a control-side file to the target (D-037-b). `src` is resolved
-    /// relative to the component/task dir; the content is inlined into the plan
-    /// (so it works under the agent too), written idempotently (sha256), chmod.
+    /// Write a file to the target — ansible `copy` (D-037-b / D-068). Provide
+    /// EITHER `content` (inline text, `{{var}}`-rendered) OR `src` (a control-side
+    /// file under the task dir, inlined into the plan so it works under the agent
+    /// too — text only; binaries go through `place`). Written idempotently
+    /// (sha256) + optional chmod. `write_file` is a back-compat alias for the
+    /// old inline-content spelling; `dst` is accepted for `dest`.
+    #[serde(alias = "write_file")]
     Copy {
-        src: String,
+        #[serde(alias = "dst")]
         dest: PathBuf,
+        #[serde(default)]
+        src: Option<String>,
+        #[serde(default)]
+        content: Option<String>,
         #[serde(default)]
         mode: Option<String>,
     },
@@ -278,7 +282,6 @@ impl Action {
             Action::PkgInstall { .. } => "package",
             Action::Extract { .. } => "unarchive",
             Action::RenderTemplate { .. } => "template",
-            Action::WriteFile { .. } => "write_file",
             Action::SystemdUnit { .. } => "systemd_unit",
             Action::RunCmd { .. } => "shell",
             Action::Place { .. } => "place",

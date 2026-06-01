@@ -183,6 +183,25 @@ actions:
     }
 
     #[test]
+    fn copy_merges_write_file() {
+        // D-068: `copy` takes `content` (inline) or `src` (file); `write_file`
+        // (+`dst`) stays as an alias for the inline form.
+        use crate::component::Action;
+        let by_content: Action =
+            serde_yaml::from_str("action: copy\ndest: /etc/x\ncontent: \"hi\"").unwrap();
+        let by_src: Action =
+            serde_yaml::from_str("action: copy\ndest: /etc/x\nsrc: files/x").unwrap();
+        let legacy: Action =
+            serde_yaml::from_str("action: write_file\ndst: /etc/x\ncontent: \"hi\"").unwrap();
+        for a in [by_content, by_src, legacy] {
+            match a {
+                Action::Copy { dest, .. } => assert_eq!(dest.to_str(), Some("/etc/x")),
+                _ => panic!("should parse to Copy"),
+            }
+        }
+    }
+
+    #[test]
     fn file_kind_accepts_binary_alias() {
         // D-065: `binary` renamed to `file`; the old spelling stays valid.
         use crate::component::MaterialKind;

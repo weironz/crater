@@ -636,13 +636,6 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 mode: None,
             }
         }
-        Action::WriteFile { dst, content } => Op::WriteFile {
-            phase,
-            describe: format!("write file {}", dst.display()),
-            path: dst.display().to_string(),
-            content: render(content, &ctx.vars)?,
-            mode: None,
-        },
         Action::SystemdUnit {
             name,
             enable,
@@ -785,22 +778,35 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 check,
             }
         }
-        Action::Copy { src, dest, mode } => {
-            // Read the control-side file and inline it (works under the agent
-            // too, which can't reach control-side paths). Text only — binaries
-            // go through `place` (a material). Idempotent + chmod via WriteFile.
-            let src_path = ctx.component_dir.join(src);
-            let bytes = std::fs::read(&src_path)
-                .map_err(|e| anyhow::anyhow!("copy: read {}: {e}", src_path.display()))?;
-            let content = String::from_utf8(bytes).map_err(|_| {
-                anyhow::anyhow!(
-                    "copy: {} is not UTF-8 (use `place` for binaries)",
-                    src_path.display()
-                )
-            })?;
+        Action::Copy { dest, src, content, mode } => {
+            // ansible `copy`: inline `content` OR a control-side `src` file
+            // (read + inlined so it works under the agent, which can't reach
+            // control-side paths — text only; binaries go through `place`).
+            let content = match (content.as_deref(), src.as_deref()) {
+                (Some(c), None) => render(c, &ctx.vars)?,
+                (None, Some(s)) => {
+                    let src_path = ctx.component_dir.join(s);
+                    let bytes = std::fs::read(&src_path)
+                        .map_err(|e| anyhow::anyhow!("copy: read {}: {e}", src_path.display()))?;
+                    String::from_utf8(bytes).map_err(|_| {
+                        anyhow::anyhow!(
+                            "copy: {} is not UTF-8 (use `place` for binaries)",
+                            src_path.display()
+                        )
+                    })?
+                }
+                (Some(_), Some(_)) => {
+                    return Err(anyhow::anyhow!("copy: set either `content` or `src`, not both"))
+                }
+                (None, None) => return Err(anyhow::anyhow!("copy: needs `content` or `src`")),
+            };
+            let describe = match src.as_deref() {
+                Some(s) => format!("copy {s} -> {}", dest.display()),
+                None => format!("write file {}", dest.display()),
+            };
             Op::WriteFile {
                 phase,
-                describe: format!("copy {} -> {}", src, dest.display()),
+                describe,
                 path: dest.display().to_string(),
                 content,
                 mode: mode.clone(),

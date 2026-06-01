@@ -827,4 +827,9 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - 原 `module` action → `role`(alias `module`);`modules/` 目录 → `roles/`(loader 回退兼容旧 `modules/`)。
   - 已对齐的(`file`/`copy`/`service`/`lineinfile`/`user`/`group`)不动;crater 特有的(`place`/`load_image`/`write_file`/`systemd_unit`)保持原名,文档归入「crater 自有」类。
 - **影响**:`tasks/*.yaml` 全量改用规范名;`ai.rs` 模块清单重写并分两类;新文档 [features/modules.md](features/modules.md)(内置模块,两类)+ 旧 modules.md 更名 [roles.md](roles.md);新增回归测试 `action_names_align_with_ansible_and_keep_aliases`(11 个规范名+别名全解析正确)。37 tests 绿。
-- **未做**:`write_file` 未并入 `copy`(Ansible 用 `copy: content=`)——留作后续,避免本次扩面。
+- **后续**:`write_file` 并入 `copy` —— 见 D-068。
+
+### D-068 `write_file` 并入 `copy`(ansible 形态:content= 或 src=)
+- **背景**:D-067 把原语对齐 Ansible 后,只剩 `write_file`(写内联内容)和 `copy`(拷控制端文件)是分开的;Ansible 是**同一个 `copy`** 用 `content:` 或 `src:` 区分。
+- **决策**:删除 `WriteFile` 变体,`Copy` 改为 `{ dest, src?, content?, mode? }` —— 二选一(都给/都不给则报错)。`write_file` 留作 `copy` 的 tag 别名、`dst` 留作 `dest` 的字段别名,旧 task 零破坏。两条路径都 lower 成同一个 `Op::WriteFile`(content 渲染 {{var}};src 读控制端文件内联进 plan,文本 only,二进制走 `place`)。
+- **影响**:`tasks/*.yaml`(docker/k8s/zot)8 处 `write_file`+`dst` 改 `copy`+`dest`;`ai.rs`、modules.md、action-layer/action-tasks 文档同步;新增测试 `copy_merges_write_file`(content/src/write_file 别名都解析为 `Copy`)。`place`/`load_image`/`systemd_unit` 仍为 crater 自有模块。38 tests 绿。

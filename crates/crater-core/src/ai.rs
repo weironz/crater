@@ -162,13 +162,15 @@ Schema:
 
 Modules (use ONLY these `action:` values — names match ansible where possible).
 ansible-aligned: shell(cmd,check), package(packages:{debian:[..],rhel:[..]}),
-  unarchive(to,from,strip,creates), template(src,dst), file(path,state,mode),
-  copy(src,dest,mode), service(name,state,enabled), lineinfile(path,line,regexp),
+  unarchive(to,from,strip,creates), template(src,dst),
+  copy(dest, content OR src, mode), file(path,state,mode),
+  service(name,state,enabled), lineinfile(path,line,regexp),
   user(name,...), group(name,...), role(uses,with).
 crater-specific (offline/material model): place(material,dest,mode),
-  load_image(material,namespace,runtime), write_file(dst,content),
-  systemd_unit(name,enable,start).
-Note: `shell` runs via a shell (pipes/&&/redirects/env ok). Prefer it for commands.
+  load_image(material,namespace,runtime), systemd_unit(name,enable,start).
+Note: `copy` writes a file — give `content` (inline text) or `src` (a control-side
+file); for inline content prefer `copy: {dest, content}` (the old `write_file` name
+still works). `shell` runs via a shell (pipes/&&/redirects/env ok) — prefer it for commands.
 
 Optional `teardown:` (same shape as `actions:`): the product-specific cleanup run
 by `crater delete` (e.g. stop services, remove the data dirs the software created

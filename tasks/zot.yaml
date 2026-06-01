@@ -20,8 +20,8 @@ actions:
     path: /var/lib/zot
     state: directory
   - id: config
-    action: write_file
-    dst: /etc/zot/config.json
+    action: copy
+    dest: /etc/zot/config.json
     content: |
       {
         "storage": { "rootDirectory": "/var/lib/zot" },
@@ -30,8 +30,8 @@ actions:
       }
     notify: [restart_zot]
   - id: unit
-    action: write_file
-    dst: /etc/systemd/system/zot.service
+    action: copy
+    dest: /etc/systemd/system/zot.service
     content: |
       [Unit]
       Description=zot OCI registry

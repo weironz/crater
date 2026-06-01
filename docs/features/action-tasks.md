@@ -81,21 +81,22 @@ action 项字段(全是引擎读得懂的封闭词汇,**无需执行即可静态
 | 取值 | `{{ version }}` | 残废渲染器纯代入,写表达式直接报错(D-036/#1) |
 | 循环 | (不在 YAML) | action 收列表参数 / targeting 组内逐台 |
 
-## 内置 action 原语(Rust 白盒)
+## 内置模块(Rust 白盒)
 
-`pkg_install` `place` `extract` `render_template` `write_file` `systemd_unit`
-`run_cmd` `load_image` `module`,以及 D-037-b 补齐的:
+模块名 D-067 起对齐 Ansible;完整两类清单(与 Ansible 对齐 / crater 自有)+ 别名表见
+[modules.md](modules.md)。`shell` `place` `unarchive` `template` `copy` `systemd_unit`
+`package` `load_image` `role`,以及 D-037-b 补齐的:
 
-| 原语 | 参数 | 引擎语义(幂等) |
+| 模块 | 参数 | 引擎语义(幂等) |
 |---|---|---|
 | `file` | `path` + `state: directory\|absent\|touch` + `mode/owner/group` | `mkdir -p`/`rm -rf`/`touch`;探针 `test -d`/`test ! -e`/`test -e` |
-| `copy` | `src`(控制端,相对 task 目录) + `dest` + `mode` | 读控制端文件**内联进 plan**(agent 也能写),sha256 幂等 + chmod;文本 only(二进制走 `place`) |
+| `copy` | `dest` + `content`(内联,渲染)**或** `src`(控制端文件) + `mode` | 内联内容或读控制端文件**进 plan**(agent 也能写),sha256 幂等 + chmod;文本 only(二进制走 `place`) |
 | `service` | `name` + `state: started\|stopped\|restarted` + `enabled` | systemd start/stop/restart + enable/disable;started/stopped 探针 `is-active` |
 | `lineinfile` | `path` + `line` + `regexp?` + `state` + `create` | present 时(有 regexp)删匹配行 + append(即替换);探针 `grep -qxF` |
 | `user` | `name` + `state` + `system/shell/home/groups` | `useradd`/`userdel`;探针 `id` |
 | `group` | `name` + `state` + `system` | `groupadd`/`groupdel`;探针 `getent group` |
 
-`copy` 复用增强后的 `Op::WriteFile`(加 `mode` + sha256 幂等),`render_template`/`write_file` 也因此变幂等(内容不变报 ok)。
+`copy` lower 成增强后的 `Op::WriteFile`(加 `mode` + sha256 幂等),`template` 也因此变幂等(内容不变报 ok)。`write_file` 是 `copy`(内联 content)的旧名别名(D-068)。
 
 ## register / hostvars(跨 host fact,D-030 机制)
 
