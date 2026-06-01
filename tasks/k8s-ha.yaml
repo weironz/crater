@@ -185,54 +185,31 @@ actions:
     material: sysdeps
     needs: [sysctl_apply]
 
-  # —— containerd / runc / cni / crictl ——
-  - id: ctd_tgz
-    action: place
-    material: containerd
-    dest: /tmp/containerd.tgz
-    needs: [deps]
+  # —— containerd / runc / cni / crictl(unarchive 直接吃 material,取+解压一步,D-073)——
   - id: ctd_extract
     action: unarchive
-    from: /tmp/containerd.tgz
+    material: containerd
     to: /usr/local
-    strip: 0
     creates: /usr/local/bin/containerd
-    needs: [ctd_tgz]
+    needs: [deps]
   - id: runc
     action: place
     material: runc
     dest: /usr/local/sbin/runc
     mode: "0755"
     needs: [deps]
-  - id: cni_tgz
-    action: place
-    material: cni-plugins
-    dest: /tmp/cni.tgz
-    needs: [deps]
-  - id: cni_dir
-    action: file
-    path: /opt/cni/bin
-    state: directory
-    needs: [cni_tgz]
   - id: cni_extract
     action: unarchive
-    from: /tmp/cni.tgz
+    material: cni-plugins
     to: /opt/cni/bin
-    strip: 0
     creates: /opt/cni/bin/bridge
-    needs: [cni_dir]
-  - id: crictl_tgz
-    action: place
-    material: crictl
-    dest: /tmp/crictl.tgz
     needs: [deps]
   - id: crictl_extract
     action: unarchive
-    from: /tmp/crictl.tgz
+    material: crictl
     to: /usr/local/bin
-    strip: 0
     creates: /usr/local/bin/crictl
-    needs: [crictl_tgz]
+    needs: [deps]
   - id: crictl_cfg
     action: place
     material: cfg-crictl

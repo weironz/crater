@@ -101,8 +101,15 @@ pub enum Action {
     #[serde(rename = "unarchive")]
     Extract {
         to: PathBuf,
+        /// A path already on the target (e.g. a prior `place`d tmp).
         #[serde(default)]
         from: Option<PathBuf>,
+        /// Take a declared archive material directly (D-073): the engine fetches
+        /// it (online: download; offline: stream the packed blob to a temp) AND
+        /// extracts to `to` in ONE step — no manual `place`-to-/tmp + temp file.
+        /// Mutually exclusive with `from`.
+        #[serde(default)]
+        material: Option<String>,
         /// tar --strip-components value.
         #[serde(default)]
         strip: u32,

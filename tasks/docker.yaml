@@ -17,19 +17,14 @@ materials:
     arch: arm64
     url_tmpl: "https://download.docker.com/linux/static/stable/aarch64/docker-{{version}}.tgz"
 actions:
-  - id: place_tgz
-    action: place
-    material: docker-tgz
-    dest: /tmp/docker.tgz
+  # unarchive 直接吃 material(取+解压一步,D-073)。tarball 内是 docker/ 目录,
+  # strip 1 → 二进制直接落 /usr/local/bin;creates 已解出 dockerd 则跳过(幂等)。
   - id: extract
-    # tarball 内是 docker/ 目录,strip 1 → 二进制直接落 /usr/local/bin。
-    # creates: 已解出 dockerd 则跳过(幂等,D-048+)。
     action: unarchive
-    from: /tmp/docker.tgz
+    material: docker-tgz
     to: /usr/local/bin
     strip: 1
     creates: /usr/local/bin/dockerd
-    needs: [place_tgz]
   - id: containerd_unit
     action: copy
     dest: /etc/systemd/system/containerd.service

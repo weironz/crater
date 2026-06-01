@@ -122,6 +122,22 @@ pub enum Op {
         #[serde(default)]
         check: Option<String>,
     },
+    /// Fetch an archive material and extract it to `to` in ONE step (D-073).
+    /// Offline: `local_archive` is the control-side blob (streamed to a temp,
+    /// extracted, removed). Online: `url` is downloaded on the target. Idempotent
+    /// when `creates` is set (skip — and skip the fetch — if it already exists).
+    UnarchiveMaterial {
+        phase: Phase,
+        describe: String,
+        to: String,
+        strip: u32,
+        #[serde(default)]
+        creates: Option<String>,
+        #[serde(default)]
+        local_archive: Option<PathBuf>,
+        #[serde(default)]
+        url: Option<String>,
+    },
 }
 
 impl Op {
@@ -131,6 +147,7 @@ impl Op {
             | Op::WriteFile { phase, .. }
             | Op::PushFile { phase, .. }
             | Op::ImageImport { phase, .. }
+            | Op::UnarchiveMaterial { phase, .. }
             | Op::PackageInstall { phase, .. } => *phase,
         }
     }
@@ -140,6 +157,7 @@ impl Op {
             | Op::WriteFile { describe, .. }
             | Op::PushFile { describe, .. }
             | Op::ImageImport { describe, .. }
+            | Op::UnarchiveMaterial { describe, .. }
             | Op::PackageInstall { describe, .. } => describe,
         }
     }
@@ -150,6 +168,7 @@ impl Op {
             Op::WriteFile { path, .. } => Some(path),
             Op::PushFile { dest, .. } => Some(dest),
             Op::ImageImport { reference, .. } => Some(reference),
+            Op::UnarchiveMaterial { to, .. } => Some(to),
             Op::PackageInstall { describe, .. } => Some(describe),
         }
     }
@@ -609,25 +628,59 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 }
             }
         }
-        Action::Extract { to, from, strip, creates } => {
-            let src = from
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "/tmp/crater-dl".to_string());
-            Op::Shell {
-                phase,
-                describe: format!("extract {src} -> {}", to.display()),
-                cmd: format!(
-                    "mkdir -p '{to}' && tar -xf '{src}' --strip-components={strip} -C '{to}'",
-                    to = to.display(),
-                    strip = strip
-                ),
-                soft_fail: false,
-                // Idempotent when the author declares `creates:` (the extract's
-                // expected product); else re-extract every run (overwrite-safe).
-                check: creates
+        Action::Extract { to, from, material, strip, creates } => {
+            let to_s = to.display().to_string();
+            let creates_s = creates.as_ref().map(|p| p.display().to_string());
+            if let Some(name) = material {
+                // D-073: fetch the material AND extract in one step. Offline → the
+                // packed blob; online → its url_tmpl (arch-injected like `place`).
+                let m = ctx.resolve_material(name)?;
+                let (local_archive, url) = if let Some(blobs) = &ctx.offline_blobs {
+                    let key = PlanContext::material_blob_key(m);
+                    let local = blobs
+                        .get(&key)
+                        .or_else(|| blobs.get(name))
+                        .ok_or_else(|| anyhow::anyhow!("offline bundle missing material '{key}'"))?
+                        .clone();
+                    (Some(local), None)
+                } else {
+                    let tmpl = m.url_tmpl.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("unarchive: material '{name}' has no url_tmpl for online fetch")
+                    })?;
+                    let raw = if let Some(a) = m.arch {
+                        let mut vars = ctx.vars.clone();
+                        vars.insert("arch".to_string(), a.as_str().to_string());
+                        render(tmpl, &vars)?
+                    } else {
+                        render(tmpl, &ctx.vars)?
+                    };
+                    (None, Some(ctx.source.rewrite(&raw)))
+                };
+                Op::UnarchiveMaterial {
+                    phase,
+                    describe: format!("unarchive {name} -> {to_s}"),
+                    to: to_s,
+                    strip: *strip,
+                    creates: creates_s,
+                    local_archive,
+                    url,
+                }
+            } else {
+                let src = from
                     .as_ref()
-                    .map(|p| format!("test -e '{}'", p.display())),
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "/tmp/crater-dl".to_string());
+                Op::Shell {
+                    phase,
+                    describe: format!("extract {src} -> {to_s}"),
+                    cmd: format!(
+                        "mkdir -p '{to_s}' && tar -xf '{src}' --strip-components={strip} -C '{to_s}'"
+                    ),
+                    soft_fail: false,
+                    // Idempotent when the author declares `creates:` (the extract's
+                    // expected product); else re-extract every run (overwrite-safe).
+                    check: creates_s.map(|c| format!("test -e '{c}'")),
+                }
             }
         }
         Action::RenderTemplate { src, dst } => {
@@ -1169,6 +1222,46 @@ async fn exec_one(
             tracing::debug!("      pushed {} bytes -> {dest}", data.len());
             Ok((StepStatus::Changed, Vec::new()))
         }
+        Op::UnarchiveMaterial {
+            to,
+            strip,
+            creates,
+            local_archive,
+            url,
+            ..
+        } => {
+            // Idempotency: declared product present → skip (AND skip the fetch).
+            if let Some(c) = creates {
+                if exec.run(&format!("test -e '{c}'")).await?.ok() {
+                    return Ok((StepStatus::Ok, Vec::new()));
+                }
+            }
+            let tmp = format!("/tmp/crater-arc-{}.tar", sanitize(to));
+            if let Some(archive) = local_archive {
+                // Offline: stream the packed blob to a temp on the target.
+                let data = std::fs::read(archive)
+                    .map_err(|e| anyhow::anyhow!("read archive {}: {e}", archive.display()))?;
+                exec.write_file(&tmp, &data).await?;
+                tracing::debug!("      pushed {} bytes archive -> {tmp}", data.len());
+            } else if let Some(u) = url {
+                // Online: the target downloads it.
+                let out = exec.run(&format!("curl -fL --retry 3 -o '{tmp}' '{u}'")).await?;
+                if !out.ok() {
+                    anyhow::bail!("step {n} fetch {u} failed (exit {}): {}", out.code, out.stderr.trim());
+                }
+            } else {
+                anyhow::bail!("step {n} unarchive: no material blob or url");
+            }
+            let cmd = format!(
+                "mkdir -p '{to}' && tar -xf '{tmp}' --strip-components={strip} -C '{to}'; rc=$?; rm -f '{tmp}'; exit $rc"
+            );
+            let out = exec.run(&cmd).await?;
+            if out.ok() {
+                Ok((StepStatus::Changed, Vec::new()))
+            } else {
+                anyhow::bail!("step {n} unarchive failed (exit {}): {}", out.code, out.stderr.trim());
+            }
+        }
         Op::ImageImport {
             reference,
             local_archive,
@@ -1287,6 +1380,32 @@ fn sanitize(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::component::Action;
+
+    #[test]
+    fn unarchive_takes_material_directly() {
+        // D-073: `unarchive` with `material` lowers to one UnarchiveMaterial op
+        // (fetch+extract), no separate place step. Offline → carries the blob.
+        let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
+        ctx.add_material(test_material("app", "https://x/app.tgz"));
+        let mut blobs = BTreeMap::new();
+        blobs.insert("app".to_string(), PathBuf::from("/blob/app.tar"));
+        ctx.offline_blobs = Some(blobs);
+        let act = Action::Extract {
+            to: PathBuf::from("/usr/local"),
+            from: None,
+            material: Some("app".into()),
+            strip: 0,
+            creates: Some(PathBuf::from("/usr/local/bin/app")),
+        };
+        match action_op(Phase::Install, &act, &ctx).unwrap() {
+            Op::UnarchiveMaterial { to, local_archive, creates, .. } => {
+                assert_eq!(to, "/usr/local");
+                assert_eq!(local_archive, Some(PathBuf::from("/blob/app.tar")));
+                assert_eq!(creates.as_deref(), Some("/usr/local/bin/app"));
+            }
+            other => panic!("expected UnarchiveMaterial, got {other:?}"),
+        }
+    }
 
     #[test]
     fn when_role_filters_steps_by_host_roles() {

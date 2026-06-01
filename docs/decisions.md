@@ -881,3 +881,11 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **决策**:开**一个** channel `exec("mkdir -p ... && cat > path")`,把**原始字节**(无 base64——stdin 不是 shell 参数,不受 MAX_ARG_STRLEN 限)用 russh `channel.data()` 流给远端 stdin,`eof()` 收尾,等 exit。SSH 自带窗口流控,line-rate。
 - **理由**:crater 用纯 Rust 的 **russh**(不 shell-out 系统 ssh/scp,守单二进制零依赖),russh 的 channel 流式即可,无需 scp/sftp。
 - **影响**:530MB 从 ~7min → **~17s**(D-071 真机实测,干净节点全 material apply 17s 到 init)。文件二进制完整(集群正常起来即证)。删掉旧的分块+base64+临时文件逻辑。
+
+## 2026-06-02 · unarchive 直接吃 material(取+解压一步,D-073)
+
+### D-073 `unarchive` 原语支持 `material`,内部完成「取+解压」
+- **背景**:9 个 tarball 类物料原来每个都要两步——`place material → /tmp/x.tgz`,再 `unarchive from: /tmp/x.tgz`,中间一个临时文件。重复暴露的是引擎缺「取一个压缩包并解压到位」的复合能力。
+- **决策**:`Extract`(action `unarchive`)加 `material` 字段(与 `from` 互斥)。引擎 `action_op` 解析:离线→该 material 的 blob 路径,在线→其 `url_tmpl`(同 `place` 注入 `{{arch}}`),产出新 Op `UnarchiveMaterial{to,strip,creates,local_archive,url}`。`exec` 里一步搞定:`creates` 已存在则跳过(**连取都不取**);否则离线把 blob 流到 `/tmp/crater-arc-*.tar`、在线 `curl` 下载,再 `tar -xf … -C to` 并删临时文件。与 `package`/`load_image` 的 `local_archive` 模式同构。
+- **理由**:声明意图(把这个压缩包解到这)而非手写中转步骤;少一个临时文件、少一步、`creates` 幂等还能省掉传输。
+- **影响**:`tasks/{k8s-ha,k8s-offline,docker}.yaml` 的 place+unarchive 对(及 cni 的 mkdir)收口成单条 `unarchive material:`(k8s 每个少 1~2 步、docker 少 1 步)。`ai.rs` 改 `unarchive(to, material, strip, creates)`。新增测试 `unarchive_takes_material_directly`。41 tests 绿。`from:`(已在目标上的路径)仍保留。**未重建 OCI**(用户:不着急;改动经单测验证,既有集群不受影响)。
