@@ -11,7 +11,7 @@ crater 自带一个**本地 OCI 镜像库** + **纯 Rust registry 客户端**（
 
 | 命令 | 作用 |
 |---|---|
-| `crater images` | 列出本地库的镜像（ref / digest / size） |
+| `crater images` | 列出本地库的镜像（ref / digest / **DISK USAGE** / **CONTENT SIZE**，docker 风格人类可读） |
 | `crater pull <ref>` | 从 registry 拉镜像进本地库 |
 | `crater push <ref>` | 把本地库的镜像推到 registry |
 | `crater load <file.oci> [--as <ref>]` | 把 oci-archive 导入本地库;省略 `--as` 用包内 ref.name（`build -t` 定的） |
@@ -30,8 +30,10 @@ crater 自带一个**本地 OCI 镜像库** + **纯 Rust registry 客户端**（
 crater registry login docker.io -u <user> -p <pass>     # 私有库才需要；公共匿名即可
 crater pull docker.io/library/hello-world:latest        # → ~/.crater/store
 crater images
-#  REFERENCE                              DIGEST        SIZE
-#  docker.io/library/hello-world:latest   3455a1c81403  402
+#  REFERENCE                              DIGEST        DISK USAGE  CONTENT SIZE
+#  docker.io/library/hello-world:latest   3455a1c81403       9.1kB         9.1kB
+# CONTENT SIZE=config+layers(registry 传输量);DISK USAGE=manifest+config+layers 实际占盘。
+# crater 物料层不压缩,故两列对真 artifact ≈ 相等(诚实,不像 docker 有压缩/解压差)。
 
 # apply 直接吃镜像地址：本地库命中→用，否则自动 pull（hello-world 是普通镜像→展开层）
 crater apply docker.io/library/hello-world:latest --host <host> --password <pw>
