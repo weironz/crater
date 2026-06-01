@@ -28,7 +28,7 @@ task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible �
 | `shell` | `cmd`, `check` | 经 shell 跑命令(管道/`&&`/重定向/环境变量前缀都支持)。`check` 是幂等探针:退出 0 则跳过(报 `ok`) | `shell` |
 | `package` | `packages: {debian:[..], rhel:[..]}`, `material` | 装系统包。在线走系统源;离线设 `material` 指向 `kind: os_package` 物料(D-062) | `package`/`apt`/`yum` |
 | `unarchive` | `to`, `from`, `strip`, `creates` | 解压 tar/tgz 到 `to`。`creates` 已存在则跳过(幂等) | `unarchive` |
-| `template` | `src`, `dst` | 渲染 `templates/<src>`({{var}} 替换)写到 `dst` | `template` |
+| `template` | `material`, `dst` | 用 **minijinja** 渲染模板物料(`kind: file` 的 `.j2`,打进 OCI 离线自洽)写到 `dst`。支持 `{% for %}`/`{{ }}`;上下文含标量 var + 结构化 `groups.<role>`=`[{name,ip}]`(D-075) | `template` |
 | `copy` | `dest`, `content` 或 `src`, `mode` | 写文件到目标:`content` 写内联内容(渲染 {{var}}),或 `src` 拷控制端文件(内联进 plan,文本,sha256 幂等)。二选一 | `copy`(content= / src=) |
 | `file` | `path`, `state`(directory/absent/touch), `mode`, `owner`, `group` | 管路径状态:建目录 / 删 / touch | `file` |
 | `service` | `name`, `state`(started/stopped/restarted), `enabled` | 管 systemd 服务(自带 daemon-reload + enable + start/stop/restart,is-active/is-enabled 幂等) | `service`/`systemd` |

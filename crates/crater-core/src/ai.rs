@@ -170,7 +170,7 @@ singleton role like bootstrap). `register:` entries take `when_role` too.
 
 Modules (use ONLY these `action:` values — names match ansible where possible).
 ansible-aligned: shell(cmd,check), package(packages:{debian:[..],rhel:[..]}),
-  unarchive(to, material, strip, creates), template(src,dst),
+  unarchive(to, material, strip, creates), template(material, dst),
   copy(dest, content OR src, mode), file(path,state,mode),
   service(name,state,enabled), lineinfile(path,line,regexp),
   user(name,...), group(name,...), role(uses,with).
