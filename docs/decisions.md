@@ -686,3 +686,17 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - 现代表格(行 hover、mono 技术字段、`<code>` 名)、卡片化 panel、响应式。
   - 新增 `/api/stats`;`index` 改静态 const(CSS 大括号免转义);htmx 轮询不变。
 - **验证**:`/api/stats` 4 卡片、`/api/deployments` pill、页面含新主题。musl 静态 31.8MB,34+2 tests 绿,0 警告。
+
+---
+
+## 2026-06-01 · crater ui 写操作:Verify / Heal(D-058)
+
+### D-058 UI 写操作(opt-in `--inventory`),经子进程调 CLI
+- **背景**:看板从只读升级到可触发动作。但 Web UI 改机群是真实权限升级。
+- **决策**:
+  - **opt-in**:`crater ui -i inventory.yaml` 才启用写动作(UI 据此持有机群凭据,类似 AWX);无 `-i` 则严格只读、按钮不出现。默认 `bind 127.0.0.1`。
+  - **动作**:**Verify now**(全局,重跑 verify 写回 DB,只读探测安全)+ 每行 **Heal**(re-apply 自愈,带 `hx-confirm` 确认)。**Delete 不做**(最危险)。
+  - **实现走子进程**:handler `run_crater(args)` 用 `current_exe` 跑 `crater task list --verify -i ...` / `crater apply <dep> <source> -i ...`。**理由**:apply_task 内部 `buffer_unordered` 借用闭包的 future 非 Send,直接在 axum handler 里 await 触发 HRTB/Send 编译错误;子进程彻底隔离,且逐字复用 CLI 行为、零耦合。
+  - htmx:按钮 `hx-post` → 返回刷新后的 deployments 片段(`#deps-pane` swap);heal 带 `hx-confirm`;`htmx-request` 期间按钮禁用。
+- **真机验证(.11/.12)**:`ui -i inv` → GET 出 Verify now + 每行 heal;POST `/api/verify` → ok 2/2;`rm yq@.12` → POST verify → **DRIFT 1/2**;POST `/api/apply/yq`(heal)→ 自愈 → 返回表 ok 2/2。34+2 tests 绿,0 警告。
+- **后续**:Delete(需更强确认)、操作鉴权(对外暴露)、操作进度/日志流。

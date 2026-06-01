@@ -13,9 +13,19 @@
 ## 用法
 
 ```bash
-crater ui                          # http://127.0.0.1:8080(只读)
+crater ui                              # http://127.0.0.1:8080(只读)
+crater ui -i inventory.yaml            # 启用写动作(Verify / Heal),UI 据此持有机群凭据
 crater ui --bind 0.0.0.0 --port 9000   # 对外暴露(注意:暂无鉴权)
 ```
+
+## 写操作(D-058,opt-in `-i`)
+
+不带 `-i` 时严格只读。带 `-i inventory.yaml` 时看板出现动作按钮(类似 AWX,UI 持有机群凭据):
+- **Verify now**(全局):重跑 verify、把漂移写回 DB、刷新看板。只读探测,安全。
+- **Heal**(每行):对该 deployment `re-apply` 自愈,带确认弹窗。
+- **Delete 暂不做**(最危险)。
+
+实现:handler 用 `current_exe` **子进程**跑 `crater task list --verify -i …` / `crater apply <dep> <source> -i …`——逐字复用 CLI、与引擎解耦(避开 axum handler 的 Send/HRTB 约束)。
 
 | 路由 | 内容 |
 |---|---|

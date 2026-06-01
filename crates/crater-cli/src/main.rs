@@ -120,14 +120,18 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TaskCmd,
     },
-    /// Serve a read-only web dashboard over the deployment state (D-054).
-    /// Axum + htmx, pure Rust, htmx embedded (works offline). Default binds
-    /// localhost only.
+    /// Serve a web dashboard over the deployment state (D-054). Axum + htmx,
+    /// pure Rust, htmx embedded (works offline). Default binds localhost only.
+    /// With `-i/--inventory`, enables write actions (Verify / Heal) against that
+    /// fleet (D-058) — the UI then holds the fleet's credentials.
     Ui {
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
         #[arg(long, default_value_t = 8080)]
         port: u16,
+        /// Inventory enabling write actions (Verify/Heal) on its hosts.
+        #[arg(short = 'i', long)]
+        inventory: Option<PathBuf>,
     },
     /// Build a task into a B 类 OCI artifact in the local store (like
     /// `docker build`). Export to a file with `crater save`.
@@ -441,7 +445,7 @@ async fn main() -> Result<()> {
             } => task_show(&name, inventory, host, user, password, key, port, verify).await,
             TaskCmd::History { limit } => task_history(limit).await,
         },
-        Cmd::Ui { bind, port } => ui::serve(&bind, port).await,
+        Cmd::Ui { bind, port, inventory } => ui::serve(&bind, port, inventory).await,
         Cmd::Build { file, tag, arch } => build_to_store(&file, tag, &arch).await,
         Cmd::Save { reference, output } => {
             ImageStore::open()?.export_oci_archive(&reference, &output)?;
@@ -1025,23 +1029,25 @@ async fn gather_deployments(
 /// **verify-phase** actions on the host (read-only), report ok/DRIFT. Returns
 /// `None` when the source can't be resolved locally or the task has no verify
 /// phase (no health probe to judge by).
+/// Resolve a deployment's recorded `source` (named task or task-file path) to a
+/// local task file. Returns None for artifact-ref sources (not resolvable here).
+fn resolve_task_path(source: &str) -> Option<PathBuf> {
+    use crater_core::task::is_task_file;
+    let p = PathBuf::from(source);
+    if p.is_file() && is_task_file(&p) {
+        return Some(p);
+    }
+    let named = PathBuf::from("tasks").join(format!("{source}.yaml"));
+    if named.is_file() && is_task_file(&named) {
+        return Some(named);
+    }
+    None
+}
+
 async fn verify_on_host(exec: &dyn Executor, source: &str) -> Option<bool> {
     use crater_core::engine::{self, Op, PlanContext, Phase};
-    use crater_core::task::{is_task_file, TaskFile};
-    // Resolve the task file from the recorded source (named task or path).
-    let path = {
-        let p = PathBuf::from(source);
-        if p.is_file() && is_task_file(&p) {
-            p
-        } else {
-            let named = PathBuf::from("tasks").join(format!("{source}.yaml"));
-            if named.is_file() && is_task_file(&named) {
-                named
-            } else {
-                return None; // artifact ref / not resolvable here
-            }
-        }
-    };
+    use crater_core::task::TaskFile;
+    let path = resolve_task_path(source)?;
     let task = TaskFile::from_yaml_file(&path).ok()?;
     let spec_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
     let ver = task.vars.get("version").cloned().unwrap_or_else(|| "latest".into());

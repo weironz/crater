@@ -7,11 +7,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use anyhow::Result;
 use axum::{
+    extract::{Path as AxPath, State},
     http::header,
     response::{Html, IntoResponse},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 
@@ -20,22 +24,33 @@ use crater_core::state::{self, StateStore, TursoStore};
 /// htmx, vendored + embedded so the dashboard works with zero network (air-gap).
 const HTMX_JS: &[u8] = include_bytes!("../assets/htmx.min.js");
 
-pub async fn serve(bind: &str, port: u16) -> Result<()> {
+/// UI config. `inventory` (from `crater ui -i`) enables write actions on that
+/// fleet (D-058); without it the dashboard is strictly read-only.
+struct UiCfg {
+    inventory: Option<PathBuf>,
+}
+
+pub async fn serve(bind: &str, port: u16, inventory: Option<PathBuf>) -> Result<()> {
     // Validate the DB is openable up front; handlers re-open per request so they
     // always see the latest writes from the CLI process (Turso cross-process
     // visibility — a fresh handle reads committed state, D-056).
     TursoStore::open().await?;
+    let cfg = Arc::new(UiCfg { inventory });
     let app = Router::new()
         .route("/", get(index))
         .route("/api/stats", get(stats_fragment))
         .route("/api/deployments", get(deployments_fragment))
         .route("/api/history", get(history_fragment))
-        .route("/htmx.min.js", get(htmx_js));
+        .route("/api/verify", post(verify_action))
+        .route("/api/apply/{deployment}", post(apply_action))
+        .route("/htmx.min.js", get(htmx_js))
+        .with_state(cfg.clone());
     let addr: SocketAddr = format!("{bind}:{port}")
         .parse()
         .map_err(|e| anyhow::anyhow!("bad bind address {bind}:{port}: {e}"))?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("crater ui → http://{addr}  (read-only; Ctrl-C to stop)");
+    let mode = if cfg.inventory.is_some() { "read-write (Verify/Heal enabled)" } else { "read-only" };
+    tracing::info!("crater ui → http://{addr}  ({mode}; Ctrl-C to stop)");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -114,6 +129,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
   .pill.delete{color:var(--unknown);background:var(--unknown-bg)}
   .empty{padding:2rem 1.25rem;color:var(--faint);text-align:center}
   .fail{color:var(--drift)}
+  .toolbar{display:flex;justify-content:flex-end;gap:.5rem;padding:.55rem 1.25rem;border-bottom:1px solid var(--border)}
+  .btn{font:inherit;font-size:.78rem;font-weight:600;color:var(--text);background:var(--surface-2);
+       border:1px solid var(--border);border-radius:8px;padding:.35rem .75rem;cursor:pointer;
+       display:inline-flex;align-items:center;gap:.35rem;transition:.12s}
+  .btn:hover{border-color:var(--accent);color:var(--accent-2)}
+  .btn:disabled{opacity:.5;cursor:default}
+  .btn-heal{font-size:.72rem;padding:.18rem .6rem;background:transparent}
+  .btn-heal:hover{color:var(--accent-2);border-color:var(--accent)}
+  .note{padding:.7rem 1.25rem;color:var(--faint);font-size:.8rem}
+  .htmx-request.btn,.htmx-request .btn{opacity:.6;pointer-events:none}
   @media(max-width:760px){.stats{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head>
@@ -126,7 +151,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
   <section class="stats" hx-get="/api/stats" hx-trigger="load, every 5s" hx-swap="innerHTML"></section>
   <section class="panel">
     <h2><span class="mk">◆</span> Deployments</h2>
-    <div hx-get="/api/deployments" hx-trigger="load, every 5s" hx-swap="innerHTML"><div class="empty">loading…</div></div>
+    <div id="deps-pane" hx-get="/api/deployments" hx-trigger="load, every 5s" hx-swap="innerHTML"><div class="empty">loading…</div></div>
   </section>
   <section class="panel">
     <h2><span class="mk">◷</span> Activity</h2>
@@ -173,17 +198,80 @@ async fn stats_fragment() -> Html<String> {
     ))
 }
 
-async fn deployments_fragment() -> Html<String> {
+async fn deployments_fragment(State(cfg): State<Arc<UiCfg>>) -> Html<String> {
+    Html(render_deployments(cfg.inventory.is_some()).await)
+}
+
+/// Run our own binary as a subprocess (the same command a human would run).
+/// Shelling out keeps the engine's borrow-heavy async out of the axum handler
+/// (Send/HRTB) and reuses CLI behavior verbatim.
+async fn run_crater(args: &[&str]) -> std::result::Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let out = tokio::process::Command::new(exe)
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// POST /api/verify — re-run drift checks across the inventory (persists to the
+/// DB), return the refreshed deployments pane (D-058). Note if read-only.
+async fn verify_action(State(cfg): State<Arc<UiCfg>>) -> Html<String> {
+    let Some(inv) = cfg.inventory.clone() else {
+        return Html("<div class='note fail'>actions disabled — start with <code>crater ui -i inventory.yaml</code></div>".into());
+    };
+    let inv_s = inv.to_string_lossy().into_owned();
+    if let Err(e) = run_crater(&["task", "list", "--verify", "-i", &inv_s]).await {
+        return Html(format!("<div class='note fail'>verify failed: {}</div>", esc(&e)));
+    }
+    Html(render_deployments(true).await)
+}
+
+/// POST /api/apply/{deployment} — re-apply (heal) a deployment via the CLI.
+async fn apply_action(State(cfg): State<Arc<UiCfg>>, AxPath(dep): AxPath<String>) -> Html<String> {
+    let Some(inv) = cfg.inventory.clone() else {
+        return Html("<div class='note fail'>actions disabled — start with <code>crater ui -i inventory.yaml</code></div>".into());
+    };
+    // Look up the deployment's source to re-apply it under the same name.
+    let source = match TursoStore::open_read().await {
+        Ok(s) => s
+            .list_deployments()
+            .await
+            .ok()
+            .and_then(|ds| ds.into_iter().find(|d| d.deployment == dep).map(|d| d.source)),
+        Err(_) => None,
+    };
+    let Some(source) = source else {
+        return Html(format!("<div class='note fail'>deployment '{}' not found</div>", esc(&dep)));
+    };
+    let inv_s = inv.to_string_lossy().into_owned();
+    if let Err(e) = run_crater(&["apply", &dep, &source, "-i", &inv_s]).await {
+        return Html(format!("<div class='note fail'>heal '{}' failed: {}</div>", esc(&dep), esc(&e)));
+    }
+    Html(render_deployments(true).await)
+}
+
+async fn render_deployments(enabled: bool) -> String {
     let store = match TursoStore::open_read().await {
         Ok(s) => s,
-        Err(e) => return Html(format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string()))),
+        Err(e) => return format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string())),
     };
     let deps = match store.list_deployments().await {
         Ok(d) => d,
-        Err(e) => return Html(format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string()))),
+        Err(e) => return format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string())),
+    };
+    let toolbar = if enabled {
+        "<div class='toolbar'><button class='btn' hx-post='/api/verify' hx-target='#deps-pane' hx-swap='innerHTML'>↻ Verify now</button></div>".to_string()
+    } else {
+        String::new()
     };
     if deps.is_empty() {
-        return Html("<div class='empty'>no deployments recorded</div>".into());
+        return format!("{toolbar}<div class='empty'>no deployments recorded</div>");
     }
     #[derive(Default)]
     struct Agg {
@@ -222,14 +310,23 @@ async fn deployments_fragment() -> Html<String> {
             "<span class='pill unknown'><span class='d'></span>unknown</span>".to_string()
         };
         let checked = if a.checked > 0 { state::fmt_epoch(a.checked) } else { "—".to_string() };
+        let action = if enabled {
+            format!(
+                "<td><button class='btn btn-heal' hx-post='/api/apply/{d}' hx-target='#deps-pane' hx-swap='innerHTML' hx-confirm='Re-apply (heal) {d} to its hosts?'>heal</button></td>",
+                d = esc(&dep)
+            )
+        } else {
+            String::new()
+        };
         rows.push_str(&format!(
-            "<tr><td><code>{}</code></td><td>{}</td><td class='mono muted'>{}</td><td class='num'>{}</td><td>{}</td><td class='muted mono'>{}</td><td class='muted mono'>{}</td></tr>",
-            esc(&dep), esc(&join(a.tasks)), esc(&join(a.versions)), a.hosts, pill, checked, state::fmt_epoch(a.last)
+            "<tr><td><code>{}</code></td><td>{}</td><td class='mono muted'>{}</td><td class='num'>{}</td><td>{}</td><td class='muted mono'>{}</td><td class='muted mono'>{}</td>{}</tr>",
+            esc(&dep), esc(&join(a.tasks)), esc(&join(a.versions)), a.hosts, pill, checked, state::fmt_epoch(a.last), action
         ));
     }
-    Html(format!(
-        "<table><thead><tr><th>Deployment</th><th>Task</th><th>Version</th><th class='num'>Hosts</th><th>Status</th><th>Checked (UTC)</th><th>Last applied (UTC)</th></tr></thead><tbody>{rows}</tbody></table>"
-    ))
+    let actions_th = if enabled { "<th></th>" } else { "" };
+    format!(
+        "{toolbar}<table><thead><tr><th>Deployment</th><th>Task</th><th>Version</th><th class='num'>Hosts</th><th>Status</th><th>Checked (UTC)</th><th>Last applied (UTC)</th>{actions_th}</tr></thead><tbody>{rows}</tbody></table>"
+    )
 }
 
 async fn history_fragment() -> Html<String> {
