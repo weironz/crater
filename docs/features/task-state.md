@@ -21,8 +21,8 @@ crater 本来**无状态/agentless**——跑完不留痕,不知道"什么装在
 | 命令 | 作用 |
 |---|---|
 | `crater task history [--limit N]` | **主视图**:最近 apply/delete 活动流(谁/何时/部署/task/主机/结果) |
-| `crater task list [--host/-i]` | 当前部署快照——**一行一个 deployment**(HOSTS 计数);默认读控制 DB,`--host/-i` 读目标机权威 marker |
-| `crater task show <name> [--host/-i]` | 该 deployment 的 per-host 明细 |
+| `crater task list [--host/-i] [--verify]` | 当前部署快照——**一行一个 deployment**(HOSTS 计数);`--verify` 重跑 verify 阶段加 STATUS(`ok N/M`/`DRIFT x/M`) |
+| `crater task show <name> [--host/-i] [--verify]` | 该 deployment 的 per-host 明细;`--verify` 加 per-host ok/DRIFT/? |
 
 `apply`/`delete` 自动维护状态(best-effort):marker(目标机,真相)+ 控制 DB(聚合/历史)。
 
@@ -59,8 +59,9 @@ HOSTS 只给**计数**(大批量不平铺,主机名去 `task show`);版本各机
 
 ## 边界 / 后续
 
-- **Phase 1b**：`crater task list --verify` / `task show <name> --verify`——漂移检测(重跑 task 的 verify 阶段,比对声明态 vs 实际:有人手动删了就标 DRIFT/MISSING)。两级都给 STATUS(task 级聚合 ok/部分漂移,host 级 ok/DRIFT/MISSING)。**不单开 `status` 动词**,做成 list/show 的 `--verify` 开关。
-- **Phase 2**：`crater ui`——Axum + htmx 只读看板,读同一个 Turso 库。
+- **Phase 1b — 已完成(D-055)**：`crater task list/show --verify`——重跑 verify 阶段检测漂移(`ok N/M`/`DRIFT`)。**检测只读;修复 = 直接 re-apply**(幂等自愈,changed 即被纠正的漂移)。需 `--host`/`-i`。
+- **Phase 2 — 已完成(D-054)**：`crater ui`——Axum + htmx 只读看板。
+- 后续:`--verify` 状态进看板;artifact-source 的 verify(拉 recipe)。
 - 控制端 DB 是 per-控制机的缓存;跨控制机的真相永远在目标机 marker(`--host` 读它)。
 
 ## 关联

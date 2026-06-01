@@ -6,7 +6,7 @@
 //!   crater <name> [flags]                      # shorthand for `crater apply <name>`
 //!   crater apply <image-ref|x.oci> --host H    # deploy an image / offline artifact
 //!   crater delete <source> [--host|-i]         # uninstall via the task's teardown: (D-049)
-//!   crater task list|show <name>|history       # deployment state: task-centric list + drill-down (D-051)
+//!   crater task list|show <name>|history       # deployment state; --verify = drift check (D-051/055)
 //!   crater ui [--bind H --port N]               # read-only web dashboard (Axum + htmx, D-054)
 //!   crater build -f task.yaml [-t ref]         # → B 类 OCI artifact in the local store
 //!   crater save <ref> -o x.oci                 # export a stored artifact to a file
@@ -294,6 +294,10 @@ enum TaskCmd {
         key: Option<PathBuf>,
         #[arg(long, default_value_t = 22)]
         port: u16,
+        /// Drift check: re-run each deployment's verify phase on the target and
+        /// report ok/DRIFT (needs `--host`/`-i` to connect).
+        #[arg(long)]
+        verify: bool,
     },
     /// Show one task's per-host instances (version/applied/source per host).
     Show {
@@ -311,6 +315,9 @@ enum TaskCmd {
         key: Option<PathBuf>,
         #[arg(long, default_value_t = 22)]
         port: u16,
+        /// Drift check: re-run the verify phase per host (needs `--host`/`-i`).
+        #[arg(long)]
+        verify: bool,
     },
     /// Recent apply/delete history (from the control-side DB).
     History {
@@ -420,7 +427,8 @@ async fn main() -> Result<()> {
                 password,
                 key,
                 port,
-            } => task_list(inventory, host, user, password, key, port).await,
+                verify,
+            } => task_list(inventory, host, user, password, key, port, verify).await,
             TaskCmd::Show {
                 name,
                 inventory,
@@ -429,7 +437,8 @@ async fn main() -> Result<()> {
                 password,
                 key,
                 port,
-            } => task_show(&name, inventory, host, user, password, key, port).await,
+                verify,
+            } => task_show(&name, inventory, host, user, password, key, port, verify).await,
             TaskCmd::History { limit } => task_history(limit).await,
         },
         Cmd::Ui { bind, port } => ui::serve(&bind, port).await,
@@ -941,9 +950,17 @@ async fn apply_task(
     Ok(())
 }
 
+/// A gathered deployment instance + optional drift status (Some(true)=ok,
+/// Some(false)=DRIFT, None=not checked / no verify phase).
+struct DepRow {
+    dep: crater_core::state::Deployment,
+    status: Option<bool>,
+}
+
 /// Gather deployment instances (one per host×task) from the right source:
-/// the control DB, or — when a target is given — the authoritative markers
-/// read off the hosts (D-051).
+/// the control DB, or — when a target is given — the authoritative markers read
+/// off the hosts (D-051). With `verify`, re-run each deployment's verify phase
+/// on the target to detect drift (D-055; requires `--host`/`-i`).
 async fn gather_deployments(
     inventory: Option<PathBuf>,
     host: Option<String>,
@@ -951,7 +968,8 @@ async fn gather_deployments(
     password: Option<String>,
     key: Option<PathBuf>,
     port: u16,
-) -> Result<Vec<crater_core::state::Deployment>> {
+    verify: bool,
+) -> Result<Vec<DepRow>> {
     use crater_core::state::Deployment;
     if inventory.is_some() || host.is_some() {
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
@@ -959,24 +977,105 @@ async fn gather_deployments(
         for h in &hosts {
             let exec = connect_executor(h, true).await?;
             for m in state::read_markers(exec.as_ref()).await.unwrap_or_default() {
-                out.push(Deployment {
-                    host: h.name.clone(),
-                    name: m.name.clone(),
-                    deployment: if m.deployment.is_empty() { m.name } else { m.deployment },
-                    version: m.version,
-                    source: m.source,
-                    applied_at: m.applied_at,
+                let status = if verify {
+                    verify_on_host(exec.as_ref(), &m.source).await
+                } else {
+                    None
+                };
+                out.push(DepRow {
+                    dep: Deployment {
+                        host: h.name.clone(),
+                        name: m.name.clone(),
+                        deployment: if m.deployment.is_empty() { m.name } else { m.deployment },
+                        version: m.version,
+                        source: m.source,
+                        applied_at: m.applied_at,
+                    },
+                    status,
                 });
             }
         }
         Ok(out)
     } else {
-        state::TursoStore::open().await?.list_deployments().await
+        Ok(state::TursoStore::open()
+            .await?
+            .list_deployments()
+            .await?
+            .into_iter()
+            .map(|dep| DepRow { dep, status: None })
+            .collect())
     }
 }
 
-/// `crater task list` (D-051): **task-centric** — one row per deployed task,
-/// hosts aggregated as an attribute (like `helm list`). `task show` drills in.
+/// Drift check (D-055): resolve the task from its `source`, re-run only its
+/// **verify-phase** actions on the host (read-only), report ok/DRIFT. Returns
+/// `None` when the source can't be resolved locally or the task has no verify
+/// phase (no health probe to judge by).
+async fn verify_on_host(exec: &dyn Executor, source: &str) -> Option<bool> {
+    use crater_core::engine::{self, Op, PlanContext, Phase};
+    use crater_core::task::{is_task_file, TaskFile};
+    // Resolve the task file from the recorded source (named task or path).
+    let path = {
+        let p = PathBuf::from(source);
+        if p.is_file() && is_task_file(&p) {
+            p
+        } else {
+            let named = PathBuf::from("tasks").join(format!("{source}.yaml"));
+            if named.is_file() && is_task_file(&named) {
+                named
+            } else {
+                return None; // artifact ref / not resolvable here
+            }
+        }
+    };
+    let task = TaskFile::from_yaml_file(&path).ok()?;
+    let spec_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    let ver = task.vars.get("version").cloned().unwrap_or_else(|| "latest".into());
+    let mut ctx = PlanContext::new(os::detect_via(exec).await, ver, spec_dir);
+    ctx.target_arch = arch::detect_via(exec).await;
+    for (k, v) in &task.vars {
+        ctx.vars.insert(k.clone(), v.clone());
+    }
+    for m in &task.materials {
+        ctx.add_material(m.clone());
+    }
+    // Verify-phase actions only, `needs` cleared (we run them standalone).
+    let verify_actions: Vec<_> = task
+        .actions
+        .iter()
+        .filter(|a| a.phase == Phase::Verify)
+        .map(|a| {
+            let mut a = a.clone();
+            a.needs.clear();
+            a
+        })
+        .collect();
+    if verify_actions.is_empty() {
+        return None; // no health probe to judge drift by
+    }
+    let steps = engine::plan_from_task(&verify_actions, &ctx).ok()?;
+    for s in &steps {
+        if let Op::Shell { cmd, .. } = &s.op {
+            match exec.run(cmd).await {
+                Ok(o) if o.ok() => {}
+                _ => return Some(false), // a verify check failed → drift
+            }
+        }
+    }
+    Some(true)
+}
+
+fn status_label(s: Option<bool>) -> &'static str {
+    match s {
+        Some(true) => "ok",
+        Some(false) => "DRIFT",
+        None => "?",
+    }
+}
+
+/// `crater task list` (D-051/052/053): **deployment-centric** — one row per
+/// deployment, hosts aggregated as a count. `--verify` adds a drift STATUS.
+#[allow(clippy::too_many_arguments)]
 async fn task_list(
     inventory: Option<PathBuf>,
     host: Option<String>,
@@ -984,10 +1083,14 @@ async fn task_list(
     password: Option<String>,
     key: Option<PathBuf>,
     port: u16,
+    verify: bool,
 ) -> Result<()> {
     let from_targets = inventory.is_some() || host.is_some();
-    let deps = gather_deployments(inventory, host, user, password, key, port).await?;
-    if deps.is_empty() {
+    if verify && !from_targets {
+        anyhow::bail!("--verify needs --host or -i (it re-runs the verify phase on the targets)");
+    }
+    let rows = gather_deployments(inventory, host, user, password, key, port, verify).await?;
+    if rows.is_empty() {
         if from_targets {
             info!("no deployments found on the target(s)");
         } else {
@@ -995,16 +1098,34 @@ async fn task_list(
         }
         return Ok(());
     }
-    // Aggregate by **deployment** label (D-052): task set, version set, host set,
-    // latest applied_at. Default deployment == task name, so usually one task.
-    type Agg = (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>, i64);
+    // Aggregate by deployment label: tasks, versions, host count, latest, drift.
+    struct Agg {
+        tasks: BTreeSet<String>,
+        versions: BTreeSet<String>,
+        hosts: usize,
+        last: i64,
+        ok: usize,
+        drift: usize,
+    }
     let mut by_dep: BTreeMap<String, Agg> = BTreeMap::new();
-    for d in deps {
-        let e = by_dep.entry(d.deployment).or_default();
-        e.0.insert(d.name);
-        e.1.insert(d.version);
-        e.2.insert(d.host);
-        e.3 = e.3.max(d.applied_at);
+    for r in rows {
+        let e = by_dep.entry(r.dep.deployment).or_insert_with(|| Agg {
+            tasks: BTreeSet::new(),
+            versions: BTreeSet::new(),
+            hosts: 0,
+            last: 0,
+            ok: 0,
+            drift: 0,
+        });
+        e.tasks.insert(r.dep.name);
+        e.versions.insert(r.dep.version);
+        e.hosts += 1;
+        e.last = e.last.max(r.dep.applied_at);
+        match r.status {
+            Some(true) => e.ok += 1,
+            Some(false) => e.drift += 1,
+            None => {}
+        }
     }
     let join_or_mixed = |s: BTreeSet<String>| {
         if s.len() == 1 {
@@ -1013,19 +1134,36 @@ async fn task_list(
             format!("{} (mixed)", s.into_iter().collect::<Vec<_>>().join(","))
         }
     };
-    println!("{:<16} {:<12} {:<14} {:>6}  {}", "DEPLOYMENT", "TASK", "VERSION", "HOSTS", "LAST APPLIED (UTC)");
-    for (dep, (tasks, versions, hosts, last)) in by_dep {
-        // Count only — scales to large fleets; `task show <name>` lists the hosts.
-        println!(
-            "{:<16} {:<12} {:<14} {:>6}  {}",
-            dep, join_or_mixed(tasks), join_or_mixed(versions), hosts.len(), state::fmt_epoch(last)
-        );
+    if verify {
+        println!("{:<16} {:<12} {:<14} {:>6}  {:<14} {}", "DEPLOYMENT", "TASK", "VERSION", "HOSTS", "STATUS", "LAST APPLIED (UTC)");
+    } else {
+        println!("{:<16} {:<12} {:<14} {:>6}  {}", "DEPLOYMENT", "TASK", "VERSION", "HOSTS", "LAST APPLIED (UTC)");
+    }
+    for (dep, a) in by_dep {
+        if verify {
+            let status = if a.drift > 0 {
+                format!("DRIFT {}/{}", a.drift, a.hosts)
+            } else {
+                format!("ok {}/{}", a.ok, a.hosts)
+            };
+            println!(
+                "{:<16} {:<12} {:<14} {:>6}  {:<14} {}",
+                dep, join_or_mixed(a.tasks), join_or_mixed(a.versions), a.hosts, status, state::fmt_epoch(a.last)
+            );
+        } else {
+            println!(
+                "{:<16} {:<12} {:<14} {:>6}  {}",
+                dep, join_or_mixed(a.tasks), join_or_mixed(a.versions), a.hosts, state::fmt_epoch(a.last)
+            );
+        }
     }
     info!("(host names: crater task show <deployment>)");
     Ok(())
 }
 
-/// `crater task show <name>` (D-051): one task's per-host instances.
+/// `crater task show <name>` (D-051): one deployment's per-host instances;
+/// `--verify` adds per-host drift status.
+#[allow(clippy::too_many_arguments)]
 async fn task_show(
     name: &str,
     inventory: Option<PathBuf>,
@@ -1034,20 +1172,33 @@ async fn task_show(
     password: Option<String>,
     key: Option<PathBuf>,
     port: u16,
+    verify: bool,
 ) -> Result<()> {
-    let mut deps = gather_deployments(inventory, host, user, password, key, port).await?;
-    // Match the deployment label (default == task name), or the task name.
-    deps.retain(|d| d.deployment == name || d.name == name);
-    if deps.is_empty() {
+    if verify && inventory.is_none() && host.is_none() {
+        anyhow::bail!("--verify needs --host or -i (it re-runs the verify phase on the targets)");
+    }
+    let mut rows = gather_deployments(inventory, host, user, password, key, port, verify).await?;
+    rows.retain(|r| r.dep.deployment == name || r.dep.name == name);
+    if rows.is_empty() {
         info!("deployment '{name}' has no recorded instances");
         return Ok(());
     }
-    println!("{:<16} {:<12} {:<10} {:<20} {}", "HOST", "TASK", "VERSION", "APPLIED (UTC)", "SOURCE");
-    for d in deps {
-        println!(
-            "{:<16} {:<12} {:<10} {:<20} {}",
-            d.host, d.name, d.version, state::fmt_epoch(d.applied_at), d.source
-        );
+    if verify {
+        println!("{:<16} {:<12} {:<10} {:<8} {:<20} {}", "HOST", "TASK", "VERSION", "STATUS", "APPLIED (UTC)", "SOURCE");
+        for r in rows {
+            println!(
+                "{:<16} {:<12} {:<10} {:<8} {:<20} {}",
+                r.dep.host, r.dep.name, r.dep.version, status_label(r.status), state::fmt_epoch(r.dep.applied_at), r.dep.source
+            );
+        }
+    } else {
+        println!("{:<16} {:<12} {:<10} {:<20} {}", "HOST", "TASK", "VERSION", "APPLIED (UTC)", "SOURCE");
+        for r in rows {
+            println!(
+                "{:<16} {:<12} {:<10} {:<20} {}",
+                r.dep.host, r.dep.name, r.dep.version, state::fmt_epoch(r.dep.applied_at), r.dep.source
+            );
+        }
     }
     Ok(())
 }

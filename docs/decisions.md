@@ -646,3 +646,15 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **路由**:`/`(页面壳)、`/api/deployments`(片段,按 deployment 聚合)、`/api/history`(片段)、`/htmx.min.js`(嵌入资源)。handler 经 `Arc<TursoStore>`(axum State)查库。
 - **验证**:`crater ui --port 8090` → `/` 出页面、`/api/deployments` 列 yq(2 hosts)、`/api/history` 含 apply/delete + DEPLOYMENT 列(my-yq01/yq 区分)、`/htmx.min.js` 50917 字节。musl 静态、34+2 tests 绿、0 警告。
 - **后续**:从 UI 触发 apply/delete(写操作);`--verify` 漂移列(Phase 1b)接进看板;鉴权(对外暴露时)。
+
+---
+
+## 2026-06-01 · 部署状态 Phase 1b:`--verify` 漂移检测(检测→re-apply 自愈)
+
+### D-055 `crater task list/show --verify`:重跑 verify 阶段检测漂移
+- **背景**:讨论"检测到以后呢"——厘清:对幂等收敛工具,**修复 = 直接 re-apply**(一趟发现+修,changed 即被纠正的漂移),检测**不是修复前置**;检测的价值是**只读态势感知/合规**(政企"看谁漂了但别动")。
+- **决策**:`crater task list --verify` / `task show --verify`——对每个 deployment,**重跑其 task 的 verify 阶段**(如 `yq --version`/`docker --version`,本就只读),全过=ok、有失败=DRIFT。需 `--host`/`-i`(要连机器)。
+- **实现**:`verify_on_host(exec, source)` 从 marker 的 `source` 解析 task 文件(命名 task/路径;artifact ref 暂不支持→`?`)→ 过滤 verify 阶段动作(清 `needs`)→ `plan_from_task` → 逐个 `Op::Shell` 在目标跑、非 0 即 DRIFT;无 verify 阶段→`?`(无探针可判)。`list --verify` 聚合(`ok N/M`/`DRIFT x/M`),`show --verify` per-host(ok/DRIFT/?)。
+- **"然后"= re-apply 自愈**:检测只读;要修就 `crater apply`(幂等收敛,changed 即修复的漂移)。
+- **真机验证(.11/.12)**:`list --verify` → `ok 2/2`;`rm /usr/local/bin/yq` on .12 → `show yq --verify` → n11=ok/n12=DRIFT,`list --verify` → `DRIFT 1/2`;`apply yq -i inv` → .12 changed=1 自愈;`list --verify` → 回到 `ok 2/2`。34+2 tests 绿,0 警告。
+- **后续**:`--verify` 状态进 `crater ui` 看板;artifact-source 的 verify(拉 recipe)。
