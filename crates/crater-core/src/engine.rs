@@ -898,9 +898,10 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 Some(ServiceState::Restarted) => cmds.push(format!("systemctl restart {name}")),
                 None => {}
             }
-            if let Some(true) = enabled {
-                probes.push(format!("systemctl is-enabled --quiet {name}"));
-            }
+            // The skip-check gates on the desired STATE only (is-active), NOT on
+            // is-enabled: a stopped-but-enabled service must still get started, and
+            // a `restarted` must always run. (Bug D-075b: an is-enabled probe here
+            // skipped the whole step — incl. start/restart — when already enabled.)
             let check = if probes.is_empty() {
                 None
             } else {
@@ -1489,6 +1490,39 @@ mod tests {
                 assert_eq!(creates.as_deref(), Some("/usr/local/bin/app"));
             }
             other => panic!("expected UnarchiveMaterial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn service_check_gates_on_state_not_enabled() {
+        // D-075b: restarted+enabled must ALWAYS run (no check); started gates on
+        // is-active only (is-enabled must not skip a stopped-but-enabled service).
+        use crate::component::ServiceState;
+        let ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
+        let restarted = Action::Service {
+            name: "haproxy".into(),
+            state: Some(ServiceState::Restarted),
+            enabled: Some(true),
+        };
+        match action_op(Phase::Install, &restarted, &ctx).unwrap() {
+            Op::Shell { check, cmd, .. } => {
+                assert!(check.is_none(), "restarted must always run, got check={check:?}");
+                assert!(cmd.contains("systemctl restart haproxy"));
+            }
+            _ => panic!("service → shell"),
+        }
+        let started = Action::Service {
+            name: "kubelet".into(),
+            state: Some(ServiceState::Started),
+            enabled: Some(true),
+        };
+        match action_op(Phase::Install, &started, &ctx).unwrap() {
+            Op::Shell { check, .. } => {
+                let c = check.unwrap();
+                assert!(c.contains("is-active"), "started gates on is-active: {c}");
+                assert!(!c.contains("is-enabled"), "must NOT gate on is-enabled: {c}");
+            }
+            _ => panic!("service → shell"),
         }
     }
 
