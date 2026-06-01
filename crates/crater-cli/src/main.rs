@@ -122,16 +122,12 @@ enum Cmd {
     },
     /// Serve a web dashboard over the deployment state (D-054). Axum + htmx,
     /// pure Rust, htmx embedded (works offline). Default binds localhost only.
-    /// With `-i/--inventory`, enables write actions (Verify / Heal) against that
-    /// fleet (D-058) — the UI then holds the fleet's credentials.
+    /// Write actions (Verify/Heal, D-058) use `./inventory.yaml` when present.
     Ui {
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
         #[arg(long, default_value_t = 8080)]
         port: u16,
-        /// Inventory enabling write actions (Verify/Heal) on its hosts.
-        #[arg(short = 'i', long)]
-        inventory: Option<PathBuf>,
     },
     /// Build a task into a B 类 OCI artifact in the local store (like
     /// `docker build`). Export to a file with `crater save`.
@@ -445,7 +441,7 @@ async fn main() -> Result<()> {
             } => task_show(&name, inventory, host, user, password, key, port, verify).await,
             TaskCmd::History { limit } => task_history(limit).await,
         },
-        Cmd::Ui { bind, port, inventory } => ui::serve(&bind, port, inventory).await,
+        Cmd::Ui { bind, port } => ui::serve(&bind, port).await,
         Cmd::Build { file, tag, arch } => build_to_store(&file, tag, &arch).await,
         Cmd::Save { reference, output } => {
             ImageStore::open()?.export_oci_archive(&reference, &output)?;

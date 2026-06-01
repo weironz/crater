@@ -667,6 +667,7 @@ dependencies = [
  "clap",
  "crater-core",
  "futures",
+ "serde_yaml",
  "tokio",
  "tracing",
  "tracing-subscriber",

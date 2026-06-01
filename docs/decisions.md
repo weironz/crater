@@ -700,3 +700,17 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - htmx:按钮 `hx-post` → 返回刷新后的 deployments 片段(`#deps-pane` swap);heal 带 `hx-confirm`;`htmx-request` 期间按钮禁用。
 - **真机验证(.11/.12)**:`ui -i inv` → GET 出 Verify now + 每行 heal;POST `/api/verify` → ok 2/2;`rm yq@.12` → POST verify → **DRIFT 1/2**;POST `/api/apply/yq`(heal)→ 自愈 → 返回表 ok 2/2。34+2 tests 绿,0 警告。
 - **后续**:Delete(需更强确认)、操作鉴权(对外暴露)、操作进度/日志流。
+
+---
+
+## 2026-06-01 · crater ui:侧边栏导航 + 浅色默认/深色切换 + 动作不再依赖配置文件
+
+### D-059 侧边栏多视图(仪表盘/主机/主机组/任务)+ 主题切换 + 动作显示不依赖 inventory 文件
+- **背景**:用户反馈——① UI 展示行为不该依赖主机配置文件(我之前用 `./inventory.yaml` 是否存在来决定按钮是否显示,错);② 要侧边栏导航(仪表盘/主机/主机组/任务),像 AWX/Portainer/Teleport。
+- **决策/实现**:
+  - **侧边栏导航**:仪表盘(stats+activity)、主机(DB 按 host 透视:每台的 deployment/状态/最近)、主机组(读 `inventory.yaml` 的 groups+hosts 作**数据**展示)、任务(deployment 表 + Verify/Heal)。nav 点击 htmx 换 `#view`,小 JS 切 active。
+  - **动作按钮始终显示**(去掉"文件存在才显示"的门控);点击时才用 `./inventory.yaml`,缺失则返回提示(运行时所需凭据,非展示门控)。
+  - **主题**:浅色为**默认**,右上角按钮切换深色;`[data-theme=dark]` 覆盖 CSS 变量,`localStorage` 记忆;纯内联 + 一小段 JS(UI chrome,非业务逻辑)。
+  - 主机视图来自**状态 DB**(crater 已部署的主机,不依赖配置文件);主机组来自 inventory 数据(无则提示创建)。
+- **验证**:shell 出侧边栏 4 项;`/view/dashboard|hosts|groups|tasks` 各自渲染;`/api/hosts` DB 透视;`/view/groups` 读 inventory 出 n11/n12;`/api/deployments` 始终带 Verify now+heal;浅色默认 + 切换。musl 静态,34+2 tests 绿,0 警告。
+- **遗留**:主机组目前只读 inventory 文件(crater 尚未把 inventory 作为受管数据存库);未来可把 hosts/groups 纳入状态库作一等对象。
