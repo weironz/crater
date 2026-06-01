@@ -592,3 +592,18 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **理由**:单一入口(apply 即部署,守 D-020 在线/离线单管线);CLI 表面更小、更诚实(内部命令不暴露给用户);清死代码。`engine::plan_from_yaml/plan_to_yaml/execute`(Op 级)保留——引擎测试仍用。
 - **影响**:`apply_oci_bundle`/`apply_image_ref` 不变(apply 路径仍用);mod 顶部用法、`offline-format §5`、`requirements F12`、`self-bootstrap-agent.md` 刷成 `apply x.oci` / `agent --task-plan`;`progress.md` 历史日志保留 deploy 记录。
 - **验证**:`crater deploy` 已无;`--help` 不含 deploy/agent;`crater agent` 仍在(要求 `--task-plan`);`apply yq --host .12` 经 agent 路径执行成功(yq 重装)。34+2 tests 绿,0 警告。
+
+---
+
+## 2026-06-01 · 部署状态管理 Phase 1a:marker + 控制端 Turso DB + `crater task`
+
+### D-051 部署态:目标机 marker(真相)+ 控制端 Turso 聚合库(`crater task list/history`)
+- **背景**:要做"部署 task 状态监控 + Web UI"。但 crater 一直**无状态/agentless**——不知道"什么装在哪"。两功能都要状态,核心决策是**状态存哪、谁是真相源**(详见对话:k8s `kubeadm reset`/mysql `/var/lib/mysql`/docker `/var/lib/docker` 那轮)。
+- **决策(两层状态)**:
+  - **目标机 marker**(`/var/lib/crater/state/<task>.json`)= **真相源**:apply 成功写、delete 删,**就是个文件、executor 读写,目标机仍 agentless**。任何控制机都能读、抗控制机丢失。
+  - **控制端 Turso DB**(`~/.crater/state.db`)= 聚合/缓存 + job 历史,喂 `crater task list/history` 和将来的 Web UI,不必每次 SSH 每台。
+- **DB 选型 Turso**(纯 Rust SQLite 重写,`tursodatabase/turso` v0.6.1):`default-features=false` + `pure-rust-crypto`,**关 mimalloc(C)/sync(云同步)**。实测 **musl 静态编过、纯 Rust 无 C**(守 N1);代价是依赖树大(~493 crate,拉 wit/wasm 工具链)、编译变慢——**N1 由"免 C"理解为"免 C + 纯 Rust",体积/依赖不算极简,但运行时仍单静态二进制**。藏在 `StateStore` trait 后(可换 redb/rusqlite)。
+- **接线**:`apply`/`delete` 成功后 → 目标机写/删 marker(`run_task_on_host`,best-effort)+ 控制端 DB upsert/delete + 记 job_run(`record_deployments`,best-effort,不影响部署结果)。`apply_source→apply_task→run_task_on_host` 贯穿 `source` 串。
+- **命令**:`crater task list`(默认读控制 DB;`--host`/`-i` 读目标机权威 marker)、`crater task history [--limit]`。
+- **真机验证**:`apply yq` 本机 + `--host .12` → `task list` 两条、`task history` 两条 apply;`task list --host .12` 读到 .12 的 marker(JSON 内容核对);`delete yq --host .12` → marker 删、DB 删、list 中 .12 消失、history 多一条 delete。34+2 tests 绿,0 警告。
+- **Phase 1b(下一步)**:`crater task status`(漂移检测——重跑 verify 阶段比对声明态 vs 实际)。**Phase 2**:`crater ui`(Axum + htmx 只读看板读同一 DB)。

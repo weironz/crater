@@ -24,6 +24,7 @@ pub mod module;
 pub mod os;
 pub mod source;
 pub mod spec;
+pub mod state;
 pub mod store;
 pub mod task;
 

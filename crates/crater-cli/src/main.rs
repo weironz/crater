@@ -6,6 +6,7 @@
 //!   crater <name> [flags]                      # shorthand for `crater apply <name>`
 //!   crater apply <image-ref|x.oci> --host H    # deploy an image / offline artifact
 //!   crater delete <source> [--host|-i]         # uninstall via the task's teardown: (D-049)
+//!   crater task list [--host|-i] | history     # deployment state: what's where + history (D-051)
 //!   crater build -f task.yaml [-t ref]         # → B 类 OCI artifact in the local store
 //!   crater save <ref> -o x.oci                 # export a stored artifact to a file
 //!   crater ai "<request>" [-o task.yaml]       # NL → validated task
@@ -19,7 +20,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
-use tracing::info;
+use tracing::{info, warn};
 
 use crater_core::arch;
 use crater_core::bundle;
@@ -28,6 +29,7 @@ use crater_core::executor::{Executor, LocalExecutor, SshExecutor};
 use crater_core::os::{self, OsFamily};
 use crater_core::source::{self, OnlineSource};
 use crater_core::spec::CraterSpec;
+use crater_core::state::{self, Marker, StateStore};
 use crater_core::store::ImageStore;
 
 #[derive(Parser)]
@@ -107,6 +109,11 @@ enum Cmd {
         /// Force the agentless shell executor instead of the default agent.
         #[arg(long)]
         shell: bool,
+    },
+    /// Inspect deployment state (D-051): what crater put where, and history.
+    Task {
+        #[command(subcommand)]
+        cmd: TaskCmd,
     },
     /// Build a task into a B 类 OCI artifact in the local store (like
     /// `docker build`). Export to a file with `crater save`.
@@ -256,6 +263,31 @@ enum RegistryCmd {
 }
 
 #[derive(Subcommand)]
+enum TaskCmd {
+    /// List deployments. From the control-side DB by default; with `--host`/`-i`
+    /// it reads the authoritative markers on the targets.
+    List {
+        #[arg(short = 'i', long)]
+        inventory: Option<PathBuf>,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long, default_value = "root")]
+        user: String,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long)]
+        key: Option<PathBuf>,
+        #[arg(long, default_value_t = 22)]
+        port: u16,
+    },
+    /// Recent apply/delete history (from the control-side DB).
+    History {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
 enum CreateWhat {
     /// Write a sample inventory.yaml (host list for `-i`) to edit.
     Inventory {
@@ -348,6 +380,17 @@ async fn main() -> Result<()> {
             apply_source(None, source, file, inventory, host, user, password, key, port, dry_run, shell, true)
                 .await
         }
+        Cmd::Task { cmd } => match cmd {
+            TaskCmd::List {
+                inventory,
+                host,
+                user,
+                password,
+                key,
+                port,
+            } => task_list(inventory, host, user, password, key, port).await,
+            TaskCmd::History { limit } => task_history(limit).await,
+        },
         Cmd::Build { file, tag, arch } => build_to_store(&file, tag, &arch).await,
         Cmd::Save { reference, output } => {
             ImageStore::open()?.export_oci_archive(&reference, &output)?;
@@ -710,7 +753,7 @@ async fn apply_source(
         // — `-i inventory.yaml`, `--host a,b`, or none → local.
         info!("{verb}: {src} → offline (OCI bundle)");
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
-        return apply_oci_bundle(&path, hosts, !dry_run, shell, teardown).await;
+        return apply_oci_bundle(&path, hosts, !dry_run, shell, teardown, &src).await;
     }
     if path.is_file() {
         // A task file (top-level `actions:`, D-037). Component specs are gone.
@@ -718,7 +761,7 @@ async fn apply_source(
             info!("{verb}: {src} → task");
             let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
             let groups = inventory_groups(inventory.as_deref())?;
-            return apply_task(&path, hosts, groups, None, !dry_run, shell, teardown).await;
+            return apply_task(&path, hosts, groups, None, !dry_run, shell, teardown, &src).await;
         }
         anyhow::bail!(
             "{src}: not a task file (needs top-level `actions:`). Component specs are no \
@@ -729,7 +772,7 @@ async fn apply_source(
     if src.contains('/') || src.contains(':') {
         info!("{verb}: {src} → image (local store / registry)");
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
-        return apply_image_ref(&src, hosts, !dry_run, teardown).await;
+        return apply_image_ref(&src, hosts, !dry_run, teardown, &src).await;
     }
     // Named task in the library: `crater apply <name>` → tasks/<name>.yaml
     // (D-043). This is the only bare-name path now (D-046): component shortcut
@@ -739,7 +782,7 @@ async fn apply_source(
         info!("{verb}: {src} → named task (tasks/{src}.yaml)");
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
         let groups = inventory_groups(inventory.as_deref())?;
-        return apply_task(&named, hosts, groups, None, !dry_run, shell, teardown).await;
+        return apply_task(&named, hosts, groups, None, !dry_run, shell, teardown, &src).await;
     }
     anyhow::bail!(
         "'{src}': not a file, image ref, or named task. Put a task at tasks/{src}.yaml, \
@@ -752,6 +795,7 @@ async fn apply_source(
 /// orchestration mirrors the component pipeline (D-030/D-031): hosts grouped by
 /// role-set run group-by-group (so a producer's `register` lands in `hostvars`
 /// before a consumer group reads it), parallel within a group.
+#[allow(clippy::too_many_arguments)]
 async fn apply_task(
     path: &Path,
     hosts: Vec<crater_core::spec::Host>,
@@ -760,6 +804,7 @@ async fn apply_task(
     do_apply: bool,
     do_shell: bool,
     teardown: bool,
+    source: &str,
 ) -> Result<()> {
     use crater_core::task::TaskFile;
     let task = TaskFile::from_yaml_file(path)?;
@@ -804,18 +849,19 @@ async fn apply_task(
 
     if !do_apply {
         for h in &hosts {
-            run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), false, do_shell, teardown).await?;
+            run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), false, do_shell, teardown, source).await?;
         }
         info!("dry-run only; omit --dry-run to execute");
         return Ok(());
     }
 
+    let mut applied_hosts: Vec<String> = Vec::new();
     let forks = forks_limit();
     for group in group_hosts_by_role(&hosts) {
         let results: Vec<Result<(String, Vec<(String, String)>)>> = futures::stream::iter(
             group
                 .iter()
-                .map(|h| run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), true, do_shell, teardown)),
+                .map(|h| run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), true, do_shell, teardown, source)),
         )
         .buffer_unordered(forks)
         .collect()
@@ -827,6 +873,7 @@ async fn apply_task(
                     for (k, v) in regs {
                         hostvars.entry(host_name.clone()).or_default().insert(k, v);
                     }
+                    applied_hosts.push(host_name);
                 }
                 Err(e) => {
                     if first_err.is_none() {
@@ -837,6 +884,100 @@ async fn apply_task(
         }
         if let Some(e) = first_err {
             return Err(e);
+        }
+    }
+
+    // Record to the control-side aggregate DB (D-051). Best-effort: the markers
+    // on the targets are authoritative; the DB is a cache/history for list/UI.
+    if let Err(e) = record_deployments(&task, source, teardown, &applied_hosts).await {
+        warn!("state DB update failed (targets' markers are authoritative): {e}");
+    }
+    Ok(())
+}
+
+/// `crater task list` (D-051): deployments from the control DB, or — when a
+/// target is given — the authoritative markers read off the hosts.
+async fn task_list(
+    inventory: Option<PathBuf>,
+    host: Option<String>,
+    user: String,
+    password: Option<String>,
+    key: Option<PathBuf>,
+    port: u16,
+) -> Result<()> {
+    if inventory.is_some() || host.is_some() {
+        let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
+        println!("{:<16} {:<14} {:<10} {:<20} {}", "HOST", "TASK", "VERSION", "APPLIED (UTC)", "SOURCE");
+        for h in &hosts {
+            let exec = connect_executor(h, true).await?;
+            let markers = state::read_markers(exec.as_ref()).await.unwrap_or_default();
+            for m in markers {
+                println!(
+                    "{:<16} {:<14} {:<10} {:<20} {}",
+                    h.name, m.name, m.version, state::fmt_epoch(m.applied_at), m.source
+                );
+            }
+        }
+        return Ok(());
+    }
+    let store = state::TursoStore::open().await?;
+    let deps = store.list_deployments().await?;
+    if deps.is_empty() {
+        info!("no deployments recorded in the control DB (~/.crater/state.db); use --host/-i to read targets directly");
+        return Ok(());
+    }
+    println!("{:<16} {:<14} {:<10} {:<20} {}", "HOST", "TASK", "VERSION", "APPLIED (UTC)", "SOURCE");
+    for d in deps {
+        println!(
+            "{:<16} {:<14} {:<10} {:<20} {}",
+            d.host, d.name, d.version, state::fmt_epoch(d.applied_at), d.source
+        );
+    }
+    Ok(())
+}
+
+/// `crater task history` (D-051): recent apply/delete runs from the control DB.
+async fn task_history(limit: usize) -> Result<()> {
+    let store = state::TursoStore::open().await?;
+    let runs = store.history(limit).await?;
+    if runs.is_empty() {
+        info!("no history recorded in the control DB (~/.crater/state.db)");
+        return Ok(());
+    }
+    println!("{:<20} {:<8} {:<14} {:<16} {}", "WHEN (UTC)", "ACTION", "TASK", "HOST", "RESULT");
+    for r in runs {
+        println!(
+            "{:<20} {:<8} {:<14} {:<16} {}",
+            state::fmt_epoch(r.ts), r.action, r.task, r.host, r.result
+        );
+    }
+    Ok(())
+}
+
+/// Record apply/delete outcomes to the control-side aggregate DB (D-051).
+async fn record_deployments(
+    task: &crater_core::task::TaskFile,
+    source: &str,
+    teardown: bool,
+    hosts: &[String],
+) -> Result<()> {
+    if hosts.is_empty() {
+        return Ok(());
+    }
+    let store = state::TursoStore::open().await?;
+    let ver = task.vars.get("version").cloned().unwrap_or_else(|| "latest".into());
+    let ts = state::now_epoch();
+    for h in hosts {
+        if teardown {
+            store.record_delete(h, &task.name, ts).await?;
+        } else {
+            let m = Marker {
+                name: task.name.clone(),
+                version: ver.clone(),
+                source: source.to_string(),
+                applied_at: ts,
+            };
+            store.record_apply(h, &m).await?;
         }
     }
     Ok(())
@@ -851,6 +992,7 @@ async fn run_task_on_host(
     do_apply: bool,
     do_shell: bool,
     teardown: bool,
+    source: &str,
 ) -> Result<(String, Vec<(String, String)>)> {
     if host.is_local() {
         info!("▶ host {} (local)", host.name);
@@ -910,6 +1052,23 @@ async fn run_task_on_host(
         engine::execute_task(&steps, &handlers, exec.as_ref()).await?;
     } else {
         run_task_via_agent(exec.as_ref(), &steps, &handlers, None).await?;
+    }
+
+    // Record on-target deployment state (D-051): apply writes the marker,
+    // delete removes it. Best-effort — the deployment already succeeded.
+    let marker_res = if teardown {
+        state::remove_marker(exec.as_ref(), &task.name).await
+    } else {
+        let m = Marker {
+            name: task.name.clone(),
+            version: ctx.version.clone(),
+            source: source.to_string(),
+            applied_at: state::now_epoch(),
+        };
+        state::write_marker(exec.as_ref(), &m).await
+    };
+    if let Err(e) = marker_res {
+        warn!("[{}] state marker update failed (deployment still applied): {e}", host.name);
     }
 
     // Capture this host's facts for later groups (D-030).
@@ -1151,6 +1310,7 @@ async fn apply_oci_bundle(
     do_apply: bool,
     do_shell: bool,
     teardown: bool,
+    source: &str,
 ) -> Result<()> {
     let dest_root = std::env::temp_dir().join(format!("crater-deploy-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dest_root);
@@ -1181,7 +1341,7 @@ async fn apply_oci_bundle(
     info!("offline (task artifact): {} task(s)", mats.len());
     for mc in mats {
         let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
-        apply_task(&recipe_file, hosts.clone(), Default::default(), Some(mc.blobmap), do_apply, do_shell, teardown)
+        apply_task(&recipe_file, hosts.clone(), Default::default(), Some(mc.blobmap), do_apply, do_shell, teardown, source)
             .await?;
     }
     let _ = std::fs::remove_dir_all(&dest_root);
@@ -1338,6 +1498,7 @@ async fn apply_image_ref(
     hosts: Vec<crater_core::spec::Host>,
     do_apply: bool,
     teardown: bool,
+    source: &str,
 ) -> Result<()> {
     let store = ImageStore::open()?;
     if !store.has(reference) {
@@ -1353,7 +1514,7 @@ async fn apply_image_ref(
         let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
         if crater_core::task::is_task_file(&recipe_file) {
             info!("image {reference}: crater task artifact → recipe-replay");
-            let res = apply_task(&recipe_file, hosts, Default::default(), Some(mc.blobmap), do_apply, true, teardown).await;
+            let res = apply_task(&recipe_file, hosts, Default::default(), Some(mc.blobmap), do_apply, true, teardown, source).await;
             let _ = std::fs::remove_dir_all(&recipe_dir);
             return res;
         }
