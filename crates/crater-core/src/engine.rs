@@ -122,6 +122,9 @@ impl Op {
 #[derive(Clone)]
 pub struct PlanContext {
     pub os: OsFamily,
+    /// Target CPU arch (D-048), detected per host via `uname -m`. Drives
+    /// per-arch material selection in `place`.
+    pub target_arch: crate::arch::Arch,
     pub version: String,
     /// Component directory (for resolving template sources).
     pub component_dir: PathBuf,
@@ -129,12 +132,13 @@ pub struct PlanContext {
     pub vars: BTreeMap<String, String>,
     /// Mirror rewriter for material URLs (online mode, China-friendly).
     pub source: OnlineSource,
-    /// Offline mode: maps a material name -> local pre-fetched blob, so `place`
-    /// resolves the packed blob by material name (D-034).
+    /// Offline mode: maps a material key -> local pre-fetched blob, so `place`
+    /// resolves the packed blob (D-034). Key is the material name, or
+    /// `name@arch` for an arch-specific variant (D-048).
     pub offline_blobs: Option<BTreeMap<String, PathBuf>>,
-    /// Declared materials by name (D-034), populated from the task so `place`
-    /// can resolve a material's URL for online fetch.
-    pub materials: BTreeMap<String, crate::component::Material>,
+    /// Declared materials by name (D-034), each entry holding the per-arch
+    /// variants (D-048); `place` picks the one matching `target_arch`.
+    pub materials: BTreeMap<String, Vec<crate::component::Material>>,
     /// Directory holding data-defined modules (`modules/<name>.yaml`, D-029).
     pub modules_dir: PathBuf,
 }
@@ -145,6 +149,7 @@ impl PlanContext {
         vars.insert("version".to_string(), version.clone());
         Self {
             os,
+            target_arch: crate::arch::Arch::Unknown,
             version,
             component_dir,
             vars,
@@ -159,6 +164,68 @@ impl PlanContext {
     pub fn with_offline(mut self, blobs: BTreeMap<String, PathBuf>) -> Self {
         self.offline_blobs = Some(blobs);
         self
+    }
+
+    /// Register a declared material under its name (D-048: same-named variants
+    /// accumulate so `place` can pick by arch).
+    pub fn add_material(&mut self, m: crate::component::Material) {
+        self.materials.entry(m.name.clone()).or_default().push(m);
+    }
+
+    /// Resolve a `place` material reference to the variant matching the target
+    /// arch (D-048). Rule: a variant whose `arch` equals the target wins; else
+    /// an arch-neutral (`arch: None`) variant; else it's an error — packaged for
+    /// the wrong arch, which must fail loudly (esp. offline/air-gap).
+    pub fn resolve_material(&self, name: &str) -> crate::Result<&crate::component::Material> {
+        use crate::arch::Arch;
+        let variants = self.materials.get(name).filter(|v| !v.is_empty()).ok_or_else(|| {
+            anyhow::anyhow!("place: unknown material '{name}' (declare it under `materials:`)")
+        })?;
+        // Exact arch match first.
+        let exact: Vec<&crate::component::Material> = variants
+            .iter()
+            .filter(|m| m.arch == Some(self.target_arch))
+            .collect();
+        if exact.len() == 1 {
+            return Ok(exact[0]);
+        }
+        if exact.len() > 1 {
+            anyhow::bail!("place: material '{name}' has duplicate variants for arch {}", self.target_arch.as_str());
+        }
+        // Fall back to an arch-neutral variant.
+        let neutral: Vec<&crate::component::Material> =
+            variants.iter().filter(|m| m.arch.is_none()).collect();
+        match neutral.len() {
+            1 => Ok(neutral[0]),
+            0 => {
+                // Distinguish "wrong arch" from "no arch info" for a clear message.
+                if self.target_arch == Arch::Unknown {
+                    anyhow::bail!(
+                        "place: material '{name}' is arch-specific but the target arch is unknown (uname -m failed)"
+                    )
+                }
+                anyhow::bail!(
+                    "place: material '{name}' is not packaged for arch {} (declared: {})",
+                    self.target_arch.as_str(),
+                    variants
+                        .iter()
+                        .map(|m| m.arch.map(|a| a.as_str()).unwrap_or("neutral"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+            _ => anyhow::bail!("place: material '{name}' has multiple arch-neutral variants (ambiguous)"),
+        }
+    }
+
+    /// The offline blob key for a resolved material (D-048): plain name for an
+    /// arch-neutral material, `name@arch` for an arch-specific variant. Build
+    /// annotates layers by the same key.
+    pub fn material_blob_key(m: &crate::component::Material) -> String {
+        match m.arch {
+            Some(a) => format!("{}@{}", m.name, a.as_str()),
+            None => m.name.clone(),
+        }
     }
 
     /// The rendered URL for a material's `url_tmpl` (online fetch / build).
@@ -421,23 +488,24 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
         }
         Action::Place { material, dest, mode } => {
             let dest = dest.display().to_string();
+            // Pick the variant matching the target arch (D-048), online or off.
+            let m = ctx.resolve_material(material)?;
             if let Some(blobs) = &ctx.offline_blobs {
-                // Offline: push the packed blob, keyed by material NAME (D-034).
-                let local = blobs.get(material).ok_or_else(|| {
-                    anyhow::anyhow!("offline bundle missing material '{material}'")
-                })?;
+                // Offline: push the packed blob, keyed by name (or name@arch).
+                let key = PlanContext::material_blob_key(m);
+                let local = blobs
+                    .get(&key)
+                    .or_else(|| blobs.get(material)) // legacy single-arch packs
+                    .ok_or_else(|| anyhow::anyhow!("offline bundle missing material '{key}'"))?;
                 Op::PushFile {
                     phase,
-                    describe: format!("place (offline) {material} -> {dest}"),
+                    describe: format!("place (offline) {key} -> {dest}"),
                     local_path: local.clone(),
                     dest,
                     mode: mode.clone(),
                 }
             } else {
-                // Online: the target fetches the material's declared URL itself.
-                let m = ctx.materials.get(material).ok_or_else(|| {
-                    anyhow::anyhow!("place: unknown material '{material}' (declare it under `materials:`)")
-                })?;
+                // Online: the target fetches the variant's declared URL itself.
                 let tmpl = m.url_tmpl.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("place: material '{material}' has no url_tmpl for online fetch")
                 })?;
@@ -1045,11 +1113,49 @@ mod tests {
         crate::component::Material {
             name: name.into(),
             kind: crate::component::MaterialKind::Binary,
+            arch: None,
             url_tmpl: Some(url.into()),
             reference: None,
             packages: Default::default(),
             sha256: None,
         }
+    }
+
+    fn arch_material(name: &str, a: crate::arch::Arch) -> crate::component::Material {
+        let mut m = test_material(name, "https://example.com/x");
+        m.arch = Some(a);
+        m
+    }
+
+    #[test]
+    fn resolve_material_picks_by_arch() {
+        use crate::arch::Arch;
+        let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
+        ctx.add_material(arch_material("docker", Arch::Amd64));
+        ctx.add_material(arch_material("docker", Arch::Arm64));
+
+        // Exact arch match wins.
+        ctx.target_arch = Arch::Arm64;
+        assert_eq!(ctx.resolve_material("docker").unwrap().arch, Some(Arch::Arm64));
+        assert_eq!(
+            PlanContext::material_blob_key(ctx.resolve_material("docker").unwrap()),
+            "docker@arm64"
+        );
+
+        // No variant for the target arch → loud error (not silent wrong-arch).
+        ctx.target_arch = Arch::Unknown;
+        assert!(ctx.resolve_material("docker").is_err());
+    }
+
+    #[test]
+    fn resolve_material_falls_back_to_neutral() {
+        use crate::arch::Arch;
+        let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
+        ctx.add_material(test_material("script", "https://example.com/s.sh")); // arch: None
+        ctx.target_arch = Arch::Arm64;
+        let m = ctx.resolve_material("script").unwrap();
+        assert_eq!(m.arch, None);
+        assert_eq!(PlanContext::material_blob_key(m), "script"); // plain name, no @arch
     }
 
     fn shell_check(op: &Op) -> Option<&str> {
@@ -1062,7 +1168,7 @@ mod tests {
     #[test]
     fn install_actions_get_idempotency_checks() {
         let mut ctx = PlanContext::new(OsFamily::Debian, "1.0".into(), PathBuf::from("."));
-        ctx.materials.insert("x".into(), test_material("x", "https://example.com/x"));
+        ctx.add_material(test_material("x", "https://example.com/x"));
 
         // place (online) -> check that the artifact already exists
         let dl = action_op(
@@ -1208,8 +1314,7 @@ mod tests {
         // The agent wire format must survive serialize -> deserialize intact,
         // including the idempotency `check` (D-019).
         let mut ctx = PlanContext::new(OsFamily::Debian, "4.53.2".into(), PathBuf::from("."));
-        ctx.materials
-            .insert("x".into(), test_material("x", "https://example.com/v{{version}}/x"));
+        ctx.add_material(test_material("x", "https://example.com/v{{version}}/x"));
         let plan = vec![
             action_op(
                 Phase::Install,

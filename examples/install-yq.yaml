@@ -8,9 +8,15 @@ hosts: all                     # targeting:组名/all(声明式,引擎按 invent
 vars:
   version: "4.53.2"
 materials:                     # 物料闭包(D-034),crater build 据此打离线包
+  # 多 arch(D-048):同名 material 各声明一个 arch,place 按目标机 uname -m 选变体。
   - name: yq-bin
     kind: binary
+    arch: amd64
     url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64"
+  - name: yq-bin
+    kind: binary
+    arch: arm64
+    url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_arm64"
 
 actions:
   - id: place_yq

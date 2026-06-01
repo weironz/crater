@@ -7,6 +7,7 @@ vars:
 materials:
   - name: zot-bin
     kind: binary
+    arch: amd64    # 官方另有 arm64 包,需要时加一条 arch: arm64 变体即可
     url_tmpl: "https://github.com/project-zot/zot/releases/download/v{{version}}/zot-linux-amd64"
 actions:
   - id: bin

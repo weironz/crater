@@ -36,6 +36,34 @@ install:
 
 `mode` 之所以折进 `place`：二进制要在同一幂等步里落地为可执行，省掉一条单独的 `chmod` run_cmd。
 
+## 多 arch material（D-048）
+
+二进制是按 CPU arch 编的，所以 `kind: binary` 带一个 **arch 维度**：同名 material 各声明
+一个 `arch`，`place` 按目标机 `uname -m`（归一化 `x86_64→amd64`/`aarch64→arm64`）选变体。
+URL 里 arch 命名各项目不一（docker `x86_64`、yq `amd64`），故**每变体写全自己的 url**，
+不用 `{{arch}}` 占位（引擎不塞命名映射表）。
+
+```yaml
+materials:
+  - { name: yq-bin, kind: binary, arch: amd64, url_tmpl: ".../yq_linux_amd64" }
+  - { name: yq-bin, kind: binary, arch: arm64, url_tmpl: ".../yq_linux_arm64" }
+```
+
+解析规则（给定 name + 目标 arch）：精确匹配 arch 的变体 → 用它；否则用 `arch` 省略的
+**中立**变体（脚本/配置等与 arch 无关的物料）；都没有 → **报错**（packaged for wrong arch，
+气隙场景最该早暴露，绝不静默推个跑不起来的二进制）。**单 arch 二进制也应写 `arch`**，
+让错配的目标响亮失败，而不是省略当中立。
+
+| 维度 | build | apply |
+|------|-------|-------|
+| **打包** | 默认打**所有**声明的 arch 变体,每个一层、按 `name@arch` 标注;`--arch amd64[,arm64]` 收窄 | — |
+| **在线** | — | `place` 选目标 arch 变体 → 目标机 curl 该变体 url |
+| **离线** | blob 按 `name@arch` 进 OCI artifact | `place (offline)` 按 `name@arch` 从包内取对应 arch 的 blob |
+
+> 注:本期 `name@arch` 多 blob 同装一个 artifact(离线正确);registry 路径「按 arch 只 pull
+> 自己那条」的 **OCI image index** 优化为后续项(D-048 待续)。`kind: image` 复用镜像原生
+> index,`kind: os_package` 的 os×arch 矩阵随它们接线时一并做。
+
 ## 基本 demo（yq，最小可复现）
 
 ### 在线
@@ -74,13 +102,13 @@ CRATER_INSECURE_REGISTRIES=<registry> crater apply <registry>/yq:4.53.2 --host <
 
 ## 边界 / 后续
 
-- 本期 `kind: binary` 全链路打通（yq 闭环）。
+- 本期 `kind: binary` 全链路打通（yq + docker static），含 **arch 维度**（D-048，见上节）。
 - `kind: image`（容器镜像，build 时 pull 进 OCI、离线 import）与 `kind: os_package`
-  （build 时下 deb/rpm、离线本地装）**已在数据模型留位、尚未接线**——它们是给
-  mysql/docker 这类有真实依赖闭包的 task 准备的下一阶段。
-- `build` 的 **version × os 矩阵**：`os_package` 按 OS 分叉（deb vs rpm），多 OS 物料拟用
-  OCI image index 按平台/annotation 组织。yq 是纯二进制单一维度，未触发；mysql 会撞上。
-- yq 作为最小闭环先证明新模型在线/离线都通，再把 `materials`+`place` 推到复杂组件。
+  （build 时下 deb/rpm、离线本地装）**已在数据模型留位、尚未接线**——它们的 arch
+  分别复用「镜像原生 index」「os×arch 矩阵」，随接线一并做。
+- **OCI image index 优化**（D-048 待续）：现状多 arch 的 `name@arch` blob 同装一个 artifact，
+  离线正确但经 registry 分发会拉全量；用 image index 按 arch 组织后，每台只 pull 自己那条。
+- yq 作为最小闭环先证明新模型在线/离线 + 多 arch 都通，再推到复杂 task。
 
 ## 关联
 

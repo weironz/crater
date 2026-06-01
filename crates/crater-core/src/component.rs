@@ -27,6 +27,14 @@ pub struct RegisterSpec {
 pub struct Material {
     pub name: String,
     pub kind: MaterialKind,
+    /// CPU arch this variant targets (D-048). `None` = arch-neutral (scripts,
+    /// configs, jars; or a single-arch shortcut). Declare several same-named
+    /// materials each with a distinct `arch` for a multi-arch binary; `place`
+    /// picks the one matching the target host (`uname -m`). A single-arch
+    /// binary SHOULD still set `arch` so a mismatched target fails loudly
+    /// rather than receiving a wrong-arch binary.
+    #[serde(default)]
+    pub arch: Option<crate::arch::Arch>,
     /// `binary`: URL template fetched online and at build (`{{version}}` etc.).
     #[serde(default)]
     pub url_tmpl: Option<String>,

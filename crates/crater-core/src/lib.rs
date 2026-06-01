@@ -13,6 +13,7 @@
 //! - [`diagnose`]  : offline rule-based failure diagnosis (M5)
 
 pub mod ai;
+pub mod arch;
 pub mod bundle;
 pub mod component;
 pub mod dag;

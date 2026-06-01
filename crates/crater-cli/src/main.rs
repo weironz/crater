@@ -20,6 +20,7 @@ use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use tracing::info;
 
+use crater_core::arch;
 use crater_core::bundle;
 use crater_core::engine::{self, Op, PlanContext};
 use crater_core::executor::{Executor, LocalExecutor, SshExecutor};
@@ -88,6 +89,10 @@ enum Cmd {
         /// Defaults to `crater/<name>:<version>`.
         #[arg(short = 't', long)]
         tag: Option<String>,
+        /// Restrict packed material arches (D-048), e.g. `--arch amd64` or
+        /// `--arch amd64,arm64`. Default: pack every declared arch variant.
+        #[arg(long, value_delimiter = ',')]
+        arch: Vec<String>,
     },
     /// Export a stored artifact/image to an oci-archive file (like `docker save`).
     Save {
@@ -316,7 +321,7 @@ async fn main() -> Result<()> {
             apply_source(name, source, file, inventory, host, user, password, key, port, dry_run, shell)
                 .await
         }
-        Cmd::Build { file, tag } => build_to_store(&file, tag).await,
+        Cmd::Build { file, tag, arch } => build_to_store(&file, tag, &arch).await,
         Cmd::Save { reference, output } => {
             ImageStore::open()?.export_oci_archive(&reference, &output)?;
             info!("saved {reference} → {}", output.display());
@@ -827,10 +832,12 @@ async fn run_task_on_host(
         info!("▶ host {} ({})", host.name, host.address);
     }
     let exec = connect_executor(host, do_apply).await?;
-    let osf = if do_apply {
-        os::detect_via(exec.as_ref()).await
+    let (osf, target_arch) = if do_apply {
+        (os::detect_via(exec.as_ref()).await, arch::detect_via(exec.as_ref()).await)
     } else {
-        OsFamily::Unknown
+        // Dry-run preview: no target connection — use the control machine's arch
+        // so `place` can resolve a concrete variant for the plan.
+        (OsFamily::Unknown, arch::detect_local())
     };
     let ver = task
         .vars
@@ -838,6 +845,7 @@ async fn run_task_on_host(
         .cloned()
         .unwrap_or_else(|| "latest".into());
     let mut ctx = PlanContext::new(osf, ver, spec_dir.to_path_buf());
+    ctx.target_arch = target_arch;
     for (k, v) in &task.vars {
         ctx.vars.insert(k.clone(), v.clone());
     }
@@ -848,7 +856,7 @@ async fn run_task_on_host(
         }
     }
     for m in &task.materials {
-        ctx.materials.insert(m.name.clone(), m.clone());
+        ctx.add_material(m.clone());
     }
     // Offline (recipe-replay, D-045): `place` pushes packed blobs from control.
     if let Some(bm) = offline_blobmap {
@@ -1016,7 +1024,7 @@ async fn connect_executor(
 
 /// `crater build -f spec [-t ref]`: build the B 类 artifact(s) and store them in
 /// the local store (~/.crater/store), like `docker build`. Export with `save`.
-async fn build_to_store(file: &Path, tag: Option<String>) -> Result<()> {
+async fn build_to_store(file: &Path, tag: Option<String>, arch_filter: &[String]) -> Result<()> {
     // `crater build` only builds tasks now (D-046): a task → B 类 artifact whose
     // recipe IS the task YAML.
     if !crater_core::task::is_task_file(file) {
@@ -1025,13 +1033,13 @@ async fn build_to_store(file: &Path, tag: Option<String>) -> Result<()> {
             file.display()
         );
     }
-    build_task_to_store(file, tag).await
+    build_task_to_store(file, tag, arch_filter).await
 }
 
 /// Build a task into a B 类 OCI artifact (D-045): fetch its `binary` materials,
 /// store them + the task YAML as the recipe, tag, into the local store. Loaded
 /// by recipe-replay through `plan_from_task` (offline).
-async fn build_task_to_store(file: &Path, tag: Option<String>) -> Result<()> {
+async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[String]) -> Result<()> {
     use crater_core::component::MaterialKind;
     use crater_core::task::TaskFile;
 
@@ -1044,22 +1052,34 @@ async fn build_task_to_store(file: &Path, tag: Option<String>) -> Result<()> {
     let reference = tag.unwrap_or_else(|| format!("crater/{}:{ver}", task.name));
     let spec_dir = file.parent().unwrap_or_else(|| Path::new("."));
     let online = OnlineSource::with_default_mirrors();
+    // Optional --arch narrowing (D-048): pack only these arches' variants.
+    let want_arch: Vec<crater_core::arch::Arch> =
+        arch_filter.iter().map(|s| crater_core::arch::Arch::from_uname(s)).collect();
 
-    // Fetch binary materials, keyed by material NAME (D-034), same key `place`
-    // resolves offline.
+    // Fetch binary materials, keyed by material NAME (or name@arch for an
+    // arch-specific variant, D-048) — the same key `place` resolves offline.
     let mut ctx = PlanContext::new(OsFamily::Unknown, ver.clone(), spec_dir.to_path_buf());
     ctx.offline_blobs = Some(BTreeMap::new()); // rendered_url yields raw URLs
     let mut materials: Vec<(String, Vec<u8>)> = Vec::new();
     for m in &task.materials {
         if m.kind == MaterialKind::Binary {
+            // Skip variants outside an explicit --arch filter (neutral always kept).
+            if !want_arch.is_empty() {
+                if let Some(a) = m.arch {
+                    if !want_arch.contains(&a) {
+                        continue;
+                    }
+                }
+            }
             if let Some(tmpl) = &m.url_tmpl {
                 let raw = ctx.rendered_url(tmpl)?;
                 let url = online.rewrite(&raw);
-                info!("  fetch material {} <- {raw}", m.name);
+                let key = PlanContext::material_blob_key(m);
+                info!("  fetch material {key} <- {raw}");
                 let (data, _) = source::fetch_best(&url)
                     .await
-                    .map_err(|e| anyhow!("fetch material {}: {e}", m.name))?;
-                materials.push((m.name.clone(), data));
+                    .map_err(|e| anyhow!("fetch material {key}: {e}"))?;
+                materials.push((key, data));
             }
         }
     }

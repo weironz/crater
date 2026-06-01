@@ -1,13 +1,73 @@
-# docker(task 形态):装包 + 写 daemon.json(CN 镜像)+ 起服务。
-# daemon.json 变更 → notify 重启 handler(ansible 经典模式)。走自举 agent。
+# docker(B1 静态二进制形态,D-047/D-048):官方 static tarball → 解包到 /usr/local/bin
+# → 写 containerd/docker systemd unit → daemon-reload → 起服务。纯 binary material,
+# 离线可行(build 把 tgz 打进 OCI artifact),按目标机 arch 选 amd64/arm64 变体。
+# daemon.json 变更 → notify 重启 handler。
 name: docker
 hosts: all
+vars:
+  version: "27.3.1"
+materials:
+  # docker 官方静态包:url 里 amd64=x86_64、arm64=aarch64(命名各异,故每变体写全 url)。
+  - name: docker-tgz
+    kind: binary
+    arch: amd64
+    url_tmpl: "https://download.docker.com/linux/static/stable/x86_64/docker-{{version}}.tgz"
+  - name: docker-tgz
+    kind: binary
+    arch: arm64
+    url_tmpl: "https://download.docker.com/linux/static/stable/aarch64/docker-{{version}}.tgz"
 actions:
-  - id: install
-    action: pkg_install
-    packages:
-      debian: [docker.io]
-      rhel: [docker]
+  - id: place_tgz
+    action: place
+    material: docker-tgz
+    dest: /tmp/docker.tgz
+  - id: extract
+    # tarball 内是 docker/ 目录,strip 1 → 二进制直接落 /usr/local/bin。
+    action: extract
+    from: /tmp/docker.tgz
+    to: /usr/local/bin
+    strip: 1
+    needs: [place_tgz]
+  - id: containerd_unit
+    action: write_file
+    dst: /etc/systemd/system/containerd.service
+    content: |
+      [Unit]
+      Description=containerd container runtime
+      After=network.target
+
+      [Service]
+      ExecStart=/usr/local/bin/containerd
+      Restart=always
+      Delegate=yes
+      KillMode=process
+      LimitNOFILE=infinity
+
+      [Install]
+      WantedBy=multi-user.target
+    needs: [extract]
+  - id: docker_unit
+    action: write_file
+    dst: /etc/systemd/system/docker.service
+    content: |
+      [Unit]
+      Description=Docker Application Container Engine
+      After=network-online.target containerd.service
+      Wants=network-online.target
+      Requires=containerd.service
+
+      [Service]
+      Type=notify
+      ExecStart=/usr/local/bin/dockerd -H unix:// --containerd=/run/containerd/containerd.sock
+      Restart=always
+      LimitNOFILE=infinity
+      LimitNPROC=infinity
+      Delegate=yes
+      KillMode=process
+
+      [Install]
+      WantedBy=multi-user.target
+    needs: [extract]
   - id: daemon
     action: write_file
     dst: /etc/docker/daemon.json
@@ -19,19 +79,30 @@ actions:
         "log-opts": { "max-size": "100m", "max-file": "3" },
         "storage-driver": "overlay2"
       }
-    needs: [install]
+    needs: [extract]
     notify: [restart_docker]
-  - id: svc
+  - id: reload
+    # 写了新 unit,需 daemon-reload 让 systemd 看见(static 包不含 unit,自己装)。
+    action: run_cmd
+    cmd: "systemctl daemon-reload"
+    needs: [containerd_unit, docker_unit]
+  - id: svc_containerd
+    action: service
+    name: containerd
+    state: started
+    enabled: true
+    needs: [reload]
+  - id: svc_docker
     action: service
     name: docker
     state: started
     enabled: true
-    needs: [daemon]
+    needs: [svc_containerd, daemon]
   - id: verify
     action: run_cmd
     phase: verify
-    cmd: "docker version --format '{{.Server.Version}}' || docker --version"
-    needs: [svc]
+    cmd: "docker --version && docker info --format '{{.ServerVersion}}'"
+    needs: [svc_docker]
 handlers:
   - id: restart_docker
     action: service

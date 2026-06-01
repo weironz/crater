@@ -137,6 +137,11 @@ Schema:
   vars: { <key>: <value> }        # optional; used as {{ key }} (plain substitution)
   materials:                      # optional; things to fetch/pack
     - { name: <id>, kind: binary, url_tmpl: <url, may contain {{version}}> }
+    # multi-arch: repeat the SAME name with distinct `arch` (amd64/arm64);
+    # `place` picks the variant matching the target host. Omit arch only for
+    # arch-neutral files (scripts/configs):
+    #   - { name: app, kind: binary, arch: amd64, url_tmpl: ".../app_x86_64" }
+    #   - { name: app, kind: binary, arch: arm64, url_tmpl: ".../app_aarch64" }
   actions:
     - id: <id>
       action: <primitive>

@@ -3,10 +3,17 @@ name: yq
 hosts: all
 vars:
   version: "4.53.2"
+# 多 arch(D-048):同名 material 各声明一个 arch 变体,place 按目标机 uname -m 选;
+# build 默认全打(--arch 可收窄),apply/离线按 arch 取对应 blob。
 materials:
   - name: yq-bin
     kind: binary
+    arch: amd64
     url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64"
+  - name: yq-bin
+    kind: binary
+    arch: arm64
+    url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_arm64"
 actions:
   - id: place_yq
     action: place

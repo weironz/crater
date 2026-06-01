@@ -552,3 +552,20 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **影响**:`component.rs` 删 `Download` 变体 + `produces_files`(已无引用,`build --image` 早删);`engine.rs` 删 `action_op` 的 download 分支,两处测试改用 `place`;`ai.rs` 系统提示去掉 `download`;`bundle.rs`/`engine.rs` 注释刷成 material/place 口径;文档(action-tasks/modules/idempotency/action-layer/engine-zero/design/offline-format §4)的原语清单与 `collect_downloads` 描述一并刷新。现有 task/example 无一使用 `action: download`,数据零改动。
 - **现存原语 9 个**:`pkg_install`/`place`/`extract`/`render_template`/`write_file`/`systemd_unit`/`run_cmd`/`load_image`/`module`(+ D-037-b 的 file/copy/service/lineinfile/user/group)。
 - **结果**:30 tests 绿,0 警告。为下一步 binary 物料的 **arch 维度**(per-host `uname -m` 探测 + `Material.arch` + build 多 arch 出 OCI index)扫清前提。
+
+---
+
+## 2026-06-01 · `kind: binary` 物料的 arch 维度
+
+### D-048 material 按 arch 分变体,apply 探测 `uname -m` 选,build 多 arch 打包
+- **背景**:讨论 docker 离线时发现 arch 缺口——`tasks/yq.yaml` 写死 `yq_linux_amd64`,推到 arm64 机器是个跑不起来的二进制(`Exec format error`),只是一直在 amd64 的 .11/.12 上测没撞到。三种 `MaterialKind`(binary/image/os_package)全吃 arch:binary 按 arch、image 复用镜像原生 index、os_package 是 os×arch 二维。本期只做实已全链路的 `binary`,把 arch 地基建好供后两者复用。
+- **决策**:
+  - 新增 `arch::Arch`(amd64/arm64/unknown),canonical 用 OCI `platform.architecture` 拼写,`uname -m` 的 `x86_64`/`aarch64` 作 serde alias;`detect_via`(`uname -m`)/`detect_local`(`std::env::consts::ARCH`,dry-run 预览用)。
+  - `Material` 加 `arch: Option<Arch>`。**省略=arch 中立**(脚本/配置);**显式=arch 专属**(二进制)。
+  - `PlanContext.materials` 由 `Map<name,Material>` 改 `Map<name,Vec<Material>>`(同名变体);加 `target_arch`、`resolve_material`(规则:精确 arch → 中立 → 报错)、`material_blob_key`(`name` 或 `name@arch`)。
+  - apply per-host 探测 arch 喂 `ctx.target_arch`;`place` 在线选变体 curl、离线按 `name@arch` 取 blob(留 `name` 旧包 fallback)。
+  - `crater build` 默认打**所有**声明 arch 变体(blob 按 `name@arch` 标注),`--arch amd64[,arm64]` 收窄。
+- **理由**:① arch 是横切轴,建在 `Material` 一处(D-047 删 download 后获取外部内容只此一途);② 单 arch 也强制写 `arch` → 错配目标**响亮失败**而非静默推错二进制(气隙刚需);③ 守 D-036(YAML 只声明 arch 维度,选哪条是 Rust 逻辑,无 `when: arch==`)。
+- **docker 转 B1**:`tasks/docker.yaml` 由 `pkg_install`(离线空包,D-047 评估)改**官方 static tarball**(`docker-<ver>.tgz` amd64/arm64 双变体)→ extract 到 `/usr/local/bin` → 写 containerd/docker systemd unit → daemon-reload → 起服务。纯 binary material,真离线可行。
+- **真机/验证**:`build -f tasks/yq.yaml`(`fetch yq-bin@amd64` + `yq-bin@arm64`,`recipe + 2 material(s)`)→ 本机离线 `apply`(`place (offline) yq-bin@amd64`,按 `uname -m` 选)→ yq v4.53.2;`--arch arm64` 只打 1 个;docker B1 真机 .11 装成(client 27.3.1,9 步 changed=5)。`resolve_material` 单测覆盖精确/中立/无变体报错。34+2 tests 绿。
+- **待续**:① **OCI image index** 按 arch 组织(registry 路径每台只 pull 自己 arch;现状 `name@arch` 多 blob 同装一 artifact,离线正确但 registry 拉全量);② `kind: image`(复用镜像原生 index)、`kind: os_package`(os×arch 矩阵)接线时一并做 arch。
