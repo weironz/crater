@@ -796,3 +796,15 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **决策**:**暂不实现**,等用户想清边界。
 - **理由**:(1) 还有 **Helm chart** ——镜像在 values/模板里,不是字面 `image:`,扫不到;(2) crater **无法可靠判断一个下载下来的 yaml 是 k8s 清单、还是普通配置文件**,盲目按 k8s 规则提 `image:` 会误伤。自动化的收益抵不过误判风险。
 - **现状**:镜像仍由 task 显式声明 `kind: image` material(手列,如 k8s-offline 的 9 个镜像)。flannel.yml 走 `kind: file` 下载,其引用的镜像单独声明为 `kind: image`。
+
+---
+
+## 2026-06-01 · `kind: file` 增加本地源 `src`;k8s-offline 去内联(重构②收尾)
+
+### D-066 `kind: file` 支持 `src`(人工维护的本地文件)+ flannel 清单从官方 url 下载
+- **背景**:重构②——(a) flannel 清单应从官方 release 下载而非手抄内联;(b) 还有一批官方不提供、必须人工维护的文件(systemd unit / drop-in / containerd 配置 / crictl 配置 / sysctl / modules),内联进 task.yaml 会「YAML 爆炸」。用户定调:flannel 走官方 url file material,人工文件也落 `file`。
+- **决策**:`Material` 加 `src: Option<PathBuf>`(task 同级相对路径,如 `files/containerd.service`),与 `url_tmpl` 二选一。`build` 对 `src` 物料**读本地文件**打成 blob(与 url 下载同一套,同 key);`place` 在线从控制机 task 目录 `PushFile` 推送、离线从包内取 blob——**copy 语义,原样推送不做 `{{}}` 渲染**(对标 Ansible `copy: src=files/`,区别于会渲染的 `template:`)。
+- **理由**:`kind` = 「怎么获取」已收口(D-065),`src` 只是 file 的第二种获取方式(本地 vs url),不新增 kind。task.yaml 从此**不内联任何文件内容**——要么 url 下载、要么 files/ 维护,爆炸问题根除,且文件可独立 diff/审阅/复用。
+- **顺带修**:`build_task_to_store` **漏了把 task.vars 灌进渲染 ctx**(自 D-064 潜伏,当时只 dry-run 等价验证、未真机重建),导致 `{{containerd_ver}}` 等非 version/arch 变量原样漏进 url(404)。补上 `for (k,v) in &task.vars` 循环。
+- **k8s-offline 重写**:flannel→`kind: file` 官方 url(`.../v{{flannel_ver}}/kube-flannel.yml`);7 个人工文件移到 `tasks/files/` 声明成 `file`+`src`;8 处 `write_file` 全改 `place`。核对官方 v0.28.4 清单的镜像 tag(`flannel:v0.28.4`/`flannel-cni-plugin:v1.9.1-flannel1`)与 CIDR(`10.244.0.0/16`)和手列 image material、pod_cidr 逐一对上(无漂移,这正是暂缓自动扫 image 时要人工守的点)。
+- **验证**:`crater build`→25 material OCI(7 二进制+flannel清单+7 src 文件+sysdeps+9 镜像);**彻底擦净** .12(删二进制/配置/`/var/lib/containerd`)后离线 `apply` 40 步全过,7 个 src place + flannel place 全 changed,节点 Ready、8 个 Pod(含 kube-flannel)全 Running、kubeadm init 零联网拉。36 tests 绿。

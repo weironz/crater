@@ -1602,6 +1602,11 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
     // Fetch binary materials, keyed by material NAME (or name@arch for an
     // arch-specific variant, D-048) — the same key `place` resolves offline.
     let mut ctx = PlanContext::new(OsFamily::Unknown, ver.clone(), spec_dir.to_path_buf());
+    // Task vars drive url_tmpl/ref rendering (D-064); without this only {{version}}
+    // and {{arch}} resolve and e.g. {{containerd_ver}} leaks literally into the URL.
+    for (k, v) in &task.vars {
+        ctx.vars.insert(k.clone(), v.clone());
+    }
     ctx.offline_blobs = Some(BTreeMap::new()); // rendered_url yields raw URLs
     let mut materials: Vec<(String, Vec<u8>)> = Vec::new();
     for m in &task.materials {
@@ -1614,6 +1619,7 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
                     }
                 }
             }
+            let key = PlanContext::material_blob_key(m);
             if let Some(tmpl) = &m.url_tmpl {
                 // Expose the material's own arch as {{arch}} so url_tmpl has a
                 // single source of truth for arch (D-064).
@@ -1622,12 +1628,21 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
                 }
                 let raw = ctx.rendered_url(tmpl)?;
                 let url = online.rewrite(&raw);
-                let key = PlanContext::material_blob_key(m);
                 info!("  fetch material {key} <- {raw}");
                 let (data, _) = source::fetch_best(&url)
                     .await
                     .map_err(|e| anyhow!("fetch material {key}: {e}"))?;
                 materials.push((key, data));
+            } else if let Some(src) = &m.src {
+                // Hand-authored local file (D-066): read from the task dir and
+                // pack verbatim, same blob key `place` resolves offline.
+                let path = spec_dir.join(src);
+                info!("  read material {key} <- {}", path.display());
+                let data = std::fs::read(&path)
+                    .map_err(|e| anyhow!("read material {key} from {}: {e}", path.display()))?;
+                materials.push((key, data));
+            } else {
+                return Err(anyhow!("file material '{key}' has neither `url_tmpl` nor `src`"));
             }
         } else if m.kind == MaterialKind::Image {
             // kind: image (D-061) — pull the image and pack it as a self-

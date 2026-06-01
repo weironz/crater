@@ -36,6 +36,23 @@ install:
 
 `mode` 之所以折进 `place`：二进制要在同一幂等步里落地为可执行，省掉一条单独的 `chmod` run_cmd。
 
+## 本地文件 material（`src`，D-066）
+
+`kind: file` 有两种获取方式:`url_tmpl`(从 url 下载)或 `src`(读 task 同级的本地文件)。
+后者用于**官方不提供、需人工维护的文件**——systemd unit、drop-in、配置文件等。
+
+```yaml
+materials:
+  - { name: unit-containerd, kind: file, src: files/containerd.service }
+actions:
+  - { id: ctd_unit, action: place, material: unit-containerd, dest: /etc/systemd/system/containerd.service }
+```
+
+- **build**:从 `<task 目录>/files/...` 读取,和 url 下载的物料一样打成 blob(同 key)。
+- **place**:在线从控制机 task 目录 `PushFile` 推送,离线从 OCI 包取 blob——都是 **copy 语义,原样推送、不做 `{{}}` 渲染**(对标 Ansible 的 `copy: src=files/`;要渲染用 `render_template`)。
+
+好处:task.yaml **不再内联任何文件内容**——要么 url 下载、要么 `files/` 维护,文件可独立 diff、审阅、复用,杜绝大段 `content: |` 把 YAML 撑爆。
+
 ## 多 arch material（D-048）
 
 二进制是按 CPU arch 编的，所以 `kind: file` 带一个 **arch 维度**：同名 material 各声明

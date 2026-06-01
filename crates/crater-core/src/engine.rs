@@ -564,10 +564,21 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                     dest,
                     mode: mode.clone(),
                 }
+            } else if let Some(src) = &m.src {
+                // Online + hand-authored local file (D-066): push it from the
+                // control machine's task dir (no URL to curl). Copy semantics.
+                let local = ctx.component_dir.join(src);
+                Op::PushFile {
+                    phase,
+                    describe: format!("place {material} <- {}", local.display()),
+                    local_path: local,
+                    dest,
+                    mode: mode.clone(),
+                }
             } else {
                 // Online: the target fetches the variant's declared URL itself.
                 let tmpl = m.url_tmpl.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("place: material '{material}' has no url_tmpl for online fetch")
+                    anyhow::anyhow!("place: material '{material}' has no url_tmpl or src for online fetch")
                 })?;
                 // {{arch}} = the resolved material's arch (single source, D-064).
                 let raw = if let Some(a) = m.arch {
@@ -1303,6 +1314,7 @@ mod tests {
             kind: crate::component::MaterialKind::File,
             arch: None,
             url_tmpl: Some(url.into()),
+            src: None,
             reference: None,
             packages: Default::default(),
             base: None,

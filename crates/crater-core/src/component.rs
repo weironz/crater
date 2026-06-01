@@ -35,9 +35,16 @@ pub struct Material {
     /// rather than receiving a wrong-arch binary.
     #[serde(default)]
     pub arch: Option<crate::arch::Arch>,
-    /// `binary`: URL template fetched online and at build (`{{version}}` etc.).
+    /// `file`: URL template fetched online and at build (`{{version}}` etc.).
     #[serde(default)]
     pub url_tmpl: Option<String>,
+    /// `file`: task-relative path to a hand-authored local file (e.g.
+    /// `files/containerd.service`) — used for content official sources don't
+    /// provide (systemd units, drop-ins, configs). `build` reads and packs it as
+    /// a blob; `place` pushes it verbatim (copy semantics, no `{{}}` render).
+    /// Mutually exclusive with `url_tmpl` (D-066).
+    #[serde(default)]
+    pub src: Option<std::path::PathBuf>,
     /// `image`: container image reference template (pulled into the OCI bundle).
     #[serde(default, rename = "ref")]
     pub reference: Option<String>,

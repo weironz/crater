@@ -1,10 +1,15 @@
-# Kubernetes 单节点 —— **全 material 离线形态**(D-063)。
+# Kubernetes 单节点 —— **全 material 离线形态**(D-063 / D-066)。
 #
-# 依赖全部声明为 materials,`crater build` 打进 OCI,目标机零联网即可起。三类 material:
-#   binary —— containerd/runc/cni/crictl/kubeadm/kubelet/kubectl 静态二进制
-#   image  —— 控制面 7 镜像(CN 镜像源)+ flannel 2 镜像;build pull 进包、apply ctr import 到 k8s.io
-#   os_package —— conntrack/socat/ipset/ethtool(buildah 在 ubuntu:24.04 解闭包打 .deb)
+# 依赖全部声明为 materials,`crater build` 打进 OCI,目标机零联网即可起。material 的
+# `kind` 表示「怎么获取内容」(D-065):
+#   file(url)       —— containerd/runc/cni/crictl/kubeadm/kubelet/kubectl 静态二进制;
+#                      flannel 清单(从官方 release 下载)
+#   file(src)       —— 官方不提供、需人工维护的文件:systemd unit / drop-in / 配置
+#                      (放在同级 files/,build 读本地、place 原样推送,copy 语义,不渲染)
+#   image           —— 控制面 7 镜像(CN 镜像源)+ flannel 2 镜像;build pull 进包、apply ctr import 到 k8s.io
+#   os_package      —— conntrack/socat/ipset/ethtool(buildah 在 ubuntu:24.04 解闭包打 .deb)
 # 目标:ubuntu 24.04 / amd64。kubeadm init 用 image-repository 同 CN 源 → 预载不拉。
+# task.yaml 不再内联任何文件内容 —— 一切要么 url 下载、要么 files/ 维护(无 YAML 爆炸)。
 name: k8s-offline
 hosts: all
 vars:
@@ -15,10 +20,11 @@ vars:
   crictl_ver: "1.31.1"
   flannel_ver: "0.28.4"
   flannel_cni_ver: "1.9.1-flannel1"
-  pod_cidr: "10.244.0.0/16"
+  pod_cidr: "10.244.0.0/16"    # 与官方 kube-flannel.yml 的 net-conf.json 默认一致
   image_repo: "registry.aliyuncs.com/google_containers"
 # {{arch}} 在渲染 material url 时自动绑定该 material 的 arch 字段(D-064),单一来源。
 materials:
+  # —— 二进制(file/url,按 arch 选变体)——
   - { name: containerd, kind: file, arch: amd64, url_tmpl: "https://github.com/containerd/containerd/releases/download/v{{containerd_ver}}/containerd-{{containerd_ver}}-linux-{{arch}}.tar.gz" }
   - { name: runc, kind: file, arch: amd64, url_tmpl: "https://github.com/opencontainers/runc/releases/download/v{{runc_ver}}/runc.{{arch}}" }
   - { name: cni-plugins, kind: file, arch: amd64, url_tmpl: "https://github.com/containernetworking/plugins/releases/download/v{{cni_ver}}/cni-plugins-linux-{{arch}}-v{{cni_ver}}.tgz" }
@@ -26,7 +32,19 @@ materials:
   - { name: kubeadm, kind: file, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubeadm" }
   - { name: kubelet, kind: file, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubelet" }
   - { name: kubectl, kind: file, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/{{arch}}/kubectl" }
+  # —— flannel 清单:官方 release 下载(file/url),其引用镜像见下方 image material ——
+  - { name: flannel-manifest, kind: file, url_tmpl: "https://github.com/flannel-io/flannel/releases/download/v{{flannel_ver}}/kube-flannel.yml" }
+  # —— 人工维护的本地文件(file/src):官方不提供,放在 files/ ——
+  - { name: cfg-modules, kind: file, src: files/modules-k8s.conf }
+  - { name: cfg-sysctl, kind: file, src: files/sysctl-k8s.conf }
+  - { name: cfg-crictl, kind: file, src: files/crictl.yaml }
+  - { name: cfg-containerd, kind: file, src: files/containerd-config.toml }
+  - { name: unit-containerd, kind: file, src: files/containerd.service }
+  - { name: unit-kubelet, kind: file, src: files/kubelet.service }
+  - { name: dropin-kubeadm, kind: file, src: files/10-kubeadm.conf }
+  # —— OS 包闭包(os_package,buildah)——
   - { name: sysdeps, kind: os_package, base: "ubuntu:24.04", arch: amd64, packages: { debian: [conntrack, socat, ipset, ethtool, ebtables] } }
+  # —— 容器镜像(image,build pull 进包、apply import 到 k8s.io)——
   - { name: img-apiserver, kind: image, ref: "registry.aliyuncs.com/google_containers/kube-apiserver:v{{version}}" }
   - { name: img-cm, kind: image, ref: "registry.aliyuncs.com/google_containers/kube-controller-manager:v{{version}}" }
   - { name: img-scheduler, kind: image, ref: "registry.aliyuncs.com/google_containers/kube-scheduler:v{{version}}" }
@@ -39,9 +57,9 @@ materials:
 actions:
   - { id: swapoff, action: run_cmd, cmd: "swapoff -a", check: "test -z \"$(swapon --show)\"" }
   - { id: swap_fstab, action: run_cmd, needs: [swapoff], cmd: "sed -ri '/\\sswap\\s/s/^([^#])/#\\1/' /etc/fstab", check: "! grep -Eq '^[^#].*\\sswap\\s' /etc/fstab" }
-  - { id: modules_conf, action: write_file, dst: /etc/modules-load.d/k8s.conf, content: "overlay\nbr_netfilter\n" }
+  - { id: modules_conf, action: place, material: cfg-modules, dest: /etc/modules-load.d/k8s.conf }
   - { id: modprobe, action: run_cmd, needs: [modules_conf], cmd: "modprobe overlay && modprobe br_netfilter", check: "lsmod | grep -q br_netfilter" }
-  - { id: sysctl_conf, action: write_file, dst: /etc/sysctl.d/k8s.conf, content: "net.bridge.bridge-nf-call-iptables = 1\nnet.bridge.bridge-nf-call-ip6tables = 1\nnet.ipv4.ip_forward = 1\n" }
+  - { id: sysctl_conf, action: place, material: cfg-sysctl, dest: /etc/sysctl.d/k8s.conf }
   - { id: sysctl_apply, action: run_cmd, needs: [sysctl_conf, modprobe], cmd: "sysctl --system", check: "test \"$(sysctl -n net.ipv4.ip_forward)\" = 1" }
 
   - { id: deps, action: pkg_install, material: sysdeps, needs: [sysctl_apply] }
@@ -54,70 +72,17 @@ actions:
   - { id: cni_extract, action: extract, from: /tmp/cni.tgz, to: /opt/cni/bin, strip: 0, creates: /opt/cni/bin/bridge, needs: [cni_dir] }
   - { id: crictl_tgz, action: place, material: crictl, dest: /tmp/crictl.tgz, needs: [deps] }
   - { id: crictl_extract, action: extract, from: /tmp/crictl.tgz, to: /usr/local/bin, strip: 0, creates: /usr/local/bin/crictl, needs: [crictl_tgz] }
-  - { id: crictl_cfg, action: write_file, dst: /etc/crictl.yaml, content: "runtime-endpoint: unix:///run/containerd/containerd.sock\nimage-endpoint: unix:///run/containerd/containerd.sock\ntimeout: 10\n" }
+  - { id: crictl_cfg, action: place, material: cfg-crictl, dest: /etc/crictl.yaml }
 
-  - id: ctd_cfg
-    action: write_file
-    dst: /etc/containerd/config.toml
-    needs: [ctd_extract]
-    notify: [restart_containerd]
-    content: |
-      version = 2
-      [plugins."io.containerd.grpc.v1.cri"]
-        sandbox_image = "registry.aliyuncs.com/google_containers/pause:3.10"
-      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
-        runtime_type = "io.containerd.runc.v2"
-      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
-        SystemdCgroup = true
-  - id: ctd_unit
-    action: write_file
-    dst: /etc/systemd/system/containerd.service
-    needs: [ctd_extract]
-    content: |
-      [Unit]
-      Description=containerd container runtime
-      After=network.target
-      [Service]
-      ExecStart=/usr/local/bin/containerd
-      Restart=always
-      Delegate=yes
-      KillMode=process
-      LimitNOFILE=infinity
-      [Install]
-      WantedBy=multi-user.target
+  - { id: ctd_cfg, action: place, material: cfg-containerd, dest: /etc/containerd/config.toml, needs: [ctd_extract], notify: [restart_containerd] }
+  - { id: ctd_unit, action: place, material: unit-containerd, dest: /etc/systemd/system/containerd.service, needs: [ctd_extract] }
   - { id: svc_ctd, action: service, name: containerd, state: started, enabled: true, needs: [ctd_cfg, ctd_unit, runc] }
 
   - { id: kubeadm, action: place, material: kubeadm, dest: /usr/local/bin/kubeadm, mode: "0755", needs: [deps] }
   - { id: kubelet_bin, action: place, material: kubelet, dest: /usr/local/bin/kubelet, mode: "0755", needs: [deps] }
   - { id: kubectl, action: place, material: kubectl, dest: /usr/local/bin/kubectl, mode: "0755", needs: [deps] }
-  - id: kubelet_unit
-    action: write_file
-    dst: /etc/systemd/system/kubelet.service
-    needs: [kubelet_bin]
-    content: |
-      [Unit]
-      Description=kubelet: The Kubernetes Node Agent
-      Wants=network-online.target
-      After=network-online.target
-      [Service]
-      ExecStart=/usr/local/bin/kubelet
-      Restart=always
-      StartLimitInterval=0
-      RestartSec=10
-      [Install]
-      WantedBy=multi-user.target
-  - id: kubelet_dropin
-    action: write_file
-    dst: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
-    needs: [kubelet_unit]
-    content: |
-      [Service]
-      Environment="KUBELET_KUBECONFIG_ARGS=--bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf"
-      Environment="KUBELET_CONFIG_ARGS=--config=/var/lib/kubelet/config.yaml"
-      EnvironmentFile=-/var/lib/kubelet/kubeadm-flags.env
-      EnvironmentFile=-/etc/default/kubelet
-      ExecStart=
-      ExecStart=/usr/local/bin/kubelet $KUBELET_KUBECONFIG_ARGS $KUBELET_CONFIG_ARGS $KUBELET_KUBEADM_ARGS $KUBELET_EXTRA_ARGS
+  - { id: kubelet_unit, action: place, material: unit-kubelet, dest: /etc/systemd/system/kubelet.service, needs: [kubelet_bin] }
+  - { id: kubelet_dropin, action: place, material: dropin-kubeadm, dest: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf, needs: [kubelet_unit] }
   - { id: svc_kubelet, action: service, name: kubelet, state: started, enabled: true, needs: [kubelet_dropin, svc_ctd] }
 
   - { id: load_apiserver, action: load_image, material: img-apiserver, namespace: "k8s.io", needs: [svc_ctd] }
@@ -133,169 +98,7 @@ actions:
   - { id: kubeadm_init, action: run_cmd, needs: [svc_kubelet, kubeadm, load_apiserver, load_cm, load_scheduler, load_proxy, load_coredns, load_pause, load_etcd], cmd: "kubeadm init --pod-network-cidr={{pod_cidr}} --image-repository {{image_repo}} --kubernetes-version v{{version}} --cri-socket=unix:///run/containerd/containerd.sock", check: "test -f /etc/kubernetes/admin.conf" }
   - { id: kubeconfig, action: run_cmd, needs: [kubeadm_init], cmd: "mkdir -p /root/.kube && cp -f /etc/kubernetes/admin.conf /root/.kube/config", check: "test -f /root/.kube/config" }
 
-  - id: flannel_manifest
-    action: write_file
-    dst: /etc/kubernetes/kube-flannel.yml
-    needs: [kubeconfig]
-    content: |
-      apiVersion: v1
-      kind: Namespace
-      metadata:
-        name: kube-flannel
-        labels:
-          pod-security.kubernetes.io/enforce: privileged
-      ---
-      apiVersion: v1
-      kind: ServiceAccount
-      metadata:
-        name: flannel
-        namespace: kube-flannel
-      ---
-      kind: ClusterRole
-      apiVersion: rbac.authorization.k8s.io/v1
-      metadata:
-        name: flannel
-      rules:
-        - apiGroups: [""]
-          resources: ["pods"]
-          verbs: ["get"]
-        - apiGroups: [""]
-          resources: ["nodes"]
-          verbs: ["get", "list", "watch"]
-        - apiGroups: [""]
-          resources: ["nodes/status"]
-          verbs: ["patch"]
-      ---
-      kind: ClusterRoleBinding
-      apiVersion: rbac.authorization.k8s.io/v1
-      metadata:
-        name: flannel
-      roleRef:
-        apiGroup: rbac.authorization.k8s.io
-        kind: ClusterRole
-        name: flannel
-      subjects:
-        - kind: ServiceAccount
-          name: flannel
-          namespace: kube-flannel
-      ---
-      kind: ConfigMap
-      apiVersion: v1
-      metadata:
-        name: kube-flannel-cfg
-        namespace: kube-flannel
-        labels:
-          tier: node
-          app: flannel
-      data:
-        cni-conf.json: |
-          {
-            "name": "cbr0",
-            "cniVersion": "0.3.1",
-            "plugins": [
-              { "type": "flannel", "delegate": { "hairpinMode": true, "isDefaultGateway": true } },
-              { "type": "portmap", "capabilities": { "portMappings": true } }
-            ]
-          }
-        net-conf.json: |
-          {
-            "Network": "10.244.0.0/16",
-            "Backend": { "Type": "vxlan" }
-          }
-      ---
-      apiVersion: apps/v1
-      kind: DaemonSet
-      metadata:
-        name: kube-flannel-ds
-        namespace: kube-flannel
-        labels:
-          tier: node
-          app: flannel
-      spec:
-        selector:
-          matchLabels:
-            app: flannel
-        template:
-          metadata:
-            labels:
-              tier: node
-              app: flannel
-          spec:
-            affinity:
-              nodeAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                  nodeSelectorTerms:
-                    - matchExpressions:
-                        - key: kubernetes.io/os
-                          operator: In
-                          values: ["linux"]
-            hostNetwork: true
-            priorityClassName: system-node-critical
-            tolerations:
-              - operator: Exists
-                effect: NoSchedule
-            serviceAccountName: flannel
-            initContainers:
-              - name: install-cni-plugin
-                image: ghcr.io/flannel-io/flannel-cni-plugin:v1.9.1-flannel1
-                command: ["cp"]
-                args: ["-f", "/flannel", "/opt/cni/bin/flannel"]
-                volumeMounts:
-                  - name: cni-plugin
-                    mountPath: /opt/cni/bin
-              - name: install-cni
-                image: ghcr.io/flannel-io/flannel:v0.28.4
-                command: ["cp"]
-                args: ["-f", "/etc/kube-flannel/cni-conf.json", "/etc/cni/net.d/10-flannel.conflist"]
-                volumeMounts:
-                  - name: cni
-                    mountPath: /etc/cni/net.d
-                  - name: flannel-cfg
-                    mountPath: /etc/kube-flannel/
-            containers:
-              - name: kube-flannel
-                image: ghcr.io/flannel-io/flannel:v0.28.4
-                command: ["/opt/bin/flanneld"]
-                args: ["--ip-masq", "--kube-subnet-mgr"]
-                securityContext:
-                  privileged: false
-                  capabilities:
-                    add: ["NET_ADMIN", "NET_RAW"]
-                env:
-                  - name: POD_NAME
-                    valueFrom:
-                      fieldRef:
-                        fieldPath: metadata.name
-                  - name: POD_NAMESPACE
-                    valueFrom:
-                      fieldRef:
-                        fieldPath: metadata.namespace
-                  - name: EVENT_QUEUE_DEPTH
-                    value: "5000"
-                volumeMounts:
-                  - name: run
-                    mountPath: /run/flannel
-                  - name: flannel-cfg
-                    mountPath: /etc/kube-flannel/
-                  - name: xtables-lock
-                    mountPath: /run/xtables.lock
-            volumes:
-              - name: run
-                hostPath:
-                  path: /run/flannel
-              - name: cni-plugin
-                hostPath:
-                  path: /opt/cni/bin
-              - name: cni
-                hostPath:
-                  path: /etc/cni/net.d
-              - name: flannel-cfg
-                configMap:
-                  name: kube-flannel-cfg
-              - name: xtables-lock
-                hostPath:
-                  path: /run/xtables.lock
-                  type: FileOrCreate
+  - { id: flannel_manifest, action: place, material: flannel-manifest, dest: /etc/kubernetes/kube-flannel.yml, needs: [kubeconfig] }
   - { id: cni, action: run_cmd, needs: [flannel_manifest], cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f /etc/kubernetes/kube-flannel.yml", check: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl -n kube-flannel get ds/kube-flannel-ds" }
   - { id: untaint, action: run_cmd, needs: [cni], cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || true" }
   - { id: verify, action: run_cmd, phase: verify, needs: [untaint], cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes -o wide" }
