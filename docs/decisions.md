@@ -569,3 +569,15 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **docker 转 B1**:`tasks/docker.yaml` 由 `pkg_install`(离线空包,D-047 评估)改**官方 static tarball**(`docker-<ver>.tgz` amd64/arm64 双变体)→ extract 到 `/usr/local/bin` → 写 containerd/docker systemd unit → daemon-reload → 起服务。纯 binary material,真离线可行。
 - **真机/验证**:`build -f tasks/yq.yaml`(`fetch yq-bin@amd64` + `yq-bin@arm64`,`recipe + 2 material(s)`)→ 本机离线 `apply`(`place (offline) yq-bin@amd64`,按 `uname -m` 选)→ yq v4.53.2;`--arch arm64` 只打 1 个;docker B1 真机 .11 装成(client 27.3.1,9 步 changed=5)。`resolve_material` 单测覆盖精确/中立/无变体报错。34+2 tests 绿。
 - **待续**:① **OCI image index** 按 arch 组织(registry 路径每台只 pull 自己 arch;现状 `name@arch` 多 blob 同装一 artifact,离线正确但 registry 拉全量);② `kind: image`(复用镜像原生 index)、`kind: os_package`(os×arch 矩阵)接线时一并做 arch。
+
+---
+
+## 2026-06-01 · crater delete:由 task 的 `teardown:` 卸载,opt-in 不强制
+
+### D-049 `crater delete` 跑 task 声明的 `teardown:`,绝不自动逆向 `actions:`
+- **背景**:讨论 apply 的反向操作时澄清——**真实软件的清理不是 apply 步骤的逆**。`run_cmd` 不可逆(引擎不知道任意命令的逆);更关键的是清理对象多是**运行时生成的状态**,install 步骤从没创建过:k8s 的 etcd/CNI/iptables(故 k8s 用 `kubeadm reset` 而非倒撤 init)、mysql 的 `/var/lib/mysql`、docker 的 `/var/lib/docker`/`/var/lib/containerd`(运行期拉的镜像/容器)。逆推 `actions:` 或逆推 apply 的 journal 都碰不到这些 → 自动逆向**必然残留、必然不一致**。
+- **决策**:清理是**产品知识 → 数据**(和 install 对称)。`TaskFile` 加可选 `teardown: Vec<ActionStep>`,`crater delete <source>` 用**同一引擎**(`plan_from_task`/`execute_task`)跑这段。**opt-in 不强制**:task 没声明 `teardown:` → `delete` 明确报错「has no delete capability」,**绝不**拿 `actions:` 自动逆向兜底(那是虚假安全感)。
+- **理由**:① 守 D-017(引擎零产品知识——`kubeadm reset`、删 `/var/lib/docker` 这些只有作者知道,写成声明,引擎只跑);② 守 D-036(teardown 也是纯数据 actions);③ 复用全部既有能力:同原语、幂等(`file: absent`/`service: stopped` 天生幂等)、dry-run、多机、agent、离线 recipe-replay。
+- **实现**:CLI 加 `Cmd::Delete`(镜像 `Apply` 的 source/targeting);`teardown: bool` 贯穿 `apply_source → apply_task → run_task_on_host`,真则选 `task.teardown`、空则提前 bail;`apply_oci_bundle`/`apply_image_ref` 同步带参(artifact/离线也能 delete,recipe 含 teardown)。
+- **tasks/docker.yaml** 加 `teardown:`:stop+disable docker/containerd → 删 `/var/lib/docker`+`/var/lib/containerd`(**运行时状态,作者声明**)→ 删 binary/unit/`/etc/docker` → daemon-reload。
+- **真机/验证**:`delete yq` → 报错(yq 无 teardown,opt-in 生效);`delete docker --dry-run` → 12 步拓扑有序;`delete docker --host .12`(已装 docker)→ changed=12,docker/containerd inactive、`/var/lib/docker` 等全清;再删幂等 `changed=1 ok=11`(仅 daemon-reload 重跑)。34+2 tests 绿。

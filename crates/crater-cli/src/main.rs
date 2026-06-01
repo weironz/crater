@@ -79,6 +79,34 @@ enum Cmd {
         #[arg(long)]
         shell: bool,
     },
+    /// Delete/uninstall a task's deployment by running its authored `teardown:`
+    /// (D-049). **Opt-in**: only a task that defines `teardown:` has this — there
+    /// is NO auto-inversion of `actions:` (real cleanup, e.g. kubeadm reset or
+    /// rm /var/lib/mysql, targets runtime state the install never created).
+    Delete {
+        /// `<source>`: a named task, task.yaml, x.oci bundle, or image ref.
+        source: Option<String>,
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        #[arg(short = 'i', long)]
+        inventory: Option<PathBuf>,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long, default_value = "root")]
+        user: String,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long)]
+        key: Option<PathBuf>,
+        #[arg(long, default_value_t = 22)]
+        port: u16,
+        /// Print the teardown plan without executing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Force the agentless shell executor instead of the default agent.
+        #[arg(long)]
+        shell: bool,
+    },
     /// Build a task into a B 类 OCI artifact in the local store (like
     /// `docker build`). Export to a file with `crater save`.
     Build {
@@ -318,7 +346,22 @@ async fn main() -> Result<()> {
                 (Some(a), None) => (None, Some(a)),
                 (None, _) => (None, None),
             };
-            apply_source(name, source, file, inventory, host, user, password, key, port, dry_run, shell)
+            apply_source(name, source, file, inventory, host, user, password, key, port, dry_run, shell, false)
+                .await
+        }
+        Cmd::Delete {
+            source,
+            file,
+            inventory,
+            host,
+            user,
+            password,
+            key,
+            port,
+            dry_run,
+            shell,
+        } => {
+            apply_source(None, source, file, inventory, host, user, password, key, port, dry_run, shell, true)
                 .await
         }
         Cmd::Build { file, tag, arch } => build_to_store(&file, tag, &arch).await,
@@ -501,7 +544,7 @@ async fn component_shortcut(args: Vec<String>) -> Result<()> {
         i += 1;
     }
     let name = name.ok_or_else(|| anyhow!("missing task name"))?;
-    apply_source(None, Some(name), None, inventory, host, user, password, key, port, dry_run, shell)
+    apply_source(None, Some(name), None, inventory, host, user, password, key, port, dry_run, shell, false)
         .await
 }
 
@@ -682,30 +725,32 @@ async fn apply_source(
     port: u16,
     dry_run: bool,
     shell: bool,
+    teardown: bool,
 ) -> Result<()> {
+    let verb = if teardown { "delete" } else { "apply" };
     // `<source>` positional, else `-f`.
     let src = source
         .or_else(|| file.map(|p| p.display().to_string()))
-        .ok_or_else(|| anyhow!("apply needs a <source>: a spec.yaml, an x.oci bundle, an image ref, or a component name"))?;
+        .ok_or_else(|| anyhow!("{verb} needs a <source>: a task.yaml, an x.oci bundle, an image ref, or a named task"))?;
     let path = PathBuf::from(&src);
     if let Some(n) = &name {
-        info!("apply: deployment '{n}' ← {src}");
+        info!("{verb}: deployment '{n}' ← {src}");
     }
 
     if path.is_file() && bundle::is_oci_archive(&path) {
         // Offline: OCI bundle. Targets from CLI (D-020: never inside the image)
         // — `-i inventory.yaml`, `--host a,b`, or none → local.
-        info!("apply: {src} → offline (OCI bundle)");
+        info!("{verb}: {src} → offline (OCI bundle)");
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
-        return apply_oci_bundle(&path, hosts, !dry_run, shell).await;
+        return apply_oci_bundle(&path, hosts, !dry_run, shell, teardown).await;
     }
     if path.is_file() {
         // A task file (top-level `actions:`, D-037). Component specs are gone.
         if crater_core::task::is_task_file(&path) {
-            info!("apply: {src} → task");
+            info!("{verb}: {src} → task");
             let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
             let groups = inventory_groups(inventory.as_deref())?;
-            return apply_task(&path, hosts, groups, None, !dry_run, shell).await;
+            return apply_task(&path, hosts, groups, None, !dry_run, shell, teardown).await;
         }
         anyhow::bail!(
             "{src}: not a task file (needs top-level `actions:`). Component specs are no \
@@ -714,19 +759,19 @@ async fn apply_source(
     }
     // Image reference (registry/store): has a registry path or a tag, not a file.
     if src.contains('/') || src.contains(':') {
-        info!("apply: {src} → image (local store / registry)");
+        info!("{verb}: {src} → image (local store / registry)");
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
-        return apply_image_ref(&src, hosts, !dry_run).await;
+        return apply_image_ref(&src, hosts, !dry_run, teardown).await;
     }
     // Named task in the library: `crater apply <name>` → tasks/<name>.yaml
     // (D-043). This is the only bare-name path now (D-046): component shortcut
     // and component-spec fleet are gone — everything is a task.
     let named = PathBuf::from("tasks").join(format!("{src}.yaml"));
     if named.is_file() && crater_core::task::is_task_file(&named) {
-        info!("apply: {src} → named task (tasks/{src}.yaml)");
+        info!("{verb}: {src} → named task (tasks/{src}.yaml)");
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
         let groups = inventory_groups(inventory.as_deref())?;
-        return apply_task(&named, hosts, groups, None, !dry_run, shell).await;
+        return apply_task(&named, hosts, groups, None, !dry_run, shell, teardown).await;
     }
     anyhow::bail!(
         "'{src}': not a file, image ref, or named task. Put a task at tasks/{src}.yaml, \
@@ -746,9 +791,20 @@ async fn apply_task(
     offline_blobmap: Option<BTreeMap<String, PathBuf>>,
     do_apply: bool,
     do_shell: bool,
+    teardown: bool,
 ) -> Result<()> {
     use crater_core::task::TaskFile;
     let task = TaskFile::from_yaml_file(path)?;
+    // Delete is opt-in (D-049): a task only has delete capability if it authored
+    // a `teardown:`. No auto-inversion of `actions:` — real cleanup targets
+    // runtime state the install steps never created.
+    if teardown && task.teardown.is_empty() {
+        anyhow::bail!(
+            "task '{}' defines no `teardown:` — it has no delete capability \
+             (delete is opt-in; author a teardown to enable it)",
+            task.name
+        );
+    }
     let spec_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
     // `hosts` group filter (D-037-b/D-043): `all` → every target; else expand the
     // group name to a role set (nested `groups:` resolved) and keep hosts whose
@@ -767,9 +823,10 @@ async fn apply_task(
         anyhow::bail!("task hosts='{}' matched no target host", task.hosts);
     }
     info!(
-        "task '{}': {} action(s), hosts={}, {} target(s), mode={}",
+        "{} '{}': {} action(s), hosts={}, {} target(s), mode={}",
+        if teardown { "teardown" } else { "task" },
         task.name,
-        task.actions.len(),
+        if teardown { task.teardown.len() } else { task.actions.len() },
         task.hosts,
         hosts.len(),
         if do_apply { "apply" } else { "dry-run" }
@@ -779,7 +836,7 @@ async fn apply_task(
 
     if !do_apply {
         for h in &hosts {
-            run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), false, do_shell).await?;
+            run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), false, do_shell, teardown).await?;
         }
         info!("dry-run only; omit --dry-run to execute");
         return Ok(());
@@ -790,7 +847,7 @@ async fn apply_task(
         let results: Vec<Result<(String, Vec<(String, String)>)>> = futures::stream::iter(
             group
                 .iter()
-                .map(|h| run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), true, do_shell)),
+                .map(|h| run_task_on_host(&task, h, &spec_dir, &hostvars, offline_blobmap.as_ref(), true, do_shell, teardown)),
         )
         .buffer_unordered(forks)
         .collect()
@@ -825,6 +882,7 @@ async fn run_task_on_host(
     offline_blobmap: Option<&BTreeMap<String, PathBuf>>,
     do_apply: bool,
     do_shell: bool,
+    teardown: bool,
 ) -> Result<(String, Vec<(String, String)>)> {
     if host.is_local() {
         info!("▶ host {} (local)", host.name);
@@ -862,9 +920,17 @@ async fn run_task_on_host(
     if let Some(bm) = offline_blobmap {
         ctx.offline_blobs = Some(bm.clone());
     }
-    let steps = engine::plan_from_task(&task.actions, &ctx)?;
+    // delete → run the authored `teardown:` actions; apply → `actions`.
+    let action_list = if teardown { &task.teardown } else { &task.actions };
+    let steps = engine::plan_from_task(action_list, &ctx)?;
     let handlers = engine::plan_handlers(&task.handlers, &ctx)?;
-    info!("[{}] task {} — {} step(s)", host.name, task.name, steps.len());
+    info!(
+        "[{}] {} {} — {} step(s)",
+        host.name,
+        if teardown { "teardown" } else { "task" },
+        task.name,
+        steps.len()
+    );
     if !do_apply {
         let ops: Vec<Op> = steps.iter().map(|s| s.op.clone()).collect();
         print_plan(&ops);
@@ -1116,6 +1182,7 @@ async fn apply_oci_bundle(
     hosts: Vec<crater_core::spec::Host>,
     do_apply: bool,
     do_shell: bool,
+    teardown: bool,
 ) -> Result<()> {
     let dest_root = std::env::temp_dir().join(format!("crater-deploy-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dest_root);
@@ -1146,7 +1213,7 @@ async fn apply_oci_bundle(
     info!("offline (task artifact): {} task(s)", mats.len());
     for mc in mats {
         let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
-        apply_task(&recipe_file, hosts.clone(), Default::default(), Some(mc.blobmap), do_apply, do_shell)
+        apply_task(&recipe_file, hosts.clone(), Default::default(), Some(mc.blobmap), do_apply, do_shell, teardown)
             .await?;
     }
     let _ = std::fs::remove_dir_all(&dest_root);
@@ -1163,7 +1230,7 @@ async fn deploy_bundle(
     do_apply: bool,
 ) -> Result<()> {
     let hosts = target_hosts(None, host, user, password, None, port)?;
-    apply_oci_bundle(bundle_file, hosts, do_apply, false).await
+    apply_oci_bundle(bundle_file, hosts, do_apply, false, false).await
 }
 
 /// The inventory's named `groups:` (from `-i`), else empty (D-043).
@@ -1315,6 +1382,7 @@ async fn apply_image_ref(
     reference: &str,
     hosts: Vec<crater_core::spec::Host>,
     do_apply: bool,
+    teardown: bool,
 ) -> Result<()> {
     let store = ImageStore::open()?;
     if !store.has(reference) {
@@ -1330,7 +1398,7 @@ async fn apply_image_ref(
         let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
         if crater_core::task::is_task_file(&recipe_file) {
             info!("image {reference}: crater task artifact → recipe-replay");
-            let res = apply_task(&recipe_file, hosts, Default::default(), Some(mc.blobmap), do_apply, true).await;
+            let res = apply_task(&recipe_file, hosts, Default::default(), Some(mc.blobmap), do_apply, true, teardown).await;
             let _ = std::fs::remove_dir_all(&recipe_dir);
             return res;
         }

@@ -36,6 +36,14 @@ pub struct TaskFile {
     /// Ordered actions. Dependencies via `needs`; the engine topo-sorts.
     #[serde(default)]
     pub actions: Vec<ActionStep>,
+    /// Teardown actions (D-049): the product-specific cleanup/uninstall, run by
+    /// `crater delete`. **Authored data, NOT auto-derived** — real software's
+    /// cleanup (kubeadm reset, rm /var/lib/mysql, rm /var/lib/docker) targets
+    /// runtime-generated state that the install steps never created, so it can't
+    /// be inverted from `actions`. Empty = this task has NO delete capability
+    /// (delete is opt-in, never forced). Same primitives/engine/idempotency.
+    #[serde(default)]
+    pub teardown: Vec<ActionStep>,
     /// Handlers (D-037-b): actions run once at the end, only if a `changed`
     /// action `notify`d them (by `id`). Deduped, in notify order.
     #[serde(default)]

@@ -157,6 +157,10 @@ Action primitives (use ONLY these):
   copy(src,dest,mode), service(name,state,enabled), lineinfile(path,line,regexp),
   user(name,...), group(name,...), systemd_unit(name,enable,start), module(uses,with).
 
+Optional `teardown:` (same shape as `actions:`): the product-specific cleanup run
+by `crater delete` (e.g. stop services, remove the data dirs the software created
+at runtime). It is NOT auto-derived — author it only if uninstall is wanted.
+
 Rules:
 - NO logic in YAML: no when-expressions, loops, or computation. Use `needs` for
   ordering, `when_os` for OS branches, and `{{ var }}` only for plain substitution.
