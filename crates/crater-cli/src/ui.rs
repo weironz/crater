@@ -147,7 +147,7 @@ fn card(label: &str, value: usize, kind: &str) -> String {
 }
 
 async fn stats_fragment() -> Html<String> {
-    let store = match TursoStore::open().await {
+    let store = match TursoStore::open_read().await {
         Ok(s) => s,
         Err(e) => return Html(format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string()))),
     };
@@ -174,7 +174,7 @@ async fn stats_fragment() -> Html<String> {
 }
 
 async fn deployments_fragment() -> Html<String> {
-    let store = match TursoStore::open().await {
+    let store = match TursoStore::open_read().await {
         Ok(s) => s,
         Err(e) => return Html(format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string()))),
     };
@@ -233,7 +233,7 @@ async fn deployments_fragment() -> Html<String> {
 }
 
 async fn history_fragment() -> Html<String> {
-    let store = match TursoStore::open().await {
+    let store = match TursoStore::open_read().await {
         Ok(s) => s,
         Err(e) => return Html(format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string()))),
     };

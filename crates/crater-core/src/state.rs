@@ -123,7 +123,22 @@ pub struct TursoStore {
 
 impl TursoStore {
     /// Open (creating if needed) the control-side state DB and ensure schema.
+    /// Runs `init()` (a write) — use only from writers / startup, not from the
+    /// read-only UI handlers (concurrent CREATE TABLE → "database is locked").
     pub async fn open() -> crate::Result<Self> {
+        let store = Self::open_inner().await?;
+        store.init().await?;
+        Ok(store)
+    }
+
+    /// Open for **reads only** — does NOT run `init()`. Safe to call per request
+    /// from concurrent UI handlers (no write lock). Assumes the schema already
+    /// exists (created by `open()` at `serve()` startup or by a writer, D-056).
+    pub async fn open_read() -> crate::Result<Self> {
+        Self::open_inner().await
+    }
+
+    async fn open_inner() -> crate::Result<Self> {
         let dir = crate::store::ImageStore::home();
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("state.db");
@@ -131,9 +146,7 @@ impl TursoStore {
             .build()
             .await
             .map_err(|e| anyhow::anyhow!("open state db: {e}"))?;
-        let store = Self { db };
-        store.init().await?;
-        Ok(store)
+        Ok(Self { db })
     }
 
     async fn init(&self) -> crate::Result<()> {
