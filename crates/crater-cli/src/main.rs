@@ -6,7 +6,7 @@
 //!   crater <name> [flags]                      # shorthand for `crater apply <name>`
 //!   crater apply <image-ref|x.oci> --host H    # deploy an image / offline artifact
 //!   crater delete <source> [--host|-i]         # uninstall via the task's teardown: (D-049)
-//!   crater task list [--host|-i] | history     # deployment state: what's where + history (D-051)
+//!   crater task list|show <name>|history       # deployment state: task-centric list + drill-down (D-051)
 //!   crater build -f task.yaml [-t ref]         # → B 类 OCI artifact in the local store
 //!   crater save <ref> -o x.oci                 # export a stored artifact to a file
 //!   crater ai "<request>" [-o task.yaml]       # NL → validated task
@@ -264,9 +264,27 @@ enum RegistryCmd {
 
 #[derive(Subcommand)]
 enum TaskCmd {
-    /// List deployments. From the control-side DB by default; with `--host`/`-i`
-    /// it reads the authoritative markers on the targets.
+    /// List deployed tasks, **one row per task** (hosts are an attribute, like
+    /// `helm list`). From the control DB by default; `--host`/`-i` reads the
+    /// authoritative markers on the targets. Drill into one with `task show`.
     List {
+        #[arg(short = 'i', long)]
+        inventory: Option<PathBuf>,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long, default_value = "root")]
+        user: String,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long)]
+        key: Option<PathBuf>,
+        #[arg(long, default_value_t = 22)]
+        port: u16,
+    },
+    /// Show one task's per-host instances (version/applied/source per host).
+    Show {
+        /// Task name (as in `task list`).
+        name: String,
         #[arg(short = 'i', long)]
         inventory: Option<PathBuf>,
         #[arg(long)]
@@ -389,6 +407,15 @@ async fn main() -> Result<()> {
                 key,
                 port,
             } => task_list(inventory, host, user, password, key, port).await,
+            TaskCmd::Show {
+                name,
+                inventory,
+                host,
+                user,
+                password,
+                key,
+                port,
+            } => task_show(&name, inventory, host, user, password, key, port).await,
             TaskCmd::History { limit } => task_history(limit).await,
         },
         Cmd::Build { file, tag, arch } => build_to_store(&file, tag, &arch).await,
@@ -895,8 +922,41 @@ async fn apply_task(
     Ok(())
 }
 
-/// `crater task list` (D-051): deployments from the control DB, or — when a
-/// target is given — the authoritative markers read off the hosts.
+/// Gather deployment instances (one per host×task) from the right source:
+/// the control DB, or — when a target is given — the authoritative markers
+/// read off the hosts (D-051).
+async fn gather_deployments(
+    inventory: Option<PathBuf>,
+    host: Option<String>,
+    user: String,
+    password: Option<String>,
+    key: Option<PathBuf>,
+    port: u16,
+) -> Result<Vec<crater_core::state::Deployment>> {
+    use crater_core::state::Deployment;
+    if inventory.is_some() || host.is_some() {
+        let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
+        let mut out = Vec::new();
+        for h in &hosts {
+            let exec = connect_executor(h, true).await?;
+            for m in state::read_markers(exec.as_ref()).await.unwrap_or_default() {
+                out.push(Deployment {
+                    host: h.name.clone(),
+                    name: m.name,
+                    version: m.version,
+                    source: m.source,
+                    applied_at: m.applied_at,
+                });
+            }
+        }
+        Ok(out)
+    } else {
+        state::TursoStore::open().await?.list_deployments().await
+    }
+}
+
+/// `crater task list` (D-051): **task-centric** — one row per deployed task,
+/// hosts aggregated as an attribute (like `helm list`). `task show` drills in.
 async fn task_list(
     inventory: Option<PathBuf>,
     host: Option<String>,
@@ -905,32 +965,59 @@ async fn task_list(
     key: Option<PathBuf>,
     port: u16,
 ) -> Result<()> {
-    if inventory.is_some() || host.is_some() {
-        let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
-        println!("{:<16} {:<14} {:<10} {:<20} {}", "HOST", "TASK", "VERSION", "APPLIED (UTC)", "SOURCE");
-        for h in &hosts {
-            let exec = connect_executor(h, true).await?;
-            let markers = state::read_markers(exec.as_ref()).await.unwrap_or_default();
-            for m in markers {
-                println!(
-                    "{:<16} {:<14} {:<10} {:<20} {}",
-                    h.name, m.name, m.version, state::fmt_epoch(m.applied_at), m.source
-                );
-            }
+    let from_targets = inventory.is_some() || host.is_some();
+    let deps = gather_deployments(inventory, host, user, password, key, port).await?;
+    if deps.is_empty() {
+        if from_targets {
+            info!("no deployments found on the target(s)");
+        } else {
+            info!("no deployments recorded in the control DB (~/.crater/state.db); use --host/-i to read targets directly");
         }
         return Ok(());
     }
-    let store = state::TursoStore::open().await?;
-    let deps = store.list_deployments().await?;
+    // Aggregate by task name: version set, host set, latest applied_at.
+    let mut by_task: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>, i64)> = BTreeMap::new();
+    for d in deps {
+        let e = by_task.entry(d.name).or_insert_with(|| (BTreeSet::new(), BTreeSet::new(), 0));
+        e.0.insert(d.version);
+        e.1.insert(d.host);
+        e.2 = e.2.max(d.applied_at);
+    }
+    println!("{:<14} {:<14} {:<20} {}", "TASK", "VERSION", "HOSTS", "LAST APPLIED (UTC)");
+    for (task, (versions, hosts, last)) in by_task {
+        let version = if versions.len() == 1 {
+            versions.into_iter().next().unwrap()
+        } else {
+            format!("{} (mixed)", versions.into_iter().collect::<Vec<_>>().join(","))
+        };
+        let host_list = hosts.iter().cloned().collect::<Vec<_>>().join(",");
+        let hosts_col = format!("{host_list} ({})", hosts.len());
+        println!("{:<14} {:<14} {:<20} {}", task, version, hosts_col, state::fmt_epoch(last));
+    }
+    Ok(())
+}
+
+/// `crater task show <name>` (D-051): one task's per-host instances.
+async fn task_show(
+    name: &str,
+    inventory: Option<PathBuf>,
+    host: Option<String>,
+    user: String,
+    password: Option<String>,
+    key: Option<PathBuf>,
+    port: u16,
+) -> Result<()> {
+    let mut deps = gather_deployments(inventory, host, user, password, key, port).await?;
+    deps.retain(|d| d.name == name);
     if deps.is_empty() {
-        info!("no deployments recorded in the control DB (~/.crater/state.db); use --host/-i to read targets directly");
+        info!("task '{name}' has no recorded deployments");
         return Ok(());
     }
-    println!("{:<16} {:<14} {:<10} {:<20} {}", "HOST", "TASK", "VERSION", "APPLIED (UTC)", "SOURCE");
+    println!("{:<16} {:<10} {:<20} {}", "HOST", "VERSION", "APPLIED (UTC)", "SOURCE");
     for d in deps {
         println!(
-            "{:<16} {:<14} {:<10} {:<20} {}",
-            d.host, d.name, d.version, state::fmt_epoch(d.applied_at), d.source
+            "{:<16} {:<10} {:<20} {}",
+            d.host, d.version, state::fmt_epoch(d.applied_at), d.source
         );
     }
     Ok(())

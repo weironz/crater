@@ -607,3 +607,17 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **命令**:`crater task list`(默认读控制 DB;`--host`/`-i` 读目标机权威 marker)、`crater task history [--limit]`。
 - **真机验证**:`apply yq` 本机 + `--host .12` → `task list` 两条、`task history` 两条 apply;`task list --host .12` 读到 .12 的 marker(JSON 内容核对);`delete yq --host .12` → marker 删、DB 删、list 中 .12 消失、history 多一条 delete。34+2 tests 绿,0 警告。
 - **Phase 1b(下一步)**:`crater task status`(漂移检测——重跑 verify 阶段比对声明态 vs 实际)。**Phase 2**:`crater ui`(Axum + htmx 只读看板读同一 DB)。
+
+---
+
+## 2026-06-01 · 定义 "task" 语义:逻辑部署单元,`task list` 按 task 维度
+
+### D-052 `crater task list` 改 task 维度(hosts 为属性),加 `task show` 下钻
+- **背景**:`task list` 原按 `(host, task)` 平铺——`apply yq -i inv` 明明是**一个 task**(部署到两台),却列成两行,把"task(逻辑部署单元)"和"per-host 实例"混了。
+- **决策**:**task = 一次部署的逻辑单元**,hosts 是它的属性(对标 Helm release / `helm list`)。
+  - `crater task list` → **一行一个 task**:`TASK｜VERSION｜HOSTS(聚合,含计数)｜LAST APPLIED`;版本不一致显示 `… (mixed)`。
+  - `crater task show <name>` → 下钻该 task 的 per-host 明细(`HOST｜VERSION｜APPLIED｜SOURCE`)。
+  - per-host marker 仍是真相源,只是默认不平铺。数据模型不变(仍按 `(host,task)` 存),只在 CLI 侧 Rust 聚合(小数据量,无需 SQL GROUP BY——也印证 SQL 非刚需)。
+- **影响**:`gather_deployments` 统一从控制 DB 或目标机 marker 取实例;`task_list` 聚合渲染、`task_show` 过滤渲染。`list`/`show` 都支持 `--host`/`-i`(读权威 marker)。
+- **真机验证**:`apply yq -i inventory(n11/n12)` → `task list` 一行 `yq 4.53.2 n11,n12 (2)`;`task show yq` 两行 per-host;本机再 apply → list 聚合成 `localhost,n11,n12 (3)`。34+2 tests 绿。
+- **Phase 1b 顺延**:漂移用 `list --verify`/`show <name> --verify`,不单开 `status`(用户定)。
