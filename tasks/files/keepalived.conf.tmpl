@@ -1,0 +1,23 @@
+vrrp_script chk_haproxy {
+  script "/usr/bin/killall -0 haproxy"
+  interval 2
+  weight 2
+}
+vrrp_instance VI_1 {
+  state BACKUP
+  interface __IFACE__
+  virtual_router_id 14
+  priority 100
+  advert_int 1
+  nopreempt
+  authentication {
+    auth_type PASS
+    auth_pass crater42
+  }
+  virtual_ipaddress {
+    __VIP__/24
+  }
+  track_script {
+    chk_haproxy
+  }
+}
