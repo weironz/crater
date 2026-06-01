@@ -634,3 +634,15 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - **`task history` 是主视图**(AWX Jobs 式,不可变活动流);**`task list` 是 crater 的额外福利**(当前部署快照,AWX 都没有——因 crater 有 marker;可漂移,留 `--verify`);`task show <name>` 下钻。
 - **实现**:`Marker`/`Deployment`/`JobRun` + DB 三表加 `deployment` 列(默认=task 名,marker 仍按 task 名存一份/host);`apply` 的 `name` 串入 `apply_task→run_task_on_host/record_deployments`;`task list` 按 deployment 聚合(`DEPLOYMENT｜TASK｜VERSION｜HOSTS 计数｜LAST APPLIED`),`history` 加 DEPLOYMENT 列。**HOSTS 改计数**(大批量不平铺,主机名去 `task show`)。
 - **真机验证**:`apply yq-a yq --host .11` + `apply yq-b yq --host .12`(同一 task.yaml)→ `task list` 两行 yq-a/yq-b 各 1 host;`task show yq-a` → .11;`history` DEPLOYMENT 列区分;`apply yq`(无名)→ deployment 默认 `yq`。schema 变更需清旧 `~/.crater/state.db`。34+2 tests 绿。
+
+---
+
+## 2026-06-01 · 部署状态 Phase 2:crater ui(Axum + htmx 只读看板)
+
+### D-054 `crater ui`:Axum 后端 + htmx 前端,只读看板,读同一 Turso 库
+- **背景**:Phase 1 已有部署状态(marker + Turso + `crater task`)。Phase 2 给它一个 Web 看板。受 AWX 启发(D-053):run/活动为主、当前态为辅。
+- **决策**:`crater ui [--bind 127.0.0.1] [--port 8080]` 起 **Axum** 服务,读控制端 Turso 库,渲染 HTML 片段;前端 **htmx** 轮询(`hx-trigger="every 5s"`)刷新。**只读**(列部署 + 历史),后续再加从 UI 触发 apply/delete。
+- **守约**:① 纯 Rust(axum/hyper/tower/tokio,无 C,musl 静态编过——31.7MB,+13MB);② **htmx.js vendor 进仓库 + `include_bytes!` 嵌入二进制**,气隙零网络可用;③ 默认 `bind 127.0.0.1`(最小攻击面);④ UI 是**视图**,逻辑留引擎/CLI(D-036),不持产品逻辑;HTML 服务端渲染、JS 近乎为零。
+- **路由**:`/`(页面壳)、`/api/deployments`(片段,按 deployment 聚合)、`/api/history`(片段)、`/htmx.min.js`(嵌入资源)。handler 经 `Arc<TursoStore>`(axum State)查库。
+- **验证**:`crater ui --port 8090` → `/` 出页面、`/api/deployments` 列 yq(2 hosts)、`/api/history` 含 apply/delete + DEPLOYMENT 列(my-yq01/yq 区分)、`/htmx.min.js` 50917 字节。musl 静态、34+2 tests 绿、0 警告。
+- **后续**:从 UI 触发 apply/delete(写操作);`--verify` 漂移列(Phase 1b)接进看板;鉴权(对外暴露时)。

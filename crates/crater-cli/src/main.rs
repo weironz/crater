@@ -7,12 +7,15 @@
 //!   crater apply <image-ref|x.oci> --host H    # deploy an image / offline artifact
 //!   crater delete <source> [--host|-i]         # uninstall via the task's teardown: (D-049)
 //!   crater task list|show <name>|history       # deployment state: task-centric list + drill-down (D-051)
+//!   crater ui [--bind H --port N]               # read-only web dashboard (Axum + htmx, D-054)
 //!   crater build -f task.yaml [-t ref]         # → B 类 OCI artifact in the local store
 //!   crater save <ref> -o x.oci                 # export a stored artifact to a file
 //!   crater ai "<request>" [-o task.yaml]       # NL → validated task
 //!   crater doctor --file log.txt | --host H    # offline rule-based diagnosis
 //!   crater run --host H --password P -- <cmd>  # ad-hoc (ansible -m shell style)
 //!   crater agent --task-plan <file>            # internal (runs on the target node)
+
+mod ui;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -116,6 +119,15 @@ enum Cmd {
     Task {
         #[command(subcommand)]
         cmd: TaskCmd,
+    },
+    /// Serve a read-only web dashboard over the deployment state (D-054).
+    /// Axum + htmx, pure Rust, htmx embedded (works offline). Default binds
+    /// localhost only.
+    Ui {
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
     },
     /// Build a task into a B 类 OCI artifact in the local store (like
     /// `docker build`). Export to a file with `crater save`.
@@ -420,6 +432,7 @@ async fn main() -> Result<()> {
             } => task_show(&name, inventory, host, user, password, key, port).await,
             TaskCmd::History { limit } => task_history(limit).await,
         },
+        Cmd::Ui { bind, port } => ui::serve(&bind, port).await,
         Cmd::Build { file, tag, arch } => build_to_store(&file, tag, &arch).await,
         Cmd::Save { reference, output } => {
             ImageStore::open()?.export_oci_archive(&reference, &output)?;
