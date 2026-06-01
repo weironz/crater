@@ -173,6 +173,8 @@ impl ImageStore {
         let accepted = vec![
             mt::IMAGE_MANIFEST_MEDIA_TYPE,
             mt::IMAGE_MANIFEST_LIST_MEDIA_TYPE,
+            mt::OCI_IMAGE_MEDIA_TYPE,       // ghcr & others use OCI manifest
+            mt::OCI_IMAGE_INDEX_MEDIA_TYPE, // ...and OCI image index (multi-arch)
             mt::IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE,
             mt::IMAGE_LAYER_GZIP_MEDIA_TYPE,
             mt::IMAGE_LAYER_MEDIA_TYPE,
@@ -203,12 +205,17 @@ impl ImageStore {
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("manifest list entry missing digest"))?
                 .to_string();
-            let mut buf: Vec<u8> = Vec::new();
-            client
-                .pull_blob(&r, sub_dig.as_str(), &mut buf)
+            // A sub-manifest lives on the MANIFESTS endpoint, not /blobs — fetch
+            // it by a digest-pinned reference (docker.io is lenient, but aliyun/
+            // harbor 404 on /blobs/<manifest-digest>).
+            let digest_ref: Reference = format!("{}/{}@{}", r.registry(), r.repository(), sub_dig)
+                .parse()
+                .map_err(|e| anyhow::anyhow!("bad digest ref for {reference}: {e}"))?;
+            let (sub_raw, _) = client
+                .pull_manifest_raw(&digest_ref, &auth, &accepted)
                 .await
                 .map_err(|e| anyhow::anyhow!("pull sub-manifest {sub_dig} of '{reference}': {e}"))?;
-            buf
+            sub_raw.to_vec()
         } else {
             raw.to_vec()
         };
