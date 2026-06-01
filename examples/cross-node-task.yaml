@@ -7,5 +7,5 @@ register:
     cmd: "hostname -I | awk '{print $1}'"
 actions:
   - id: note_peer
-    action: run_cmd
+    action: shell
     cmd: "echo 'first-node = {{ hostvars.n11.ip }}' > /tmp/crater-peer; cat /tmp/crater-peer"

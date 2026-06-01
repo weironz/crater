@@ -839,3 +839,13 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **决策**:删除 `SystemdUnit` 变体。`service` 加 tag 别名 `systemd_unit`、字段别名 `enable`→`enabled`,并保留 back-compat 字段 `start: Option<bool>`(`start: true` 在引擎里等价 `state: started`)。旧 `systemd_unit` task 零破坏。
 - **理由**:无任务在用 `systemd_unit`;合并后「crater 自有模块」只剩 `place`/`load_image` 两个真·物料模型特有的,其余全部对齐 Ansible。
 - **影响**:engine 删 SystemdUnit arm、Service arm 折入 `start`;`kind()`、main.rs(gather hosts 的 match)、ai.rs、modules.md(从自有表移除 + 别名表加行)、action-layer/action-tasks 同步;新增测试 `service_subsumes_systemd_unit`。39 tests 绿。
+
+---
+
+## 2026-06-02 · 彻底改名,移除全部别名
+
+### D-070 删除所有 back-compat 别名,旧名不再解析
+- **背景**:D-065~069 改名时都保留了旧名 serde 别名(渐进迁移)。用户决定**彻底改变、不留旧名**——仓库 task/example 已全部迁到新名,别名只剩历史包袱。
+- **决策**:删除全部别名:material `kind` 的 `binary`;action 的 `run_cmd`/`command`(→`shell`)、`pkg_install`(→`package`)、`extract`(→`unarchive`)、`render_template`(→`template`)、`module`(→`role`)、`write_file`+`dst`(→`copy`+`dest`)、`systemd_unit`+`enable`/`start`(→`service`+`enabled`/`state`);role 的 `modules/` 目录回退。旧名写进 task 直接报错(`unknown variant`)。
+- **理由**:单一拼写、无歧义;文档/AI 提示不必再解释"两种写法"。这是 crater 自己的项目、仓库内已全部迁移,破坏性可控。
+- **影响**:`examples/*.yaml` 8 处 `run_cmd`→`shell`、`install-yq.yaml` 2 处 `kind: binary`→`file`;Service 删回 `{name,state,enabled}`(去掉 `start` 字段)、engine 去 `modules/` 回退;4 个别名测试改为"现名解析 + 旧名报错"断言;modules.md 别名表改"改名对照(已废弃)"、ai.rs 提示加"用这些确切名字"。38 tests 绿。**破坏性**:任何外部用旧名的 task 需手动迁移(对照表见 [features/modules.md](features/modules.md))。

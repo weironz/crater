@@ -175,8 +175,7 @@ pub struct PlanContext {
     /// Declared materials by name (D-034), each entry holding the per-arch
     /// variants (D-048); `place` picks the one matching `target_arch`.
     pub materials: BTreeMap<String, Vec<crate::component::Material>>,
-    /// Directory holding data-defined roles (`roles/<name>.yaml`, D-029; the old
-    /// `modules/` dir is still honored as a fallback).
+    /// Directory holding data-defined roles (`roles/<name>.yaml`, D-029).
     pub roles_dir: PathBuf,
 }
 
@@ -647,14 +646,7 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
         Action::Module { uses, with } => {
             // Data-defined role (D-029): load roles/<uses>.yaml, render its
             // check/act with `with` (+ ctx vars), lower to a checked shell op.
-            // Back-compat: fall back to the old modules/ dir if roles/ has no file.
-            let mut path = ctx.roles_dir.join(format!("{uses}.yaml"));
-            if !path.exists() {
-                let legacy = PathBuf::from("modules").join(format!("{uses}.yaml"));
-                if legacy.exists() {
-                    path = legacy;
-                }
-            }
+            let path = ctx.roles_dir.join(format!("{uses}.yaml"));
             let desc = crate::module::ModuleDescriptor::from_yaml_file(&path)?;
             let with_strings: BTreeMap<String, String> = with
                 .iter()
@@ -783,16 +775,8 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
             name,
             state,
             enabled,
-            start,
         } => {
             use crate::component::ServiceState;
-            // Back-compat: old `systemd_unit`'s `start: true` == `state: started`.
-            let state = (*state).or(if *start == Some(true) {
-                Some(ServiceState::Started)
-            } else {
-                None
-            });
-            let state = &state;
             let mut cmds = vec!["systemctl daemon-reload".to_string()];
             match enabled {
                 Some(true) => cmds.push(format!("systemctl enable {name}")),

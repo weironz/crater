@@ -10,11 +10,11 @@ vars:
 materials:                     # 物料闭包(D-034),crater build 据此打离线包
   # 多 arch(D-048):同名 material 各声明一个 arch,place 按目标机 uname -m 选变体。
   - name: yq-bin
-    kind: binary
+    kind: file
     arch: amd64
     url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64"
   - name: yq-bin
-    kind: binary
+    kind: file
     arch: arm64
     url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_arm64"
 
@@ -26,7 +26,7 @@ actions:
     mode: "0755"
 
   - id: verify
-    action: run_cmd
+    action: shell
     phase: verify
     cmd: "/usr/local/bin/yq --version"
     needs: [place_yq]          # 引擎据此排在 place_yq 之后
@@ -34,7 +34,7 @@ actions:
   # 封闭枚举条件:仅 rhel 系执行。目标非 rhel 时,引擎在 Rust 里把这步过滤掉
   # (它根本不进 plan)——不是 YAML 在"判断",是引擎在判断。
   - id: rhel_only_note
-    action: run_cmd
+    action: shell
     phase: verify
     when_os: [rhel]
     cmd: "echo 'rhel-specific step'"

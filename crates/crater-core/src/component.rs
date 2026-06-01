@@ -66,13 +66,11 @@ pub struct Material {
 /// `file` (download an arbitrary file by `url_tmpl` — binaries, tarballs, YAML
 /// manifests, configs; arch-variant aware), `image` (pull a container image into
 /// a self-contained oci-archive), `os_package` (resolve a .deb/.rpm closure via
-/// buildah). `binary` is accepted as a back-compat alias for `file` (D-065).
+/// buildah).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaterialKind {
-    /// Download an arbitrary file via `url_tmpl`. Canonical name `file`; the old
-    /// `binary` spelling still parses (alias) so existing tasks keep working.
-    #[serde(alias = "binary")]
+    /// Download an arbitrary file via `url_tmpl` (or read a local `src`).
     File,
     Image,
     OsPackage,
@@ -88,14 +86,14 @@ pub enum Action {
     /// system repo. For OFFLINE, set `material` to a `kind: os_package` material
     /// whose .deb/.rpm closure was packed at build (D-062): offline installs
     /// from the packed closure (`apt-get install ./*.deb` / `dnf install ./*.rpm`).
-    #[serde(rename = "package", alias = "pkg_install")]
+    #[serde(rename = "package")]
     PkgInstall {
         #[serde(default)]
         packages: BTreeMap<String, Vec<String>>,
         #[serde(default)]
         material: Option<String>,
     },
-    #[serde(rename = "unarchive", alias = "extract")]
+    #[serde(rename = "unarchive")]
     Extract {
         to: PathBuf,
         #[serde(default)]
@@ -110,14 +108,14 @@ pub enum Action {
         #[serde(default)]
         creates: Option<PathBuf>,
     },
-    #[serde(rename = "template", alias = "render_template")]
+    #[serde(rename = "template")]
     RenderTemplate {
         src: String,
         dst: PathBuf,
     },
     /// Run a command through the target's shell (ansible `shell` — pipes, `&&`,
-    /// redirects, env prefixes all work; aliased `command`/`run_cmd`).
-    #[serde(rename = "shell", alias = "run_cmd", alias = "command")]
+    /// redirects, env prefixes all work).
+    #[serde(rename = "shell")]
     RunCmd {
         cmd: String,
         /// Optional idempotency probe (ansible `creates:`-style): if this shell
@@ -128,9 +126,8 @@ pub enum Action {
     },
     /// Invoke a reusable role (D-029) — ansible's `role`. `uses` resolves to a
     /// data-defined `roles/<uses>.yaml`; `with` supplies its params. Lowers to a
-    /// checked shell op, so it inherits the idempotency contract. (`module` is
-    /// kept as a back-compat alias for the old spelling.)
-    #[serde(rename = "role", alias = "module")]
+    /// checked shell op, so it inherits the idempotency contract.
+    #[serde(rename = "role")]
     Module {
         uses: String,
         #[serde(default)]
@@ -179,11 +176,8 @@ pub enum Action {
     /// EITHER `content` (inline text, `{{var}}`-rendered) OR `src` (a control-side
     /// file under the task dir, inlined into the plan so it works under the agent
     /// too — text only; binaries go through `place`). Written idempotently
-    /// (sha256) + optional chmod. `write_file` is a back-compat alias for the
-    /// old inline-content spelling; `dst` is accepted for `dest`.
-    #[serde(alias = "write_file")]
+    /// (sha256) + optional chmod.
     Copy {
-        #[serde(alias = "dst")]
         dest: PathBuf,
         #[serde(default)]
         src: Option<String>,
@@ -194,19 +188,13 @@ pub enum Action {
     },
     /// Manage a systemd service — ansible `service`/`systemd` (D-037-b / D-069).
     /// Does daemon-reload, then enable/disable + start/stop/restart. Idempotent
-    /// for started/stopped/enabled (is-active / is-enabled probes). Subsumes the
-    /// old `systemd_unit` action, kept as a back-compat alias: `enable:`→`enabled:`,
-    /// `start: true`→`state: started`.
-    #[serde(alias = "systemd_unit")]
+    /// for started/stopped/enabled (is-active / is-enabled probes).
     Service {
         name: String,
         #[serde(default)]
         state: Option<ServiceState>,
-        #[serde(default, alias = "enable")]
-        enabled: Option<bool>,
-        /// Back-compat for `systemd_unit`'s `start:` bool (== `state: started`).
         #[serde(default)]
-        start: Option<bool>,
+        enabled: Option<bool>,
     },
     /// Ensure a single line is present/absent in a file (D-037-b). Idempotent in
     /// the engine via a grep probe. `regexp` (if set) matches the line to

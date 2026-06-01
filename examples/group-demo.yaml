@@ -3,5 +3,5 @@ name: group-demo
 hosts: cluster
 actions:
   - id: mark
-    action: run_cmd
+    action: shell
     cmd: "echo on-$(hostname -I | awk '{print $1}')"

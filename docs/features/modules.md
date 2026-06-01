@@ -25,7 +25,7 @@ task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible �
 
 | crater 模块 | 参数 | 作用 | Ansible 对应 |
 |---|---|---|---|
-| `shell` | `cmd`, `check` | 经 shell 跑命令(管道/`&&`/重定向/环境变量前缀都支持)。`check` 是幂等探针:退出 0 则跳过(报 `ok`) | `shell`(`command` 也收作别名) |
+| `shell` | `cmd`, `check` | 经 shell 跑命令(管道/`&&`/重定向/环境变量前缀都支持)。`check` 是幂等探针:退出 0 则跳过(报 `ok`) | `shell` |
 | `package` | `packages: {debian:[..], rhel:[..]}`, `material` | 装系统包。在线走系统源;离线设 `material` 指向 `kind: os_package` 物料(D-062) | `package`/`apt`/`yum` |
 | `unarchive` | `to`, `from`, `strip`, `creates` | 解压 tar/tgz 到 `to`。`creates` 已存在则跳过(幂等) | `unarchive` |
 | `template` | `src`, `dst` | 渲染 `templates/<src>`({{var}} 替换)写到 `dst` | `template` |
@@ -36,8 +36,8 @@ task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible �
 | `user` | `name`, `state`, `system`, `shell`, `home`, `groups` | 确保系统用户存在/不存在(`id` 探针) | `user` |
 | `group` | `name`, `state`, `system` | 确保系统组存在/不存在(`getent` 探针) | `group` |
 
-`shell` 等于 Ansible 的 `shell`,**不是 `command`**:crater 的命令默认经过 shell,管道、
-`&&`、`2>/dev/null`、`KUBECONFIG=... cmd` 这些都能用。`command` 收作别名(行为同 `shell`)。
+`shell` 对齐 Ansible 的 `shell` 而**不是 `command`**:crater 的命令默认经过 shell,管道、
+`&&`、`2>/dev/null`、`KUBECONFIG=... cmd` 这些都能用(Ansible 的 `command` 不经 shell、不支持这些)。
 
 ## 二、crater 自有的模块(离线 / 物料模型)
 
@@ -48,9 +48,11 @@ task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible �
 | `place` | `material`, `dest`, `mode` | 放置一个 `materials:` 声明的物料:在线目标机自己下载 `url_tmpl`,离线控制端推打进 OCI 的 blob(D-034) | Ansible 把"下载"`get_url` 与"拷贝"`copy` 分开;crater 用物料逻辑名统一,在线/离线由后端定 |
 | `load_image` | `material`, `namespace`, `runtime` | 导入 `kind: image` 物料:离线推 oci-archive 并 `ctr import`,在线运行时 pull(D-061) | Ansible 无内置镜像导入(社区模块) |
 
-## 别名对照(旧 crater 名 → 现规范名)
+## 改名对照(旧名已废弃,不再解析)
 
-| 旧名(仍可用) | 现规范名 |
+D-070 起**彻底改名、不留别名**——下表旧名写进 task 会直接报错(`unknown variant`)。
+
+| 旧名(已废弃) | 现名 |
 |---|---|
 | `run_cmd` / `command` | `shell` |
 | `pkg_install` | `package` |
@@ -58,17 +60,15 @@ task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible �
 | `render_template` | `template` |
 | `write_file`(`dst`+`content`) | `copy`(`dest`+`content`) |
 | `systemd_unit`(`enable`/`start`) | `service`(`enabled`/`state: started`) |
-| `module`(调用角色) | `role`(见 [roles.md](roles.md)) |
-
-旧名全部保留为 serde 别名,既有 task 零改动;新 task / `crater ai` 生成的用规范名。
+| `module`(调用角色) | `role`(见 [roles.md](roles.md));`modules/` 目录 → `roles/` |
+| `kind: binary`(material) | `kind: file` |
 
 ## demo / 验证
 
 ```bash
-# 任一 task 用规范名书写,build/apply 行为与旧名完全一致(纯改名)
 crater build -f tasks/k8s-offline.yaml   # 解析 shell/package/unarchive… 正常
-cargo test -p crater-core action_names_align_with_ansible_and_keep_aliases
-# → 11 个名字(规范名+别名)全部解析到正确变体
+cargo test -p crater-core action_names_are_ansible_module_names_only
+# → 现名全部解析正确,旧名一律报错
 ```
 
 ## 关联

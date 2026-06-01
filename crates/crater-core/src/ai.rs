@@ -169,8 +169,8 @@ ansible-aligned: shell(cmd,check), package(packages:{debian:[..],rhel:[..]}),
 crater-specific (offline/material model): place(material,dest,mode),
   load_image(material,namespace,runtime).
 Note: `copy` writes a file — give `content` (inline text) or `src` (a control-side
-file); for inline content prefer `copy: {dest, content}` (the old `write_file` name
-still works). `shell` runs via a shell (pipes/&&/redirects/env ok) — prefer it for commands.
+file). `shell` runs via a shell (pipes/&&/redirects/env ok) — prefer it for commands.
+Use these exact names only (no `run_cmd`/`pkg_install`/`write_file`/etc. — they error).
 
 Optional `teardown:` (same shape as `actions:`): the product-specific cleanup run
 by `crater delete` (e.g. stop services, remove the data dirs the software created
@@ -246,7 +246,7 @@ mod tests {
     #[tokio::test]
     async fn nl_to_task_parses_and_rejects_bad() {
         let p = FakeProvider(
-            "```yaml\nname: yq\nactions:\n  - {action: run_cmd, cmd: \"yq --version\"}\n```".into(),
+            "```yaml\nname: yq\nactions:\n  - {action: shell, cmd: \"yq --version\"}\n```".into(),
         );
         let (_y, task) = nl_to_task(&p, "install yq").await.unwrap();
         assert_eq!(task.name, "yq");

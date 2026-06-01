@@ -39,7 +39,7 @@ crater apply -f task.yaml          # 首跑 role → changed
 crater apply -f task.yaml          # 再跑 role → ok(grep 命中)
 ```
 
-> 旧拼写 `action: module` + `modules/` 目录仍作 back-compat 兼容(D-067)。
+> D-070 起彻底改名:旧 `action: module` + `modules/` 目录已废弃,统一用 `action: role` + `roles/`。
 
 ## 验证(真机)
 

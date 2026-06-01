@@ -17,7 +17,7 @@
 ```yaml
 materials:                 # ← build 读这一段，绝不扫 install
   - name: yq-bin
-    kind: file             # file | image | os_package（kind = 「怎么获取」；binary 是 file 的旧别名）
+    kind: file             # file | image | os_package（kind = 「怎么获取这份内容」）
     url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64"
 
 install:

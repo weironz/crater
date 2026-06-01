@@ -119,7 +119,7 @@ mod tests {
 name: install-yq
 vars: { version: "4.53.2" }
 materials:
-  - { name: yq-bin, kind: binary, url_tmpl: "https://x/{{version}}/yq" }
+  - { name: yq-bin, kind: file, url_tmpl: "https://x/{{version}}/yq" }
 actions:
   - id: place_yq
     action: place
@@ -127,7 +127,7 @@ actions:
     dest: /usr/local/bin/yq
     mode: "0755"
   - id: verify
-    action: run_cmd
+    action: shell
     cmd: "yq --version"
     phase: verify
     needs: [place_yq]
@@ -143,24 +143,18 @@ actions:
     }
 
     #[test]
-    fn action_names_align_with_ansible_and_keep_aliases() {
-        // D-067: primitives renamed to ansible module names; old crater spellings
-        // stay as aliases.
+    fn action_names_are_ansible_module_names_only() {
+        // D-070: canonical ansible-aligned names only — old crater spellings are
+        // GONE (no aliases).
         use crate::component::Action;
-        let cases = [
+        let canonical = [
             ("shell", "RunCmd"),
-            ("command", "RunCmd"),
-            ("run_cmd", "RunCmd"),
             ("package", "PkgInstall"),
-            ("pkg_install", "PkgInstall"),
             ("unarchive", "Extract"),
-            ("extract", "Extract"),
             ("template", "RenderTemplate"),
-            ("render_template", "RenderTemplate"),
             ("role", "Module"),
-            ("module", "Module"),
         ];
-        for (name, want) in cases {
+        for (name, want) in canonical {
             let yaml = match want {
                 "RunCmd" => format!("action: {name}\ncmd: \"true\""),
                 "PkgInstall" => format!("action: {name}\npackages: {{ debian: [x] }}"),
@@ -180,20 +174,25 @@ actions:
             };
             assert_eq!(got, want, "action: {name} should parse to {want}");
         }
+        // Old names must now be rejected.
+        for old in ["run_cmd", "command", "pkg_install", "extract", "render_template", "module", "write_file", "systemd_unit"] {
+            let yaml = format!("action: {old}\nname: x");
+            assert!(
+                serde_yaml::from_str::<Action>(&yaml).is_err(),
+                "old name `{old}` should no longer parse"
+            );
+        }
     }
 
     #[test]
-    fn copy_merges_write_file() {
-        // D-068: `copy` takes `content` (inline) or `src` (file); `write_file`
-        // (+`dst`) stays as an alias for the inline form.
+    fn copy_takes_content_or_src() {
+        // D-068/070: `copy` takes `content` or `src`; `write_file`/`dst` are gone.
         use crate::component::Action;
         let by_content: Action =
             serde_yaml::from_str("action: copy\ndest: /etc/x\ncontent: \"hi\"").unwrap();
         let by_src: Action =
             serde_yaml::from_str("action: copy\ndest: /etc/x\nsrc: files/x").unwrap();
-        let legacy: Action =
-            serde_yaml::from_str("action: write_file\ndst: /etc/x\ncontent: \"hi\"").unwrap();
-        for a in [by_content, by_src, legacy] {
+        for a in [by_content, by_src] {
             match a {
                 Action::Copy { dest, .. } => assert_eq!(dest.to_str(), Some("/etc/x")),
                 _ => panic!("should parse to Copy"),
@@ -202,21 +201,9 @@ actions:
     }
 
     #[test]
-    fn service_subsumes_systemd_unit() {
-        // D-069: systemd_unit merged into service; old spelling + enable/start
-        // fields stay as aliases.
+    fn service_canonical_only() {
+        // D-069/070: service uses state/enabled; systemd_unit/enable/start are gone.
         use crate::component::{Action, ServiceState};
-        let legacy: Action =
-            serde_yaml::from_str("action: systemd_unit\nname: foo\nenable: true\nstart: true")
-                .unwrap();
-        match legacy {
-            Action::Service { name, enabled, start, .. } => {
-                assert_eq!(name, "foo");
-                assert_eq!(enabled, Some(true));
-                assert_eq!(start, Some(true));
-            }
-            _ => panic!("systemd_unit should parse to Service"),
-        }
         let modern: Action =
             serde_yaml::from_str("action: service\nname: foo\nstate: restarted\nenabled: false")
                 .unwrap();
@@ -230,18 +217,18 @@ actions:
     }
 
     #[test]
-    fn file_kind_accepts_binary_alias() {
-        // D-065: `binary` renamed to `file`; the old spelling stays valid.
+    fn file_kind_canonical_only() {
+        // D-065/070: `kind: file` is the only spelling; `binary` is gone.
         use crate::component::MaterialKind;
-        let yaml = r#"
-name: t
-materials:
-  - { name: a, kind: file, url_tmpl: "https://x/a" }
-  - { name: b, kind: binary, url_tmpl: "https://x/b" }
-actions: []
-"#;
+        let yaml = "name: t\nmaterials:\n  - name: a\n    kind: file\n    url_tmpl: \"https://x/a\"\nactions: []\n";
         let t: TaskFile = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(t.materials[0].kind, MaterialKind::File);
-        assert_eq!(t.materials[1].kind, MaterialKind::File);
+        assert!(
+            serde_yaml::from_str::<TaskFile>(
+                "name: t\nmaterials:\n  - name: a\n    kind: binary\n    url_tmpl: x\nactions: []\n"
+            )
+            .is_err(),
+            "kind: binary should no longer parse"
+        );
     }
 }
