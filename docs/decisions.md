@@ -971,3 +971,16 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **影响**:`spec.rs`(三级 vars + resolve_host_vars/resolve + 单测)、`main.rs`(target_hosts 调 resolve、`--host` Host 字面量补 vars、run_task_on_host overlay+校验、移除 apply_task 校验)。`INVENTORY_TEMPLATE`/inventory.md 加三级 vars 示范。`verify_on_host`(drift 只读路径)无 inventory host,暂用 task 默认(其 verify 动作不需环境 var)。
 - **验证**:51 tests 绿(新增 `resolve_host_vars_precedence`);真机 inventory 放 `vars.pod_cidr: 10.99.0.0/16` → dry-run `kubeadm init --pod-network-cidr=10.99.0.0/16`(覆盖 task 默认 10.244),证 inventory > task params。
 - **后续(规划)**:`--set k=v` CLI 覆盖(最高优先级);校验扩到角色(inventory 是否定义所需组);verify_on_host 也接 inventory vars。
+
+## 2026-06-02 · project 编排层(= Ansible playbook)(D-083)
+
+### D-083 project:有序 plays 编排多个 task(大型交付)
+- **背景**:单 task/role 装不下整套平台交付(主机初始化→k8s→CNI→存储→监控→裸机 mysql/redis)。需要 Ansible playbook 那层:有序 plays,每个 play 在一个主机组上跑一件事。架构层级:**project(plays of tasks)→ task(actions,含 `action: role`)→ role(materials+actions)**。
+- **决策(增量 1:在线 + file source,复用现有 task 管线)**:
+  - `crater-core/project.rs`:`Project{name, description, plays}` + `Play{name?, source, hosts?, vars}` + `is_project_file`(顶层 `plays:`)。
+  - `apply_task` 加 `hosts_override` + `var_overrides`(play 重定向目标组 / 叠加 vars)。
+  - `apply_project`:按序逐 play 解析 `source`(路径或 `tasks/<source>.yaml`)→ `apply_task`(带覆盖);**delete 逆序**;play 间 barrier(每个 apply_task 跑完才下一个),故 host-init→k8s→cni 的顺序成立;全 play 共用一个 deployment 标签(project 名或 `--name`)。
+  - `apply_source` 检测 `plays:` → 路由到 project;命名 `crater apply <name>` 也识别 project。
+- **影响**:`project.rs`(+ 单测)、`lib.rs` 注册、`main.rs`(apply_task 覆盖参数 + apply_project + 路由 + 4 处旧 apply_task 调用补参)。示范 `tasks/demo-project.yaml`(yq→k8s 两 play)。新增测试 `parses_project_with_plays`。
+- **验证**:52 tests 绿;dry-run `crater apply -f tasks/demo-project.yaml -i inventory.yaml`:play 1 demo-roles 在全 3 台、play 2 k8s-ha 仅 controlplane(n11),按序、各自 host 过滤;命名 `crater apply demo-project` 同样路由到 project。
+- **后续(规划)**:离线 project(`crater build -f project.yaml` → bundle 各 play task 的 OCI、内容寻址去重);纯 Ansible `roles: [...]` 内联 play;跨 play hostvars 传递;project 级 `crater inspect`;project delete 对无 teardown 的 play 优雅跳过(当前沿用单 task 的 opt-in,无 teardown 会报错)。

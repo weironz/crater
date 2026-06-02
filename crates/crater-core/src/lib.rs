@@ -22,6 +22,7 @@ pub mod engine;
 pub mod executor;
 pub mod module;
 pub mod os;
+pub mod project;
 pub mod source;
 pub mod spec;
 pub mod state;

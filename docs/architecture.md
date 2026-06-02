@@ -200,6 +200,7 @@ task/role ──声明──▶ 契约(params + 角色)
 - `when_os` / `when_role` / `run_once` / `throttle` / 可等待 cross-host fact / fail-fast(`HostCoord`)
 - register / hostvars / groups(kubekey 式嵌套 + `derive_roles` 角色推导)
 - inventory 三级 vars(全局/组/主机,覆盖 task params 默认,D-082)
+- **project 编排**(有序 plays,每 play 引用 task + hosts/vars 覆盖,delete 逆序;在线+file source,D-083)
 - `template`(minijinja)、place/unarchive/load_image/copy/service…
 - **role 长全**(自带 materials/actions/handlers/params,展开扁平化,D-080)
 - **`params:` 富契约 + `crater inspect` + `--gen-inventory` + apply 前校验**(D-081)
@@ -207,7 +208,7 @@ task/role ──声明──▶ 契约(params + 角色)
 
 **[规划] 未实现**:
 - role `meta.dependencies`(role 依赖 role,闭包沿图组合);task/role/play/project 分层
-- project(= playbook)编排层 + 跨 role OCI 去重 bundle
+- 离线 project(`build -f project.yaml` → bundle 各 play 的 OCI、去重)+ 纯 Ansible `roles:[]` 内联 play + 跨 play hostvars + project inspect
 - `--set k=v` CLI 覆盖;build/apply 变量分期再细化
 - 惰性 partial pull(apply 只拉计划引用的 layer)
 - 条件依赖拆可选 role(如 `apiserver-lb`)+ endpoint 按拓扑派生
@@ -215,13 +216,14 @@ task/role ──声明──▶ 契约(params + 角色)
 
 ---
 
-## 11. 建议实施顺序
+## 11. 建议实施顺序(✅=已落地)
 
-1. **role 长全**(materials/params 挂 role)—— 成为可 build 的复用单元;骨架。
-2. **`params:` 契约 + `crater inspect`** —— 自描述、可发现。
-3. **inventory vars + 变量分期** —— 环境配置出 OCI。
-4. **apply 前校验** —— 三者一致性。
-5. **project(playbook)编排** —— 大型交付。
+1. ✅ **role 长全**(materials/params 挂 role,D-080)。
+2. ✅ **`params:` 契约 + `crater inspect`**(D-081)。
+3. ✅ **inventory 三级 vars**(环境配置出 OCI,D-082)。
+4. ✅ **apply 前校验**(D-081/082,per-host 合并后校验)。
+5. ✅ **project(playbook)编排**(在线+file source,D-083);离线 bundle 待续。
 6. **惰性 partial pull** —— 扩展性(define broad, materialize narrow)。
+7. 离线 project bundle / 纯 Ansible `roles:[]` 内联 play / `--set` / role meta.dependencies / OCI annotations。
 
 每一步都复用前一步:project 的 component 传 params 就是 role 的 params 契约,打哪组就是 inventory 的组。

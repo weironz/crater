@@ -818,12 +818,17 @@ async fn apply_source(
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
         return apply_oci_bundle(&path, hosts, !dry_run, shell, teardown, &src, name.as_deref()).await;
     }
+    if path.is_file() && crater_core::project::is_project_file(&path) {
+        // A project (top-level `plays:`, D-083): orchestrate plays in order.
+        info!("{verb}: {src} → project");
+        return apply_project(&path, name.as_deref(), inventory, host, user, password, key, port, dry_run, shell, teardown).await;
+    }
     if path.is_file() {
         // A task file (top-level `actions:`, D-037). Component specs are gone.
         if crater_core::task::is_task_file(&path) {
             info!("{verb}: {src} → task");
             let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
-            return apply_task(&path, hosts, None, !dry_run, shell, teardown, &src, name.as_deref()).await;
+            return apply_task(&path, hosts, None, !dry_run, shell, teardown, &src, name.as_deref(), None, BTreeMap::new()).await;
         }
         anyhow::bail!(
             "{src}: not a task file (needs top-level `actions:`). Component specs are no \
@@ -840,15 +845,88 @@ async fn apply_source(
     // (D-043). This is the only bare-name path now (D-046): component shortcut
     // and component-spec fleet are gone — everything is a task.
     let named = PathBuf::from("tasks").join(format!("{src}.yaml"));
+    if named.is_file() && crater_core::project::is_project_file(&named) {
+        info!("{verb}: {src} → named project (tasks/{src}.yaml)");
+        return apply_project(&named, name.as_deref(), inventory, host, user, password, key, port, dry_run, shell, teardown).await;
+    }
     if named.is_file() && crater_core::task::is_task_file(&named) {
         info!("{verb}: {src} → named task (tasks/{src}.yaml)");
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
-        return apply_task(&named, hosts, None, !dry_run, shell, teardown, &src, name.as_deref()).await;
+        return apply_task(&named, hosts, None, !dry_run, shell, teardown, &src, name.as_deref(), None, BTreeMap::new()).await;
     }
     anyhow::bail!(
         "'{src}': not a file, image ref, or named task. Put a task at tasks/{src}.yaml, \
          or pass a path / -f <file> / an image reference."
     )
+}
+
+/// `crater apply <project>.yaml` (D-083): run a project's plays in order (delete
+/// runs them in REVERSE). Each play resolves its `source` to a task (path or
+/// `tasks/<source>.yaml`) and applies it with the play's `hosts`/`vars` overrides.
+/// A barrier between plays (each `apply_task` completes first), so ordering like
+/// host-init → k8s → cni holds. All plays share one deployment label (the project
+/// name, or `--name`), so `task list` groups them.
+#[allow(clippy::too_many_arguments)]
+async fn apply_project(
+    path: &Path,
+    name: Option<&str>,
+    inventory: Option<PathBuf>,
+    host: Option<String>,
+    user: String,
+    password: Option<String>,
+    key: Option<PathBuf>,
+    port: u16,
+    dry_run: bool,
+    shell: bool,
+    teardown: bool,
+) -> Result<()> {
+    use crater_core::project::Project;
+    let project = Project::from_yaml_file(path)?;
+    let verb = if teardown { "delete" } else { "apply" };
+    if project.plays.is_empty() {
+        anyhow::bail!("project '{}' 没有 plays", project.name);
+    }
+    let mut order: Vec<&crater_core::project::Play> = project.plays.iter().collect();
+    if teardown {
+        order.reverse(); // tear down in reverse: e.g. k8s before host baseline.
+    }
+    let deployment = name.map(|s| s.to_string()).unwrap_or_else(|| project.name.clone());
+    info!(
+        "{verb} project '{}': {} play(s){}",
+        project.name,
+        order.len(),
+        if teardown { "(逆序)" } else { "" }
+    );
+    let total = order.len();
+    for (i, play) in order.iter().enumerate() {
+        let label = play.name.clone().unwrap_or_else(|| play.source.clone());
+        // Resolve source: an explicit path, else a named task tasks/<source>.yaml.
+        let src_path = {
+            let p = PathBuf::from(&play.source);
+            if p.is_file() { p } else { PathBuf::from("tasks").join(format!("{}.yaml", play.source)) }
+        };
+        if !src_path.is_file() {
+            anyhow::bail!(
+                "project '{}' play '{label}':source '{}' 未找到(路径或 tasks/{}.yaml)",
+                project.name, play.source, play.source
+            );
+        }
+        info!(
+            "── play {}/{total}: {label}(source={}, hosts={})",
+            i + 1,
+            play.source,
+            play.hosts.as_deref().unwrap_or("<task 默认>")
+        );
+        let hosts = target_hosts(inventory.as_deref(), host.clone(), &user, password.clone(), key.clone(), port)?;
+        apply_task(
+            &src_path, hosts, None, !dry_run, shell, teardown, &play.source, Some(&deployment),
+            play.hosts.clone(), play.vars.clone(),
+        )
+        .await
+        .map_err(|e| anyhow!("project '{}' play '{label}' 失败:{e}", project.name))?;
+    }
+    info!("{verb} project '{}' 完成", project.name);
+    Ok(())
 }
 
 /// `crater apply <task>.yaml` (D-037): run a generic task across the targets.
@@ -866,9 +944,18 @@ async fn apply_task(
     teardown: bool,
     source: &str,
     name: Option<&str>,
+    // Project-play overrides (D-083): retarget the task's group / overlay vars.
+    hosts_override: Option<String>,
+    var_overrides: BTreeMap<String, String>,
 ) -> Result<()> {
     use crater_core::task::TaskFile;
     let mut task = TaskFile::from_yaml_file(path)?;
+    if let Some(h) = &hosts_override {
+        task.hosts = h.clone();
+    }
+    for (k, v) in &var_overrides {
+        task.vars.insert(k.clone(), v.clone());
+    }
     // Flatten role bundles (D-080): online from a task file → roles read from
     // ./roles; offline from an OCI → recipe is already flat (expanded at build),
     // so this is a no-op (no `action: role` bundles remain).
@@ -2081,7 +2168,7 @@ async fn apply_oci_bundle(
     info!("offline (task artifact): {} task(s)", mats.len());
     for mc in mats {
         let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
-        apply_task(&recipe_file, hosts.clone(), Some(mc.blobmap), do_apply, do_shell, teardown, source, name)
+        apply_task(&recipe_file, hosts.clone(), Some(mc.blobmap), do_apply, do_shell, teardown, source, name, None, BTreeMap::new())
             .await?;
     }
     let _ = std::fs::remove_dir_all(&dest_root);
@@ -2236,7 +2323,7 @@ async fn apply_image_ref(
         let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
         if crater_core::task::is_task_file(&recipe_file) {
             info!("image {reference}: crater task artifact → recipe-replay");
-            let res = apply_task(&recipe_file, hosts, Some(mc.blobmap), do_apply, true, teardown, source, name).await;
+            let res = apply_task(&recipe_file, hosts, Some(mc.blobmap), do_apply, true, teardown, source, name, None, BTreeMap::new()).await;
             let _ = std::fs::remove_dir_all(&recipe_dir);
             return res;
         }
