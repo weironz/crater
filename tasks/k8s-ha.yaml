@@ -1,15 +1,16 @@
 # Kubernetes —— **统一拓扑 + 全 material 离线形态**(D-071)。
 #
-# 一份 task,拓扑由 inventory 角色决定:
-#   单节点      : 1 台 [controlplane, bootstrap]
-#   1 主 N 从    : 1 台 [controlplane, bootstrap] + N 台 [worker]
-#   HA 多主多从 : 1 台 [controlplane, bootstrap] + (M-1) 台 [controlplane, master] + N 台 [worker]
+# 一份 task,拓扑由 inventory 组(D-077)决定 —— 无 bootstrap/master 角色,
+# controlplane 组首台即 init 节点(仿 kubekey:init_kubernetes_node = kube_control_plane[0]):
+#   单节点      : 1 台 controlplane
+#   1 主 N 从    : 1 台 controlplane + N 台 worker
+#   HA 多主多从 : M 台 controlplane + N 台 worker
 #
-# 角色与动作(when_role 分流):
+# 角色与动作(when_role + run_once 分流):
 #   公共(无 when_role)      : containerd/runc/cni/crictl/kubelet/二进制/sysctl/镜像导入
 #   controlplane            : keepalived + haproxy(co-located,VIP 前置 apiserver)
-#   bootstrap               : kubeadm init --upload-certs + flannel + 注册 join/certkey + 去污点
-#   master(非首)serial      : kubeadm join --control-plane(逐台,防 etcd 抢)
+#   controlplane + run_once : kubeadm init --upload-certs + flannel + 注册 join/certkey + 去污点(仅首台)
+#   controlplane(serial)    : kubeadm join --control-plane(逐台,check 守卫跳过 init 节点,防 etcd 抢)
 #   worker                  : kubeadm join
 #
 # 高可用入口:VIP 192.168.73.14:8443 → 持 VIP 的 master 上的 haproxy → 轮询各 apiserver:6443。
@@ -17,7 +18,8 @@
 # 离线:keepalived/haproxy 走 os_package(buildah);其余同 k8s-offline。目标 ubuntu 24.04/amd64。
 name: k8s-ha
 hosts: all
-serial_roles: [master]          # 额外 master 逐台 join(D-071)
+# 无整组串行:前置(传输/解压/装 containerd)全并行;只有 cp_join 这一步用
+# throttle:1 逐台(护 etcd),token 靠可等待 fact 跨机传递(D-077,仿 kubespray)。
 
 vars:
   version: "1.36.1"            # 最新稳定 k8s
@@ -95,9 +97,9 @@ materials:
   - name: dropin-kubeadm
     kind: file
     src: files/10-kubeadm.conf
-  - name: cfg-keepalived          # 模板,占位 __IFACE__/__VIP__
+  - name: cfg-keepalived          # minijinja 模板:{{vip}} 渲染,__IFACE__ 运行时填
     kind: file
-    src: files/keepalived.conf.tmpl
+    src: templates/keepalived.conf.j2
   - name: cfg-haproxy             # minijinja 模板(server 列表 {% for %} 渲染)
     kind: file
     src: templates/haproxy.cfg.j2
@@ -145,13 +147,16 @@ materials:
     kind: image
     ref: "ghcr.io/flannel-io/flannel-cni-plugin:v{{flannel_cni_ver}}"
 
-# bootstrap 注册 join / certkey,供 master、worker 消费(D-071 角色键 hostvars)。
+# init 节点(controlplane 第一台)注册 join / certkey,供其余 master、worker 消费
+# (D-077:run_once 取首台;角色键 hostvars.controlplane.*)。
 register:
   - name: join
-    when_role: [bootstrap]
+    when_role: [controlplane]
+    run_once: true
     cmd: "kubeadm token create --print-join-command"
   - name: certkey
-    when_role: [bootstrap]
+    when_role: [controlplane]
+    run_once: true
     cmd: "kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1"
 
 actions:
@@ -304,23 +309,23 @@ actions:
     dst: /etc/haproxy/haproxy.cfg
     when_role: [controlplane]
     needs: [lb_pkgs]
-  # keepalived:仍 place 模板 + sed 填网卡(运行时探测)/VIP。
-  - id: keepalived_tmpl
-    action: place
+  # keepalived:VIP 用 minijinja 模板在 plan 期渲染(同 haproxy);只剩网卡名是运行时值
+  # (各节点 NIC 名不定、plan 期不可知),用一行 sed 填 __IFACE__。
+  - id: keepalived_cfg
+    action: template
     material: cfg-keepalived
-    dest: /etc/keepalived/keepalived.conf.tmpl
+    dst: /etc/keepalived/keepalived.conf
     when_role: [controlplane]
     needs: [lb_pkgs]
-  - id: keepalived_cfg
+  - id: keepalived_iface
     action: shell
     when_role: [controlplane]
-    needs: [keepalived_tmpl]
-    # 网卡按子网自动探测,VIP 来自 vars
+    needs: [keepalived_cfg]
     cmd: |
       IFACE=$(ip -o -4 addr show | awk '$4 ~ /^192\.168\.73\./ {print $2; exit}')
       [ -z "$IFACE" ] && IFACE=$(ip -o -4 route show to {{subnet}} 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
-      sed "s|__IFACE__|$IFACE|g; s|__VIP__|{{vip}}|g" /etc/keepalived/keepalived.conf.tmpl > /etc/keepalived/keepalived.conf
-    check: "grep -q '{{vip}}' /etc/keepalived/keepalived.conf"
+      sed -i "s|__IFACE__|$IFACE|g" /etc/keepalived/keepalived.conf
+    check: "! grep -q __IFACE__ /etc/keepalived/keepalived.conf"
   # restarted(非 started):包安装时 haproxy 已带默认配置起来了,必须重启加载我们
   # 写入的 :8443 配置 —— 且要在 init 之前(handler 在末尾太晚),故直接 restarted。
   - id: svc_haproxy
@@ -336,18 +341,22 @@ actions:
     state: restarted
     enabled: true
     when_role: [controlplane]
-    needs: [keepalived_cfg, svc_haproxy]
+    needs: [keepalived_iface, svc_haproxy]
 
-  # ========== bootstrap:第一个 master ==========
+  # ========== init 节点:controlplane 第一台(run_once,D-077)==========
+  # 无独立 bootstrap 角色:run_once 取 controlplane 组首台作 init 节点(kubeadm init);
+  # 其余 master 走下面的 cp_join(check 守卫,init 节点自动跳过)。
   - id: kubeadm_init
     action: shell
-    when_role: [bootstrap]
+    when_role: [controlplane]
+    run_once: true
     needs: [svc_kubelet, svc_keepalived, load_images]
     cmd: "kubeadm init --control-plane-endpoint {{control_plane_endpoint}} --upload-certs --pod-network-cidr={{pod_cidr}} --image-repository {{image_repo}} --kubernetes-version v{{version}} --cri-socket=unix:///run/containerd/containerd.sock"
     check: "test -f /etc/kubernetes/admin.conf"
   - id: kubeconfig
     action: shell
-    when_role: [bootstrap]
+    when_role: [controlplane]
+    run_once: true
     needs: [kubeadm_init]
     cmd: "mkdir -p /root/.kube && cp -f /etc/kubernetes/admin.conf /root/.kube/config"
     check: "test -f /root/.kube/config"
@@ -355,30 +364,41 @@ actions:
     action: place
     material: flannel-manifest
     dest: /etc/kubernetes/kube-flannel.yml
-    when_role: [bootstrap]
+    when_role: [controlplane]
+    run_once: true
     needs: [kubeconfig]
   - id: cni
     action: shell
-    when_role: [bootstrap]
+    when_role: [controlplane]
+    run_once: true
     needs: [flannel_manifest]
     cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f /etc/kubernetes/kube-flannel.yml"
     check: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl -n kube-flannel get ds/kube-flannel-ds"
   - id: untaint
     action: shell
-    when_role: [bootstrap]
+    when_role: [controlplane]
+    run_once: true
     needs: [cni]
     cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || true"
 
-  # ========== master(非首):control-plane join(serial)==========
+  # ========== 其余 master:control-plane join(throttle 逐台,check 守卫跳过 init 节点)==========
+  # when_role:[controlplane] 但非 run_once → init 节点也会进 plan,靠 check(kubelet.conf
+  # 已存在)自动跳过;n12/n13 无 kubelet.conf → 执行 join。
+  # throttle:1 → 这一步同时只一台跑(护 etcd:learner 必须逐个同步);其余前置全并行。
+  # token/certkey 是可等待 fact:引擎阻塞到 init 节点 register 出 hostvars.controlplane.*(D-077)。
   - id: cp_join
     action: shell
-    when_role: [master]
-    needs: [svc_kubelet, svc_keepalived, load_images]
-    cmd: "{{hostvars.bootstrap.join}} --control-plane --certificate-key {{hostvars.bootstrap.certkey}} --cri-socket=unix:///run/containerd/containerd.sock"
+    when_role: [controlplane]
+    throttle: 1
+    # needs kubeadm_init: on the init node this orders cp_join AFTER init so its
+    # check (kubelet.conf exists) skips it; on the other masters kubeadm_init is
+    # run_once-filtered, so the need is auto-satisfied and cp_join runs (D-077).
+    needs: [svc_kubelet, svc_keepalived, load_images, kubeadm_init]
+    cmd: "{{hostvars.controlplane.join}} --control-plane --certificate-key {{hostvars.controlplane.certkey}} --cri-socket=unix:///run/containerd/containerd.sock"
     check: "test -f /etc/kubernetes/kubelet.conf"
   - id: master_kubeconfig
     action: shell
-    when_role: [master]
+    when_role: [controlplane]
     needs: [cp_join]
     cmd: "mkdir -p /root/.kube && cp -f /etc/kubernetes/admin.conf /root/.kube/config"
     check: "test -f /root/.kube/config"
@@ -388,14 +408,15 @@ actions:
     action: shell
     when_role: [worker]
     needs: [svc_kubelet, load_images]
-    cmd: "{{hostvars.bootstrap.join}} --cri-socket=unix:///run/containerd/containerd.sock"
+    cmd: "{{hostvars.controlplane.join}} --cri-socket=unix:///run/containerd/containerd.sock"
     check: "test -f /etc/kubernetes/kubelet.conf"
 
-  # ========== 验证(bootstrap 上看全局)==========
+  # ========== 验证(init 节点上看全局)==========
   - id: verify
     action: shell
     phase: verify
-    when_role: [bootstrap]
+    when_role: [controlplane]
+    run_once: true
     needs: [untaint]
     cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes -o wide"
 
@@ -432,12 +453,19 @@ teardown:
     enabled: false
     when_role: [controlplane]
     needs: [reset]
+  # 2.5) 强删残留容器:kubeadm reset + stop containerd 都不会杀 shim 托管的容器
+  #      (containerd-shim 保活),残留 apiserver/scheduler/cm/etcd 占端口 → 下次 join
+  #      撞 "Port 6443/10257/10259 in use"。趁 containerd 还在用 crictl 强删,再杀残余 shim。
+  - id: kill_containers
+    action: shell
+    needs: [reset, stop_kubelet]
+    cmd: "crictl --runtime-endpoint unix:///run/containerd/containerd.sock rm -f $(crictl --runtime-endpoint unix:///run/containerd/containerd.sock ps -aq 2>/dev/null) 2>/dev/null; pkill -9 containerd-shim 2>/dev/null; true"
   - id: stop_containerd
     action: service
     name: containerd
     state: stopped
     enabled: false
-    needs: [reset, stop_kubelet]
+    needs: [reset, stop_kubelet, kill_containers]
   # 3) 删运行态数据 + 配置目录(含 containerd 数据)
   - id: rm_dirs
     action: shell

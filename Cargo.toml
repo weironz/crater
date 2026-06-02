@@ -2,6 +2,16 @@
 resolver = "2"
 members = ["crates/crater-core", "crates/crater-cli"]
 
+# Dev-build speed (D-079): cut debug-info volume (codegen + linker handle far less
+# data) while keeping backtraces; deps get no debug info at all — we never step
+# into them — shrinking the link further. Pair with mold (.cargo/config.toml).
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+debug = false
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

@@ -242,7 +242,17 @@ async fn view_groups() -> Html<String> {
     } else {
         groups.push_str("<table><thead><tr><th>Group</th><th>Members</th></tr></thead><tbody>");
         for (g, members) in &spec.inventory.groups {
-            let tags: String = members.iter().map(|m| format!("<span class='tag'>{}</span>", esc(m))).collect();
+            let tags: String = members
+                .hosts
+                .iter()
+                .map(|m| format!("<span class='tag'>{}</span>", esc(m)))
+                .chain(
+                    members
+                        .groups
+                        .iter()
+                        .map(|m| format!("<span class='tag'>@{}</span>", esc(m))),
+                )
+                .collect();
             groups.push_str(&format!("<tr><td><code>{}</code></td><td>{}</td></tr>", esc(g), tags));
         }
         groups.push_str("</tbody></table>");

@@ -81,6 +81,21 @@ pub struct ActionStep {
     /// e.g. `kubeadm init` on `[bootstrap]`, `kubeadm join` on `[worker]`.
     #[serde(default)]
     pub when_role: Vec<String>,
+    /// Run only on the **first** target host that matches this step's `when_role`
+    /// (inventory order). Mirrors kubekey's `run_once` + `init_kubernetes_node ==
+    /// inventory_hostname`: the cluster's init node is implicitly the first
+    /// control-plane host — no separate `bootstrap` role needed. Combine with
+    /// `when_role: [controlplane]` so `kubeadm init` runs once on the first master
+    /// while the rest fall through to a `--control-plane` join (D-077).
+    #[serde(default)]
+    pub run_once: bool,
+    /// Cap how many target hosts run THIS step concurrently (D-077). `Some(1)` =
+    /// strictly one at a time across the hosts the step targets (the rest queue);
+    /// `None` = no cap (all run together, bounded only by global forks). A generic
+    /// concurrency primitive — the engine knows nothing about *why* (e.g. a task
+    /// throttles `kubeadm join` to 1 so control-plane nodes don't race on etcd).
+    #[serde(default)]
+    pub throttle: Option<usize>,
     /// Closed-enum condition: run only offline (`true`) / only online (`false`).
     #[serde(default)]
     pub when_offline: Option<bool>,

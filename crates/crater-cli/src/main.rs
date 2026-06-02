@@ -765,7 +765,8 @@ async fn run_agent(task_plan: &Path) -> Result<()> {
         .map_err(|e| anyhow!("read task plan {}: {e}", task_plan.display()))?;
     let plan = engine::task_plan_from_yaml(&text)?;
     info!("agent: executing task ({} step(s)) locally", plan.steps.len());
-    engine::execute_task(&plan.steps, &plan.handlers, &LocalExecutor).await
+    // Agent runs one host locally — no cross-host coordination (D-077).
+    engine::execute_task(&plan.steps, &plan.handlers, &LocalExecutor, None).await
 }
 
 
@@ -811,8 +812,7 @@ async fn apply_source(
         if crater_core::task::is_task_file(&path) {
             info!("{verb}: {src} → task");
             let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
-            let groups = inventory_groups(inventory.as_deref())?;
-            return apply_task(&path, hosts, groups, None, !dry_run, shell, teardown, &src, name.as_deref()).await;
+            return apply_task(&path, hosts, None, !dry_run, shell, teardown, &src, name.as_deref()).await;
         }
         anyhow::bail!(
             "{src}: not a task file (needs top-level `actions:`). Component specs are no \
@@ -832,8 +832,7 @@ async fn apply_source(
     if named.is_file() && crater_core::task::is_task_file(&named) {
         info!("{verb}: {src} → named task (tasks/{src}.yaml)");
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
-        let groups = inventory_groups(inventory.as_deref())?;
-        return apply_task(&named, hosts, groups, None, !dry_run, shell, teardown, &src, name.as_deref()).await;
+        return apply_task(&named, hosts, None, !dry_run, shell, teardown, &src, name.as_deref()).await;
     }
     anyhow::bail!(
         "'{src}': not a file, image ref, or named task. Put a task at tasks/{src}.yaml, \
@@ -850,7 +849,6 @@ async fn apply_source(
 async fn apply_task(
     path: &Path,
     hosts: Vec<crater_core::spec::Host>,
-    groups: BTreeMap<String, Vec<String>>,
     offline_blobmap: Option<BTreeMap<String, PathBuf>>,
     do_apply: bool,
     do_shell: bool,
@@ -874,17 +872,17 @@ async fn apply_task(
         );
     }
     let spec_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-    // `hosts` group filter (D-037-b/D-043): `all` → every target; else expand the
-    // group name to a role set (nested `groups:` resolved) and keep hosts whose
-    // roles intersect it. Hosts with no roles (CLI --host / local) always match.
+    // `hosts` group filter (D-037-b/D-043/D-077): `all` → every target; else keep
+    // hosts carrying that group as a role. Roles are derived from inventory groups
+    // (transitive, so a control-plane host also carries the parent `k8s_cluster`),
+    // so a plain `host.roles.contains` covers nested groups. Hosts with no roles
+    // (CLI --host / local) always match.
     let hosts: Vec<crater_core::spec::Host> = if task.hosts == "all" {
         hosts
     } else {
-        let mut seen = BTreeSet::new();
-        let wanted = expand_group(&task.hosts, &groups, &mut seen);
         hosts
             .into_iter()
-            .filter(|h| h.roles.is_empty() || h.roles.iter().any(|r| wanted.contains(r)))
+            .filter(|h| h.roles.is_empty() || h.roles.iter().any(|r| r == &task.hosts))
             .collect()
     };
     if hosts.is_empty() {
@@ -919,13 +917,17 @@ async fn apply_task(
         .map(|(k, v)| (k.clone(), v.iter().map(|(_, ip)| ip.clone()).collect::<Vec<_>>().join(" ")))
         .collect();
     // host name → roles, so a host's registered facts can also be published under
-    // its roles (`hostvars.<role>.<name>`, D-071) for singleton roles like bootstrap.
+    // its roles (`hostvars.<role>.<name>`, D-071) for singleton roles like the init node.
     let name_roles: BTreeMap<String, Vec<String>> =
+        hosts.iter().map(|h| (h.name.clone(), h.roles.clone())).collect();
+    // Ordered (name, roles) of all targets (D-077), for `run_once` gating: a
+    // run_once step runs only on the first target matching its when_role.
+    let target_hosts: Vec<(String, Vec<String>)> =
         hosts.iter().map(|h| (h.name.clone(), h.roles.clone())).collect();
 
     if !do_apply {
         for h in &hosts {
-            run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, &role_members, offline_blobmap.as_ref(), false, do_shell, teardown, source, &deployment).await?;
+            run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, &role_members, &target_hosts, None, offline_blobmap.as_ref(), false, do_shell, teardown, source, &deployment).await?;
         }
         info!("dry-run only; omit --dry-run to execute");
         return Ok(());
@@ -933,48 +935,88 @@ async fn apply_task(
 
     let mut applied_hosts: Vec<String> = Vec::new();
     let forks = forks_limit();
+
+    // Merge one host's registered facts into the shared hostvars, published both
+    // as `hostvars.<host>.<name>` and `hostvars.<role>.<name>` (D-030/D-071).
+    fn merge_regs(
+        hostvars: &mut BTreeMap<String, BTreeMap<String, String>>,
+        name_roles: &BTreeMap<String, Vec<String>>,
+        host_name: &str,
+        regs: Vec<(String, String)>,
+    ) {
+        let roles = name_roles.get(host_name).cloned().unwrap_or_default();
+        for (k, v) in regs {
+            hostvars.entry(host_name.to_string()).or_default().insert(k.clone(), v.clone());
+            for r in &roles {
+                hostvars.entry(r.clone()).or_default().insert(k.clone(), v.clone());
+            }
+        }
+    }
+
     for group in group_hosts_by_role(&hosts) {
         // serial_roles (D-071): a group whose hosts hold a serial role runs one at
-        // a time (forks=1) — e.g. control-plane joins must not race on etcd quorum.
-        let group_forks = if group
+        // a time — e.g. control-plane joins must not race on etcd quorum.
+        let serial = group
             .iter()
-            .any(|h| h.roles.iter().any(|r| task.serial_roles.contains(r)))
-        {
-            1
+            .any(|h| h.roles.iter().any(|r| task.serial_roles.contains(r)));
+        if serial {
+            // Sequential WITH progressive fact propagation (D-077): each host's
+            // registered facts are merged into hostvars BEFORE the next host plans.
+            // (Prefer per-step `throttle` over serial_roles — it parallelizes prep.)
+            for h in group {
+                let (host_name, regs) = run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, &role_members, &target_hosts, None, offline_blobmap.as_ref(), true, do_shell, teardown, source, &deployment).await?;
+                merge_regs(&mut hostvars, &name_roles, &host_name, regs);
+                applied_hosts.push(host_name);
+            }
         } else {
-            forks
-        };
-        let results: Vec<Result<(String, Vec<(String, String)>)>> = futures::stream::iter(
-            group
-                .iter()
-                .map(|h| run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, &role_members, offline_blobmap.as_ref(), true, do_shell, teardown, source, &deployment)),
-        )
-        .buffer_unordered(group_forks)
-        .collect()
-        .await;
-        let mut first_err = None;
-        for r in results {
-            match r {
-                Ok((host_name, regs)) => {
-                    let roles = name_roles.get(&host_name).cloned().unwrap_or_default();
-                    for (k, v) in regs {
-                        hostvars.entry(host_name.clone()).or_default().insert(k.clone(), v.clone());
-                        // Also publish under each role (singleton roles like bootstrap).
-                        for r in &roles {
-                            hostvars.entry(r.clone()).or_default().insert(k.clone(), v.clone());
-                        }
-                    }
-                    applied_hosts.push(host_name);
+            // Independent hosts → run in PARALLEL, coordinated by a shared
+            // HostCoord (D-077): a step awaiting a cross-host fact blocks until its
+            // producer publishes (fail-fast if the producer errors), and a
+            // `throttle`d step is capped to N-at-once. Seeded with prior-group facts.
+            let mut seed: BTreeMap<String, String> = BTreeMap::new();
+            for (scope, kv) in &hostvars {
+                for (k, v) in kv {
+                    seed.insert(format!("hostvars.{scope}.{k}"), v.clone());
                 }
-                Err(e) => {
-                    if first_err.is_none() {
-                        first_err = Some(e);
+            }
+            let coord = engine::HostCoord::new(seed, group.len());
+            let (coord_ref, task_ref, spec_dir_ref) = (&coord, &task, spec_dir.as_path());
+            let (hostvars_ref, role_addrs_ref, role_members_ref) = (&hostvars, &role_addrs, &role_members);
+            let (target_hosts_ref, offline_ref, deployment_ref) =
+                (target_hosts.as_slice(), offline_blobmap.as_ref(), deployment.as_str());
+            let results: Vec<Result<(String, Vec<(String, String)>)>> = futures::stream::iter(
+                group.iter().map(|h| async move {
+                    // Signal the coordinator on finish so peers awaiting this host's
+                    // facts fail fast on error / never-produced rather than blocking
+                    // to the timeout (D-077). Facts (if any) are published inside.
+                    let r = run_task_on_host(task_ref, h, spec_dir_ref, hostvars_ref, role_addrs_ref, role_members_ref, target_hosts_ref, Some(coord_ref), offline_ref, true, do_shell, teardown, source, deployment_ref).await;
+                    if r.is_err() {
+                        coord_ref.mark_aborted();
+                    }
+                    coord_ref.host_done();
+                    r
+                }),
+            )
+            .buffer_unordered(forks)
+            .collect()
+            .await;
+            let mut first_err = None;
+            for r in results {
+                match r {
+                    Ok((host_name, regs)) => {
+                        merge_regs(&mut hostvars, &name_roles, &host_name, regs);
+                        applied_hosts.push(host_name);
+                    }
+                    Err(e) => {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
                     }
                 }
             }
-        }
-        if let Some(e) = first_err {
-            return Err(e);
+            if let Some(e) = first_err {
+                return Err(e);
+            }
         }
     }
 
@@ -1311,6 +1353,8 @@ async fn run_task_on_host(
     hostvars: &BTreeMap<String, BTreeMap<String, String>>,
     role_addrs: &BTreeMap<String, String>,
     role_members: &BTreeMap<String, Vec<(String, String)>>,
+    target_hosts: &[(String, Vec<String>)],
+    coord: Option<&engine::HostCoord>,
     offline_blobmap: Option<&BTreeMap<String, PathBuf>>,
     do_apply: bool,
     do_shell: bool,
@@ -1354,6 +1398,31 @@ async fn run_task_on_host(
     }
     ctx.groups = role_members.clone(); // structured groups for the template layer (D-075)
     ctx.host_roles = host.roles.clone();
+    // run_once gating (D-077): this host's identity + the ordered target list.
+    ctx.self_host = host.name.clone();
+    ctx.target_hosts = target_hosts.to_vec();
+    // Facts THIS host will itself register (mirrors the register gating below):
+    // a step must never await a fact its own host produces — the register runs
+    // after the step, so awaiting it would deadlock (D-077). Keyed exactly as the
+    // consumers reference them: hostvars.<host>.<name> and hostvars.<role>.<name>.
+    for reg in &task.register {
+        let role_match = |roles: &[String]| {
+            reg.when_role.is_empty() || reg.when_role.iter().any(|r| roles.iter().any(|h| h == r))
+        };
+        if !role_match(&host.roles) {
+            continue;
+        }
+        if reg.run_once {
+            let leader = target_hosts.iter().find(|(_, roles)| role_match(roles));
+            if leader.is_some_and(|(name, _)| name != &host.name) {
+                continue;
+            }
+        }
+        ctx.self_produced.insert(format!("hostvars.{}.{}", host.name, reg.name));
+        for r in &host.roles {
+            ctx.self_produced.insert(format!("hostvars.{r}.{}", reg.name));
+        }
+    }
     // The target's own inventory identity, for templates that need a stable
     // unique per-host value (e.g. kubeadm `--node-name`, D-071).
     ctx.vars.insert("inventory_hostname".to_string(), host.name.clone());
@@ -1384,8 +1453,11 @@ async fn run_task_on_host(
     // Default: self-bootstrap agent runs the task plan on the target (D-044).
     // Offline (blobs on control), --shell, or local → control-plane execute_task.
     if offline_blobmap.is_some() || do_shell || host.is_local() {
-        engine::execute_task(&steps, &handlers, exec.as_ref()).await?;
+        engine::execute_task(&steps, &handlers, exec.as_ref(), coord).await?;
     } else {
+        // Agent path runs the plan on the target without the control-side coord;
+        // cross-host throttle/awaited-facts (D-077) only apply to control-plane
+        // execute (the offline branch above, which HA always takes).
         run_task_via_agent(exec.as_ref(), &steps, &handlers, None).await?;
     }
 
@@ -1407,13 +1479,29 @@ async fn run_task_on_host(
         warn!("[{}] state marker update failed (deployment still applied): {e}", host.name);
     }
 
-    // Capture this host's facts for later groups (D-030).
+    // Capture this host's facts for later groups (D-030). Apply only — teardown
+    // has no fact consumers, and the register cmds (e.g. `kubeadm token create`)
+    // would run against tooling teardown just removed (D-077: it deleted kubeadm).
     let mut registered: Vec<(String, String)> = Vec::new();
     for reg in &task.register {
+        if teardown {
+            break;
+        }
         // when_role (D-071): only gather this fact on hosts holding the role
-        // (e.g. the join command is produced on [bootstrap], not on workers).
-        if !reg.when_role.is_empty() && !reg.when_role.iter().any(|r| host.roles.contains(r)) {
+        // (e.g. the join command is produced on the control-plane, not workers).
+        let role_match = |roles: &[String]| {
+            reg.when_role.is_empty() || reg.when_role.iter().any(|r| roles.iter().any(|h| h == r))
+        };
+        if !role_match(&host.roles) {
             continue;
+        }
+        // run_once (D-077): gather only on the first target matching when_role
+        // (the implicit init node) — `kubeadm token create` / upload-certs once.
+        if reg.run_once {
+            let leader = target_hosts.iter().find(|(_, roles)| role_match(roles));
+            if leader.is_some_and(|(name, _)| name != &host.name) {
+                continue;
+            }
         }
         let out = exec.run(&engine::render(&reg.cmd, &ctx.vars)?).await?;
         if !out.ok() {
@@ -1428,6 +1516,21 @@ async fn run_task_on_host(
         let val = out.stdout.trim().to_string();
         info!("[{}] registered {} ({} bytes)", host.name, reg.name, val.len());
         registered.push((reg.name.clone(), val));
+    }
+    // Publish to the group coordinator (D-077) so concurrently-running peers
+    // awaiting these facts (e.g. a control-plane join awaiting the init node's
+    // token) unblock immediately — keyed as the consumers reference them.
+    if let Some(c) = coord {
+        let mut kv: Vec<(String, String)> = Vec::new();
+        for (name, val) in &registered {
+            kv.push((format!("hostvars.{}.{name}", host.name), val.clone()));
+            for r in &host.roles {
+                kv.push((format!("hostvars.{r}.{name}"), val.clone()));
+            }
+        }
+        if !kv.is_empty() {
+            c.publish(&kv).await;
+        }
     }
     Ok((host.name.clone(), registered))
 }
@@ -1469,7 +1572,11 @@ const INVENTORY_TEMPLATE: &str = r#"# crater inventory —— 部署目标主机
 # 用法:crater apply <动作> -i <此文件>(大量机器、每台各自凭据)。
 #
 # 每台主机至少 name + address;认证用 password 或 key(二选一,key 优先)。
-# user 默认 root,port 默认 22。roles 可选(组件/task 按 role 选主机)。
+# user 默认 root,port 默认 22。
+#
+# 角色/成员由 groups 决定(仿 kubekey/Ansible):每个组列 hosts:(主机名)
+# 和/或 groups:(嵌套子组),可嵌套。host 的角色 = 所属组(含嵌套向上传播),
+# 不在 host 上重复写。task 的 when_role/hosts 按组名匹配。
 inventory:
   hosts:
     # ① 密码认证
@@ -1478,20 +1585,27 @@ inventory:
       user: root
       port: 22
       password: "changeme"
-      # roles: [web]
 
     # ② SSH 私钥认证(适合禁用密码登录的机群;~ 会自动展开为 $HOME)
     - name: web2
       address: 192.168.1.12
       user: ubuntu
       key: ~/.ssh/id_rsa
-      # roles: [web]
 
     # ③ 再一台
     - name: db1
       address: 192.168.1.20
       password: "changeme"
-      # roles: [db]
+
+  groups:
+    # 组成员 = 主机名;run_once 步骤取组内首台(如 k8s init 节点)。
+    web:
+      hosts: [web1, web2]
+    db:
+      hosts: [db1]
+    # 嵌套:组也能包含其他组,角色向上传播(web1 同时拥有 app 角色)。
+    app:
+      groups: [web, db]
 "#;
 
 /// `crater create inventory [path]`: write a sample inventory for the user to
@@ -1803,43 +1917,11 @@ async fn apply_oci_bundle(
     info!("offline (task artifact): {} task(s)", mats.len());
     for mc in mats {
         let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
-        apply_task(&recipe_file, hosts.clone(), Default::default(), Some(mc.blobmap), do_apply, do_shell, teardown, source, name)
+        apply_task(&recipe_file, hosts.clone(), Some(mc.blobmap), do_apply, do_shell, teardown, source, name)
             .await?;
     }
     let _ = std::fs::remove_dir_all(&dest_root);
     Ok(())
-}
-
-/// The inventory's named `groups:` (from `-i`), else empty (D-043).
-fn inventory_groups(inv: Option<&Path>) -> Result<BTreeMap<String, Vec<String>>> {
-    match inv {
-        Some(p) => Ok(CraterSpec::from_yaml_file(p)?.inventory.groups),
-        None => Ok(BTreeMap::new()),
-    }
-}
-
-/// Expand a group/role name to a set of leaf role names (D-043). A name found in
-/// `groups` recurses over its members (nestable); otherwise it IS a role.
-/// `seen` guards against cycles.
-fn expand_group(
-    name: &str,
-    groups: &BTreeMap<String, Vec<String>>,
-    seen: &mut BTreeSet<String>,
-) -> BTreeSet<String> {
-    if !seen.insert(name.to_string()) {
-        return BTreeSet::new();
-    }
-    match groups.get(name) {
-        Some(members) => members
-            .iter()
-            .flat_map(|m| expand_group(m, groups, seen))
-            .collect(),
-        None => {
-            let mut s = BTreeSet::new();
-            s.insert(name.to_string());
-            s
-        }
-    }
 }
 
 /// Resolve deploy targets for image/oci/component sources, three layers:
@@ -1859,10 +1941,14 @@ fn target_hosts(
 ) -> Result<Vec<crater_core::spec::Host>> {
     if let Some(p) = inv {
         let spec = CraterSpec::from_yaml_file(p)?;
-        if spec.inventory.hosts.is_empty() {
+        let mut inv = spec.inventory;
+        if inv.hosts.is_empty() {
             anyhow::bail!("inventory {} has no hosts", p.display());
         }
-        Ok(spec.inventory.hosts)
+        // Derive each host's roles from group membership (D-077): the inventory
+        // declares membership once under `groups:`, not per-host `roles:`.
+        inv.derive_roles();
+        Ok(inv.hosts)
     } else if let Some(h) = host {
         let hosts: Vec<_> = h
             .split(',')
@@ -1900,14 +1986,22 @@ async fn list_images() -> Result<()> {
         info!("no images in local store ({})", store.root.display());
         return Ok(());
     }
+    // Pad REFERENCE to the widest ref (not a fixed 48) so long registry paths
+    // don't push the other columns out of alignment.
+    let refw = imgs
+        .iter()
+        .map(|i| i.reference.len())
+        .max()
+        .unwrap_or(0)
+        .max("REFERENCE".len());
     println!(
-        "{:<48} {:<16} {:>11} {:>13}",
+        "{:<refw$} {:<16} {:>11} {:>13}",
         "REFERENCE", "DIGEST", "DISK USAGE", "CONTENT SIZE"
     );
     for i in imgs {
         let short = i.digest.trim_start_matches("sha256:").chars().take(12).collect::<String>();
         println!(
-            "{:<48} {:<16} {:>11} {:>13}",
+            "{:<refw$} {:<16} {:>11} {:>13}",
             i.reference,
             short,
             human_size(i.disk_usage),
@@ -1977,7 +2071,7 @@ async fn apply_image_ref(
         let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
         if crater_core::task::is_task_file(&recipe_file) {
             info!("image {reference}: crater task artifact → recipe-replay");
-            let res = apply_task(&recipe_file, hosts, Default::default(), Some(mc.blobmap), do_apply, true, teardown, source, name).await;
+            let res = apply_task(&recipe_file, hosts, Some(mc.blobmap), do_apply, true, teardown, source, name).await;
             let _ = std::fs::remove_dir_all(&recipe_dir);
             return res;
         }

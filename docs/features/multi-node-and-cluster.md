@@ -36,16 +36,28 @@ D-030 的 fan-out + register/hostvars 之上,D-071 补齐了**按角色分流**,
 不对称集群(k8s:control 跑 init、worker 跑 join、HA 还要额外 master control-plane join):
 
 - **`when_role: [..]`**(`ActionStep` 与 `register` 都支持):步骤/fact 只在持该角色的主机跑。
-  公共步骤(containerd/kubelet/…)不写 when_role → 全跑;`kubeadm init` 标 `[bootstrap]`、
-  `kubeadm join` 标 `[worker]`。闭合枚举,守 D-036。
+  公共步骤(containerd/kubelet/…)不写 when_role → 全跑;`kubeadm join` 标 `[worker]`。
+  角色由 inventory 组成员推导(见 [inventory.md](inventory.md))。闭合枚举,守 D-036。
+- **`run_once: true`**(`ActionStep` 与 `register`,D-077):只在「匹配 `when_role` 的**第一台**
+  目标(inventory 顺序)」跑——即隐式 init 节点。仿 kubekey:**无独立 `bootstrap` 角色**,
+  `controlplane` 组首台即 init。`kubeadm init`/flannel/去污点标 `when_role:[controlplane]+run_once`;
+  其余 master 的 `cp_join` 标 `when_role:[controlplane]`(非 run_once,靠 `check:` 让 init 节点跳过)。
+- **`throttle: N`**(`ActionStep`,D-077,仿 kubespray `throttle`):跑这一步的主机里同时最多 N 台
+  (`1` = 逐台)。**通用并发原语,引擎不知 etcd 为何物**——`cp_join` 写 `throttle: 1` 即可让
+  control-plane join 逐台(护 etcd learner 同步),而前置(传输/装 containerd)**全并行**。
+  取代了过去整组 `serial_roles` 的粗粒度串行。
+- **可等待 fact(cross-host)**:某步的命令插了 `{{ hostvars.<role>.<fact> }}` 而该 fact 由别的
+  主机 register,引擎在执行这步前**阻塞等到生产者发布**(`HostCoord`,通用数据依赖,零产品知识)。
+  于是 init 节点和其余 master **同组并行**跑前置,`cp_join` 自动等 init 的 token 出来再 join。
+  超时(`CRATER_FACT_TIMEOUT`,默认 1800s)报错而非死等。一台**不会等自己产出的 fact**(防自锁)。
 - **`{{ groups.<role> }}`**:inventory 里该角色所有主机地址(空格连接),注入渲染——
   如 haproxy backend = `{{ groups.controlplane }}`(自动列出所有 master IP)。
-- **角色键 hostvars**:某主机 register 的 fact 额外发布 `hostvars.<role>.<name>`,
-  单例角色(bootstrap)免写死主机名:master/worker 用 `{{ hostvars.bootstrap.join }}`。
-- **`serial_roles: [..]`**(task 顶层):角色集命中的组 `forks=1` 逐台执行——
-  control-plane join 必须串行(防 etcd quorum 抢)。
-- **`{{ inventory_hostname }}` / `{{ inventory_addr }}`**:目标机自身 inventory 名/地址,
-  给 kubeadm `--node-name` 等需要稳定唯一值的场景(防同名节点冲突)。
+- **角色键 hostvars + 组内渐进式传递**:某主机 register 的 fact 额外发布 `hostvars.<role>.<name>`;
+  serial 组内**每台跑完即合并供下一台**(D-077),故同一 `controlplane` 组里 init 节点注册的
+  `hostvars.controlplane.join` 能被随后的 master/worker 直接用,无需拆角色制造组间 barrier。
+- **`serial_roles: [..]`**(task 顶层,**遗留/粗粒度**):角色集命中的组整组逐台执行。优先用
+  步骤级 `throttle` —— 它只串需要的那一步、前置仍并行。k8s-ha 已从 `serial_roles` 改用 `throttle`。
+- **`{{ inventory_hostname }}` / `{{ inventory_addr }}`**:目标机自身 inventory 名/地址。
 
 完整例子:[`tasks/k8s-ha.yaml`](../../tasks/k8s-ha.yaml)(全 material 离线、可 build OCI)。
 
@@ -59,5 +71,6 @@ D-030 的 fan-out + register/hostvars 之上,D-071 补齐了**按角色分流**,
 ## 边界 / 后续
 
 - 跨组顺序靠 role 首次出现序(未显式声明 role 依赖);register 未支持 `no_log`;组内 host 失败不停其对等但整体 apply 失败。
+- 可等待 fact / `throttle` 只在**控制端 execute**(离线或 `--shell` 路径)生效;在线多节点走 agent 路径时不协调(HA 一律离线 build+apply,落在控制端 execute)。
 - HA 入口 keepalived+haproxy 见 `tasks/k8s-ha.yaml`(co-located systemd,非 static pod)。
 - 运行时:containerd 不一定动态加载 flannel 的 CNI 配置,脏状态节点需 `restart containerd`(干净首装无此问题)。

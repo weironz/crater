@@ -236,6 +236,13 @@ impl ImageStore {
             }
         }
         for d in &digests {
+            // Incremental pull (D-078): blobs are content-addressed, so a blob
+            // already in the store IS this digest's content — skip the network
+            // fetch. The manifest itself is always re-fetched (cheap), so a moved
+            // tag still picks up new layers; only unchanged layers are skipped.
+            if self.blob_path(strip(d)).exists() {
+                continue;
+            }
             let mut buf: Vec<u8> = Vec::new();
             client
                 .pull_blob(&r, d.as_str(), &mut buf)

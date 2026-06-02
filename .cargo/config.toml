@@ -1,0 +1,4 @@
+# Build-speed config (D-079). The dominant dev-build cost on this 2-core box is
+# codegen + link; mold is a much faster linker than the default bfd/gold.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

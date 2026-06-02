@@ -179,6 +179,166 @@ impl Op {
             Op::PackageInstall { describe, .. } => Some(describe),
         }
     }
+
+    /// Fields that may still carry `{{ }}` templates needing late, exec-time
+    /// resolution of cross-host facts (D-077) — e.g. a join command embedding
+    /// `{{ hostvars.<role>.<fact> }}` produced by another host mid-run.
+    fn templated_fields_mut(&mut self) -> Vec<&mut String> {
+        match self {
+            Op::Shell { cmd, check, .. } => match check {
+                Some(c) => vec![cmd, c],
+                None => vec![cmd],
+            },
+            Op::WriteFile { content, .. } => vec![content],
+            Op::UnarchiveMaterial { url: Some(u), .. } => vec![u],
+            _ => vec![],
+        }
+    }
+
+    /// The `hostvars.*` template keys this Op references but that weren't resolved
+    /// at plan time (D-077): cross-host facts to await before executing.
+    pub fn unresolved_hostvar_keys(&self) -> Vec<String> {
+        // Clone is cheap relative to a step; reuse the mut accessor for read.
+        let mut me = self.clone();
+        let mut keys = Vec::new();
+        for s in me.templated_fields_mut() {
+            collect_template_keys(s, &mut keys);
+        }
+        keys.retain(|k| k.starts_with("hostvars."));
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    /// Re-render this Op's templated fields against `vars` (the now-resolved
+    /// cross-host facts). Leaves any still-unknown `{{ }}` untouched.
+    pub fn resolve_templates(&mut self, vars: &BTreeMap<String, String>) -> crate::Result<()> {
+        for s in self.templated_fields_mut() {
+            *s = render(s, vars)?;
+        }
+        Ok(())
+    }
+}
+
+/// Collect the inner keys of every `{{ key }}` token in `s` (whitespace-trimmed).
+fn collect_template_keys(s: &str, out: &mut Vec<String>) {
+    let mut i = 0;
+    while let Some(rel) = s[i..].find("{{") {
+        let open = i + rel + 2;
+        if let Some(rel_end) = s[open..].find("}}") {
+            let close = open + rel_end;
+            let key = s[open..close].trim().to_string();
+            if !key.is_empty() {
+                out.push(key);
+            }
+            i = close + 2;
+        } else {
+            break;
+        }
+    }
+}
+
+/// Cross-host coordinator for one concurrently-running host group (D-077).
+///
+/// Generic, zero product knowledge — it does two things tasks can lean on:
+/// 1. **Awaitable facts**: a host blocks at a step until the `hostvars.*` it
+///    interpolates have been `publish`ed by their producing host. Replaces the
+///    coarse "serialize the whole group" barrier with a precise data dependency.
+/// 2. **Per-step throttle**: a named semaphore caps how many hosts run a given
+///    step at once (`throttle: 1` = one at a time).
+///
+/// Shared via `Arc` across the group's concurrent `run_task_on_host` futures.
+pub struct HostCoord {
+    facts: tokio::sync::Mutex<BTreeMap<String, String>>,
+    sems: std::sync::Mutex<BTreeMap<String, std::sync::Arc<tokio::sync::Semaphore>>>,
+    timeout: std::time::Duration,
+    /// A peer host in this group errored — waiters bail fast instead of blocking
+    /// on a fact a dead producer will never publish (D-077).
+    aborted: std::sync::atomic::AtomicBool,
+    /// Hosts in the group that could still publish facts; reaching 0 with a fact
+    /// still missing means nobody will ever produce it → fail fast.
+    remaining: std::sync::atomic::AtomicUsize,
+}
+
+impl HostCoord {
+    /// Seed with facts already known (e.g. from earlier host groups) and the
+    /// number of participating hosts (producers) in this group.
+    pub fn new(seed: BTreeMap<String, String>, participants: usize) -> Self {
+        let timeout = std::env::var("CRATER_FACT_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(std::time::Duration::from_secs(1800));
+        Self {
+            facts: tokio::sync::Mutex::new(seed),
+            sems: std::sync::Mutex::new(BTreeMap::new()),
+            timeout,
+            aborted: std::sync::atomic::AtomicBool::new(false),
+            remaining: std::sync::atomic::AtomicUsize::new(participants),
+        }
+    }
+
+    /// Publish facts produced by a host (its `register`ed values, keyed as
+    /// `hostvars.<host|role>.<name>`); wakes any host awaiting them.
+    pub async fn publish(&self, kv: &[(String, String)]) {
+        let mut f = self.facts.lock().await;
+        for (k, v) in kv {
+            f.insert(k.clone(), v.clone());
+        }
+    }
+
+    /// A peer host errored — release all waiters with a fail-fast error.
+    pub fn mark_aborted(&self) {
+        self.aborted.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// A host finished (success or failure). Its facts, if any, are already
+    /// published by this point, so decrementing here is safe.
+    pub fn host_done(&self) {
+        let _ = self
+            .remaining
+            .fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |n| {
+                Some(n.saturating_sub(1))
+            });
+    }
+
+    /// Block until every key in `keys` is published, returning their values.
+    /// Fails fast (D-077) if a peer aborted or every producer finished without
+    /// the fact; otherwise polls, with a hard timeout as a last-resort backstop.
+    pub async fn wait_facts(&self, keys: &[String]) -> crate::Result<BTreeMap<String, String>> {
+        use std::sync::atomic::Ordering;
+        let start = std::time::Instant::now();
+        loop {
+            {
+                let f = self.facts.lock().await;
+                if keys.iter().all(|k| f.contains_key(k)) {
+                    return Ok(keys.iter().map(|k| (k.clone(), f[k].clone())).collect());
+                }
+                let missing: Vec<&String> = keys.iter().filter(|k| !f.contains_key(*k)).collect();
+                if self.aborted.load(Ordering::SeqCst) {
+                    anyhow::bail!("a peer host failed before producing cross-host facts {missing:?}");
+                }
+                if self.remaining.load(Ordering::SeqCst) == 0 {
+                    anyhow::bail!("all peer hosts finished without producing cross-host facts {missing:?}");
+                }
+                if start.elapsed() >= self.timeout {
+                    anyhow::bail!(
+                        "timeout ({}s) waiting for cross-host facts {missing:?}",
+                        self.timeout.as_secs()
+                    );
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    /// The named semaphore for a throttled step (created once at `permits`).
+    fn sem(&self, key: &str, permits: usize) -> std::sync::Arc<tokio::sync::Semaphore> {
+        let mut s = self.sems.lock().unwrap();
+        s.entry(key.to_string())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Semaphore::new(permits.max(1))))
+            .clone()
+    }
 }
 
 #[derive(Clone)]
@@ -210,6 +370,15 @@ pub struct PlanContext {
     /// `template` action's minijinja context as `groups.<role>` = list of
     /// `{name, ip}`. Drives declarative iteration (e.g. haproxy server list).
     pub groups: BTreeMap<String, Vec<(String, String)>>,
+    /// This target host's own inventory name (D-077), for `run_once` gating.
+    pub self_host: String,
+    /// All target hosts of this run as (name, roles), in inventory order (D-077).
+    /// A `run_once` step runs only on the first entry matching its `when_role`.
+    pub target_hosts: Vec<(String, Vec<String>)>,
+    /// `hostvars.*` keys THIS host will itself produce (D-077). A step never
+    /// awaits a fact its own host registers — that would self-deadlock (the
+    /// register runs after the step). So these are excluded from `awaited_facts`.
+    pub self_produced: BTreeSet<String>,
 }
 
 impl PlanContext {
@@ -228,6 +397,9 @@ impl PlanContext {
             roles_dir: PathBuf::from("roles"),
             host_roles: Vec::new(),
             groups: BTreeMap::new(),
+            self_host: String::new(),
+            target_hosts: Vec::new(),
+            self_produced: BTreeSet::new(),
         }
     }
 
@@ -324,6 +496,17 @@ pub struct TaskStep {
     pub ignore_errors: bool,
     #[serde(default)]
     pub notify: Vec<String>,
+    /// Stable step id (the action's `id`), used as the throttle semaphore key —
+    /// must match across hosts, so it can't be the per-host step index (D-077).
+    #[serde(default)]
+    pub id: String,
+    /// Cap concurrent hosts on this step (`Some(1)` = one at a time). D-077.
+    #[serde(default)]
+    pub throttle: Option<usize>,
+    /// Cross-host `hostvars.*` facts to await before executing this step (D-077),
+    /// then substitute into its command. Empty for ordinary steps.
+    #[serde(default)]
+    pub awaited_facts: Vec<String>,
 }
 
 /// A serializable task plan (steps + handlers) for the agent (D-044): the
@@ -375,9 +558,20 @@ pub fn plan_from_task(
             || os.match_keys().iter().any(|k| s.when_os.iter().any(|w| w == k));
         let off_ok = s.when_offline.map_or(true, |w| w == offline);
         // when_role (D-071): run only on hosts holding one of these roles.
-        let role_ok = s.when_role.is_empty()
-            || s.when_role.iter().any(|r| ctx.host_roles.iter().any(|h| h == r));
-        if os_ok && off_ok && role_ok {
+        let role_match = |roles: &[String]| {
+            s.when_role.is_empty() || s.when_role.iter().any(|r| roles.iter().any(|h| h == r))
+        };
+        let role_ok = role_match(&ctx.host_roles);
+        // run_once (D-077): only the FIRST target host matching this step's
+        // when_role runs it (inventory order) — the implicit init node. Empty
+        // target_hosts (e.g. dry-run preview) → don't gate, let it through.
+        let once_ok = !s.run_once
+            || ctx
+                .target_hosts
+                .iter()
+                .find(|(_, roles)| role_match(roles))
+                .is_none_or(|(leader, _)| leader == &ctx.self_host);
+        if os_ok && off_ok && role_ok && once_ok {
             items.push(Item { id, step: s });
         } else {
             filtered.insert(id);
@@ -415,11 +609,23 @@ pub fn plan_from_task(
     let mut steps = Vec::new();
     for id in order {
         let it = by_id[id.as_str()];
+        let op = action_op(it.step.phase, &it.step.action, ctx)?;
+        // Cross-host facts the op references but that weren't resolved at plan
+        // time — minus any this host produces itself (those resolve via its own
+        // register, and awaiting them would deadlock). D-077.
+        let awaited_facts: Vec<String> = op
+            .unresolved_hostvar_keys()
+            .into_iter()
+            .filter(|k| !ctx.self_produced.contains(k))
+            .collect();
         steps.push(TaskStep {
-            op: action_op(it.step.phase, &it.step.action, ctx)?,
+            op,
             retries: it.step.retries,
             ignore_errors: it.step.ignore_errors,
             notify: it.step.notify.clone(),
+            id: it.id.clone(),
+            throttle: it.step.throttle,
+            awaited_facts,
         });
     }
     Ok(steps)
@@ -493,12 +699,42 @@ pub async fn execute_task(
     steps: &[TaskStep],
     handlers: &BTreeMap<String, Op>,
     exec: &dyn Executor,
+    coord: Option<&HostCoord>,
 ) -> crate::Result<()> {
     let total = steps.len();
     let (mut n_ok, mut n_changed, mut n_warn) = (0u32, 0u32, 0u32);
     let mut notified: Vec<String> = Vec::new();
     for (i, st) in steps.iter().enumerate() {
-        let status = run_one(&st.op, exec, i + 1, total, st.retries, st.ignore_errors).await?;
+        // Cross-host facts (D-077): block until the producing host publishes them,
+        // then substitute into this step's command. No coord (single-host / agent)
+        // → run as-is (the literal `{{ }}` would fail, surfacing the misconfig).
+        let resolved_op;
+        let op: &Op = if !st.awaited_facts.is_empty() {
+            if let Some(c) = coord {
+                let resolved = c.wait_facts(&st.awaited_facts).await?;
+                let mut o = st.op.clone();
+                o.resolve_templates(&resolved)?;
+                resolved_op = o;
+                &resolved_op
+            } else {
+                &st.op
+            }
+        } else {
+            &st.op
+        };
+        // Throttle (D-077): hold a per-step permit while running. Acquired AFTER
+        // awaiting facts so a producer that runs the same step can't be blocked
+        // by a consumer holding the permit while it waits on that producer.
+        let _permit = match (coord, st.throttle) {
+            (Some(c), Some(n)) => Some(
+                c.sem(&st.id, n)
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("throttle '{}' acquire failed: {e}", st.id))?,
+            ),
+            _ => None,
+        };
+        let status = run_one(op, exec, i + 1, total, st.retries, st.ignore_errors).await?;
         match status {
             StepStatus::Ok => n_ok += 1,
             StepStatus::Changed => {
@@ -1578,6 +1814,8 @@ mod tests {
             phase: Phase::Install,
             when_os: vec![],
             when_role: if role.is_empty() { vec![] } else { vec![role.into()] },
+            run_once: false,
+            throttle: None,
             when_offline: None,
             retries: 0,
             ignore_errors: false,
@@ -1596,6 +1834,105 @@ mod tests {
 
         ctx.host_roles = vec![]; // no roles → only the unconditional step
         assert_eq!(plan_from_task(&actions, &ctx).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn run_once_runs_only_on_first_matching_target() {
+        // D-077: a run_once step runs only on the FIRST target (inventory order)
+        // matching its when_role — the implicit init node. No bootstrap role.
+        let mut init = crate::task::ActionStep {
+            id: Some("init".into()),
+            needs: vec![],
+            phase: Phase::Install,
+            when_os: vec![],
+            when_role: vec!["controlplane".into()],
+            run_once: true,
+            throttle: None,
+            when_offline: None,
+            retries: 0,
+            ignore_errors: false,
+            notify: vec![],
+            action: Action::RunCmd { cmd: "kubeadm init".into(), check: None },
+        };
+        let actions = std::slice::from_ref(&init);
+
+        // Three control-plane hosts in inventory order; n11 is the leader.
+        let targets = vec![
+            ("n11".to_string(), vec!["controlplane".to_string()]),
+            ("n12".to_string(), vec!["controlplane".to_string()]),
+            ("n13".to_string(), vec!["controlplane".to_string()]),
+        ];
+        let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
+        ctx.host_roles = vec!["controlplane".into()];
+        ctx.target_hosts = targets.clone();
+
+        ctx.self_host = "n11".into();
+        assert_eq!(plan_from_task(actions, &ctx).unwrap().len(), 1); // init node runs it
+        ctx.self_host = "n12".into();
+        assert_eq!(plan_from_task(actions, &ctx).unwrap().len(), 0); // others skip
+        ctx.self_host = "n13".into();
+        assert_eq!(plan_from_task(actions, &ctx).unwrap().len(), 0);
+
+        // Without run_once, every control-plane host runs it.
+        init.run_once = false;
+        let actions = std::slice::from_ref(&init);
+        ctx.self_host = "n12".into();
+        assert_eq!(plan_from_task(actions, &ctx).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn op_scans_and_resolves_cross_host_facts() {
+        // D-077: an Op exposes the unresolved `hostvars.*` it references, and
+        // resolves them once the values are known.
+        let mut op = Op::Shell {
+            phase: Phase::Install,
+            describe: "join".into(),
+            cmd: "{{hostvars.controlplane.join}} --certificate-key {{hostvars.controlplane.certkey}}".into(),
+            soft_fail: false,
+            check: Some("test -f /etc/kubernetes/kubelet.conf".into()), // no hostvars here
+        };
+        assert_eq!(
+            op.unresolved_hostvar_keys(),
+            vec!["hostvars.controlplane.certkey".to_string(), "hostvars.controlplane.join".to_string()]
+        );
+        let mut vars = BTreeMap::new();
+        vars.insert("hostvars.controlplane.join".to_string(), "kubeadm join 1.2.3.4 --token abc".to_string());
+        vars.insert("hostvars.controlplane.certkey".to_string(), "deadbeef".to_string());
+        op.resolve_templates(&vars).unwrap();
+        match &op {
+            Op::Shell { cmd, .. } => {
+                assert_eq!(cmd, "kubeadm join 1.2.3.4 --token abc --certificate-key deadbeef");
+            }
+            _ => unreachable!(),
+        }
+        assert!(op.unresolved_hostvar_keys().is_empty());
+    }
+
+    #[tokio::test]
+    async fn host_coord_awaits_facts_and_throttles() {
+        use std::sync::Arc;
+        let coord = Arc::new(HostCoord::new(BTreeMap::new(), 2));
+
+        // A waiter blocks until the producer publishes the fact.
+        let c2 = coord.clone();
+        let waiter = tokio::spawn(async move {
+            c2.wait_facts(&["hostvars.controlplane.join".to_string()]).await.unwrap()
+        });
+        // Not yet published → still pending.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished());
+        coord
+            .publish(&[("hostvars.controlplane.join".to_string(), "TOKEN".to_string())])
+            .await;
+        let got = waiter.await.unwrap();
+        assert_eq!(got["hostvars.controlplane.join"], "TOKEN");
+
+        // Throttle(1): the same named permit is exclusive.
+        let sem = coord.sem("cp_join", 1);
+        let p1 = sem.clone().acquire_owned().await.unwrap();
+        assert!(coord.sem("cp_join", 1).try_acquire_owned().is_err()); // held
+        drop(p1);
+        assert!(coord.sem("cp_join", 1).try_acquire_owned().is_ok()); // released
     }
 
     fn test_material(name: &str, url: &str) -> crate::component::Material {

@@ -18,10 +18,14 @@ pub struct RegisterSpec {
     pub name: String,
     pub cmd: String,
     /// Run this fact-gathering only on hosts holding one of these roles (D-071;
-    /// empty = all). E.g. register the kubeadm join command only on `[bootstrap]`
-    /// so workers don't run `kubeadm token create` (which would fail + abort).
+    /// empty = all). E.g. register the kubeadm join command only on the
+    /// control-plane so workers don't run `kubeadm token create` (which fails).
     #[serde(default)]
     pub when_role: Vec<String>,
+    /// Gather this fact only on the FIRST host matching `when_role` (D-077): the
+    /// implicit init node. `kubeadm token create` / `upload-certs` run once there.
+    #[serde(default)]
+    pub run_once: bool,
 }
 
 /// One declared material in a component's offline closure (D-034). The build

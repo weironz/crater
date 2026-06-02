@@ -86,6 +86,13 @@ tar -xf /tmp/yq.oci -C /tmp/x && cat /tmp/x/oci-layout /tmp/x/index.json && ls /
 - yq B 类 artifact：`build`（`recipe + 1 material(s)`）→ `load` → `push` 到 zot（manifest 带 `artifactType` + recipe/material 层）→ 清本地 store → `apply <zot>/yq --host .12`（`pull_blob` 取自定义层 → recipe-replay → `place (offline) yq-bin`）→ `yq --version` v4.53.2。
 - 包结构经校验：`oci-layout`/`index.json`/`blobs/sha256` 齐全；组件 manifest 为 `artifactType` 制品，layer 为 recipe + material（**无伪 rootfs config / 假 image 层**）。
 
+## build 提速（D-078）
+
+- **增量镜像拉取**：`store.pull` 拉每个 layer 前先看 `blobs/sha256/<digest>` 是否已存在——内容寻址,digest 命中即内容命中,跳过网络。重 build / 多镜像共用基础层只下一次。manifest 仍每次取,移动的 tag 照样拉新层。
+- **并行 file 取材**：`kind: file` 的二进制/压缩包(build 字节大头)并发下载(`buffer_unordered(8)`)。`kind: image`(`index.json` 读改写非并发安全)与 `os_package`(buildah 重)仍串行。
+- 真机:k8s-ha 全套 build 76s(9 镜像各 1~3s 命中缓存、8 个 file ~5s 内并发完成)。
+- 未做(后续):file/os_package 下载缓存(`~/.crater/cache`)、整体构建缓存(源未变即跳过)、`--no-cache`、并行镜像拉取(需 `index.json` 锁)。
+
 ## 边界 / 后续
 
 - `materials: kind: image / os_package` 接线（容器镜像 import、deb/rpm 离线装）；build 的 version×os 矩阵用 OCI image index 组织（D-034 下一阶段，待 mysql/docker）。

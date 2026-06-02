@@ -15,7 +15,7 @@ vrrp_instance VI_1 {
     auth_pass crater42
   }
   virtual_ipaddress {
-    __VIP__/24
+    {{ vip }}/24
   }
   track_script {
     chk_haproxy
