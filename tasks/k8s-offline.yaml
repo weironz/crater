@@ -126,14 +126,10 @@ materials:
 
 actions:
   # —— 最先:设主机名(kubeadm 用 OS hostname 作 node 名,先设好、避免默认 ubuntu 撞名)——
-  # 由本机主 IP 末段derive 出合法且唯一的 k8s-<octet>(--host 模式下 inventory 名是 IP,不能直接用)。
   - id: set_hostname
     action: shell
-    cmd: |
-      oct=$(ip -o -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' | sed 's/.*\.//')
-      [ -z "$oct" ] && oct=$(hostname -I | awk '{print $1}' | sed 's/.*\.//')
-      hostnamectl set-hostname "k8s-$oct"
-    check: "hostname | grep -q '^k8s-'"
+    cmd: "hostnamectl set-hostname {{inventory_hostname}}"
+    check: "test \"$(hostname)\" = {{inventory_hostname}}"
 
   # —— 内核/系统前置 ——
   - id: swapoff

@@ -156,6 +156,12 @@ register:
 
 actions:
   # ========== 公共(所有节点)==========
+  # 最先设主机名:kubeadm 用 OS hostname 作 node 名(inventory 名 n11/n12/n13),
+  # 设好后就不必再 --node-name。
+  - id: set_hostname
+    action: shell
+    cmd: "hostnamectl set-hostname {{inventory_hostname}}"
+    check: "test \"$(hostname)\" = {{inventory_hostname}}"
   - id: swapoff
     action: shell
     cmd: "swapoff -a"
@@ -276,7 +282,7 @@ actions:
     name: kubelet
     state: started
     enabled: true
-    needs: [kubelet_dropin, svc_ctd]
+    needs: [kubelet_dropin, svc_ctd, set_hostname]   # 主机名须在 kubelet 起来前设好
 
   # —— 镜像导入(全节点;一步导入全部,D-074)——
   - id: load_images
@@ -337,7 +343,7 @@ actions:
     action: shell
     when_role: [bootstrap]
     needs: [svc_kubelet, svc_keepalived, load_images]
-    cmd: "kubeadm init --control-plane-endpoint {{control_plane_endpoint}} --upload-certs --pod-network-cidr={{pod_cidr}} --image-repository {{image_repo}} --kubernetes-version v{{version}} --node-name {{inventory_hostname}} --cri-socket=unix:///run/containerd/containerd.sock"
+    cmd: "kubeadm init --control-plane-endpoint {{control_plane_endpoint}} --upload-certs --pod-network-cidr={{pod_cidr}} --image-repository {{image_repo}} --kubernetes-version v{{version}} --cri-socket=unix:///run/containerd/containerd.sock"
     check: "test -f /etc/kubernetes/admin.conf"
   - id: kubeconfig
     action: shell
@@ -368,7 +374,7 @@ actions:
     action: shell
     when_role: [master]
     needs: [svc_kubelet, svc_keepalived, load_images]
-    cmd: "{{hostvars.bootstrap.join}} --control-plane --certificate-key {{hostvars.bootstrap.certkey}} --node-name {{inventory_hostname}} --cri-socket=unix:///run/containerd/containerd.sock"
+    cmd: "{{hostvars.bootstrap.join}} --control-plane --certificate-key {{hostvars.bootstrap.certkey}} --cri-socket=unix:///run/containerd/containerd.sock"
     check: "test -f /etc/kubernetes/kubelet.conf"
   - id: master_kubeconfig
     action: shell
@@ -382,7 +388,7 @@ actions:
     action: shell
     when_role: [worker]
     needs: [svc_kubelet, load_images]
-    cmd: "{{hostvars.bootstrap.join}} --node-name {{inventory_hostname}} --cri-socket=unix:///run/containerd/containerd.sock"
+    cmd: "{{hostvars.bootstrap.join}} --cri-socket=unix:///run/containerd/containerd.sock"
     check: "test -f /etc/kubernetes/kubelet.conf"
 
   # ========== 验证(bootstrap 上看全局)==========
