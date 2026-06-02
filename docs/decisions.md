@@ -984,3 +984,14 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **影响**:`project.rs`(+ 单测)、`lib.rs` 注册、`main.rs`(apply_task 覆盖参数 + apply_project + 路由 + 4 处旧 apply_task 调用补参)。示范 `tasks/demo-project.yaml`(yq→k8s 两 play)。新增测试 `parses_project_with_plays`。
 - **验证**:52 tests 绿;dry-run `crater apply -f tasks/demo-project.yaml -i inventory.yaml`:play 1 demo-roles 在全 3 台、play 2 k8s-ha 仅 controlplane(n11),按序、各自 host 过滤;命名 `crater apply demo-project` 同样路由到 project。
 - **后续(规划)**:离线 project(`crater build -f project.yaml` → bundle 各 play task 的 OCI、内容寻址去重);纯 Ansible `roles: [...]` 内联 play;跨 play hostvars 传递;project 级 `crater inspect`;project delete 对无 teardown 的 play 优雅跳过(当前沿用单 task 的 opt-in,无 teardown 会报错)。
+
+## 2026-06-03 · task 内嵌 inventory + `hosts:` 认主机名(D-084)
+
+### D-084 自包含单文件(task + inventory)+ `hosts:` 匹配主机名/组名
+- **背景**:用户想要"一个完整 yq 单文件,含 inventory + task,`crater apply -f yq.yaml` 直接跑"。原来 task 不带机器清单,必须 `-i`/`--host`。且 `hosts:` 只认组名,不认主机名,不符合 Ansible 直觉。
+- **决策**:
+  - `TaskFile` 加可选 `inventory: Option<Inventory>`。`task_hosts()` 解析优先级:**`-i`/`--host` > 任务内嵌 inventory(`resolve()` 做角色推导+三级 vars)> localhost**。`crater build` **剥掉** `task.inventory`(`= None`)—— 绝不把明文凭据烤进可分发 OCI。
+  - `hosts:` 过滤改为匹配 **`all` | 组名(role) | 主机名(host.name)**(原只认组名)。
+- **影响**:`task.rs`(TaskFile.inventory 字段)、`main.rs`(task_hosts 辅助 + 两处 task 分支用它 + hosts 过滤加 host 名 + build 剥 inventory)。示范 `examples/yq.yaml`(自包含,演示密码占位)。
+- **验证**:52 tests 绿;`crater apply -f examples/yq.yaml --dry-run`(无 -i)→ 目标取自内嵌 inventory 的 n1;`hosts: all` 与 `hosts: n1`(主机名)均命中 n1。
+- **安全**:内嵌 inventory 含明文密码,仅本机自用,勿分发;build 已自动剥离。分发用"纯 task + 各自 `-i`"分离形态。

@@ -827,7 +827,7 @@ async fn apply_source(
         // A task file (top-level `actions:`, D-037). Component specs are gone.
         if crater_core::task::is_task_file(&path) {
             info!("{verb}: {src} → task");
-            let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
+            let hosts = task_hosts(&path, inventory.as_deref(), host, &user, password, key, port)?;
             return apply_task(&path, hosts, None, !dry_run, shell, teardown, &src, name.as_deref(), None, BTreeMap::new()).await;
         }
         anyhow::bail!(
@@ -851,7 +851,7 @@ async fn apply_source(
     }
     if named.is_file() && crater_core::task::is_task_file(&named) {
         info!("{verb}: {src} → named task (tasks/{src}.yaml)");
-        let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
+        let hosts = task_hosts(&named, inventory.as_deref(), host, &user, password, key, port)?;
         return apply_task(&named, hosts, None, !dry_run, shell, teardown, &src, name.as_deref(), None, BTreeMap::new()).await;
     }
     anyhow::bail!(
@@ -977,17 +977,20 @@ async fn apply_task(
         );
     }
     let spec_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-    // `hosts` group filter (D-037-b/D-043/D-077): `all` → every target; else keep
-    // hosts carrying that group as a role. Roles are derived from inventory groups
-    // (transitive, so a control-plane host also carries the parent `k8s_cluster`),
-    // so a plain `host.roles.contains` covers nested groups. Hosts with no roles
+    // `hosts` filter (D-037-b/D-043/D-077/D-084): `all` → every target; else keep
+    // hosts matching that **group name** (a role, derived transitively from
+    // inventory groups) OR that **host name** (ansible-style). Hosts with no roles
     // (CLI --host / local) always match.
     let hosts: Vec<crater_core::spec::Host> = if task.hosts == "all" {
         hosts
     } else {
         hosts
             .into_iter()
-            .filter(|h| h.roles.is_empty() || h.roles.iter().any(|r| r == &task.hosts))
+            .filter(|h| {
+                h.roles.is_empty()
+                    || h.name == task.hosts
+                    || h.roles.iter().any(|r| r == &task.hosts)
+            })
             .collect()
     };
     if hosts.is_empty() {
@@ -2003,6 +2006,8 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
     // hoisted into task.materials (so they get packed) and role actions spliced
     // into the recipe — making the OCI self-contained (no role files needed offline).
     task.expand_roles(Path::new("roles"))?;
+    // Never bake an embedded inventory (creds!) into the distributable OCI (D-084).
+    task.inventory = None;
     // Build-stage params (version-like, affect materials) must be resolved now (D-081).
     task.validate_params(&task.effective_vars(), Some(crater_core::task::ParamStage::Build))?;
     let ver = task
@@ -2182,6 +2187,31 @@ async fn apply_oci_bundle(
 ///
 /// Heterogeneous per-host credentials are intentionally NOT expressible via
 /// `--host` (it shares one credential) — use an inventory file for that.
+/// Resolve targets for a TASK file (D-084): an explicit `-i`/`--host` wins; else
+/// the task's own embedded `inventory:` (self-contained single file); else local.
+fn task_hosts(
+    task_path: &Path,
+    inv: Option<&Path>,
+    host: Option<String>,
+    user: &str,
+    password: Option<String>,
+    key: Option<PathBuf>,
+    port: u16,
+) -> Result<Vec<crater_core::spec::Host>> {
+    if inv.is_some() || host.is_some() {
+        return target_hosts(inv, host, user, password, key, port);
+    }
+    // No CLI target → use the task's embedded inventory if it has hosts, else local.
+    if let Some(mut emb) = crater_core::task::TaskFile::from_yaml_file(task_path)?.inventory {
+        if !emb.hosts.is_empty() {
+            emb.resolve(); // derive roles + merge the three var levels (D-077/082)
+            info!("  目标取自任务内嵌 inventory({} 台)", emb.hosts.len());
+            return Ok(emb.hosts);
+        }
+    }
+    target_hosts(None, None, user, password, key, port) // → localhost
+}
+
 fn target_hosts(
     inv: Option<&Path>,
     host: Option<String>,

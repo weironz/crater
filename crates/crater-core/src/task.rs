@@ -23,6 +23,11 @@ pub struct TaskFile {
     /// One-line human summary, shown by `crater inspect` (D-081).
     #[serde(default)]
     pub description: Option<String>,
+    /// Optional embedded inventory (D-084): makes a task file self-contained —
+    /// `crater apply -f x.yaml` (no `-i`) targets these hosts. An explicit `-i`
+    /// overrides it. **`crater build` strips this** (never bake creds into an OCI).
+    #[serde(default)]
+    pub inventory: Option<crate::spec::Inventory>,
     /// Target group name, or `all` (default). A declarative label the engine
     /// resolves against the inventory — NOT an expression (D-036).
     #[serde(default = "default_hosts")]
