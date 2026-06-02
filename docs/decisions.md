@@ -995,3 +995,13 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **影响**:`task.rs`(TaskFile.inventory 字段)、`main.rs`(task_hosts 辅助 + 两处 task 分支用它 + hosts 过滤加 host 名 + build 剥 inventory)。示范 `examples/yq.yaml`(自包含,演示密码占位)。
 - **验证**:52 tests 绿;`crater apply -f examples/yq.yaml --dry-run`(无 -i)→ 目标取自内嵌 inventory 的 n1;`hosts: all` 与 `hosts: n1`(主机名)均命中 n1。
 - **安全**:内嵌 inventory 含明文密码,仅本机自用,勿分发;build 已自动剥离。分发用"纯 task + 各自 `-i`"分离形态。
+
+## 2026-06-03 · 模板/示例库 library/ + 命名递归解析(D-085)
+
+### D-085 把 tasks/ + examples/ 整合成 library/(自包含分类),命名快捷搜 library
+- **背景**:`tasks/` 平铺把真实 task、project、共享 files/templates 全混一起,`examples/` 又堆了一堆早期特性 demo。需要一个干净的模板/示例库。
+- **决策**:新建 `library/`,按交付物分类:`apps/`(yq/docker/mysql/zot)、`k8s/`(k8s-ha/k8s-offline/k8s-online + 共享 files/templates + inventory.example)、`projects/`(demo-platform)、`demos/`(cross-node/group/hostfilter/lug/fcs/d037b/demo-roles)。+ `library/README.md` 索引。`roles/` 与 `inventory.yaml` 留仓库根(role 解析为 `./roles`,inventory 含密码 gitignore)。
+- **命名解析(`find_named`)**:`crater apply <名>` 与 project play 的 `source:` 都改用 `find_named` —— 显式路径 > `library/` 下递归首个 `<名>.yaml` > `tasks/`(back-compat)。故命名快捷继续可用(`crater apply k8s-ha` → `library/k8s/k8s-ha.yaml`),project 的 `source: k8s-ha` 也自动解析。
+- **路径不变性**:k8s 三个 task 与它们共享的 `files/`+`templates/` 整体搬到 `library/k8s/`,material `src:` 相对 task 目录解析,路径自然不变(inspect 仍 28 materials)。yq 三个冗余变体合并为一个自包含模板 `library/apps/yq.yaml`(占位密码)。
+- **影响**:`main.rs`(find_named/find_yaml_under + apply_source 命名块 + apply_project source 用之);大量 `git mv`;README/库 README。涉密的真 inventory(examples/ 下的)删除不入库。
+- **验证**:52 tests 绿;dry-run:命名 `crater apply k8s-ha`/`demo-platform`、`inspect library/k8s/k8s-ha.yaml`(28 materials)、自包含 `-f library/apps/yq.yaml` 全部正常解析。

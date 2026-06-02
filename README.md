@@ -25,7 +25,7 @@ crater apply docker.io/library/app:v1 --host 10.0.0.5     # 直接部署镜像/�
 | 本机 | `crater apply <task>` |
 | 少量机器(共用凭据) | `crater apply <task> --host a,b --password x`(或 `--key ~/.ssh/id_rsa`) |
 | 大量机器(各自凭据) | `crater apply <task> -i inventory.yaml` |
-| 命名 task | `crater apply yq`(裸名 → `tasks/yq.yaml`) |
+| 命名 task | `crater apply yq`(裸名 → 在 `library/` 下递归找 `yq.yaml`) |
 | 文件 / 镜像 / 离线包 | `crater apply x.yaml` / `crater apply docker.io/...` / `crater apply x.oci` |
 | 离线打包 | `crater build -f task.yaml -t <ref>` → `crater save <ref> -o x.oci` |
 | 镜像库 | `crater images` / `pull` / `push` / `tag` / `load` / `registry login` |
@@ -58,7 +58,7 @@ crater apply yq --host 10.0.0.5 --password <pw> --dry-run
 crater create inventory                                 # 生成示例 inventory.yaml
 
 # 离线:打包 → 分发 → 零联网部署
-crater build -f tasks/yq.yaml -t myreg/yq:1.0           # → 本地库(B 类 artifact)
+crater build -f library/apps/yq.yaml -t myreg/yq:1.0    # → 本地库(B 类 artifact)
 crater save myreg/yq:1.0 -o yq.oci                      # 导出文件,拷到离线机
 crater apply yq.oci --host 10.0.0.5 --password <pw>     # recipe-replay
 ```
@@ -72,9 +72,8 @@ crater/
 ├── crates/
 │   ├── crater-core/   # 引擎:task / component(原语) / engine / executor / source / bundle / store / ai / diagnose
 │   └── crater-cli/    # `crater` 二进制
-├── tasks/             # 命名 task 库(crater apply <name> → tasks/<name>.yaml)
-├── modules/           # 数据定义 module(action: module,D-029)
-├── examples/          # 示例 task
+├── library/           # 模板/示例库:apps/ k8s/ projects/ demos/(crater apply <name> 递归找)
+├── roles/             # 可复用 role(action: role uses: X → roles/X.yaml 或 roles/X/role.yaml)
 └── docs/              # 设计 / 决策 / 功能文档
 ```
 

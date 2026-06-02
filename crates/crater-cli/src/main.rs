@@ -841,21 +841,21 @@ async fn apply_source(
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
         return apply_image_ref(&src, hosts, !dry_run, teardown, &src, name.as_deref()).await;
     }
-    // Named task in the library: `crater apply <name>` → tasks/<name>.yaml
-    // (D-043). This is the only bare-name path now (D-046): component shortcut
-    // and component-spec fleet are gone — everything is a task.
-    let named = PathBuf::from("tasks").join(format!("{src}.yaml"));
-    if named.is_file() && crater_core::project::is_project_file(&named) {
-        info!("{verb}: {src} → named project (tasks/{src}.yaml)");
-        return apply_project(&named, name.as_deref(), inventory, host, user, password, key, port, dry_run, shell, teardown).await;
-    }
-    if named.is_file() && crater_core::task::is_task_file(&named) {
-        info!("{verb}: {src} → named task (tasks/{src}.yaml)");
-        let hosts = task_hosts(&named, inventory.as_deref(), host, &user, password, key, port)?;
-        return apply_task(&named, hosts, None, !dry_run, shell, teardown, &src, name.as_deref(), None, BTreeMap::new()).await;
+    // Named task/project: `crater apply <name>` → first match of <name>.yaml under
+    // library/ (then tasks/ for back-compat). D-043/D-085.
+    if let Some(named) = find_named(&src) {
+        if crater_core::project::is_project_file(&named) {
+            info!("{verb}: {src} → named project ({})", named.display());
+            return apply_project(&named, name.as_deref(), inventory, host, user, password, key, port, dry_run, shell, teardown).await;
+        }
+        if crater_core::task::is_task_file(&named) {
+            info!("{verb}: {src} → named task ({})", named.display());
+            let hosts = task_hosts(&named, inventory.as_deref(), host, &user, password, key, port)?;
+            return apply_task(&named, hosts, None, !dry_run, shell, teardown, &src, name.as_deref(), None, BTreeMap::new()).await;
+        }
     }
     anyhow::bail!(
-        "'{src}': not a file, image ref, or named task. Put a task at tasks/{src}.yaml, \
+        "'{src}': not a file, image ref, or named task/project. Put it under library/<name>.yaml, \
          or pass a path / -f <file> / an image reference."
     )
 }
@@ -900,17 +900,13 @@ async fn apply_project(
     let total = order.len();
     for (i, play) in order.iter().enumerate() {
         let label = play.name.clone().unwrap_or_else(|| play.source.clone());
-        // Resolve source: an explicit path, else a named task tasks/<source>.yaml.
-        let src_path = {
-            let p = PathBuf::from(&play.source);
-            if p.is_file() { p } else { PathBuf::from("tasks").join(format!("{}.yaml", play.source)) }
-        };
-        if !src_path.is_file() {
-            anyhow::bail!(
-                "project '{}' play '{label}':source '{}' 未找到(路径或 tasks/{}.yaml)",
+        // Resolve source: an explicit path, else a named task/project under library/.
+        let src_path = find_named(&play.source).ok_or_else(|| {
+            anyhow!(
+                "project '{}' play '{label}':source '{}' 未找到(路径或 library/**/{}.yaml)",
                 project.name, play.source, play.source
-            );
-        }
+            )
+        })?;
         info!(
             "── play {}/{total}: {label}(source={}, hosts={})",
             i + 1,
@@ -2187,6 +2183,38 @@ async fn apply_oci_bundle(
 ///
 /// Heterogeneous per-host credentials are intentionally NOT expressible via
 /// `--host` (it shares one credential) — use an inventory file for that.
+/// Resolve a bare `<name>` to a task/project file (D-085): an explicit path, else
+/// the first `<name>.yaml` found under `library/` (then `tasks/` for back-compat).
+fn find_named(name: &str) -> Option<PathBuf> {
+    let p = PathBuf::from(name);
+    if p.is_file() {
+        return Some(p);
+    }
+    for root in ["library", "tasks"] {
+        if let Some(f) = find_yaml_under(Path::new(root), name) {
+            return Some(f);
+        }
+    }
+    None
+}
+
+/// Recursively find `<name>.yaml` under `dir` (first match, dirs after files).
+fn find_yaml_under(dir: &Path, name: &str) -> Option<PathBuf> {
+    let target = format!("{name}.yaml");
+    let rd = std::fs::read_dir(dir).ok()?;
+    let mut subdirs = Vec::new();
+    for e in rd.flatten() {
+        let path = e.path();
+        if path.is_dir() {
+            subdirs.push(path);
+        } else if path.file_name().and_then(|n| n.to_str()) == Some(target.as_str()) {
+            return Some(path);
+        }
+    }
+    subdirs.sort();
+    subdirs.into_iter().find_map(|d| find_yaml_under(&d, name))
+}
+
 /// Resolve targets for a TASK file (D-084): an explicit `-i`/`--host` wins; else
 /// the task's own embedded `inventory:` (self-contained single file); else local.
 fn task_hosts(
