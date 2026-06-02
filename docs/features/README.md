@@ -7,6 +7,9 @@
 > [README](../../README.md) / [action-tasks.md](action-tasks.md) 为准；早期文档（idempotency /
 > engine-zero / modules / ssh-executor 等）的 component 措辞属历史，原理对 task 同样成立。
 
+> **架构/设计理念**:整体定位、概念模型(对齐 Ansible)、离线打包设计、OCI artifact 结构、
+> 与 Helm/kubespray 的关系,见 [../architecture.md](../architecture.md)(区分已实现/规划)。
+
 ## 索引
 
 | 功能 | 文档 | ADR |
