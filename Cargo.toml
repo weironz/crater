@@ -12,6 +12,16 @@ split-debuginfo = "unpacked"
 [profile.dev.package."*"]
 debug = false
 
+# Release = the SHIPPED binary (also pushed to targets in agent mode), so优化体积:
+# strip 符号 + 跨 crate LTO + 单 codegen 单元 + panic=abort(去 unwind 表)。
+# 100MB debug → ~一二十 MB。构建较慢(一次性)。
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
