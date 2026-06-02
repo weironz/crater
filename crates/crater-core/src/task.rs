@@ -20,11 +20,21 @@ use crate::module::ModuleDescriptor;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TaskFile {
     pub name: String,
+    /// One-line human summary, shown by `crater inspect` (D-081).
+    #[serde(default)]
+    pub description: Option<String>,
     /// Target group name, or `all` (default). A declarative label the engine
     /// resolves against the inventory — NOT an expression (D-036).
     #[serde(default = "default_hosts")]
     pub hosts: String,
+    /// Input contract (D-081, Helm `values.schema`-like): declared parameters
+    /// with description / default / required / stage. A param's `default` seeds
+    /// the render vars (see [`TaskFile::effective_vars`]); `crater inspect`
+    /// prints this so a consumer knows what to put in their inventory.
+    #[serde(default)]
+    pub params: BTreeMap<String, ParamSpec>,
     /// Static data, exposed to templates as `{{ key }}` (pure substitution).
+    /// A simple shorthand / override for `params` defaults.
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
     /// Offline material closure (D-034) — what `crater build` packs.
@@ -58,6 +68,35 @@ pub struct TaskFile {
 
 fn default_hosts() -> String {
     "all".into()
+}
+
+/// One declared input parameter (D-081) — the contract a consumer reads via
+/// `crater inspect` to know what to set in their inventory.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ParamSpec {
+    /// What the parameter is for (shown by `inspect`).
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Default value; seeds the render vars. Absent + `required` ⇒ must be supplied.
+    #[serde(default)]
+    pub default: Option<String>,
+    /// Must be supplied (when no default) or the run errors before deploying.
+    #[serde(default)]
+    pub required: bool,
+    /// `build` (affects materials → frozen into the OCI) vs `apply` (environment
+    /// config, supplied at deploy). Drives the online/offline story (D-078/081).
+    #[serde(default)]
+    pub stage: ParamStage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ParamStage {
+    /// Resolved at build time (offline: frozen in the OCI), e.g. component version.
+    Build,
+    /// Resolved at apply time (per-environment), e.g. vip / subnet. The default.
+    #[default]
+    Apply,
 }
 
 /// One action in a task: a primitive (flattened: `action: place` + its params)
@@ -130,6 +169,58 @@ impl TaskFile {
     ///
     /// Legacy thin roles (single `act`) are left as `action: role` for the engine
     /// to lower. Idempotent for role-free tasks. Call before build and planning.
+    /// Effective template vars (D-081): each param's `default`, overlaid by any
+    /// explicit `vars` (and, later, inventory/CLI overrides). Use this everywhere
+    /// instead of `vars` directly so declared param defaults take effect.
+    pub fn effective_vars(&self) -> BTreeMap<String, String> {
+        let mut m = BTreeMap::new();
+        for (k, p) in &self.params {
+            if let Some(d) = &p.default {
+                m.insert(k.clone(), d.clone());
+            }
+        }
+        for (k, v) in &self.vars {
+            m.insert(k.clone(), v.clone());
+        }
+        m
+    }
+
+    /// Error if any `required` param has no default and isn't in `provided` (the
+    /// merged var set). `stage` filters which params to check — `Some(Build)` at
+    /// build (only version-like inputs), `None` at apply (all). Fail fast.
+    pub fn validate_params(
+        &self,
+        provided: &BTreeMap<String, String>,
+        stage: Option<ParamStage>,
+    ) -> crate::Result<()> {
+        let missing: Vec<&String> = self
+            .params
+            .iter()
+            .filter(|(_, p)| stage.is_none_or(|s| s == p.stage))
+            .filter(|(k, p)| p.required && p.default.is_none() && !provided.contains_key(*k))
+            .map(|(k, _)| k)
+            .collect();
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "缺少必填参数 {missing:?} —— 在 inventory 的 vars 提供(`crater inspect` 看完整契约)"
+            );
+        }
+        Ok(())
+    }
+
+    /// Inventory roles this task branches on — the union of `when_role` across
+    /// actions/teardown/handlers/register. Tells a consumer which groups to define.
+    pub fn roles_needed(&self) -> Vec<String> {
+        let mut s: BTreeSet<String> = BTreeSet::new();
+        for a in self.actions.iter().chain(&self.teardown).chain(&self.handlers) {
+            s.extend(a.when_role.iter().cloned());
+        }
+        for r in &self.register {
+            s.extend(r.when_role.iter().cloned());
+        }
+        s.into_iter().collect()
+    }
+
     pub fn expand_roles(&mut self, roles_dir: &Path) -> crate::Result<()> {
         let mut materials = std::mem::take(&mut self.materials);
         let mut handlers = std::mem::take(&mut self.handlers);
@@ -526,5 +617,34 @@ actions:
         // sibling `needs: [cr]` → role terminal (svc; fetch is depended on internally).
         assert_eq!(by("post").needs, vec!["cr.svc"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn params_effective_vars_and_validation() {
+        // D-081: param defaults seed vars; explicit vars override; required params
+        // without a value fail validation (apply checks all, build only build-stage).
+        let task: TaskFile = serde_yaml::from_str(
+            r#"
+name: t
+params:
+  version:  { default: "1.36.1", stage: build }
+  vip:      { description: "control-plane VIP", required: true, stage: apply }
+  pod_cidr: { default: "10.244.0.0/16" }
+vars:
+  version: "9.9.9"
+actions: []
+"#,
+        )
+        .unwrap();
+        let ev = task.effective_vars();
+        assert_eq!(ev.get("version").unwrap(), "9.9.9"); // vars overrides param default
+        assert_eq!(ev.get("pod_cidr").unwrap(), "10.244.0.0/16"); // param default seeds var
+        assert!(!ev.contains_key("vip")); // required, no default, not supplied
+
+        assert!(task.validate_params(&ev, None).is_err()); // apply: vip missing → fail
+        assert!(task.validate_params(&ev, Some(ParamStage::Build)).is_ok()); // build: vip is apply-stage
+        let mut provided = ev.clone();
+        provided.insert("vip".into(), "192.168.73.14".into());
+        assert!(task.validate_params(&provided, None).is_ok()); // supplied → ok
     }
 }

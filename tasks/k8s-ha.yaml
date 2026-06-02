@@ -17,12 +17,36 @@
 # keepalived(VRRP)在 controlplane 间浮动 VIP;haproxy backend = {{ groups.controlplane }}。
 # 离线:keepalived/haproxy 走 os_package(buildah);其余同 k8s-offline。目标 ubuntu 24.04/amd64。
 name: k8s-ha
+description: "离线 Kubernetes 1.36.1,支持 单节点 / 1主N从 / HA 多主多从(crater inspect 看契约)"
 hosts: all
 # 无整组串行:前置(传输/解压/装 containerd)全并行;只有 cp_join 这一步用
 # throttle:1 逐台(护 etcd),token 靠可等待 fact 跨机传递(D-077,仿 kubespray)。
 
+# 输入契约(D-081):用户面向的参数。build 期(version)烤进 OCI;apply 期(vip/网段)
+# 部署时按环境给(暂用 default,inventory vars 落地后改由 inventory 提供)。
+params:
+  version:
+    description: "Kubernetes 版本(决定拉取的二进制/镜像,烤进 OCI)"
+    default: "1.36.1"
+    stage: build
+  vip:
+    description: "控制面 VIP(HA 入口,keepalived 浮动;单 master 可指向该 master)"
+    default: "192.168.73.14"
+    stage: apply
+  control_plane_endpoint:
+    description: "kubeadm --control-plane-endpoint(VIP:haproxy 前端口)"
+    default: "192.168.73.14:8443"
+    stage: apply
+  subnet:
+    description: "VIP 所在子网(keepalived 选网卡用)"
+    default: "192.168.73.0/24"
+    stage: apply
+  pod_cidr:
+    description: "Pod 网段(flannel)"
+    default: "10.244.0.0/16"
+    stage: apply
+
 vars:
-  version: "1.36.1"            # 最新稳定 k8s
   containerd_ver: "2.3.1"      # containerd 2.x(config schema v4)
   runc_ver: "1.4.2"
   cni_ver: "1.9.1"
@@ -32,12 +56,8 @@ vars:
   pause_ver: "3.10.2"
   flannel_ver: "0.28.4"
   flannel_cni_ver: "1.9.1-flannel1"
-  pod_cidr: "10.244.0.0/16"
   image_repo: "registry.aliyuncs.com/google_containers"
-  vip: "192.168.73.14"
   apiserver_port: "6443"                          # haproxy 后端各 master 的 apiserver 口
-  control_plane_endpoint: "192.168.73.14:8443"   # VIP:haproxy 前端口
-  subnet: "192.168.73.0/24"                       # keepalived 选 VIP 网卡用
 
 materials:
   # —— 二进制 ——

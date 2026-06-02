@@ -153,16 +153,16 @@ inventory:
 
 ---
 
-## 7. 契约与可发现性(让 OCI 可被别人使用)[规划]
+## 7. 契约与可发现性(让 OCI 可被别人使用)[现状,D-081]
 
 OCI 是黑盒,消费者需要能 introspect 的契约 —— 对标 Helm `values.schema.json` + `helm show`、Terraform `variables.tf`。
 
-1. **task/role 声明富参数 `params:`**(取代裸 `vars:`):`description` / `default` / `required` / `stage: build|apply`。
-2. **自动提取角色契约**:扫 `when_role`/`run_once`/`groups.*` 汇总"需要哪些组",消费者据此写 inventory。
-3. **`crater inspect <ref|file>`**:从 OCI 内嵌 recipe(或 task 文件)打印 name/version/描述/参数/角色/materials 清单。在线离线同一命令(OCI 内嵌的 recipe 就是 task)。
-4. **`crater inspect --gen-inventory`**:吐出骨架 inventory(必填组 + apply 参数 + 默认值 + 注释)。
-5. **apply 前校验**:用 params 契约校验 inventory/CLI 是否补齐 required 参数、定义了所需角色,缺了**明确报错**而非部署到一半崩。
-6. **OCI annotations**:一句话描述 + 角色列表写进 manifest annotations,Docker Hub 网页 / `skopeo inspect` 可见摘要。
+1. [现状] **task 声明富参数 `params:`**:`description` / `default` / `required` / `stage: build|apply`。契约=声明的 params;裸 `vars`=内部默认。`effective_vars()` = params 默认 ⊕ vars。
+2. [现状] **自动提取角色契约**:`roles_needed()` 扫 `when_role` 汇总"需要哪些组",`inspect`/`--gen-inventory` 用它。
+3. [现状] **`crater inspect <ref|file>`**:file→load+expand;OCI→读内嵌(扁平)recipe。打印 name/version/描述/参数/角色/materials。
+4. [现状] **`crater inspect --gen-inventory`**:吐骨架 inventory(必需组 + apply 期 params + 默认 + 注释)。
+5. [部分] **apply 前校验**:已校验 required params(apply 全部 / build 仅 build 期);[规划] 校验角色(inventory 是否定义所需组)。
+6. [规划] **OCI annotations**:一句话描述 + 角色列表写进 manifest annotations,Docker Hub 网页 / `skopeo inspect` 可见摘要。
 
 **安全红线**:inventory 含明文凭据 → **可分发的 OCI 绝不内嵌 inventory**;凭据始终独立于制品。
 
@@ -199,14 +199,15 @@ task/role ──声明──▶ 契约(params + 角色)
 - `materials:` 三种 kind(file/image/os_package,buildah)
 - `when_os` / `when_role` / `run_once` / `throttle` / 可等待 cross-host fact / fail-fast(`HostCoord`)
 - register / hostvars / groups(kubekey 式嵌套 + `derive_roles` 角色推导)
-- `action: role`(子配方,D-029)、`template`(minijinja)、place/unarchive/load_image/copy/service…
+- `template`(minijinja)、place/unarchive/load_image/copy/service…
+- **role 长全**(自带 materials/actions/handlers/params,展开扁平化,D-080)
+- **`params:` 富契约 + `crater inspect` + `--gen-inventory` + apply 前校验**(D-081)
 - build 提速:增量镜像拉取 + file 并发取材(D-078)
 
 **[规划] 未实现**:
-- role 长全(自带 materials/params/meta.dependencies),task/role/play/project 分层
+- role `meta.dependencies`(role 依赖 role,闭包沿图组合);task/role/play/project 分层
 - project(= playbook)编排层 + 跨 role OCI 去重 bundle
-- `params:` 富契约 + `crater inspect` + `--gen-inventory` + apply 前校验
-- inventory 三级 vars + build/apply 变量分期
+- inventory 三级 vars + build/apply 变量分期(apply params 改由 inventory 给)+ `--set` CLI 覆盖
 - 惰性 partial pull(apply 只拉计划引用的 layer)
 - 条件依赖拆可选 role(如 `apiserver-lb`)+ endpoint 按拓扑派生
 - OCI annotations 摘要

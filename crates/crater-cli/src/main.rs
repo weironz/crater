@@ -152,6 +152,16 @@ enum Cmd {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Inspect a task/OCI's input contract (D-081): params (description/default/
+    /// required/stage), the inventory roles it needs, and its materials. Reads a
+    /// task file's `params:` or an artifact's embedded (flattened) recipe.
+    Inspect {
+        /// A task file (`tasks/x.yaml`) or a built artifact ref (`crater/k8s-ha:1.36.1`).
+        source: String,
+        /// Emit a starter inventory.yaml (required groups + apply-stage params).
+        #[arg(long)]
+        gen_inventory: bool,
+    },
     /// AI copilot: natural language -> a validated task yaml.
     /// Configure via CRATER_AI_ENDPOINT / CRATER_AI_KEY / CRATER_AI_MODEL.
     Ai {
@@ -443,6 +453,7 @@ async fn main() -> Result<()> {
         },
         Cmd::Ui { bind, port } => ui::serve(&bind, port).await,
         Cmd::Build { file, tag, arch } => build_to_store(&file, tag, &arch).await,
+        Cmd::Inspect { source, gen_inventory } => inspect_source(&source, gen_inventory).await,
         Cmd::Save { reference, output } => {
             ImageStore::open()?.export_oci_archive(&reference, &output)?;
             info!("saved {reference} → {}", output.display());
@@ -862,6 +873,9 @@ async fn apply_task(
     // ./roles; offline from an OCI → recipe is already flat (expanded at build),
     // so this is a no-op (no `action: role` bundles remain).
     task.expand_roles(Path::new("roles"))?;
+    // Validate the param contract (D-081): every required param must have a value
+    // (default or supplied). Fail before deploying, with a clear list.
+    task.validate_params(&task.effective_vars(), None)?;
     // Optional deployment/grouping label (D-052), default = task name. Only used
     // for `task list` grouping; apply/delete behavior is identical regardless.
     let deployment = name.unwrap_or(&task.name).to_string();
@@ -1128,10 +1142,10 @@ async fn verify_on_host(exec: &dyn Executor, source: &str) -> Option<bool> {
     let path = resolve_task_path(source)?;
     let task = TaskFile::from_yaml_file(&path).ok()?;
     let spec_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-    let ver = task.vars.get("version").cloned().unwrap_or_else(|| "latest".into());
+    let ver = task.effective_vars().get("version").cloned().unwrap_or_else(|| "latest".into());
     let mut ctx = PlanContext::new(os::detect_via(exec).await, ver, spec_dir);
     ctx.target_arch = arch::detect_via(exec).await;
-    for (k, v) in &task.vars {
+    for (k, v) in &task.effective_vars() {
         ctx.vars.insert(k.clone(), v.clone());
     }
     for m in &task.materials {
@@ -1331,7 +1345,7 @@ async fn record_deployments(
         return Ok(());
     }
     let store = state::TursoStore::open().await?;
-    let ver = task.vars.get("version").cloned().unwrap_or_else(|| "latest".into());
+    let ver = task.effective_vars().get("version").cloned().unwrap_or_else(|| "latest".into());
     let ts = state::now_epoch();
     for h in hosts {
         if teardown {
@@ -1380,13 +1394,13 @@ async fn run_task_on_host(
         (OsFamily::Unknown, arch::detect_local())
     };
     let ver = task
-        .vars
+        .effective_vars()
         .get("version")
         .cloned()
         .unwrap_or_else(|| "latest".into());
     let mut ctx = PlanContext::new(osf, ver, spec_dir.to_path_buf());
     ctx.target_arch = target_arch;
-    for (k, v) in &task.vars {
+    for (k, v) in &task.effective_vars() {
         ctx.vars.insert(k.clone(), v.clone());
     }
     // Other hosts' registered facts become template vars (D-030).
@@ -1688,6 +1702,129 @@ async fn build_to_store(file: &Path, tag: Option<String>, arch_filter: &[String]
     build_task_to_store(file, tag, arch_filter).await
 }
 
+/// `crater inspect <source>` (D-081): print a task/OCI's input contract — params
+/// (description/default/required/stage), the inventory roles it needs, and its
+/// materials. `--gen-inventory` emits a starter inventory instead. Source is a
+/// task file (its `params:`) or an artifact ref (its embedded, flattened recipe).
+async fn inspect_source(source: &str, gen_inventory: bool) -> Result<()> {
+    use crater_core::component::MaterialKind;
+    use crater_core::task::{ParamStage, TaskFile};
+
+    // Resolve the task: a local file (load + expand roles) or an OCI artifact
+    // (its recipe is already flat — expanded at build, D-080).
+    let p = Path::new(source);
+    let task: TaskFile = if p.is_file() && crater_core::task::is_task_file(p) {
+        let mut t = TaskFile::from_yaml_file(p)?;
+        t.expand_roles(Path::new("roles"))?;
+        t
+    } else {
+        let store = ImageStore::open()?;
+        if !store.has(source) {
+            info!("{source} not in local store → pulling");
+            store.pull(source).await?;
+        }
+        let manifest = store.resolve_manifest(source)?;
+        let dir = std::env::temp_dir().join(format!("crater-inspect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mc = bundle::materialize_component(&manifest, &store.blobs_dir(), &dir)?
+            .ok_or_else(|| anyhow!("{source} is not a crater task artifact (no recipe)"))?;
+        let t = TaskFile::from_yaml_file(&dir.join(&mc.name).join("component.yaml"))?;
+        let _ = std::fs::remove_dir_all(&dir);
+        t
+    };
+
+    let ev = task.effective_vars();
+    let roles = task.roles_needed();
+
+    // The contract = DECLARED params only. Plain `vars` (e.g. component versions)
+    // are internal defaults — overridable but not advertised as user inputs.
+    struct P {
+        name: String,
+        stage: ParamStage,
+        required: bool,
+        default: Option<String>,
+        desc: Option<String>,
+    }
+    let mut params: Vec<P> = task
+        .params
+        .iter()
+        .map(|(k, p)| P {
+            name: k.clone(),
+            stage: p.stage,
+            required: p.required,
+            default: p.default.clone(),
+            desc: p.description.clone(),
+        })
+        .collect();
+    params.sort_by(|a, b| a.name.cmp(&b.name));
+    // Internal vars not declared as params (count only, for the summary note).
+    let internal_vars = task.vars.keys().filter(|k| !task.params.contains_key(*k)).count();
+
+    if gen_inventory {
+        // Starter inventory: apply-stage params under vars, required groups.
+        println!("inventory:");
+        let apply: Vec<&P> = params.iter().filter(|p| p.stage == ParamStage::Apply).collect();
+        if !apply.is_empty() {
+            println!("  vars:");
+            for p in &apply {
+                let val = p.default.clone().unwrap_or_else(|| "TODO".into());
+                let note = p.desc.as_deref().map(|d| format!("   # {d}")).unwrap_or_default();
+                println!("    {}: \"{}\"{}", p.name, val, note);
+            }
+        }
+        println!("  hosts:");
+        println!("    - name: node1");
+        println!("      address: 192.168.1.11");
+        println!("      password: \"changeme\"");
+        if !roles.is_empty() {
+            println!("  groups:");
+            for r in &roles {
+                println!("    {r}:");
+                println!("      hosts: [node1]");
+            }
+        }
+        return Ok(());
+    }
+
+    // Contract summary.
+    let ver = ev.get("version").map(|v| format!("  v{v}")).unwrap_or_default();
+    let desc = task.description.as_deref().map(|d| format!("  — {d}")).unwrap_or_default();
+    println!("{}{}{}", task.name, ver, desc);
+    println!("hosts: {}", task.hosts);
+    println!(
+        "角色(inventory 需定义): {}",
+        if roles.is_empty() { "(无 / 全部)".to_string() } else { roles.join(", ") }
+    );
+    if params.is_empty() {
+        println!("参数: (无声明的 params)");
+    } else {
+        println!("参数(契约):");
+        for p in &params {
+            let stage = match p.stage {
+                ParamStage::Build => "build",
+                ParamStage::Apply => "apply",
+            };
+            let req = if p.required && p.default.is_none() { "必填" } else { "选填" };
+            let def = p.default.as_deref().map(|d| format!(" = {d}")).unwrap_or_default();
+            let d = p.desc.as_deref().map(|d| format!("   {d}")).unwrap_or_default();
+            println!("  {:<22} ({stage}, {req}){def}{d}", p.name);
+        }
+    }
+    if internal_vars > 0 {
+        println!("(另有 {internal_vars} 个内部 vars 默认,可覆盖但非对外契约)");
+    }
+    let (mut nf, mut ni, mut no) = (0u32, 0u32, 0u32);
+    for m in &task.materials {
+        match m.kind {
+            MaterialKind::File => nf += 1,
+            MaterialKind::Image => ni += 1,
+            MaterialKind::OsPackage => no += 1,
+        }
+    }
+    println!("materials: {} ({nf} file, {ni} image, {no} os_package)", task.materials.len());
+    Ok(())
+}
+
 /// Build a task into a B 类 OCI artifact (D-045): fetch its `binary` materials,
 /// store them + the task YAML as the recipe, tag, into the local store. Loaded
 /// by recipe-replay through `plan_from_task` (offline).
@@ -1763,8 +1900,10 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
     // hoisted into task.materials (so they get packed) and role actions spliced
     // into the recipe — making the OCI self-contained (no role files needed offline).
     task.expand_roles(Path::new("roles"))?;
+    // Build-stage params (version-like, affect materials) must be resolved now (D-081).
+    task.validate_params(&task.effective_vars(), Some(crater_core::task::ParamStage::Build))?;
     let ver = task
-        .vars
+        .effective_vars()
         .get("version")
         .cloned()
         .unwrap_or_else(|| "latest".into());
@@ -1780,7 +1919,7 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
     let mut ctx = PlanContext::new(OsFamily::Unknown, ver.clone(), spec_dir.to_path_buf());
     // Task vars drive url_tmpl/ref rendering (D-064); without this only {{version}}
     // and {{arch}} resolve and e.g. {{containerd_ver}} leaks literally into the URL.
-    for (k, v) in &task.vars {
+    for (k, v) in &task.effective_vars() {
         ctx.vars.insert(k.clone(), v.clone());
     }
     ctx.offline_blobs = Some(BTreeMap::new()); // rendered_url yields raw URLs

@@ -949,3 +949,16 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **影响**:`module.rs`(RoleDescriptor)、`task.rs`(expand_roles + 单测)、`engine.rs`(Module 仅 lower 瘦形态,撞到 bundle 报错=未展开 bug)、`main.rs`(build/apply 接线)。新增 `roles/yq.yaml` + `tasks/demo-roles.yaml` 示范 + `roles.md` 文档。新增测试 `expand_roles_flattens_bundle_and_hoists_materials`。
 - **验证**:49 tests 绿;真机网络 dry-run/build:`action: role uses: yq` → 展开成 `place install_yq.bin`(url 渲染 v4.44.3),build 收到 `install_yq.bin` 并打包 `crater/demo-roles:latest`;**移走 `roles/yq.yaml` 后 apply 该 OCI 仍 `place (offline) install_yq.bin`**(证 OCI 自包含)。
 - **后续(规划)**:role `params` 加默认值/类型(契约,接 D 系列 inspect)、`meta.dependencies`(role 依赖 role,闭包沿图组合)、task/role/play/project 分层(见 architecture.md §3/§11)。
+
+## 2026-06-02 · params 契约 + crater inspect(自描述/可发现)(D-081)
+
+### D-081 富 params 声明 + apply 前校验 + `crater inspect`(对标 Helm values + show)
+- **背景**:OCI/task 是黑盒,消费者不知道支持哪些变量、该往 inventory 填什么(见 architecture.md §7)。需要可 introspect 的输入契约(Helm `values.schema` + `helm show` 形态)。
+- **决策**:
+  - `TaskFile` 加 `description` + `params: BTreeMap<String, ParamSpec>`,`ParamSpec{description, default, required, stage: build|apply}`(`task.rs`)。**契约 = 声明的 params**;裸 `vars` 降为"内部默认"(可覆盖、不对外宣告)。
+  - `effective_vars()` = params 的 default ⊕ vars 覆盖 —— build/apply 全改用它(取代直接读 `vars`),故声明 param 默认即生效;`version` 等取值也走它。
+  - `validate_params(provided, stage)`:`required` 且无 default 又没提供 → 报错。**apply 前校验全部**,**build 前只校验 build 期**(缺 apply 参数不挡 build)。
+  - **`crater inspect <file|ref>`**:file → 加载+`expand_roles`;OCI ref → `materialize_component` 读内嵌(已扁平)recipe。打印 name/version/description、**所需角色**(`roles_needed()` 扫 actions/teardown/handlers/register 的 `when_role` 并集)、**契约 params**(stage/必填/default/desc)、内部 vars 计数、materials 摘要。`--gen-inventory` 吐骨架(只列 apply 期 params + 必需组)。
+- **影响**:`task.rs`(ParamSpec/ParamStage + 方法 + 单测)、`main.rs`(`Cmd::Inspect` + `inspect_source` + build/apply 接 effective_vars/validate)。`k8s-ha.yaml` 声明 `description` + 5 个 params(version=build;vip/control_plane_endpoint/subnet/pod_cidr=apply),其余组件版本留 vars(内部默认)——`effective_vars` 产出与原先同,recipe 行为不变。新增测试 `params_effective_vars_and_validation`。
+- **验证**:50 tests 绿;`crater inspect tasks/k8s-ha.yaml` 打印 5 params(+11 内部 vars)+ 角色 controlplane/worker + 28 materials(17 file/9 image/2 os_package);`--gen-inventory` 只吐 4 个 apply 参数 + controlplane/worker 组;dry-run 渲染 `--control-plane-endpoint 192.168.73.14:8443 … -v1.36.1`(参数从 params 默认经 effective_vars 解析)。
+- **后续(规划)**:inventory vars 三级(全局/组/主机)落地后,apply 期 params 改由 inventory 提供、可标 `required` 无 default;`--set k=v` CLI 覆盖;OCI annotations 写摘要(registry 可见);校验扩到角色(inventory 是否定义了所需组)。
