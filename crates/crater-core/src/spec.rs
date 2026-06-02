@@ -27,6 +27,10 @@ impl CraterSpec {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Inventory {
+    /// Global vars (D-082): lowest-precedence environment values, applied to every
+    /// host. Override task `params` defaults at apply time (vip/subnet/…).
+    #[serde(default)]
+    pub vars: BTreeMap<String, String>,
     #[serde(default)]
     pub hosts: Vec<Host>,
     /// Named groups → members (kubekey/Ansible style, D-077). Each group lists
@@ -47,6 +51,9 @@ pub struct Group {
     /// Nested group names, expanded transitively.
     #[serde(default)]
     pub groups: Vec<String>,
+    /// Group vars (D-082): apply to the group's members; override global vars.
+    #[serde(default)]
+    pub vars: BTreeMap<String, String>,
 }
 
 impl Inventory {
@@ -95,6 +102,36 @@ impl Inventory {
             host.roles = roles.into_iter().collect();
         }
     }
+
+    /// Merge the three var levels into each `host.vars` (D-082), precedence
+    /// **global < group < host**. A host's groups (its derived `roles`) are
+    /// applied in sorted order, so two groups setting the same key resolve
+    /// deterministically (host vars are the escape hatch). Run AFTER
+    /// [`Inventory::derive_roles`] (it reads `host.roles`).
+    pub fn resolve_host_vars(&mut self) {
+        let global = self.vars.clone();
+        let group_vars: BTreeMap<String, BTreeMap<String, String>> =
+            self.groups.iter().map(|(k, g)| (k.clone(), g.vars.clone())).collect();
+        for host in &mut self.hosts {
+            let mut merged = global.clone();
+            let mut groups: Vec<&String> = host.roles.iter().collect();
+            groups.sort();
+            for g in groups {
+                if let Some(gv) = group_vars.get(g) {
+                    merged.extend(gv.iter().map(|(k, v)| (k.clone(), v.clone())));
+                }
+            }
+            merged.extend(host.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+            host.vars = merged;
+        }
+    }
+
+    /// Prepare a freshly-loaded inventory for use: derive roles from groups, then
+    /// merge the three var levels into each host. Call once after parsing.
+    pub fn resolve(&mut self) {
+        self.derive_roles();
+        self.resolve_host_vars();
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -114,6 +151,11 @@ pub struct Host {
     pub key: Option<PathBuf>,
     #[serde(default)]
     pub roles: Vec<String>,
+    /// Host vars (D-082): highest-precedence environment values for this host.
+    /// After [`Inventory::resolve_host_vars`] this holds the FULLY MERGED set
+    /// (global ⊕ group ⊕ host) that apply overlays onto the task's vars.
+    #[serde(default)]
+    pub vars: BTreeMap<String, String>,
 }
 
 impl Host {
@@ -127,6 +169,7 @@ impl Host {
             password: None,
             key: None,
             roles: Vec::new(),
+            vars: BTreeMap::new(),
         }
     }
 
@@ -180,6 +223,40 @@ inventory:
         assert_eq!(roles("n11"), vec!["controlplane", "k8s_cluster"]);
         assert_eq!(roles("n12"), vec!["controlplane", "k8s_cluster"]);
         assert_eq!(roles("w1"), vec!["k8s_cluster", "worker"]);
+    }
+
+    /// D-082: three var levels merge with precedence global < group < host.
+    #[test]
+    fn resolve_host_vars_precedence() {
+        let yaml = r#"
+inventory:
+  vars:
+    vip: "10.0.0.1"
+    pod_cidr: "10.244.0.0/16"
+    common: "global"
+  hosts:
+    - name: n11
+      address: 1.1.1.1
+      vars: { common: "host" }
+    - name: w1
+      address: 2.2.2.2
+  groups:
+    controlplane:
+      hosts: [n11]
+      vars: { vip: "192.168.73.14", common: "group" }
+    worker:
+      hosts: [w1]
+"#;
+        let mut inv: CraterSpec = serde_yaml::from_str(yaml).unwrap();
+        inv.inventory.resolve();
+        let h = |n: &str| inv.inventory.hosts.iter().find(|h| h.name == n).unwrap();
+        // n11: group overrides global vip; host overrides group `common`; global pod_cidr inherited.
+        assert_eq!(h("n11").vars.get("vip").unwrap(), "192.168.73.14");
+        assert_eq!(h("n11").vars.get("common").unwrap(), "host");
+        assert_eq!(h("n11").vars.get("pod_cidr").unwrap(), "10.244.0.0/16");
+        // w1: only global (worker group has no vars).
+        assert_eq!(h("w1").vars.get("vip").unwrap(), "10.0.0.1");
+        assert_eq!(h("w1").vars.get("common").unwrap(), "global");
     }
 
     /// Inline `roles:` on a host are kept and unioned with group-derived roles.

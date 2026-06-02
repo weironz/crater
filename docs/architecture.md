@@ -141,8 +141,8 @@ material.v1     cfg-keepalived    361B          # 内容 = minijinja 模板
 
 现状把两类混在 `task.vars`,导致环境特定值(VIP)被烤进 OCI → 制品绑死环境。
 
-### 6.2 inventory 变量层 [规划]
-仿 Ansible group_vars/host_vars,给 inventory 加三级 vars(全局 / 组 / 主机),apply 时合并进 `ctx.vars`,**优先级 inventory > task 默认**:
+### 6.2 inventory 变量层 [现状,D-082]
+仿 Ansible group_vars/host_vars,inventory 三级 vars(全局 `inventory.vars` / 组 `groups.<g>.vars` / 主机 `hosts[].vars`),`Inventory::resolve()` 合并进每台 `host.vars`,apply 时叠加到 `ctx.vars`,**优先级 主机 > 组 > 全局 > task params 默认**:
 ```yaml
 inventory:
   vars: { vip: 192.168.73.14, subnet: 192.168.73.0/24 }   # 全局
@@ -199,6 +199,7 @@ task/role ──声明──▶ 契约(params + 角色)
 - `materials:` 三种 kind(file/image/os_package,buildah)
 - `when_os` / `when_role` / `run_once` / `throttle` / 可等待 cross-host fact / fail-fast(`HostCoord`)
 - register / hostvars / groups(kubekey 式嵌套 + `derive_roles` 角色推导)
+- inventory 三级 vars(全局/组/主机,覆盖 task params 默认,D-082)
 - `template`(minijinja)、place/unarchive/load_image/copy/service…
 - **role 长全**(自带 materials/actions/handlers/params,展开扁平化,D-080)
 - **`params:` 富契约 + `crater inspect` + `--gen-inventory` + apply 前校验**(D-081)
@@ -207,7 +208,7 @@ task/role ──声明──▶ 契约(params + 角色)
 **[规划] 未实现**:
 - role `meta.dependencies`(role 依赖 role,闭包沿图组合);task/role/play/project 分层
 - project(= playbook)编排层 + 跨 role OCI 去重 bundle
-- inventory 三级 vars + build/apply 变量分期(apply params 改由 inventory 给)+ `--set` CLI 覆盖
+- `--set k=v` CLI 覆盖;build/apply 变量分期再细化
 - 惰性 partial pull(apply 只拉计划引用的 layer)
 - 条件依赖拆可选 role(如 `apiserver-lb`)+ endpoint 按拓扑派生
 - OCI annotations 摘要

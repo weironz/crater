@@ -962,3 +962,12 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **影响**:`task.rs`(ParamSpec/ParamStage + 方法 + 单测)、`main.rs`(`Cmd::Inspect` + `inspect_source` + build/apply 接 effective_vars/validate)。`k8s-ha.yaml` 声明 `description` + 5 个 params(version=build;vip/control_plane_endpoint/subnet/pod_cidr=apply),其余组件版本留 vars(内部默认)——`effective_vars` 产出与原先同,recipe 行为不变。新增测试 `params_effective_vars_and_validation`。
 - **验证**:50 tests 绿;`crater inspect tasks/k8s-ha.yaml` 打印 5 params(+11 内部 vars)+ 角色 controlplane/worker + 28 materials(17 file/9 image/2 os_package);`--gen-inventory` 只吐 4 个 apply 参数 + controlplane/worker 组;dry-run 渲染 `--control-plane-endpoint 192.168.73.14:8443 … -v1.36.1`(参数从 params 默认经 effective_vars 解析)。
 - **后续(规划)**:inventory vars 三级(全局/组/主机)落地后,apply 期 params 改由 inventory 提供、可标 `required` 无 default;`--set k=v` CLI 覆盖;OCI annotations 写摘要(registry 可见);校验扩到角色(inventory 是否定义了所需组)。
+
+## 2026-06-02 · inventory 三级 vars(环境配置出 OCI)(D-082)
+
+### D-082 inventory 全局/组/主机 vars,覆盖 task params 默认
+- **背景**:D-081 的 apply 期 params(vip/网段)默认值还写在 task 里 → 烤进 OCI,制品绑环境。要把环境配置移到 inventory(仿 Ansible group_vars/host_vars),让 OCI 与环境无关。
+- **决策**:`spec.rs` 给 `Inventory`/`Group`/`Host` 各加 `vars: BTreeMap<String,String>`(全 serde default)。`Inventory::resolve_host_vars()` 按 **全局 < 组(host 所属,按组名排序) < 主机** 合并进每台 `host.vars`(host.vars 最终持完整合并集);`Inventory::resolve()` = `derive_roles()` + `resolve_host_vars()`,在 `target_hosts` 加载 inventory 后调用。`run_task_on_host` 在 `task.effective_vars()` 之上 **overlay `host.vars`** 进 `ctx.vars`(故 **优先级 主机 > 组 > 全局 > task params 默认**),并在此处(合并后)`validate_params(&ctx.vars, None)` —— 校验移到 per-host,使 inventory 提供的 required 参数生效、报错在该台 plan 前。`apply_task` 的一次性校验移除。
+- **影响**:`spec.rs`(三级 vars + resolve_host_vars/resolve + 单测)、`main.rs`(target_hosts 调 resolve、`--host` Host 字面量补 vars、run_task_on_host overlay+校验、移除 apply_task 校验)。`INVENTORY_TEMPLATE`/inventory.md 加三级 vars 示范。`verify_on_host`(drift 只读路径)无 inventory host,暂用 task 默认(其 verify 动作不需环境 var)。
+- **验证**:51 tests 绿(新增 `resolve_host_vars_precedence`);真机 inventory 放 `vars.pod_cidr: 10.99.0.0/16` → dry-run `kubeadm init --pod-network-cidr=10.99.0.0/16`(覆盖 task 默认 10.244),证 inventory > task params。
+- **后续(规划)**:`--set k=v` CLI 覆盖(最高优先级);校验扩到角色(inventory 是否定义所需组);verify_on_host 也接 inventory vars。

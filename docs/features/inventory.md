@@ -52,3 +52,30 @@ k8s-ha 不需要 `bootstrap`/`master` 角色:**`controlplane` 组第一台**(inv
 - HA 多主多从:`controlplane` 多台 + `worker` 多台
 
 详见 [multi-node-and-cluster.md](multi-node-and-cluster.md)。生成样例:`crater create inventory`。
+
+## 三级 vars(D-082):环境配置出 OCI
+
+inventory 可在三个层级提供变量,覆盖 task 的 `params` 默认 —— 这样**环境特定值
+(vip/网段/端口)放 inventory,OCI 保持与环境无关**(同一 OCI 到处部署)。
+
+```yaml
+inventory:
+  vars:                          # ① 全局:对所有主机
+    vip: "192.168.73.14"
+    pod_cidr: "10.244.0.0/16"
+  hosts:
+    - name: n11
+      address: 192.168.73.11
+      vars: { node_label: "edge" }   # ③ 主机:最高优先级
+  groups:
+    controlplane:
+      hosts: [n11, n12, n13]
+      vars: { apiserver_port: "6443" }   # ② 组:覆盖全局,被主机覆盖
+```
+
+**优先级:主机 > 组 > 全局 > task params 默认**。一台属多个组时,组 vars 按组名排序
+合并(冲突用主机 vars 兜底)。加载时 `Inventory::resolve()` 把三层合并进每台 `host.vars`,
+apply 时叠加到渲染上下文(`{{vip}}` 等)。
+
+用 `crater inspect <task>` 看哪些是 apply 期参数(该放 inventory);`--gen-inventory`
+直接吐带这些 vars 的骨架。

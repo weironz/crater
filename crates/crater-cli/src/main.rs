@@ -873,9 +873,9 @@ async fn apply_task(
     // ./roles; offline from an OCI → recipe is already flat (expanded at build),
     // so this is a no-op (no `action: role` bundles remain).
     task.expand_roles(Path::new("roles"))?;
-    // Validate the param contract (D-081): every required param must have a value
-    // (default or supplied). Fail before deploying, with a clear list.
-    task.validate_params(&task.effective_vars(), None)?;
+    // Param-contract validation happens per-host in run_task_on_host (against the
+    // merged task ⊕ inventory vars, D-082) — so inventory-supplied required params
+    // count and errors are reported before that host plans.
     // Optional deployment/grouping label (D-052), default = task name. Only used
     // for `task list` grouping; apply/delete behavior is identical regardless.
     let deployment = name.unwrap_or(&task.name).to_string();
@@ -1403,6 +1403,15 @@ async fn run_task_on_host(
     for (k, v) in &task.effective_vars() {
         ctx.vars.insert(k.clone(), v.clone());
     }
+    // Inventory vars (D-082) override task param defaults: host.vars is the merged
+    // global ⊕ group ⊕ host set (resolved in target_hosts). This is how apply-stage
+    // env config (vip/subnet/…) comes from inventory rather than baked in the OCI.
+    for (k, v) in &host.vars {
+        ctx.vars.insert(k.clone(), v.clone());
+    }
+    // Validate the param contract against the merged vars (D-081/082): every
+    // required param must now have a value (default / inventory). Fail before planning.
+    task.validate_params(&ctx.vars, None)?;
     // Other hosts' registered facts become template vars (D-030).
     for (h, kv) in hostvars {
         for (k, v) in kv {
@@ -1595,7 +1604,12 @@ const INVENTORY_TEMPLATE: &str = r#"# crater inventory —— 部署目标主机
 # 角色/成员由 groups 决定(仿 kubekey/Ansible):每个组列 hosts:(主机名)
 # 和/或 groups:(嵌套子组),可嵌套。host 的角色 = 所属组(含嵌套向上传播),
 # 不在 host 上重复写。task 的 when_role/hosts 按组名匹配。
+#
+# 三级 vars(全局 inventory.vars < 组 groups.<g>.vars < 主机 hosts[].vars),
+# 覆盖 task 的 params 默认 —— 环境配置(vip/网段等)放这里,让 OCI 与环境无关。
 inventory:
+  # vars:                 # 全局(对所有主机生效)
+  #   vip: "192.168.1.100"
   hosts:
     # ① 密码认证
     - name: web1
@@ -1619,6 +1633,8 @@ inventory:
     # 组成员 = 主机名;run_once 步骤取组内首台(如 k8s init 节点)。
     web:
       hosts: [web1, web2]
+      # vars:               # 组级 vars(覆盖全局,被主机 vars 覆盖)
+      #   listen_port: "8080"
     db:
       hosts: [db1]
     # 嵌套:组也能包含其他组,角色向上传播(web1 同时拥有 app 角色)。
@@ -2093,9 +2109,9 @@ fn target_hosts(
         if inv.hosts.is_empty() {
             anyhow::bail!("inventory {} has no hosts", p.display());
         }
-        // Derive each host's roles from group membership (D-077): the inventory
-        // declares membership once under `groups:`, not per-host `roles:`.
-        inv.derive_roles();
+        // Derive roles from groups (D-077) + merge the three var levels into each
+        // host (D-082: global ⊕ group ⊕ host).
+        inv.resolve();
         Ok(inv.hosts)
     } else if let Some(h) = host {
         let hosts: Vec<_> = h
@@ -2110,6 +2126,7 @@ fn target_hosts(
                 password: password.clone(),
                 key: key.clone(),
                 roles: vec![],
+                vars: BTreeMap::new(),
             })
             .collect();
         if hosts.is_empty() {
