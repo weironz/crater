@@ -20,11 +20,14 @@ hosts: all
 serial_roles: [master]          # 额外 master 逐台 join(D-071)
 
 vars:
-  version: "1.31.14"
-  containerd_ver: "1.7.22"
-  runc_ver: "1.1.14"
-  cni_ver: "1.5.1"
-  crictl_ver: "1.31.1"
+  version: "1.36.1"            # 最新稳定 k8s
+  containerd_ver: "2.3.1"      # containerd 2.x(config schema v4)
+  runc_ver: "1.4.2"
+  cni_ver: "1.9.1"
+  crictl_ver: "1.36.0"
+  coredns_ver: "1.14.2"        # 随 kubeadm 1.36.1(kubeadm config images list)
+  etcd_ver: "3.6.8-0"
+  pause_ver: "3.10.2"
   flannel_ver: "0.28.4"
   flannel_cni_ver: "1.9.1-flannel1"
   pod_cidr: "10.244.0.0/16"
@@ -128,13 +131,13 @@ materials:
     ref: "registry.aliyuncs.com/google_containers/kube-proxy:v{{version}}"
   - name: img-coredns
     kind: image
-    ref: "registry.aliyuncs.com/google_containers/coredns:v1.11.3"
+    ref: "registry.aliyuncs.com/google_containers/coredns:v{{coredns_ver}}"
   - name: img-pause
     kind: image
-    ref: "registry.aliyuncs.com/google_containers/pause:3.10"
+    ref: "registry.aliyuncs.com/google_containers/pause:{{pause_ver}}"
   - name: img-etcd
     kind: image
-    ref: "registry.aliyuncs.com/google_containers/etcd:3.5.24-0"
+    ref: "registry.aliyuncs.com/google_containers/etcd:{{etcd_ver}}"
   - name: img-flannel
     kind: image
     ref: "ghcr.io/flannel-io/flannel:v{{flannel_ver}}"
@@ -205,6 +208,12 @@ actions:
     to: /opt/cni/bin
     creates: /opt/cni/bin/bridge
     needs: [deps]
+  # CNI 配置目录:必须在 containerd 启动前存在,否则 containerd 对它的 fsnotify watch
+  # 建不起来 → flannel 后写的配置不被加载、节点卡 NotReady(D-076 根因)。
+  - id: cni_confdir
+    action: file
+    path: /etc/cni/net.d
+    state: directory
   - id: crictl_extract
     action: unarchive
     material: crictl
@@ -231,7 +240,7 @@ actions:
     name: containerd
     state: started
     enabled: true
-    needs: [ctd_cfg, ctd_unit, runc]
+    needs: [ctd_cfg, ctd_unit, runc, cni_confdir]
 
   # —— kubeadm / kubelet / kubectl ——
   - id: kubeadm
@@ -390,10 +399,19 @@ handlers:
     name: containerd
     state: restarted
 
+# teardown = install 的完整反向:reset 运行态 → 停/禁服务 → 删数据/配置/二进制 → purge 包。
 teardown:
+  # 1) 运行态:kubeadm reset(etcd/CNI/iptables/挂载)
   - id: reset
     action: shell
     cmd: "kubeadm reset -f --cri-socket=unix:///run/containerd/containerd.sock || true"
+  # 2) 停 + 禁用所有服务
+  - id: stop_kubelet
+    action: service
+    name: kubelet
+    state: stopped
+    enabled: false
+    needs: [reset]
   - id: stop_keepalived
     action: service
     name: keepalived
@@ -408,19 +426,39 @@ teardown:
     enabled: false
     when_role: [controlplane]
     needs: [reset]
-  - id: rm_cni
-    action: file
-    path: /etc/cni/net.d
-    state: absent
-    needs: [reset]
-  - id: rm_kube
-    action: file
-    path: /etc/kubernetes
-    state: absent
-    needs: [reset]
-  - id: stop_kubelet
+  - id: stop_containerd
     action: service
-    name: kubelet
+    name: containerd
     state: stopped
     enabled: false
+    needs: [reset, stop_kubelet]
+  # 3) 删运行态数据 + 配置目录(含 containerd 数据)
+  - id: rm_dirs
+    action: shell
+    needs: [stop_containerd]
+    cmd: "rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd /var/lib/containerd /etc/cni/net.d /root/.kube /etc/containerd /etc/keepalived /etc/haproxy"
+  # 4) 删我们装的二进制(containerd/runc/cni/crictl/kube*)
+  - id: rm_bins
+    action: shell
+    needs: [stop_containerd]
+    cmd: "rm -f /usr/local/bin/kubeadm /usr/local/bin/kubelet /usr/local/bin/kubectl /usr/local/bin/crictl /usr/local/bin/containerd /usr/local/bin/containerd-shim-runc-v2 /usr/local/bin/ctr /usr/local/bin/containerd-stress /usr/local/sbin/runc; rm -rf /opt/cni/bin"
+  # 5) 删配置文件 + systemd unit
+  - id: rm_units
+    action: shell
+    needs: [stop_containerd]
+    cmd: "rm -f /etc/systemd/system/containerd.service /etc/systemd/system/kubelet.service /etc/crictl.yaml /etc/modules-load.d/k8s.conf /etc/sysctl.d/k8s.conf; rm -rf /etc/systemd/system/kubelet.service.d"
+  # 6) purge OS 包(离线,apt 不联网)
+  - id: purge_lb
+    action: shell
+    when_role: [controlplane]
+    needs: [stop_keepalived, stop_haproxy]
+    cmd: "DEBIAN_FRONTEND=noninteractive apt-get purge -y keepalived haproxy 2>/dev/null || true"
+  - id: purge_sysdeps
+    action: shell
     needs: [reset]
+    cmd: "DEBIAN_FRONTEND=noninteractive apt-get purge -y conntrack socat ipset ethtool ebtables 2>/dev/null || true"
+  # 7) 收尾
+  - id: reload
+    action: shell
+    needs: [rm_units, rm_bins, rm_dirs]
+    cmd: "systemctl daemon-reload"
