@@ -1,26 +1,29 @@
 # crater 模板/示例库
 
-把可复用的 task / project / role 示例集中在这里。`crater apply <名>` 会在 `library/`
-下递归找 `<名>.yaml`(命名快捷),也可 `crater apply -f library/<路径>.yaml`。
+每个子目录 = **一个自闭环交付包**(对齐 Ansible 的 playbook 仓库 + role 目录)。
+`crater apply <名>` 在 `library/` 下递归找入口 `<名>.yaml`。
 
-## 目录
+## 标准交付目录(见 `_template/`)
+```
+library/<交付>/
+├── README.md
+├── <交付>.yaml             # 入口:project(多 play)或 task(单体)= Ansible site.yml
+├── inventory.example.yaml  # 示范清单(占位密码)= Ansible inventories/sample
+└── roles/<role>/           # 本交付私有 role = Ansible role 目录
+    ├── role.yaml           # params + materials + actions + handlers(crater 紧凑合一)
+    ├── files/              # role 私有静态文件(src: 相对本 role 目录)
+    └── templates/          # role 私有 .j2(minijinja)
+```
+唯一比 Ansible 多的:`role.yaml` 里的 `materials:`(离线闭包,烤进 OCI)—— Ansible 没有的概念。
+
+## 现有交付
 | 目录 | 内容 |
 |------|------|
-| `apps/`     | 单体应用/中间件(无本地文件依赖):`yq` `docker` `mysql` `zot` |
-| `k8s/`      | Kubernetes 系列(共享 `files/` + `templates/`):`k8s-ha`(HA 多主)、`k8s-offline`(离线)、`k8s-online`(在线单节点);`inventory.example.yaml` 示范清单 |
-| `projects/` | project 编排示例(= playbook):`demo-platform`(yq → k8s 两 play) |
-| `demos/`    | 引擎特性演示:`cross-node`(跨机 register/hostvars)、`group`、`hostfilter`、`lug`、`fcs`、`d037b`、`demo-roles` |
+| `yq/` `docker/` `mysql/` `zot/` | 单体应用/中间件 |
+| `k8s/` | Kubernetes:`k8s-ha`/`k8s-offline`/`k8s-online` 部署 + `k8s-upgrade`(滚动升级 project,用交付内 `roles/kube-upgrade`)+ 共享 files/templates + inventory.example |
+| `_template/` | 标准交付骨架(复制起新交付)|
+| `_examples/` | 非交付:跨交付编排(demo-platform)+ 引擎特性 demo |
 
-## 用法速查
-```bash
-crater inspect library/k8s/k8s-ha.yaml                 # 看契约:参数/所需角色/materials
-crater inspect library/k8s/k8s-ha.yaml --gen-inventory > my-inv.yaml
-crater apply k8s-ha -i my-inv.yaml                     # 在线部署(命名快捷,自动找 library/)
-crater build  -f library/k8s/k8s-ha.yaml               # 打离线 OCI(→ 本地库)
-crater apply  -f library/projects/demo-platform.yaml -i my-inv.yaml   # 跑 project
-crater apply  -f library/apps/yq.yaml                  # 自包含单文件(用内嵌 inventory)
-```
-
-## 仓库根的两个约定(不在 library/ 内)
-- `roles/` —— 可复用 role(`action: role uses: X` 解析 `./roles/X.yaml` 或 `./roles/X/role.yaml`)。
-- `inventory.yaml` —— 你的真机清单(含明文密码,已 gitignore)。库内 `*.example.yaml` 用占位密码。
+## 仓库根
+- `roles/`(根)— 全局共享 role(`action: role` 先找交付内 `roles/`,回退根 `./roles`)。
+- `inventory.yaml`(根,gitignored)— 你的真机清单。

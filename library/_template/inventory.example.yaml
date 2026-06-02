@@ -1,0 +1,4 @@
+inventory:
+  # vars: { some_input: "..." }   # 覆盖 params 默认
+  hosts:
+    - { name: node1, address: 192.168.1.11, user: root, password: "changeme" }

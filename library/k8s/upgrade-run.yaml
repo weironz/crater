@@ -1,0 +1,7 @@
+# 被 k8s-upgrade project 调用:对一个主机组执行 kube-upgrade role。
+name: k8s-upgrade-run
+hosts: all
+params:
+  version: { description: "目标 k8s 版本", required: true, stage: build }
+actions:
+  - { id: upgrade, action: role, uses: kube-upgrade, with: { version: "{{version}}" } }

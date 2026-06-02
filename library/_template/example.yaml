@@ -1,0 +1,8 @@
+# 入口:简单交付用 task(本例);复杂交付用 project(plays)。
+name: example
+description: "示例交付(标准骨架)"
+hosts: all
+params:
+  some_input: { description: "示例参数", default: "v1", stage: apply }
+actions:
+  - { id: do, action: role, uses: example-role, with: { some_input: "{{some_input}}" } }

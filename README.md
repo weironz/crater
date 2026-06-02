@@ -58,7 +58,7 @@ crater apply yq --host 10.0.0.5 --password <pw> --dry-run
 crater create inventory                                 # 生成示例 inventory.yaml
 
 # 离线:打包 → 分发 → 零联网部署
-crater build -f library/apps/yq.yaml -t myreg/yq:1.0    # → 本地库(B 类 artifact)
+crater build -f library/yq/yq.yaml -t myreg/yq:1.0      # → 本地库(B 类 artifact)
 crater save myreg/yq:1.0 -o yq.oci                      # 导出文件,拷到离线机
 crater apply yq.oci --host 10.0.0.5 --password <pw>     # recipe-replay
 ```
@@ -72,8 +72,10 @@ crater/
 ├── crates/
 │   ├── crater-core/   # 引擎:task / component(原语) / engine / executor / source / bundle / store / ai / diagnose
 │   └── crater-cli/    # `crater` 二进制
-├── library/           # 模板/示例库:apps/ k8s/ projects/ demos/(crater apply <name> 递归找)
-├── roles/             # 可复用 role(action: role uses: X → roles/X.yaml 或 roles/X/role.yaml)
+├── library/           # 模板/示例库:每个子目录 = 一个自闭环交付(yq/ docker/ mysql/ zot/ k8s/),
+│                      #   含 <名>.yaml + inventory.example + roles/<role>/{role.yaml,files/,templates/};
+│                      #   _template/ 标准骨架、_examples/ 跨交付编排+特性 demo(crater apply <名> 递归找)
+├── roles/             # 全局共享 role(action: role uses: X → 先交付内 roles/X[.yaml|/role.yaml],回退 ./roles)
 └── docs/              # 设计 / 决策 / 功能文档
 ```
 

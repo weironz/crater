@@ -914,6 +914,16 @@ async fn apply_project(
             play.hosts.as_deref().unwrap_or("<task 默认>")
         );
         let hosts = target_hosts(inventory.as_deref(), host.clone(), &user, password.clone(), key.clone(), port)?;
+        // Skip a play whose target group has no hosts (e.g. HA with no separate
+        // workers) — don't abort the whole project (D-083).
+        if let Some(g) = &play.hosts {
+            let matches = g == "all"
+                || hosts.iter().any(|h| h.roles.is_empty() || h.name == *g || h.roles.iter().any(|r| r == g));
+            if !matches {
+                info!("   (跳过:hosts='{g}' 无匹配主机)");
+                continue;
+            }
+        }
         apply_task(
             &src_path, hosts, None, !dry_run, shell, teardown, &play.source, Some(&deployment),
             play.hosts.clone(), play.vars.clone(),
@@ -955,7 +965,7 @@ async fn apply_task(
     // Flatten role bundles (D-080): online from a task file → roles read from
     // ./roles; offline from an OCI → recipe is already flat (expanded at build),
     // so this is a no-op (no `action: role` bundles remain).
-    task.expand_roles(Path::new("roles"))?;
+    task.expand_roles(&roles_dir_for(path.parent().unwrap_or_else(|| Path::new("."))))?;
     // Param-contract validation happens per-host in run_task_on_host (against the
     // merged task ⊕ inventory vars, D-082) — so inventory-supplied required params
     // count and errors are reported before that host plans.
@@ -1486,6 +1496,7 @@ async fn run_task_on_host(
         .unwrap_or_else(|| "latest".into());
     let mut ctx = PlanContext::new(osf, ver, spec_dir.to_path_buf());
     ctx.target_arch = target_arch;
+    ctx.roles_dir = roles_dir_for(spec_dir); // legacy thin roles, relative to delivery (D-086)
     for (k, v) in &task.effective_vars() {
         ctx.vars.insert(k.clone(), v.clone());
     }
@@ -1812,12 +1823,12 @@ async fn inspect_source(source: &str, gen_inventory: bool) -> Result<()> {
     use crater_core::component::MaterialKind;
     use crater_core::task::{ParamStage, TaskFile};
 
-    // Resolve the task: a local file (load + expand roles) or an OCI artifact
-    // (its recipe is already flat — expanded at build, D-080).
-    let p = Path::new(source);
-    let task: TaskFile = if p.is_file() && crater_core::task::is_task_file(p) {
-        let mut t = TaskFile::from_yaml_file(p)?;
-        t.expand_roles(Path::new("roles"))?;
+    // Resolve the task: a local file (explicit path OR named under library/, then
+    // load + expand roles) or an OCI artifact (recipe already flat, D-080).
+    let local = find_named(source).filter(|f| crater_core::task::is_task_file(f));
+    let task: TaskFile = if let Some(f) = local {
+        let mut t = TaskFile::from_yaml_file(&f)?;
+        t.expand_roles(&roles_dir_for(f.parent().unwrap_or_else(|| Path::new("."))))?;
         t
     } else {
         let store = ImageStore::open()?;
@@ -2001,7 +2012,7 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
     // Flatten role bundles BEFORE collecting materials (D-080): role closures are
     // hoisted into task.materials (so they get packed) and role actions spliced
     // into the recipe — making the OCI self-contained (no role files needed offline).
-    task.expand_roles(Path::new("roles"))?;
+    task.expand_roles(&roles_dir_for(file.parent().unwrap_or_else(|| Path::new("."))))?;
     // Never bake an embedded inventory (creds!) into the distributable OCI (D-084).
     task.inventory = None;
     // Build-stage params (version-like, affect materials) must be resolved now (D-081).
@@ -2183,6 +2194,17 @@ async fn apply_oci_bundle(
 ///
 /// Heterogeneous per-host credentials are intentionally NOT expressible via
 /// `--host` (it shares one credential) — use an inventory file for that.
+/// The roles dir for a delivery (D-086): the task/project file's sibling `roles/`
+/// (self-contained delivery), falling back to `./roles` (cwd) for back-compat.
+fn roles_dir_for(spec_dir: &Path) -> PathBuf {
+    let local = spec_dir.join("roles");
+    if local.is_dir() {
+        local
+    } else {
+        PathBuf::from("roles")
+    }
+}
+
 /// Resolve a bare `<name>` to a task/project file (D-085): an explicit path, else
 /// the first `<name>.yaml` found under `library/` (then `tasks/` for back-compat).
 fn find_named(name: &str) -> Option<PathBuf> {

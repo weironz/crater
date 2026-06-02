@@ -25,3 +25,4 @@ Thumbs.db
 /inventory.yaml
 *.oci
 *.tar
+*.log

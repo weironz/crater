@@ -1,0 +1,6 @@
+# kubeadm 滚动升级:control-plane 先(逐台,首台 apply)→ worker 后(逐台)。
+name: k8s-upgrade
+description: "kubeadm 滚动升级到指定版本(逐台,先 cp 后 worker)"
+plays:
+  - { name: 控制面滚动升级, source: upgrade-run, hosts: controlplane, vars: { version: "1.37.0" } }
+  - { name: worker 滚动升级, source: upgrade-run, hosts: worker,       vars: { version: "1.37.0" } }

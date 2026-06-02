@@ -255,7 +255,11 @@ fn expand_steps(
             result.push(step.clone());
             continue;
         };
-        let role = ModuleDescriptor::from_yaml_file(&roles_dir.join(format!("{uses}.yaml")))?;
+        // Resolve role as flat `roles/<uses>.yaml` OR dir `roles/<uses>/role.yaml`
+        // (Ansible-aligned role dir, D-086). `role_base` = the role's own dir, used
+        // to make its `src:` files/templates absolute (so they resolve regardless
+        // of which task/delivery uses the role).
+        let (role, role_base) = load_role(roles_dir, uses)?;
         role.check_params(uses, with)?;
         if !role.is_bundle() {
             result.push(step.clone()); // legacy thin role → engine lowers it
@@ -270,7 +274,16 @@ fn expand_steps(
         // Render the role's params into its actions/materials/handlers, then
         // recursively expand any nested roles inside it.
         let ractions: Vec<ActionStep> = render_yaml(&role.actions, &with_vars)?;
-        let rmaterials: Vec<Material> = render_yaml(&role.materials, &with_vars)?;
+        let mut rmaterials: Vec<Material> = render_yaml(&role.materials, &with_vars)?;
+        // Make role-private file/template `src:` absolute (relative to the role dir),
+        // so the role is self-contained no matter where it's used (D-086).
+        for m in &mut rmaterials {
+            if let Some(src) = &m.src {
+                if src.is_relative() {
+                    m.src = Some(role_base.join(src));
+                }
+            }
+        }
         let rhandlers: Vec<ActionStep> = render_yaml(&role.handlers, &with_vars)?;
         let ractions = expand_steps(&ractions, roles_dir, out_materials, out_handlers)?;
 
@@ -376,6 +389,28 @@ fn render_yaml<T: Serialize + serde::de::DeserializeOwned>(
     let yaml = serde_yaml::to_string(items)?;
     let rendered = crate::engine::render(&yaml, vars)?;
     Ok(serde_yaml::from_str(&rendered)?)
+}
+
+/// Resolve a role to its descriptor + its own base dir (D-086): flat
+/// `roles/<uses>.yaml` (base = roles_dir) OR dir `roles/<uses>/role.yaml`
+/// (base = roles_dir/<uses>, holding its private `files/` + `templates/`).
+/// Base is canonicalized so the role's `src:` paths become absolute.
+fn load_role(roles_dir: &Path, uses: &str) -> crate::Result<(ModuleDescriptor, std::path::PathBuf)> {
+    let flat = roles_dir.join(format!("{uses}.yaml"));
+    let dir_file = roles_dir.join(uses).join("role.yaml");
+    let (file, base) = if flat.is_file() {
+        (flat, roles_dir.to_path_buf())
+    } else if dir_file.is_file() {
+        (dir_file, roles_dir.join(uses))
+    } else {
+        anyhow::bail!(
+            "role '{uses}' 未找到:{} 或 {}",
+            flat.display(),
+            dir_file.display()
+        );
+    };
+    let base = std::fs::canonicalize(&base).unwrap_or(base);
+    Ok((ModuleDescriptor::from_yaml_file(&file)?, base))
 }
 
 /// `with:` param values (yaml scalars) as strings for templating.

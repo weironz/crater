@@ -1005,3 +1005,16 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **路径不变性**:k8s 三个 task 与它们共享的 `files/`+`templates/` 整体搬到 `library/k8s/`,material `src:` 相对 task 目录解析,路径自然不变(inspect 仍 28 materials)。yq 三个冗余变体合并为一个自包含模板 `library/apps/yq.yaml`(占位密码)。
 - **影响**:`main.rs`(find_named/find_yaml_under + apply_source 命名块 + apply_project source 用之);大量 `git mv`;README/库 README。涉密的真 inventory(examples/ 下的)删除不入库。
 - **验证**:52 tests 绿;dry-run:命名 `crater apply k8s-ha`/`demo-platform`、`inspect library/k8s/k8s-ha.yaml`(28 materials)、自包含 `-f library/apps/yq.yaml` 全部正常解析。
+
+## 2026-06-03 · 每个交付自闭环 + Ansible 对齐目录(D-086)
+
+### D-086 role-dir 形态 + 私有 files/templates + role 相对交付解析
+- **背景**:crater 不像 kubespray 只有"一个 k8s 对象";用户要 `library/` 每个子目录都是**一个自闭环交付包**,含一套标准目录结构。选型在「flat `roles/<n>.yaml`」与「Ansible 式 role 目录」之间,用户选 **A**:对齐 Ansible 目录 + 紧凑 `role.yaml`(params+materials+actions+handlers 合一)+ 私有 `files/`/`templates/`,role 相对交付解析。
+- **决策**:
+  - **role 双形态**:`load_role(roles_dir, uses)` 兼容 flat(`roles/<uses>.yaml`,base=roles_dir)与 dir(`roles/<uses>/role.yaml`,base=`roles_dir/<uses>` 并 canonicalize)。返回 `(ModuleDescriptor, role_base)`。
+  - **role 私有物料**:展开时 role 内 `material.src` 若为相对路径 → 改写成相对 **role 目录**的绝对路径(`role_base.join(src)`),故 role 自带 `files/`/`templates/` 可独立搬动。
+  - **role 相对交付**:`roles_dir_for(spec_dir)` = 交付目录下 `roles/` 优先,回退仓库根 `./roles`。apply/build/inspect 三路均按入口文件所在目录解析 role。
+  - **标准交付目录**(`library/_template/`):`<名>.yaml`(project 或 task)+ `inventory.example.yaml` + `README.md` + `roles/<role>/{role.yaml,files/,templates/}`。唯一超出 Ansible 的:`role.yaml` 的 `materials:`(离线闭包,烤进 OCI)。
+- **影响**:`task.rs`(load_role 双形态 + role 私有 src→绝对 + expand_roles 用 role_base);`main.rs`(roles_dir_for + ctx.roles_dir 按 spec_dir + inspect_source 用 find_named + apply_project 跳过空组 play);`library/` 重组(apps→`yq/docker/mysql/zot/`、`kube-upgrade` 移入 `library/k8s/roles/`、`k8s-upgrade.yaml` 移入 `library/k8s/`、demos/projects→`library/_examples/`)+ 各交付 README + `library/_template/` 骨架。
+- **验证**:52 tests 绿;`crater inspect yq` 读 `library/yq/yq.yaml`(不当 OCI ref 拉取);`crater apply k8s-upgrade` 解析交付内 `roles/kube-upgrade/`(v1.37.0 渲染),worker play 空组优雅跳过;`_template` 骨架 dry-run 从 role 私有绝对路径 place 私有文件,通过。
+- **后续(规划)**:把 `k8s-ha` 大 task 拆成交付内多 role(`roles/preflight`/`containerd`/`controlplane`/`worker`/`cni`),进一步对齐 Ansible role 分解(用户尚未确认,大改)。

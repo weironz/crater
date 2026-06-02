@@ -1,0 +1,63 @@
+# 滚动升级 role(D-080):换二进制 + kubeadm upgrade。版本由 with: {version} 注入。
+# cp 逐台(throttle)、首台 apply(run_once)其余 node;worker 逐台 node。
+name: kube-upgrade
+params: [version]
+materials:
+  - { name: kubeadm, kind: file, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/amd64/kubeadm" }
+  - { name: kubelet, kind: file, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/amd64/kubelet" }
+  - { name: kubectl, kind: file, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/amd64/kubectl" }
+actions:
+  - id: place_kubeadm                      # 先换 kubeadm(惰性,未重启)
+    action: place
+    material: kubeadm
+    dest: /usr/local/bin/kubeadm
+    mode: "0755"
+  - id: drain                              # control-plane 自带 kubeconfig,drain 本机(逐台)
+    action: shell
+    when_role: [controlplane]
+    throttle: 1
+    needs: [place_kubeadm]
+    cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl drain $(hostname) --ignore-daemonsets --delete-emptydir-data --timeout=300s || true"
+  - id: cp_apply                           # 首个 control-plane:upgrade apply(run_once)+ 版本标记
+    action: shell
+    when_role: [controlplane]
+    run_once: true
+    needs: [drain]
+    cmd: "kubeadm upgrade apply -y v{{version}} && touch /etc/kubernetes/crater-upgraded-{{version}}"
+    check: "test -f /etc/kubernetes/crater-upgraded-{{version}}"
+  - id: cp_node                            # 其余 control-plane:upgrade node(逐台;首台有标记→跳过)
+    action: shell
+    when_role: [controlplane]
+    throttle: 1
+    needs: [cp_apply]
+    cmd: "kubeadm upgrade node && touch /etc/kubernetes/crater-upgraded-{{version}}"
+    check: "test -f /etc/kubernetes/crater-upgraded-{{version}}"
+  - id: w_node                             # worker:upgrade node(逐台)
+    action: shell
+    when_role: [worker]
+    throttle: 1
+    needs: [place_kubeadm]
+    cmd: "kubeadm upgrade node"
+  - id: place_kubelet                      # 换 kubelet/kubectl(在 upgrade 之后)
+    action: place
+    material: kubelet
+    dest: /usr/local/bin/kubelet
+    mode: "0755"
+    needs: [cp_node, w_node]
+  - id: place_kubectl
+    action: place
+    material: kubectl
+    dest: /usr/local/bin/kubectl
+    mode: "0755"
+    needs: [cp_node, w_node]
+  - id: restart_kubelet                    # 重启 kubelet 切到新版(逐台)
+    action: service
+    name: kubelet
+    state: restarted
+    throttle: 1
+    needs: [place_kubelet]
+  - id: uncordon                           # control-plane:恢复调度
+    action: shell
+    when_role: [controlplane]
+    needs: [restart_kubelet]
+    cmd: "KUBECONFIG=/etc/kubernetes/admin.conf kubectl uncordon $(hostname) || true"
