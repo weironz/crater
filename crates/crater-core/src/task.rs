@@ -9,11 +9,12 @@
 //! Rust engine in [`crate::engine::plan_from_task`].
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::component::{Action, Material, RegisterSpec};
 use crate::engine::Phase;
+use crate::module::ModuleDescriptor;
 
 /// A task file: `crater apply <name>.yaml`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -119,6 +120,207 @@ impl TaskFile {
     pub fn from_yaml_file(path: &Path) -> crate::Result<Self> {
         let text = std::fs::read_to_string(path)?;
         Ok(serde_yaml::from_str(&text)?)
+    }
+
+    /// Flatten role invocations into this task (D-080). Every `action: role`
+    /// whose role is a **bundle** (has `actions:`) is replaced in-place by the
+    /// role's actions (id- and material-name-prefixed, params rendered), and the
+    /// role's `materials`/`handlers` are hoisted into the task — so the build
+    /// closure and the planner see one flat task with no role indirection.
+    ///
+    /// Legacy thin roles (single `act`) are left as `action: role` for the engine
+    /// to lower. Idempotent for role-free tasks. Call before build and planning.
+    pub fn expand_roles(&mut self, roles_dir: &Path) -> crate::Result<()> {
+        let mut materials = std::mem::take(&mut self.materials);
+        let mut handlers = std::mem::take(&mut self.handlers);
+        let actions = std::mem::take(&mut self.actions);
+        self.actions = expand_steps(&actions, roles_dir, &mut materials, &mut handlers)?;
+        self.materials = materials;
+        self.handlers = handlers;
+        Ok(())
+    }
+}
+
+/// Recursively expand role-bundle invocations in `steps`, hoisting role
+/// materials/handlers into the out params. Returns the flattened action list.
+fn expand_steps(
+    steps: &[ActionStep],
+    roles_dir: &Path,
+    out_materials: &mut Vec<Material>,
+    out_handlers: &mut Vec<ActionStep>,
+) -> crate::Result<Vec<ActionStep>> {
+    let mut result: Vec<ActionStep> = Vec::new();
+    // role-step id → the role's terminal action ids, so a *sibling* step that
+    // `needs:` the role-step waits for the whole role.
+    let mut terminal_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for step in steps {
+        let Action::Module { uses, with } = &step.action else {
+            result.push(step.clone());
+            continue;
+        };
+        let role = ModuleDescriptor::from_yaml_file(&roles_dir.join(format!("{uses}.yaml")))?;
+        role.check_params(uses, with)?;
+        if !role.is_bundle() {
+            result.push(step.clone()); // legacy thin role → engine lowers it
+            continue;
+        }
+
+        // Prefix everything this invocation contributes, so two roles (or two
+        // uses of one role) never collide. Prefer the step's id, else the role name.
+        let prefix = step.id.clone().unwrap_or_else(|| uses.clone());
+        let with_vars = with_to_strings(with);
+
+        // Render the role's params into its actions/materials/handlers, then
+        // recursively expand any nested roles inside it.
+        let ractions: Vec<ActionStep> = render_yaml(&role.actions, &with_vars)?;
+        let rmaterials: Vec<Material> = render_yaml(&role.materials, &with_vars)?;
+        let rhandlers: Vec<ActionStep> = render_yaml(&role.handlers, &with_vars)?;
+        let ractions = expand_steps(&ractions, roles_dir, out_materials, out_handlers)?;
+
+        // Give every role action a stable id; collect ids + which are depended on.
+        let mut named: Vec<(String, ActionStep)> = ractions
+            .into_iter()
+            .enumerate()
+            .map(|(j, a)| (a.id.clone().unwrap_or_else(|| format!("action{j}")), a))
+            .collect();
+        let role_ids: BTreeSet<String> = named.iter().map(|(id, _)| id.clone()).collect();
+        let depended: BTreeSet<String> = named
+            .iter()
+            .flat_map(|(_, a)| a.needs.iter().filter(|n| role_ids.contains(*n)).cloned())
+            .collect();
+
+        // Prefix material names; build local→prefixed map for ref rewriting.
+        let mut materials = rmaterials;
+        let mut matmap: BTreeMap<String, String> = BTreeMap::new();
+        for m in &mut materials {
+            let prefixed = format!("{prefix}.{}", m.name);
+            let old = std::mem::replace(&mut m.name, prefixed);
+            matmap.insert(old, m.name.clone());
+        }
+        // Prefix handler ids (so role-internal notify can target them).
+        let mut handlers = rhandlers;
+        let handler_ids: BTreeSet<String> =
+            handlers.iter().filter_map(|h| h.id.clone()).collect();
+        for h in &mut handlers {
+            if let Some(id) = &h.id {
+                h.id = Some(format!("{prefix}.{id}"));
+            }
+        }
+
+        // Rewrite each role action: prefix id + internal needs + material refs +
+        // role-handler notifies; entry actions inherit the invocation's needs;
+        // unset targeting inherits the invocation's when_role/when_os.
+        for (id, a) in &mut named {
+            let had_internal = a.needs.iter().any(|n| role_ids.contains(n));
+            let mut needs: Vec<String> = a
+                .needs
+                .iter()
+                .map(|n| if role_ids.contains(n) { format!("{prefix}.{n}") } else { n.clone() })
+                .collect();
+            if !had_internal {
+                needs.extend(step.needs.iter().cloned());
+            }
+            a.needs = needs;
+            a.id = Some(format!("{prefix}.{id}"));
+            rewrite_material_refs(&mut a.action, &matmap);
+            for nfy in &mut a.notify {
+                if handler_ids.contains(nfy) {
+                    *nfy = format!("{prefix}.{nfy}");
+                }
+            }
+            if a.when_role.is_empty() {
+                a.when_role = step.when_role.clone();
+            }
+            if a.when_os.is_empty() {
+                a.when_os = step.when_os.clone();
+            }
+        }
+
+        // Sibling steps that `needs:` this role-step wait for its terminals
+        // (actions nothing else in the role depends on).
+        if let Some(rid) = &step.id {
+            let terminals: Vec<String> = role_ids
+                .iter()
+                .filter(|id| !depended.contains(*id))
+                .map(|id| format!("{prefix}.{id}"))
+                .collect();
+            terminal_map.insert(rid.clone(), terminals);
+        }
+
+        out_materials.extend(materials);
+        out_handlers.extend(handlers);
+        result.extend(named.into_iter().map(|(_, a)| a));
+    }
+
+    // Rewrite sibling needs that referenced a now-expanded role-step id.
+    if !terminal_map.is_empty() {
+        for s in &mut result {
+            if s.needs.iter().any(|n| terminal_map.contains_key(n)) {
+                s.needs = s
+                    .needs
+                    .iter()
+                    .flat_map(|n| terminal_map.get(n).cloned().unwrap_or_else(|| vec![n.clone()]))
+                    .collect();
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Render a serializable list's `{{ param }}` refs with `vars` (yaml round-trip).
+/// Unknown keys (task vars resolved later) are left literal by [`crate::engine::render`].
+fn render_yaml<T: Serialize + serde::de::DeserializeOwned>(
+    items: &[T],
+    vars: &BTreeMap<String, String>,
+) -> crate::Result<Vec<T>> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    let yaml = serde_yaml::to_string(items)?;
+    let rendered = crate::engine::render(&yaml, vars)?;
+    Ok(serde_yaml::from_str(&rendered)?)
+}
+
+/// `with:` param values (yaml scalars) as strings for templating.
+fn with_to_strings(with: &BTreeMap<String, serde_yaml::Value>) -> BTreeMap<String, String> {
+    with.iter()
+        .map(|(k, v)| {
+            let s = match v {
+                serde_yaml::Value::String(s) => s.clone(),
+                serde_yaml::Value::Bool(b) => b.to_string(),
+                serde_yaml::Value::Number(n) => n.to_string(),
+                other => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
+            };
+            (k.clone(), s)
+        })
+        .collect()
+}
+
+/// Rewrite the material name(s) an action references, per `map` (local→prefixed).
+fn rewrite_material_refs(action: &mut Action, map: &BTreeMap<String, String>) {
+    let one = |s: &mut String| {
+        if let Some(n) = map.get(s) {
+            *s = n.clone();
+        }
+    };
+    let opt = |o: &mut Option<String>| {
+        if let Some(s) = o {
+            if let Some(n) = map.get(s) {
+                *s = n.clone();
+            }
+        }
+    };
+    match action {
+        Action::Place { material, .. } | Action::RenderTemplate { material, .. } => one(material),
+        Action::Extract { material, .. } | Action::PkgInstall { material, .. } => opt(material),
+        Action::LoadImage { material, materials, .. } => {
+            opt(material);
+            for m in materials {
+                one(m);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -255,5 +457,74 @@ actions:
             .is_err(),
             "kind: binary should no longer parse"
         );
+    }
+
+    #[test]
+    fn expand_roles_flattens_bundle_and_hoists_materials() {
+        // D-080: a role bundle (materials + actions) is spliced into the task,
+        // its materials hoisted (name-prefixed), params rendered, ids/needs/refs
+        // rewired, and a sibling `needs:` on the role-step → role terminals.
+        let dir = std::env::temp_dir().join(format!("crater-roletest-{}", std::process::id()));
+        let roles = dir.join("roles");
+        std::fs::create_dir_all(&roles).unwrap();
+        std::fs::write(
+            roles.join("containerd.yaml"),
+            r#"
+name: containerd
+params: [version]
+materials:
+  - { name: bin, kind: file, url_tmpl: "https://x/v{{version}}/containerd.tgz" }
+actions:
+  - { id: fetch, action: unarchive, material: bin, to: /usr/local }
+  - { id: svc, action: shell, cmd: "systemctl enable containerd", needs: [fetch] }
+handlers:
+  - { id: reload, action: shell, cmd: "systemctl daemon-reload" }
+"#,
+        )
+        .unwrap();
+
+        let mut task: TaskFile = serde_yaml::from_str(
+            r#"
+name: t
+materials:
+  - { name: other, kind: file, url_tmpl: "https://y" }
+actions:
+  - { id: pre, action: shell, cmd: "echo pre" }
+  - { id: cr, action: role, uses: containerd, with: { version: "2.3.1" }, needs: [pre], when_role: [node] }
+  - { id: post, action: shell, cmd: "echo post", needs: [cr] }
+"#,
+        )
+        .unwrap();
+        task.expand_roles(&roles).unwrap();
+
+        // materials hoisted + prefixed by the step id `cr` + param rendered.
+        let names: Vec<&str> = task.materials.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["other", "cr.bin"]);
+        let bin = task.materials.iter().find(|m| m.name == "cr.bin").unwrap();
+        assert_eq!(bin.url_tmpl.as_deref(), Some("https://x/v2.3.1/containerd.tgz"));
+        // handler hoisted + prefixed.
+        assert_eq!(task.handlers.len(), 1);
+        assert_eq!(task.handlers[0].id.as_deref(), Some("cr.reload"));
+
+        // actions flattened: pre, cr.fetch, cr.svc, post.
+        let ids: Vec<&str> = task.actions.iter().map(|a| a.id.as_deref().unwrap()).collect();
+        assert_eq!(ids, vec!["pre", "cr.fetch", "cr.svc", "post"]);
+
+        let by = |id: &str| task.actions.iter().find(|a| a.id.as_deref() == Some(id)).unwrap();
+        // entry action inherits the role-step's needs + when_role; material ref prefixed.
+        let fetch = by("cr.fetch");
+        assert_eq!(fetch.needs, vec!["pre"]);
+        assert_eq!(fetch.when_role, vec!["node"]);
+        match &fetch.action {
+            Action::Extract { material, .. } => assert_eq!(material.as_deref(), Some("cr.bin")),
+            other => panic!("expected unarchive, got {other:?}"),
+        }
+        // internal need prefixed; targeting inherited.
+        let svc = by("cr.svc");
+        assert_eq!(svc.needs, vec!["cr.fetch"]);
+        assert_eq!(svc.when_role, vec!["node"]);
+        // sibling `needs: [cr]` → role terminal (svc; fetch is depended on internally).
+        assert_eq!(by("post").needs, vec!["cr.svc"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

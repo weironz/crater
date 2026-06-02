@@ -857,7 +857,11 @@ async fn apply_task(
     name: Option<&str>,
 ) -> Result<()> {
     use crater_core::task::TaskFile;
-    let task = TaskFile::from_yaml_file(path)?;
+    let mut task = TaskFile::from_yaml_file(path)?;
+    // Flatten role bundles (D-080): online from a task file → roles read from
+    // ./roles; offline from an OCI → recipe is already flat (expanded at build),
+    // so this is a no-op (no `action: role` bundles remain).
+    task.expand_roles(Path::new("roles"))?;
     // Optional deployment/grouping label (D-052), default = task name. Only used
     // for `task list` grouping; apply/delete behavior is identical regardless.
     let deployment = name.unwrap_or(&task.name).to_string();
@@ -1754,7 +1758,11 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
     use crater_core::component::MaterialKind;
     use crater_core::task::TaskFile;
 
-    let task = TaskFile::from_yaml_file(file)?;
+    let mut task = TaskFile::from_yaml_file(file)?;
+    // Flatten role bundles BEFORE collecting materials (D-080): role closures are
+    // hoisted into task.materials (so they get packed) and role actions spliced
+    // into the recipe — making the OCI self-contained (no role files needed offline).
+    task.expand_roles(Path::new("roles"))?;
     let ver = task
         .vars
         .get("version")
@@ -1852,8 +1860,9 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
         }
     }
 
-    // Recipe = the task YAML verbatim.
-    let recipe = std::fs::read(file)?;
+    // Recipe = the ROLE-EXPANDED task (flat, self-contained), not the raw file —
+    // so offline replay needs no role files (D-080). Note: drops source comments.
+    let recipe = serde_yaml::to_string(&task)?.into_bytes();
     let stage_root = std::env::temp_dir().join(format!("crater-taskimg-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&stage_root);
     let stage = bundle::BundleStage::new(stage_root.clone())?;

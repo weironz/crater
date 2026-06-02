@@ -970,21 +970,31 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
             check: check.as_ref().map(|c| render(c, &ctx.vars)).transpose()?,
         },
         Action::Module { uses, with } => {
-            // Data-defined role (D-029): load roles/<uses>.yaml, render its
-            // check/act with `with` (+ ctx vars), lower to a checked shell op.
+            // Legacy thin role (D-029): a single `check → act` template. Full
+            // role *bundles* (with `actions:`) are flattened by `expand_roles`
+            // BEFORE planning (D-080), so only the thin form reaches here.
             let path = ctx.roles_dir.join(format!("{uses}.yaml"));
             let desc = crate::module::ModuleDescriptor::from_yaml_file(&path)?;
+            desc.check_params(uses, with)?;
+            if desc.is_bundle() {
+                anyhow::bail!(
+                    "role '{uses}' is a bundle (has `actions:`) but reached the planner unexpanded — \
+                     expand_roles must run before plan_from_task (D-080)"
+                );
+            }
+            let act = desc.act.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("role '{uses}' has neither `actions:` nor `act:`")
+            })?;
             let with_strings: BTreeMap<String, String> = with
                 .iter()
                 .map(|(k, v)| (k.clone(), yaml_value_to_string(v)))
                 .collect();
-            desc.check_params(uses, &with_strings)?;
             let mut vars = ctx.vars.clone();
             vars.extend(with_strings);
             Op::Shell {
                 phase,
-                describe: format!("module {uses}"),
-                cmd: render(&desc.act, &vars)?,
+                describe: format!("role {uses}"),
+                cmd: render(act, &vars)?,
                 soft_fail: false,
                 check: desc.check.as_ref().map(|c| render(c, &vars)).transpose()?,
             }

@@ -1,0 +1,13 @@
+# 示范 role(D-080):带自己的 materials 闭包 + actions。
+name: yq
+params: [version]
+materials:
+  - name: bin
+    kind: file
+    url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64"
+actions:
+  - id: place
+    action: place
+    material: bin
+    dest: /usr/local/bin/yq
+    mode: "0755"

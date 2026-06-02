@@ -939,3 +939,13 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - **④ file material 并行取**(`main.rs`):URL 渲染仍在顺序段(要改 `ctx.vars["arch"]`),实际 fetch 收集成 job 后 `buffer_unordered(8)` 并发(纯网络/磁盘无共享态)。`kind:image`/`os_package` 仍串行(image 的 `tag()` 读改写 `index.json` 非并发安全;buildah 重)。
 - **验证(真机网络 + 阿里云/ghcr)**:`crater build -f tasks/k8s-ha.yaml` 全程 76s——9 镜像各 1~3s(① 命中既有 292 blob)、8 个 file material 在 ~5s 内**并发**完成(kubeadm 73MB/kubelet·kubectl 60MB/cni 55MB 几乎同时返回),产出 `crater/k8s-ha:1.36.1`(28 material)。50 tests 绿。
 - **后续(本轮未做)**:② file/os_package 下载缓存(`~/.crater/cache`,file 按声明 `sha256` 或 URL、os_package 按 `hash(base+pkgs)`)、③ 整体构建缓存(ref 已存在且源未变即跳过)、`--no-cache`/`--pull` 逃生开关、并行镜像拉取(需给 `index.json` 加锁)。
+
+## 2026-06-02 · role 长全:materials 挂到 role + 展开扁平化(D-080)
+
+### D-080 role 升为可复用捆绑(自带 materials + 多 actions),展开期扁平化
+- **背景**:对齐 Ansible 后(见 [architecture.md](architecture.md)),role 应是**可复用、可分发、自带离线闭包**的单元(= ansible role + 可烤 materials),而当前 crater 的 role 只是单 `check→act` 瘦模板(D-029)。"materials 挂到 role"是这条线的地基第一步。
+- **决策**:`roles/<name>.yaml` 升为 = task 减 `hosts:`(`materials` + `actions` + `handlers` + `params`)。`ModuleDescriptor` 扩字段;`is_bundle()` = 有 `actions:`。**机制 = plan/build 前的展开扁平化**(`TaskFile::expand_roles`,不动引擎 DAG 核心):每个 `action: role` 被替换为 role 的 actions —— id 与 material 名按**调用步 id**(无则 role 名)前缀(`install_yq.bin`/`install_yq.place`),`with` 参数经 `engine::render` 渲染进 actions/materials(yaml round-trip),内部 `needs` 同步前缀,入口动作(无内部 needs)继承调用步的 `needs`/`when_role`/`when_os`,role 的 `materials`/`handlers` **上浮并入 task**;别的步 `needs: [role-step-id]` → 重写到 role 的终端动作(role 内无人依赖的)。瘦角色(无 actions)保持旧路 lower 成单 `Op::Shell`。
+- **接线**:`build_task_to_store` 在收 materials 前 `expand_roles`,且 **recipe 改存"扁平化后的 task"**(`serde_yaml::to_string`)而非原文 → OCI 自包含,**离线 apply 不需 role 文件**。`apply_task` 加载后也 `expand_roles`(在线从文件→读 ./roles;离线从 OCI→recipe 已扁平,no-op)。roles 解析沿用引擎约定 `./roles`(cwd 相对)。
+- **影响**:`module.rs`(RoleDescriptor)、`task.rs`(expand_roles + 单测)、`engine.rs`(Module 仅 lower 瘦形态,撞到 bundle 报错=未展开 bug)、`main.rs`(build/apply 接线)。新增 `roles/yq.yaml` + `tasks/demo-roles.yaml` 示范 + `roles.md` 文档。新增测试 `expand_roles_flattens_bundle_and_hoists_materials`。
+- **验证**:49 tests 绿;真机网络 dry-run/build:`action: role uses: yq` → 展开成 `place install_yq.bin`(url 渲染 v4.44.3),build 收到 `install_yq.bin` 并打包 `crater/demo-roles:latest`;**移走 `roles/yq.yaml` 后 apply 该 OCI 仍 `place (offline) install_yq.bin`**(证 OCI 自包含)。
+- **后续(规划)**:role `params` 加默认值/类型(契约,接 D 系列 inspect)、`meta.dependencies`(role 依赖 role,闭包沿图组合)、task/role/play/project 分层(见 architecture.md §3/§11)。
