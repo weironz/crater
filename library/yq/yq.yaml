@@ -1,17 +1,9 @@
-# yq —— 自包含单文件模板(inventory + task 一体)。
-# 用法:crater apply -f library/yq/yq.yaml -i <你的 inventory>      # 推荐
-#       crater apply -f library/yq/yq.yaml                           # 用下方内嵌 inventory
-# crater build 会自动剥掉 inventory(凭据不进 OCI)。
-
 name: yq
-description: "安装 yq(自包含示例:inventory + task)"
+description: "install yq"
 hosts: all                      # all / 组名 / 主机名
 
-params:                         # 输入契约(crater inspect 可见)
-  version:
-    description: "yq 版本"
-    default: "4.44.3"
-    stage: build
+vars:
+  version: "4.44.3"             # 默认版本;crater build --set version=X 可覆盖
 
 materials:
   - name: yq-bin
@@ -23,8 +15,4 @@ actions:
     action: place
     material: yq-bin
     dest: /usr/local/bin/yq
-    mode: "0755"               # place 自带幂等(引擎内建 test -s dest),无需手写 check
-
-inventory:                      # 内嵌示范(占位密码):改成你的机器,或删掉改用 -i
-  hosts:
-    - { name: node1, address: 192.168.1.11, user: root, password: "changeme" }
+    mode: "0755"

@@ -8,12 +8,12 @@
 #   just save                              # 构建并导出离线 .oci(拷给 air-gap 机器)
 #   just registry=192.168.1.5:5000 namespace=lib push   # 覆盖私有库 / 离线库
 #
-# 版本由 yq.yaml 的 params.version 决定(单一真相):改版本只改 yq.yaml,tag 自动跟随。
+# 版本由 yq.yaml 的 vars.version 决定(单一真相):改版本只改 yq.yaml,tag 自动跟随。
 
 registry  := "docker.io"        # registry 主机:docker.io / 192.168.1.5:5000(私有/离线)
 namespace := "willdockerhub"    # 命名空间 / 组织
 name      := "yq"
-version   := `sed -nE 's/^[[:space:]]*default:[[:space:]]*"?([^"]+)"?.*/\1/p' yq.yaml | head -1`
+version   := `sed -nE 's/^[[:space:]]*version:[[:space:]]*"?([^"]+)"?.*/\1/p' yq.yaml | head -1`
 ref       := registry + "/" + namespace + "/" + name + ":" + version
 
 # 列出可用命令(默认)
