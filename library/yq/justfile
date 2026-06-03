@@ -1,0 +1,36 @@
+# library/yq —— 构建 / 推送 / 导出 yq 的 OCI 制品(B 类 artifact)。
+# 需要 just:https://github.com/casey/just (apt install just / cargo install just / 下载二进制)
+#
+# 用法:
+#   just                                   # 列出命令
+#   just build                             # 构建到本地库 ~/.crater/store
+#   just push                              # 构建并推送到 registry
+#   just save                              # 构建并导出离线 .oci(拷给 air-gap 机器)
+#   just registry=192.168.1.5:5000 push    # 覆盖 registry(私有库 / 离线库)
+#
+# 版本由 yq.yaml 的 params.version 决定(单一真相):改版本只改 yq.yaml,tag 自动跟随。
+
+registry := "willdockerhub"
+name     := "yq"
+version  := `sed -nE 's/^[[:space:]]*default:[[:space:]]*"?([^"]+)"?.*/\1/p' yq.yaml | head -1`
+ref      := registry + "/" + name + ":" + version
+
+# 列出可用命令(默认)
+default:
+    @just --list
+
+# 构建 OCI 制品到本地库
+build:
+    crater build -f {{name}}.yaml -t {{ref}}
+
+# 构建并推送到 registry
+push: build
+    crater push {{ref}}
+
+# 构建并导出为离线 .oci 文件
+save: build
+    crater save {{ref}} -o {{name}}-{{version}}.oci
+
+# 删除本地导出的 .oci
+clean:
+    rm -f *.oci
