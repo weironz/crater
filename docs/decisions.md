@@ -1044,3 +1044,12 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **影响**:`engine.rs`(PlanContext.offline + `blob_for` + 五取数点 + 测试 `three_state_place_resolution`)、`bundle.rs`(层 `fetch` annotation + `materialize_component` 只收本地存在的 blob)、`store.rs`(`pull_thin`/`pull_layers`/`has_all_layers` + 常量)、`main.rs`(`--offline` flag + `apply_image_ref` 三态 + `offline` 贯通 `apply_task`/`run_task_on_host`/`ctx.offline`)。
 - **验证**:53 tests 绿;yq 实测:manifest 层 `yq-bin` 标 `fetch=dependency`;blob 在→`place (blob)`;删 blob(模拟瘦拉)默认→`place 在线 curl`;删 blob + `--offline`→识别本地不完整、试图全量补拉。
 - **真机验证(2026-06-03)**:build → `crater push willdockerhub/yq:thin`(Docker Hub),干净 `CRATER_HOME` apply 到 n11(192.168.73.11)。瘦在线:控制机只拉 **16K**(recipe 733B + config 49B + manifest 863B,**无** 10MB yq-bin 层),日志 `thin pull`,n11 `place yq-bin <- https://github.com/...` 自行在线 curl,实装 yq v4.44.3。`--offline` 同制品:控制机 `pulling full closure` 拉 **9.6M**(含 yq-bin blob),`place (blob)` 由控制机推送、目标零联网。同一 recipe、一个 flag 切换,registry 端无需任何特殊基础设施。
+
+## 2026-06-03 · crater build --set 覆盖 build 期 param(D-089)
+
+### D-089 build 期 param 可覆盖,补齐 params 契约的对称性
+- **背景**:`yq.yaml` 把 `params.version` 的 `default` 写在 yaml 里。用户问"版本写死合适吗"。`default` 作"基线/缺省版本"是对的(声明式、`inspect` 可见、制品即某确定版本的闭包),但 `crater build` 只有 `-f/-t/--arch`,**没有覆盖 param 的入口**——要出别的版本只能改 yaml,`default` 退化成"写死"。更隐蔽:justfile `just version=X` 只改 tag、不改实际拉取版本(crater 仍从 yaml 读)→ tag 与内容不符的 footgun。本质是 **D-081 契约不对称**:apply 能覆盖 param(inventory/`-i`),build 不能。
+- **决策**:`crater build` 加 `--set key=val`(可重复)。解析后注入 `task.vars`——`effective_vars` 中 vars 排在 param `default` 之上,故覆盖值贯穿:material URL 渲染、默认 tag 的 `<version>`、烤进 OCI 的 recipe 全用它。注入在 `expand_roles` 与物料抓取**之前**(role params 也按新 vars 渲染)。
+- **影响**:`main.rs`(`Cmd::Build` 加 `--set`、`parse_set_overrides`、`build_to_store`/`build_task_to_store` 透传并注入)。`library/yq/justfile`:build recipe 改 `crater build … --set version={{version}}`,`version` 默认从 `yq.yaml` 取、`just version=X` 临时覆盖时 tag 与内容一并改,footgun 消除。
+- **验证**:53 tests 绿;`crater build -f library/yq/yq.yaml --set version=4.40.5`(不带 `-t`)→ 拉 `v4.40.5`、默认 tag `crater/yq:4.40.5`;`just version=4.40.5 build` → URL 与 tag 均 4.40.5,默认 `just build` 仍 yaml 的 4.44.3。
+- **后续(规划)**:`apply` 侧也接 `--set`(目前 apply 期覆盖靠 inventory vars / `-i`,但单机 `apply --host` 无 inventory 时缺一个 ad-hoc 覆盖入口)。

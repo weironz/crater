@@ -149,6 +149,12 @@ enum Cmd {
         /// `--arch amd64,arm64`. Default: pack every declared arch variant.
         #[arg(long, value_delimiter = ',')]
         arch: Vec<String>,
+        /// Override a build-stage param without editing the yaml (D-089), e.g.
+        /// `--set version=4.55.1`. Repeatable. Overrides the param's `default`
+        /// (and the default tag's `<version>`), so a CI/justfile builds any
+        /// version from one source. Drives material URLs + the recipe baked in.
+        #[arg(long = "set", value_name = "KEY=VAL")]
+        set: Vec<String>,
     },
     /// Export a stored artifact/image to an oci-archive file (like `docker save`).
     Save {
@@ -459,7 +465,7 @@ async fn main() -> Result<()> {
             TaskCmd::History { limit } => task_history(limit).await,
         },
         Cmd::Ui { bind, port } => ui::serve(&bind, port).await,
-        Cmd::Build { file, tag, arch } => build_to_store(&file, tag, &arch).await,
+        Cmd::Build { file, tag, arch, set } => build_to_store(&file, tag, &arch, &set).await,
         Cmd::Inspect { source, gen_inventory } => inspect_source(&source, gen_inventory).await,
         Cmd::Save { reference, output } => {
             ImageStore::open()?.export_oci_archive(&reference, &output)?;
@@ -1816,9 +1822,21 @@ async fn connect_executor(
 // build (→ local store) / save (→ oci file) / deploy
 // ---------------------------------------------------------------------------
 
+/// Parse `--set key=val` overrides (D-089) into a map. Each must contain `=`.
+fn parse_set_overrides(set: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut m = BTreeMap::new();
+    for kv in set {
+        let (k, v) = kv
+            .split_once('=')
+            .ok_or_else(|| anyhow!("--set '{kv}': expected KEY=VAL"))?;
+        m.insert(k.trim().to_string(), v.to_string());
+    }
+    Ok(m)
+}
+
 /// `crater build -f spec [-t ref]`: build the B 类 artifact(s) and store them in
 /// the local store (~/.crater/store), like `docker build`. Export with `save`.
-async fn build_to_store(file: &Path, tag: Option<String>, arch_filter: &[String]) -> Result<()> {
+async fn build_to_store(file: &Path, tag: Option<String>, arch_filter: &[String], set: &[String]) -> Result<()> {
     // `crater build` only builds tasks now (D-046): a task → B 类 artifact whose
     // recipe IS the task YAML.
     if !crater_core::task::is_task_file(file) {
@@ -1827,7 +1845,8 @@ async fn build_to_store(file: &Path, tag: Option<String>, arch_filter: &[String]
             file.display()
         );
     }
-    build_task_to_store(file, tag, arch_filter).await
+    let overrides = parse_set_overrides(set)?;
+    build_task_to_store(file, tag, arch_filter, &overrides).await
 }
 
 /// `crater inspect <source>` (D-081): print a task/OCI's input contract — params
@@ -2019,11 +2038,24 @@ fn build_os_package_repo(base: &str, family: &str, pkgs: &[String]) -> Result<Ve
     Ok(data)
 }
 
-async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[String]) -> Result<()> {
+async fn build_task_to_store(
+    file: &Path,
+    tag: Option<String>,
+    arch_filter: &[String],
+    overrides: &BTreeMap<String, String>,
+) -> Result<()> {
     use crater_core::component::MaterialKind;
     use crater_core::task::TaskFile;
 
     let mut task = TaskFile::from_yaml_file(file)?;
+    // `--set key=val` (D-089): override build-stage params without editing the
+    // yaml — injected into task.vars (which `effective_vars` ranks above param
+    // defaults), so material URLs + the default tag's <version> + the baked
+    // recipe all use the overridden value. Must precede expand_roles (role
+    // params render against these vars) and material fetching.
+    for (k, v) in overrides {
+        task.vars.insert(k.clone(), v.clone());
+    }
     // Flatten role bundles BEFORE collecting materials (D-080): role closures are
     // hoisted into task.materials (so they get packed) and role actions spliced
     // into the recipe — making the OCI self-contained (no role files needed offline).
