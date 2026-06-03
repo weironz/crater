@@ -131,6 +131,21 @@ material.v1     cfg-keepalived    361B          # 内容 = minijinja 模板
 - **取用**(`bundle::materialize_component`):遍历 layers,recipe 层 → 写出配方;material 层 → 建 `blobmap[name] = blobs/sha256/<digest>`,供 recipe 的 `place` 等按名引用。
 - **增量/惰性友好**:每个 material 已是独立 layer → [现状] `store.pull` 拉镜像时跳过已有 blob(D-078);[规划] apply 时**只拉计划引用的 layer**(惰性 partial pull),"task 定义得多"不拖垮单次部署。
 
+### 5.1 OCI 操作栈:协议靠 oci-client,制品语义自写 [现状]
+
+crater **不自实现 OCI registry 协议** —— registry I/O 全部用 `oci-client`(crates.io `oci-client` 0.17,即 **`oras-project/rust-oci-client`**;纯 Rust + rustls,无 C 依赖,musl 可静态编译)。分工:
+
+| 层 | 谁做 | 内容 |
+|---|---|---|
+| **协议层** | `oci-client`(=rust-oci-client) | HTTP / distribution 协议、token 认证、manifest 与 blob 的 GET/PUT、multi-arch index 解析 |
+| **制品语义层** | crater(`store.rs` / `bundle.rs`) | 本地 store(`index.json`/`oci-layout`/内容寻址/`tag`/`retag`/`list`/增量去重)+ B类 artifact 的**合成**(recipe+materials→manifest)与**还原**(`materialize_component`) |
+
+即 **协议靠库、语义自写**:哪怕换成 oras CLI 也得自己实现第二层 —— oras 只负责"搬运 artifact",artifact 长什么样(recipe/material 结构)得 crater 自己定义。
+
+用到的 API:`Client` / `Reference` / `secrets::RegistryAuth` / **`pull_manifest_raw`**(拉层清单)/ **`pull_blob`**(按 digest 逐个拉)。刻意用低层 `pull_blob` 而非高层 `pull` —— 后者面向 image,会**合成 image-manifest、丢掉 `artifactType` 和自定义 layer mediaType**(D-032 已踩并验证此坑)。
+
+**partial pull(选择性拉层)天然可得**:`pull_manifest_raw` 与 `pull_blob` 本就分离 —— 先拉 manifest 看每层 mediaType,再自选拉哪些 blob。这正是上面"只拉计划引用的 layer"和「瘦在线部署」(只拉 recipe + 自建文件层,依赖层在线现拉;`--offline` 才全量)的实现基础,**零新增依赖**。
+
 ---
 
 ## 6. 变量分层:build 期 vs apply 期

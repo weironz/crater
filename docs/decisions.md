@@ -1018,3 +1018,14 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **影响**:`task.rs`(load_role 双形态 + role 私有 src→绝对 + expand_roles 用 role_base);`main.rs`(roles_dir_for + ctx.roles_dir 按 spec_dir + inspect_source 用 find_named + apply_project 跳过空组 play);`library/` 重组(apps→`yq/docker/mysql/zot/`、`kube-upgrade` 移入 `library/k8s/roles/`、`k8s-upgrade.yaml` 移入 `library/k8s/`、demos/projects→`library/_examples/`)+ 各交付 README + `library/_template/` 骨架。
 - **验证**:52 tests 绿;`crater inspect yq` 读 `library/yq/yq.yaml`(不当 OCI ref 拉取);`crater apply k8s-upgrade` 解析交付内 `roles/kube-upgrade/`(v1.37.0 渲染),worker play 空组优雅跳过;`_template` 骨架 dry-run 从 role 私有绝对路径 place 私有文件,通过。
 - **后续(规划)**:把 `k8s-ha` 大 task 拆成交付内多 role(`roles/preflight`/`containerd`/`controlplane`/`worker`/`cni`),进一步对齐 Ansible role 分解(用户尚未确认,大改)。
+
+## 2026-06-03 · OCI 操作栈选型:协议靠 oci-client,语义自写(D-087)
+
+### D-087 不自实现 OCI 协议,registry I/O 全用 oci-client(=oras-project/rust-oci-client)
+- **背景**:crater 频繁操作 OCI(build/push/pull/save/load/apply ref)。需明确:协议层是不是自己造的轮子?是否该引入 oras。
+- **结论(现状,非新决策,补记)**:crater **从未自实现 OCI registry 协议** —— 依赖 crates.io 的 `oci-client = "0.17.0"`,它就是 **`oras-project/rust-oci-client`**(前身 `oci-distribution`,归入 oras-project 后改名)。纯 Rust + rustls,无 C 依赖,musl 可静态编译,契合 D-012(单二进制零运行时)。**无需也不引入 oras CLI**。
+- **分层**:
+  - **协议层 = `oci-client`**:HTTP/distribution、token 认证、manifest 与 blob 的 GET/PUT、multi-arch index 解析。用到 `Client`/`Reference`/`secrets::RegistryAuth`/`pull_manifest_raw`/`pull_blob`。
+  - **制品语义层 = crater 自写**(`store.rs`/`bundle.rs`):本地 store(index.json/oci-layout/内容寻址/tag/retag/list/增量去重)+ B类 artifact 合成与还原(`materialize_component`)。这层任何工具(含 oras)都不提供 —— artifact 的 recipe/material 结构是 crater 的语义。
+- **关键经验**:刻意用低层 `pull_blob`(而非高层 `pull`)—— 高层 `pull` 面向 image,会合成 image-manifest 丢掉 `artifactType` + 自定义 layer mediaType(D-032 已踩坑验证)。
+- **直接收益**:`pull_manifest_raw` + `pull_blob` 天然分离 → **partial pull(选择性拉层)零新依赖**,是「瘦在线部署」(默认只拉 recipe + 自建文件层、依赖层在线现拉;`--offline` 全量)的实现基础。详见 [architecture.md §5.1](architecture.md)。
