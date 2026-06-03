@@ -63,23 +63,8 @@ enum Cmd {
         arg2: Option<String>,
         #[arg(short, long)]
         file: Option<PathBuf>,
-        /// Inventory file (its `inventory:` hosts) — large-fleet form, per-host
-        /// creds. A spec source carries its own inventory.
-        #[arg(short = 'i', long)]
-        inventory: Option<PathBuf>,
-        /// Target host(s), comma-separated for a small fleet sharing one credential:
-        /// `--host 10.0.0.5,10.0.0.6`. Omit (and no `-i`) → local install.
-        #[arg(long)]
-        host: Option<String>,
-        #[arg(long, default_value = "root")]
-        user: String,
-        #[arg(long)]
-        password: Option<String>,
-        /// SSH private-key file (alternative to --password), shared by all --host.
-        #[arg(long)]
-        key: Option<PathBuf>,
-        #[arg(long, default_value_t = 22)]
-        port: u16,
+        #[command(flatten)]
+        target: TargetOpts,
         /// Print the plan without executing.
         #[arg(long)]
         dry_run: bool,
@@ -102,18 +87,8 @@ enum Cmd {
         source: Option<String>,
         #[arg(short, long)]
         file: Option<PathBuf>,
-        #[arg(short = 'i', long)]
-        inventory: Option<PathBuf>,
-        #[arg(long)]
-        host: Option<String>,
-        #[arg(long, default_value = "root")]
-        user: String,
-        #[arg(long)]
-        password: Option<String>,
-        #[arg(long)]
-        key: Option<PathBuf>,
-        #[arg(long, default_value_t = 22)]
-        port: u16,
+        #[command(flatten)]
+        target: TargetOpts,
         /// Print the teardown plan without executing.
         #[arg(long)]
         dry_run: bool,
@@ -304,18 +279,8 @@ enum TaskCmd {
     /// `helm list`). From the control DB by default; `--host`/`-i` reads the
     /// authoritative markers on the targets. Drill into one with `task show`.
     List {
-        #[arg(short = 'i', long)]
-        inventory: Option<PathBuf>,
-        #[arg(long)]
-        host: Option<String>,
-        #[arg(long, default_value = "root")]
-        user: String,
-        #[arg(long)]
-        password: Option<String>,
-        #[arg(long)]
-        key: Option<PathBuf>,
-        #[arg(long, default_value_t = 22)]
-        port: u16,
+        #[command(flatten)]
+        target: TargetOpts,
         /// Drift check: re-run each deployment's verify phase on the target and
         /// report ok/DRIFT (needs `--host`/`-i` to connect).
         #[arg(long)]
@@ -325,18 +290,8 @@ enum TaskCmd {
     Show {
         /// Task name (as in `task list`).
         name: String,
-        #[arg(short = 'i', long)]
-        inventory: Option<PathBuf>,
-        #[arg(long)]
-        host: Option<String>,
-        #[arg(long, default_value = "root")]
-        user: String,
-        #[arg(long)]
-        password: Option<String>,
-        #[arg(long)]
-        key: Option<PathBuf>,
-        #[arg(long, default_value_t = 22)]
-        port: u16,
+        #[command(flatten)]
+        target: TargetOpts,
         /// Drift check: re-run the verify phase per host (needs `--host`/`-i`).
         #[arg(long)]
         verify: bool,
@@ -359,6 +314,58 @@ enum CreateWhat {
         #[arg(long)]
         force: bool,
     },
+}
+
+/// The connection / target-selection six-tuple shared by every fleet command
+/// (`apply`/`delete`/`task list`/`task show`). `#[command(flatten)]` keeps each
+/// subcommand's surface identical while defining the flags + resolver once.
+#[derive(clap::Args, Clone, Debug)]
+struct TargetOpts {
+    /// Inventory file (its `inventory:` hosts) — large-fleet form, per-host
+    /// creds. A spec source carries its own inventory.
+    #[arg(short = 'i', long)]
+    inventory: Option<PathBuf>,
+    /// Target host(s), comma-separated for a small fleet sharing one credential:
+    /// `--host 10.0.0.5,10.0.0.6`. Omit (and no `-i`) → local install.
+    #[arg(long)]
+    host: Option<String>,
+    #[arg(long, default_value = "root")]
+    user: String,
+    #[arg(long)]
+    password: Option<String>,
+    /// SSH private-key file (alternative to --password), shared by all --host.
+    #[arg(long)]
+    key: Option<PathBuf>,
+    #[arg(long, default_value_t = 22)]
+    port: u16,
+}
+
+impl TargetOpts {
+    /// Resolve to a concrete host list: inventory > `--host` > localhost.
+    fn hosts(&self) -> Result<Vec<crater_core::spec::Host>> {
+        target_hosts(
+            self.inventory.as_deref(),
+            self.host.clone(),
+            &self.user,
+            self.password.clone(),
+            self.key.clone(),
+            self.port,
+        )
+    }
+
+    /// Like [`hosts`], but a task with no CLI target falls back to its embedded
+    /// inventory before localhost (D-084).
+    fn task_hosts(&self, task_path: &Path) -> Result<Vec<crater_core::spec::Host>> {
+        task_hosts(
+            task_path,
+            self.inventory.as_deref(),
+            self.host.clone(),
+            &self.user,
+            self.password.clone(),
+            self.key.clone(),
+            self.port,
+        )
+    }
 }
 
 /// Compact wall-clock timer (`HH:MM:SS`, UTC) — dependency-free, keeps log
@@ -408,12 +415,7 @@ async fn main() -> Result<()> {
             arg1,
             arg2,
             file,
-            inventory,
-            host,
-            user,
-            password,
-            key,
-            port,
+            target,
             dry_run,
             shell,
             offline,
@@ -424,44 +426,18 @@ async fn main() -> Result<()> {
                 (Some(a), None) => (None, Some(a)),
                 (None, _) => (None, None),
             };
-            apply_source(name, source, file, inventory, host, user, password, key, port, dry_run, shell, false, offline)
-                .await
+            apply_source(name, source, file, target, dry_run, shell, false, offline).await
         }
         Cmd::Delete {
             source,
             file,
-            inventory,
-            host,
-            user,
-            password,
-            key,
-            port,
+            target,
             dry_run,
             shell,
-        } => {
-            apply_source(None, source, file, inventory, host, user, password, key, port, dry_run, shell, true, false)
-                .await
-        }
+        } => apply_source(None, source, file, target, dry_run, shell, true, false).await,
         Cmd::Task { cmd } => match cmd {
-            TaskCmd::List {
-                inventory,
-                host,
-                user,
-                password,
-                key,
-                port,
-                verify,
-            } => task_list(inventory, host, user, password, key, port, verify).await,
-            TaskCmd::Show {
-                name,
-                inventory,
-                host,
-                user,
-                password,
-                key,
-                port,
-                verify,
-            } => task_show(&name, inventory, host, user, password, key, port, verify).await,
+            TaskCmd::List { target, verify } => task_list(target, verify).await,
+            TaskCmd::Show { name, target, verify } => task_show(&name, target, verify).await,
             TaskCmd::History { limit } => task_history(limit).await,
         },
         Cmd::Ui { bind, port } => ui::serve(&bind, port).await,
@@ -638,8 +614,8 @@ async fn component_shortcut(args: Vec<String>) -> Result<()> {
         i += 1;
     }
     let name = name.ok_or_else(|| anyhow!("missing task name"))?;
-    apply_source(None, Some(name), None, inventory, host, user, password, key, port, dry_run, shell, false, false)
-        .await
+    let target = TargetOpts { inventory, host, user, password, key, port };
+    apply_source(None, Some(name), None, target, dry_run, shell, false, false).await
 }
 
 
@@ -804,12 +780,7 @@ async fn apply_source(
     name: Option<String>,
     source: Option<String>,
     file: Option<PathBuf>,
-    inventory: Option<PathBuf>,
-    host: Option<String>,
-    user: String,
-    password: Option<String>,
-    key: Option<PathBuf>,
-    port: u16,
+    target: TargetOpts,
     dry_run: bool,
     shell: bool,
     teardown: bool,
@@ -829,19 +800,19 @@ async fn apply_source(
         // Offline: OCI bundle. Targets from CLI (D-020: never inside the image)
         // — `-i inventory.yaml`, `--host a,b`, or none → local.
         info!("{verb}: {src} → offline (OCI bundle)");
-        let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
+        let hosts = target.hosts()?;
         return apply_oci_bundle(&path, hosts, !dry_run, shell, teardown, &src, name.as_deref()).await;
     }
     if path.is_file() && crater_core::project::is_project_file(&path) {
         // A project (top-level `plays:`, D-083): orchestrate plays in order.
         info!("{verb}: {src} → project");
-        return apply_project(&path, name.as_deref(), inventory, host, user, password, key, port, dry_run, shell, teardown).await;
+        return apply_project(&path, name.as_deref(), &target, dry_run, shell, teardown).await;
     }
     if path.is_file() {
         // A task file (top-level `actions:`, D-037). Component specs are gone.
         if crater_core::task::is_task_file(&path) {
             info!("{verb}: {src} → task");
-            let hosts = task_hosts(&path, inventory.as_deref(), host, &user, password, key, port)?;
+            let hosts = target.task_hosts(&path)?;
             return apply_task(&path, hosts, None, false, !dry_run, shell, teardown, &src, name.as_deref(), None, BTreeMap::new()).await;
         }
         anyhow::bail!(
@@ -852,7 +823,7 @@ async fn apply_source(
     // Image reference (registry/store): has a registry path or a tag, not a file.
     if src.contains('/') || src.contains(':') {
         info!("{verb}: {src} → image (local store / registry)");
-        let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
+        let hosts = target.hosts()?;
         return apply_image_ref(&src, hosts, !dry_run, teardown, &src, name.as_deref(), offline).await;
     }
     // Named task/project: `crater apply <name>` → first match of <name>.yaml under
@@ -860,11 +831,11 @@ async fn apply_source(
     if let Some(named) = find_named(&src) {
         if crater_core::project::is_project_file(&named) {
             info!("{verb}: {src} → named project ({})", named.display());
-            return apply_project(&named, name.as_deref(), inventory, host, user, password, key, port, dry_run, shell, teardown).await;
+            return apply_project(&named, name.as_deref(), &target, dry_run, shell, teardown).await;
         }
         if crater_core::task::is_task_file(&named) {
             info!("{verb}: {src} → named task ({})", named.display());
-            let hosts = task_hosts(&named, inventory.as_deref(), host, &user, password, key, port)?;
+            let hosts = target.task_hosts(&named)?;
             return apply_task(&named, hosts, None, false, !dry_run, shell, teardown, &src, name.as_deref(), None, BTreeMap::new()).await;
         }
     }
@@ -884,12 +855,7 @@ async fn apply_source(
 async fn apply_project(
     path: &Path,
     name: Option<&str>,
-    inventory: Option<PathBuf>,
-    host: Option<String>,
-    user: String,
-    password: Option<String>,
-    key: Option<PathBuf>,
-    port: u16,
+    target: &TargetOpts,
     dry_run: bool,
     shell: bool,
     teardown: bool,
@@ -927,7 +893,7 @@ async fn apply_project(
             play.source,
             play.hosts.as_deref().unwrap_or("<task 默认>")
         );
-        let hosts = target_hosts(inventory.as_deref(), host.clone(), &user, password.clone(), key.clone(), port)?;
+        let hosts = target.hosts()?;
         // Skip a play whose target group has no hosts (e.g. HA with no separate
         // workers) — don't abort the whole project (D-083).
         if let Some(g) = &play.hosts {
@@ -1171,17 +1137,12 @@ struct DepRow {
 /// off the hosts (D-051). With `verify`, re-run each deployment's verify phase
 /// on the target to detect drift (D-055; requires `--host`/`-i`).
 async fn gather_deployments(
-    inventory: Option<PathBuf>,
-    host: Option<String>,
-    user: String,
-    password: Option<String>,
-    key: Option<PathBuf>,
-    port: u16,
+    target: &TargetOpts,
     verify: bool,
 ) -> Result<Vec<DepRow>> {
     use crater_core::state::Deployment;
-    if inventory.is_some() || host.is_some() {
-        let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
+    if target.inventory.is_some() || target.host.is_some() {
+        let hosts = target.hosts()?;
         // Persist verify results so the read-only UI can show drift (D-055).
         let store = if verify { state::TursoStore::open().await.ok() } else { None };
         let now = state::now_epoch();
@@ -1301,20 +1262,12 @@ fn status_label(s: Option<bool>) -> &'static str {
 /// `crater task list` (D-051/052/053): **deployment-centric** — one row per
 /// deployment, hosts aggregated as a count. `--verify` adds a drift STATUS.
 #[allow(clippy::too_many_arguments)]
-async fn task_list(
-    inventory: Option<PathBuf>,
-    host: Option<String>,
-    user: String,
-    password: Option<String>,
-    key: Option<PathBuf>,
-    port: u16,
-    verify: bool,
-) -> Result<()> {
-    let from_targets = inventory.is_some() || host.is_some();
+async fn task_list(target: TargetOpts, verify: bool) -> Result<()> {
+    let from_targets = target.inventory.is_some() || target.host.is_some();
     if verify && !from_targets {
         anyhow::bail!("--verify needs --host or -i (it re-runs the verify phase on the targets)");
     }
-    let rows = gather_deployments(inventory, host, user, password, key, port, verify).await?;
+    let rows = gather_deployments(&target, verify).await?;
     if rows.is_empty() {
         if from_targets {
             info!("no deployments found on the target(s)");
@@ -1389,20 +1342,11 @@ async fn task_list(
 /// `crater task show <name>` (D-051): one deployment's per-host instances;
 /// `--verify` adds per-host drift status.
 #[allow(clippy::too_many_arguments)]
-async fn task_show(
-    name: &str,
-    inventory: Option<PathBuf>,
-    host: Option<String>,
-    user: String,
-    password: Option<String>,
-    key: Option<PathBuf>,
-    port: u16,
-    verify: bool,
-) -> Result<()> {
-    if verify && inventory.is_none() && host.is_none() {
+async fn task_show(name: &str, target: TargetOpts, verify: bool) -> Result<()> {
+    if verify && target.inventory.is_none() && target.host.is_none() {
         anyhow::bail!("--verify needs --host or -i (it re-runs the verify phase on the targets)");
     }
-    let mut rows = gather_deployments(inventory, host, user, password, key, port, verify).await?;
+    let mut rows = gather_deployments(&target, verify).await?;
     rows.retain(|r| r.dep.deployment == name || r.dep.name == name);
     if rows.is_empty() {
         info!("deployment '{name}' has no recorded instances");
