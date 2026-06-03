@@ -1,0 +1,17 @@
+[Unit]
+Description=Docker Application Container Engine
+After=network-online.target containerd.service
+Wants=network-online.target
+Requires=containerd.service
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/dockerd -H unix:// --containerd=/run/containerd/containerd.sock
+Restart=always
+LimitNOFILE=infinity
+LimitNPROC=infinity
+Delegate=yes
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

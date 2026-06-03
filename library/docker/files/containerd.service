@@ -1,0 +1,13 @@
+[Unit]
+Description=containerd container runtime
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/containerd
+Restart=always
+Delegate=yes
+KillMode=process
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target

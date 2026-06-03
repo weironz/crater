@@ -12,10 +12,16 @@ materials:
     kind: file
     arch: amd64
     url_tmpl: "https://download.docker.com/linux/static/stable/x86_64/docker-{{version}}.tgz"
-  - name: docker-tgz
+  # 自建配置(无下载源)→ files/ 私有文件,build 打成 embedded blob(离线随 recipe 走)。
+  - name: containerd-unit
     kind: file
-    arch: arm64
-    url_tmpl: "https://download.docker.com/linux/static/stable/aarch64/docker-{{version}}.tgz"
+    src: files/containerd.service
+  - name: docker-unit
+    kind: file
+    src: files/docker.service
+  - name: daemon-json
+    kind: file
+    src: files/daemon.json
 actions:
   # unarchive 直接吃 material(取+解压一步,D-073)。tarball 内是 docker/ 目录,
   # strip 1 → 二进制直接落 /usr/local/bin;creates 已解出 dockerd 则跳过(幂等)。
@@ -26,58 +32,21 @@ actions:
     strip: 1
     creates: /usr/local/bin/dockerd
   - id: containerd_unit
-    action: copy
+    action: place
+    material: containerd-unit
     dest: /etc/systemd/system/containerd.service
-    content: |
-      [Unit]
-      Description=containerd container runtime
-      After=network.target
-
-      [Service]
-      ExecStart=/usr/local/bin/containerd
-      Restart=always
-      Delegate=yes
-      KillMode=process
-      LimitNOFILE=infinity
-
-      [Install]
-      WantedBy=multi-user.target
     needs: [extract]
     notify: [reload_systemd]
   - id: docker_unit
-    action: copy
+    action: place
+    material: docker-unit
     dest: /etc/systemd/system/docker.service
-    content: |
-      [Unit]
-      Description=Docker Application Container Engine
-      After=network-online.target containerd.service
-      Wants=network-online.target
-      Requires=containerd.service
-
-      [Service]
-      Type=notify
-      ExecStart=/usr/local/bin/dockerd -H unix:// --containerd=/run/containerd/containerd.sock
-      Restart=always
-      LimitNOFILE=infinity
-      LimitNPROC=infinity
-      Delegate=yes
-      KillMode=process
-
-      [Install]
-      WantedBy=multi-user.target
     needs: [extract]
     notify: [reload_systemd]
   - id: daemon
-    action: copy
+    action: place
+    material: daemon-json
     dest: /etc/docker/daemon.json
-    content: |
-      {
-        "registry-mirrors": ["https://docker.m.daocloud.io"],
-        "exec-opts": ["native.cgroupdriver=systemd"],
-        "log-driver": "json-file",
-        "log-opts": { "max-size": "100m", "max-file": "3" },
-        "storage-driver": "overlay2"
-      }
     needs: [extract]
     notify: [restart_docker]
   - id: svc_containerd
