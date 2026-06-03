@@ -52,6 +52,11 @@ const MT_RECIPE: &str = "application/vnd.crater.recipe.v1+yaml";
 /// logical material name (D-034) so `place` resolves it offline by name.
 const MT_MATERIAL: &str = "application/vnd.crater.material.v1";
 const ANN_MATERIAL_NAME: &str = "org.crater.material.name";
+/// Layer fetch class (D-087): `embedded` = self-authored file with no online
+/// source → always pulled (even a thin pull); `dependency` = has url/ref/pkgs →
+/// skipped on a thin pull, fetched online at apply. Absent ⇒ treated as embedded
+/// (old artifacts pull in full — safe, just no thin savings).
+const ANN_MATERIAL_FETCH: &str = "org.crater.material.fetch";
 const ANN_COMPONENT_NAME: &str = "org.crater.component.name";
 const ANN_COMPONENT_VERSION: &str = "org.crater.component.version";
 const ANN_RUN_MODE: &str = "org.crater.run-mode";
@@ -260,7 +265,7 @@ impl BundleStage {
         version: &str,
         run_mode: &str,
         recipe_yaml: &[u8],
-        materials: &[(String, Vec<u8>)],
+        materials: &[(String, bool, Vec<u8>)], // (name, embedded?, bytes) — D-087
     ) -> crate::Result<ImageRef> {
         let (recipe_d, recipe_s) = self.store_raw(recipe_yaml)?;
         let mut layers = vec![json!({
@@ -269,11 +274,12 @@ impl BundleStage {
         })];
         // Each material layer is annotated with its logical material name (D-034)
         // — the key `place` resolves against during offline recipe-replay.
-        for (mat_name, data) in materials {
+        for (mat_name, embedded, data) in materials {
             let (d, s) = self.store_raw(data)?;
+            let fetch = if *embedded { "embedded" } else { "dependency" };
             layers.push(json!({
                 "mediaType": MT_MATERIAL, "digest": format!("sha256:{d}"), "size": s,
-                "annotations": { ANN_MATERIAL_NAME: mat_name }
+                "annotations": { ANN_MATERIAL_NAME: mat_name, ANN_MATERIAL_FETCH: fetch }
             }));
         }
         let cfg = json!({"name": name, "version": version, "runMode": run_mode});
@@ -530,11 +536,16 @@ pub fn materialize_component(
                 fs::write(cdir.join("component.yaml"), fs::read(&blob)?)?;
             } else if mt == MT_MATERIAL {
                 // Key by material name (D-034); fall back to legacy source-url.
-                if let Some(key) = l["annotations"][ANN_MATERIAL_NAME]
-                    .as_str()
-                    .or_else(|| l["annotations"][ANN_SOURCE_URL].as_str())
-                {
-                    blobmap.insert(key.to_string(), blob);
+                // Only map blobs actually present locally (D-087): a thin pull
+                // leaves `dependency` layers in the registry, so their blobs are
+                // absent — those materials are fetched online at apply instead.
+                if blob.exists() {
+                    if let Some(key) = l["annotations"][ANN_MATERIAL_NAME]
+                        .as_str()
+                        .or_else(|| l["annotations"][ANN_SOURCE_URL].as_str())
+                    {
+                        blobmap.insert(key.to_string(), blob);
+                    }
                 }
             }
         }

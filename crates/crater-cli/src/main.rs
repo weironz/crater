@@ -86,6 +86,12 @@ enum Cmd {
         /// Force the agentless shell executor instead of the default agent.
         #[arg(long)]
         shell: bool,
+        /// For an image/artifact `<source>`: pull the FULL closure (all material
+        /// layers) and replay it air-gapped (D-087). Default is thin-online —
+        /// pull only the recipe + self-authored files, fetch dependencies online
+        /// at apply. Ignored for `.oci` bundles (already full) and task files.
+        #[arg(long)]
+        offline: bool,
     },
     /// Delete/uninstall a task's deployment by running its authored `teardown:`
     /// (D-049). **Opt-in**: only a task that defines `teardown:` has this — there
@@ -404,6 +410,7 @@ async fn main() -> Result<()> {
             port,
             dry_run,
             shell,
+            offline,
         } => {
             // Two positional forms: `apply <source>` or `apply <name> <source>`.
             let (name, source) = match (arg1, arg2) {
@@ -411,7 +418,7 @@ async fn main() -> Result<()> {
                 (Some(a), None) => (None, Some(a)),
                 (None, _) => (None, None),
             };
-            apply_source(name, source, file, inventory, host, user, password, key, port, dry_run, shell, false)
+            apply_source(name, source, file, inventory, host, user, password, key, port, dry_run, shell, false, offline)
                 .await
         }
         Cmd::Delete {
@@ -426,7 +433,7 @@ async fn main() -> Result<()> {
             dry_run,
             shell,
         } => {
-            apply_source(None, source, file, inventory, host, user, password, key, port, dry_run, shell, true)
+            apply_source(None, source, file, inventory, host, user, password, key, port, dry_run, shell, true, false)
                 .await
         }
         Cmd::Task { cmd } => match cmd {
@@ -625,7 +632,7 @@ async fn component_shortcut(args: Vec<String>) -> Result<()> {
         i += 1;
     }
     let name = name.ok_or_else(|| anyhow!("missing task name"))?;
-    apply_source(None, Some(name), None, inventory, host, user, password, key, port, dry_run, shell, false)
+    apply_source(None, Some(name), None, inventory, host, user, password, key, port, dry_run, shell, false, false)
         .await
 }
 
@@ -800,6 +807,7 @@ async fn apply_source(
     dry_run: bool,
     shell: bool,
     teardown: bool,
+    offline: bool,
 ) -> Result<()> {
     let verb = if teardown { "delete" } else { "apply" };
     // `<source>` positional, else `-f`.
@@ -828,7 +836,7 @@ async fn apply_source(
         if crater_core::task::is_task_file(&path) {
             info!("{verb}: {src} → task");
             let hosts = task_hosts(&path, inventory.as_deref(), host, &user, password, key, port)?;
-            return apply_task(&path, hosts, None, !dry_run, shell, teardown, &src, name.as_deref(), None, BTreeMap::new()).await;
+            return apply_task(&path, hosts, None, false, !dry_run, shell, teardown, &src, name.as_deref(), None, BTreeMap::new()).await;
         }
         anyhow::bail!(
             "{src}: not a task file (needs top-level `actions:`). Component specs are no \
@@ -839,7 +847,7 @@ async fn apply_source(
     if src.contains('/') || src.contains(':') {
         info!("{verb}: {src} → image (local store / registry)");
         let hosts = target_hosts(inventory.as_deref(), host, &user, password, key, port)?;
-        return apply_image_ref(&src, hosts, !dry_run, teardown, &src, name.as_deref()).await;
+        return apply_image_ref(&src, hosts, !dry_run, teardown, &src, name.as_deref(), offline).await;
     }
     // Named task/project: `crater apply <name>` → first match of <name>.yaml under
     // library/ (then tasks/ for back-compat). D-043/D-085.
@@ -851,7 +859,7 @@ async fn apply_source(
         if crater_core::task::is_task_file(&named) {
             info!("{verb}: {src} → named task ({})", named.display());
             let hosts = task_hosts(&named, inventory.as_deref(), host, &user, password, key, port)?;
-            return apply_task(&named, hosts, None, !dry_run, shell, teardown, &src, name.as_deref(), None, BTreeMap::new()).await;
+            return apply_task(&named, hosts, None, false, !dry_run, shell, teardown, &src, name.as_deref(), None, BTreeMap::new()).await;
         }
     }
     anyhow::bail!(
@@ -925,7 +933,7 @@ async fn apply_project(
             }
         }
         apply_task(
-            &src_path, hosts, None, !dry_run, shell, teardown, &play.source, Some(&deployment),
+            &src_path, hosts, None, false, !dry_run, shell, teardown, &play.source, Some(&deployment),
             play.hosts.clone(), play.vars.clone(),
         )
         .await
@@ -945,6 +953,9 @@ async fn apply_task(
     path: &Path,
     hosts: Vec<crater_core::spec::Host>,
     offline_blobmap: Option<BTreeMap<String, PathBuf>>,
+    // Strict-offline (air-gap): missing blob = error, not online fetch (D-087).
+    // A thin-online ref carries a partial blobmap with this `false`.
+    offline: bool,
     do_apply: bool,
     do_shell: bool,
     teardown: bool,
@@ -1041,7 +1052,7 @@ async fn apply_task(
 
     if !do_apply {
         for h in &hosts {
-            run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, &role_members, &target_hosts, None, offline_blobmap.as_ref(), false, do_shell, teardown, source, &deployment).await?;
+            run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, &role_members, &target_hosts, None, offline_blobmap.as_ref(), offline, false, do_shell, teardown, source, &deployment).await?;
         }
         info!("dry-run only; omit --dry-run to execute");
         return Ok(());
@@ -1078,7 +1089,7 @@ async fn apply_task(
             // registered facts are merged into hostvars BEFORE the next host plans.
             // (Prefer per-step `throttle` over serial_roles — it parallelizes prep.)
             for h in group {
-                let (host_name, regs) = run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, &role_members, &target_hosts, None, offline_blobmap.as_ref(), true, do_shell, teardown, source, &deployment).await?;
+                let (host_name, regs) = run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, &role_members, &target_hosts, None, offline_blobmap.as_ref(), offline, true, do_shell, teardown, source, &deployment).await?;
                 merge_regs(&mut hostvars, &name_roles, &host_name, regs);
                 applied_hosts.push(host_name);
             }
@@ -1103,7 +1114,7 @@ async fn apply_task(
                     // Signal the coordinator on finish so peers awaiting this host's
                     // facts fail fast on error / never-produced rather than blocking
                     // to the timeout (D-077). Facts (if any) are published inside.
-                    let r = run_task_on_host(task_ref, h, spec_dir_ref, hostvars_ref, role_addrs_ref, role_members_ref, target_hosts_ref, Some(coord_ref), offline_ref, true, do_shell, teardown, source, deployment_ref).await;
+                    let r = run_task_on_host(task_ref, h, spec_dir_ref, hostvars_ref, role_addrs_ref, role_members_ref, target_hosts_ref, Some(coord_ref), offline_ref, offline, true, do_shell, teardown, source, deployment_ref).await;
                     if r.is_err() {
                         coord_ref.mark_aborted();
                     }
@@ -1470,6 +1481,7 @@ async fn run_task_on_host(
     target_hosts: &[(String, Vec<String>)],
     coord: Option<&engine::HostCoord>,
     offline_blobmap: Option<&BTreeMap<String, PathBuf>>,
+    offline: bool,
     do_apply: bool,
     do_shell: bool,
     teardown: bool,
@@ -1555,8 +1567,11 @@ async fn run_task_on_host(
         ctx.add_material(m.clone());
     }
     // Offline (recipe-replay, D-045): `place` pushes packed blobs from control.
+    // `offline` distinguishes strict air-gap (missing blob = error) from
+    // thin-online (partial blobmap, missing material fetched online) — D-087.
     if let Some(bm) = offline_blobmap {
         ctx.offline_blobs = Some(bm.clone());
+        ctx.offline = offline;
     }
     // delete → run the authored `teardown:` actions; apply → `actions`.
     let action_list = if teardown { &task.teardown } else { &task.actions };
@@ -2037,8 +2052,8 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
     for (k, v) in &task.effective_vars() {
         ctx.vars.insert(k.clone(), v.clone());
     }
-    ctx.offline_blobs = Some(BTreeMap::new()); // rendered_url yields raw URLs
-    let mut materials: Vec<(String, Vec<u8>)> = Vec::new();
+    ctx.offline = true; // build wants raw URLs (no mirror rewrite) from rendered_url (D-087)
+    let mut materials: Vec<(String, bool, Vec<u8>)> = Vec::new(); // (key, embedded?, bytes) — D-087
     for m in &task.materials {
         if m.kind == MaterialKind::File {
             // Skip variants outside an explicit --arch filter (neutral always kept).
@@ -2062,7 +2077,7 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
                 let (data, _) = source::fetch_best(&url)
                     .await
                     .map_err(|e| anyhow!("fetch material {key}: {e}"))?;
-                materials.push((key, data));
+                materials.push((key, false, data)); // has url_tmpl → dependency layer (D-087)
             } else if let Some(src) = &m.src {
                 // Hand-authored local file (D-066): read from the task dir and
                 // pack verbatim, same blob key `place` resolves offline.
@@ -2070,7 +2085,7 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
                 info!("  read material {key} <- {}", path.display());
                 let data = std::fs::read(&path)
                     .map_err(|e| anyhow!("read material {key} from {}: {e}", path.display()))?;
-                materials.push((key, data));
+                materials.push((key, true, data)); // self-authored src, no online source → embedded (D-087)
             } else {
                 return Err(anyhow!("file material '{key}' has neither `url_tmpl` nor `src`"));
             }
@@ -2091,7 +2106,7 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
             let data = std::fs::read(&tmp)?;
             let _ = std::fs::remove_file(&tmp);
             info!("    packed {} ({} bytes)", reference, data.len());
-            materials.push((key, data));
+            materials.push((key, false, data)); // image has ref → dependency layer (D-087)
         } else if m.kind == MaterialKind::OsPackage {
             // kind: os_package (D-062) — resolve the .deb/.rpm dependency closure
             // in the target OS via buildah (daemonless), pack as a tar blob;
@@ -2110,7 +2125,7 @@ async fn build_task_to_store(file: &Path, tag: Option<String>, arch_filter: &[St
             info!("  build os_package {key} <- {base} [{}] (buildah)", pkgs.join(" "));
             let data = build_os_package_repo(base, family, &pkgs)?;
             info!("    packed closure ({} bytes)", data.len());
-            materials.push((key, data));
+            materials.push((key, false, data)); // os_package source → dependency layer (D-087)
         }
     }
 
@@ -2180,7 +2195,7 @@ async fn apply_oci_bundle(
     info!("offline (task artifact): {} task(s)", mats.len());
     for mc in mats {
         let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
-        apply_task(&recipe_file, hosts.clone(), Some(mc.blobmap), do_apply, do_shell, teardown, source, name, None, BTreeMap::new())
+        apply_task(&recipe_file, hosts.clone(), Some(mc.blobmap), true, do_apply, do_shell, teardown, source, name, None, BTreeMap::new())
             .await?;
     }
     let _ = std::fs::remove_dir_all(&dest_root);
@@ -2388,11 +2403,21 @@ async fn apply_image_ref(
     teardown: bool,
     source: &str,
     name: Option<&str>,
+    offline: bool,
 ) -> Result<()> {
     let store = ImageStore::open()?;
-    if !store.has(reference) {
-        info!("{reference} not in local store → pulling");
-        store.pull(reference).await?;
+    // D-087: strict-offline (air-gap) needs the FULL closure locally — re-pull if
+    // a prior thin pull left `dependency` layers absent. Thin-online (default)
+    // pulls only recipe + `embedded` files; dependencies are fetched online at
+    // apply, so an absent local copy just needs a thin pull.
+    if offline {
+        if !store.has(reference) || !store.has_all_layers(reference) {
+            info!("{reference}: pulling full closure (--offline)");
+            store.pull(reference).await?;
+        }
+    } else if !store.has(reference) {
+        info!("{reference}: thin pull (recipe + embedded files; dependencies fetched online)");
+        store.pull_thin(reference).await?;
     }
 
     // crater task artifact (B 类) → recipe-replay via the task pipeline (D-045).
@@ -2403,7 +2428,7 @@ async fn apply_image_ref(
         let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
         if crater_core::task::is_task_file(&recipe_file) {
             info!("image {reference}: crater task artifact → recipe-replay");
-            let res = apply_task(&recipe_file, hosts, Some(mc.blobmap), do_apply, true, teardown, source, name, None, BTreeMap::new()).await;
+            let res = apply_task(&recipe_file, hosts, Some(mc.blobmap), offline, do_apply, true, teardown, source, name, None, BTreeMap::new()).await;
             let _ = std::fs::remove_dir_all(&recipe_dir);
             return res;
         }

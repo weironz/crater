@@ -358,6 +358,14 @@ pub struct PlanContext {
     /// resolves the packed blob (D-034). Key is the material name, or
     /// `name@arch` for an arch-specific variant (D-048).
     pub offline_blobs: Option<BTreeMap<String, PathBuf>>,
+    /// Strict-offline (air-gap) mode (D-087): a material with no packed blob is a
+    /// hard error (the bundle is incomplete), NOT an online fetch. When `false`
+    /// (online / thin-online), a material absent from `offline_blobs` is fetched
+    /// online — so a thin pull (recipe + embedded `src` files only, dependency
+    /// layers left in the registry) still deploys, pulling deps at apply time.
+    /// Decoupled from `offline_blobs.is_some()`: thin-online HAS a (partial) blob
+    /// map (the embedded files) yet is NOT strict-offline.
+    pub offline: bool,
     /// Declared materials by name (D-034), each entry holding the per-arch
     /// variants (D-048); `place` picks the one matching `target_arch`.
     pub materials: BTreeMap<String, Vec<crate::component::Material>>,
@@ -393,6 +401,7 @@ impl PlanContext {
             vars,
             source: OnlineSource::with_default_mirrors(),
             offline_blobs: None,
+            offline: false,
             materials: BTreeMap::new(),
             roles_dir: PathBuf::from("roles"),
             host_roles: Vec::new(),
@@ -403,10 +412,30 @@ impl PlanContext {
         }
     }
 
-    /// Switch this context into offline mode with a blob map.
+    /// Switch this context into strict-offline (air-gap) mode with a FULL blob
+    /// map: every material must be present or `place`/etc. error out.
     pub fn with_offline(mut self, blobs: BTreeMap<String, PathBuf>) -> Self {
         self.offline_blobs = Some(blobs);
+        self.offline = true;
         self
+    }
+
+    /// Thin-online (D-087): a PARTIAL blob map (typically just the embedded
+    /// `src` files a thin pull fetched) while staying online — materials absent
+    /// from the map are fetched online at apply time. `offline` stays `false`.
+    pub fn with_local_blobs(mut self, blobs: BTreeMap<String, PathBuf>) -> Self {
+        self.offline_blobs = Some(blobs);
+        self
+    }
+
+    /// Look up a material's pre-fetched local blob, if this context carries one
+    /// (D-087). `Some` → use the packed blob; `None` → caller fetches online, or
+    /// errors when `self.offline`. Keyed by `name@arch` (D-048), falling back to
+    /// the plain name (arch-neutral / legacy single-arch packs).
+    pub fn blob_for(&self, m: &crate::component::Material) -> Option<PathBuf> {
+        let blobs = self.offline_blobs.as_ref()?;
+        let key = Self::material_blob_key(m);
+        blobs.get(&key).or_else(|| blobs.get(&m.name)).cloned()
     }
 
     /// Register a declared material under its name (D-048: same-named variants
@@ -475,7 +504,7 @@ impl PlanContext {
     /// Offline mode skips mirror rewrite (the raw URL is the manifest key).
     pub fn rendered_url(&self, url_tmpl: &str) -> crate::Result<String> {
         let raw = render(url_tmpl, &self.vars)?;
-        Ok(if self.offline_blobs.is_some() {
+        Ok(if self.offline {
             raw
         } else {
             self.source.rewrite(&raw)
@@ -541,7 +570,7 @@ pub fn plan_from_task(
     actions: &[crate::task::ActionStep],
     ctx: &PlanContext,
 ) -> crate::Result<Vec<TaskStep>> {
-    let offline = ctx.offline_blobs.is_some();
+    let offline = ctx.offline;
     let os = ctx.os;
 
     // 1) Filter by the closed-enum conditions (NOT free expressions, D-036).
@@ -796,20 +825,21 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 OsFamily::Rhel => Some(format!("rpm -q {} >/dev/null 2>&1", pkgs.join(" "))),
                 OsFamily::Unknown => None,
             };
-            // Offline + an os_package material → install from the packed closure.
-            let local_archive = match (material, &ctx.offline_blobs) {
-                (Some(name), Some(blobs)) => {
+            // A packed os_package blob → install from the closure; else (online)
+            // the target installs from its own package source (D-087 three-state).
+            let local_archive = match material {
+                Some(name) => {
                     let m = ctx.resolve_material(name)?;
-                    let key = PlanContext::material_blob_key(m);
-                    Some(
-                        blobs
-                            .get(&key)
-                            .or_else(|| blobs.get(name))
-                            .ok_or_else(|| anyhow::anyhow!("offline bundle missing os_package '{key}'"))?
-                            .clone(),
-                    )
+                    match ctx.blob_for(m) {
+                        Some(p) => Some(p),
+                        None if ctx.offline => {
+                            let key = PlanContext::material_blob_key(m);
+                            anyhow::bail!("offline bundle missing os_package '{key}'")
+                        }
+                        None => None,
+                    }
                 }
-                _ => None,
+                None => None,
             };
             Op::PackageInstall {
                 phase,
@@ -824,20 +854,20 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
             let dest = dest.display().to_string();
             // Pick the variant matching the target arch (D-048), online or off.
             let m = ctx.resolve_material(material)?;
-            if let Some(blobs) = &ctx.offline_blobs {
-                // Offline: push the packed blob, keyed by name (or name@arch).
+            if let Some(local) = ctx.blob_for(m) {
+                // A packed blob (strict-offline, or the embedded-file layer of a
+                // thin-online pull): push it verbatim, keyed by name (or name@arch).
                 let key = PlanContext::material_blob_key(m);
-                let local = blobs
-                    .get(&key)
-                    .or_else(|| blobs.get(material)) // legacy single-arch packs
-                    .ok_or_else(|| anyhow::anyhow!("offline bundle missing material '{key}'"))?;
                 Op::PushFile {
                     phase,
-                    describe: format!("place (offline) {key} -> {dest}"),
-                    local_path: local.clone(),
+                    describe: format!("place (blob) {key} -> {dest}"),
+                    local_path: local,
                     dest,
                     mode: mode.clone(),
                 }
+            } else if ctx.offline {
+                let key = PlanContext::material_blob_key(m);
+                anyhow::bail!("offline bundle missing material '{key}'")
             } else if let Some(src) = &m.src {
                 // Online + hand-authored local file (D-066): push it from the
                 // control machine's task dir (no URL to curl). Copy semantics.
@@ -862,7 +892,7 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 } else {
                     render(tmpl, &ctx.vars)?
                 };
-                let url = if ctx.offline_blobs.is_some() { raw } else { ctx.source.rewrite(&raw) };
+                let url = ctx.source.rewrite(&raw);
                 let mut cmd = format!("curl -fL --retry 3 -o '{dest}' '{url}'");
                 if let Some(mode) = mode {
                     cmd.push_str(&format!(" && chmod {mode} '{dest}'"));
@@ -883,14 +913,11 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 // D-073: fetch the material AND extract in one step. Offline → the
                 // packed blob; online → its url_tmpl (arch-injected like `place`).
                 let m = ctx.resolve_material(name)?;
-                let (local_archive, url) = if let Some(blobs) = &ctx.offline_blobs {
-                    let key = PlanContext::material_blob_key(m);
-                    let local = blobs
-                        .get(&key)
-                        .or_else(|| blobs.get(name))
-                        .ok_or_else(|| anyhow::anyhow!("offline bundle missing material '{key}'"))?
-                        .clone();
+                let (local_archive, url) = if let Some(local) = ctx.blob_for(m) {
                     (Some(local), None)
+                } else if ctx.offline {
+                    let key = PlanContext::material_blob_key(m);
+                    anyhow::bail!("offline bundle missing material '{key}'")
                 } else {
                     let tmpl = m.url_tmpl.as_deref().ok_or_else(|| {
                         anyhow::anyhow!("unarchive: material '{name}' has no url_tmpl for online fetch")
@@ -937,14 +964,12 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
             // render with minijinja + inventory context, lower to a plain WriteFile
             // (so it ships in the recipe and works offline).
             let m = ctx.resolve_material(material)?;
-            let raw = if let Some(blobs) = &ctx.offline_blobs {
-                let key = PlanContext::material_blob_key(m);
-                let path = blobs
-                    .get(&key)
-                    .or_else(|| blobs.get(material))
-                    .ok_or_else(|| anyhow::anyhow!("offline bundle missing template material '{key}'"))?;
-                std::fs::read_to_string(path)
+            let raw = if let Some(path) = ctx.blob_for(m) {
+                std::fs::read_to_string(&path)
                     .map_err(|e| anyhow::anyhow!("read template blob {}: {e}", path.display()))?
+            } else if ctx.offline {
+                let key = PlanContext::material_blob_key(m);
+                anyhow::bail!("offline bundle missing template material '{key}'")
             } else {
                 let src = m.src.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("template: material '{material}' has no `src` (a local .j2)")
@@ -1013,17 +1038,13 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                     anyhow::anyhow!("load_image: material '{name}' has no `ref` (kind: image)")
                 })?;
                 let reference = render(reference, &ctx.vars)?;
-                let local_archive = if let Some(blobs) = &ctx.offline_blobs {
-                    let key = PlanContext::material_blob_key(m);
-                    Some(
-                        blobs
-                            .get(&key)
-                            .or_else(|| blobs.get(name.as_str()))
-                            .ok_or_else(|| anyhow::anyhow!("offline bundle missing image material '{key}'"))?
-                            .clone(),
-                    )
-                } else {
-                    None
+                let local_archive = match ctx.blob_for(m) {
+                    Some(p) => Some(p),
+                    None if ctx.offline => {
+                        let key = PlanContext::material_blob_key(m);
+                        anyhow::bail!("offline bundle missing image material '{key}'")
+                    }
+                    None => None,
                 };
                 images.push(ImageItem { reference, local_archive });
             }
@@ -1736,6 +1757,51 @@ mod tests {
                 assert_eq!(creates.as_deref(), Some("/usr/local/bin/app"));
             }
             other => panic!("expected UnarchiveMaterial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn three_state_place_resolution() {
+        // D-087: `place` resolves a material per-material, not by a global offline
+        // flag — blob present → use blob; absent + strict-offline → error; absent
+        // + online → fetch. This makes thin-online (partial blobmap) deploy work.
+        let place = |name: &str| Action::Place {
+            material: name.into(),
+            dest: PathBuf::from("/usr/local/bin/x"),
+            mode: Some("0755".into()),
+        };
+
+        // (1) Thin-online: a url material ABSENT from the (partial) blobmap is
+        // fetched online — even though offline_blobs IS set (the embedded layer).
+        let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
+        ctx.add_material(test_material("dep", "https://x/dep"));
+        ctx = ctx.with_local_blobs(BTreeMap::new()); // partial map, no "dep"; offline=false
+        match action_op(Phase::Install, &place("dep"), &ctx).unwrap() {
+            Op::Shell { cmd, .. } => assert!(cmd.contains("curl"), "thin-online → online curl, got {cmd}"),
+            other => panic!("expected online Shell, got {other:?}"),
+        }
+
+        // (2) Strict-offline: the same missing material is a hard error.
+        let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
+        ctx.add_material(test_material("dep", "https://x/dep"));
+        ctx = ctx.with_offline(BTreeMap::new()); // offline=true, empty map
+        assert!(
+            action_op(Phase::Install, &place("dep"), &ctx).is_err(),
+            "strict-offline + missing blob must error, not fetch online"
+        );
+
+        // (3) A material present in the blobmap is pushed from the blob (thin-online).
+        let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
+        let mut m = test_material("cfg", "unused");
+        m.url_tmpl = None;
+        m.src = Some(PathBuf::from("files/cfg")); // self-authored embedded file
+        ctx.add_material(m);
+        let mut blobs = BTreeMap::new();
+        blobs.insert("cfg".to_string(), PathBuf::from("/blob/cfg"));
+        ctx = ctx.with_local_blobs(blobs);
+        match action_op(Phase::Install, &place("cfg"), &ctx).unwrap() {
+            Op::PushFile { local_path, .. } => assert_eq!(local_path, PathBuf::from("/blob/cfg")),
+            other => panic!("expected PushFile from blob, got {other:?}"),
         }
     }
 

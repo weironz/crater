@@ -16,6 +16,10 @@ use crate::bundle::sha256_hex;
 
 const MT_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 const ANN_REF: &str = "org.opencontainers.image.ref.name";
+// B 类 artifact layer typing (D-087) — kept in sync with bundle.rs, used to
+// skip `dependency` material layers on a thin pull.
+const MT_MATERIAL: &str = "application/vnd.crater.material.v1";
+const ANN_MATERIAL_FETCH: &str = "org.crater.material.fetch";
 
 #[derive(Debug, Clone)]
 pub struct StoredImage {
@@ -162,6 +166,34 @@ impl ImageStore {
     /// (D-033). Blob *data* still comes from `pull()`; their sha256 match the
     /// digests the raw manifest references (content-addressed).
     pub async fn pull(&self, reference: &str) -> crate::Result<()> {
+        self.pull_layers(reference, false).await
+    }
+
+    /// Thin pull (D-087): manifest + config + recipe + `embedded` material layers
+    /// only. `dependency` layers (have url/ref/pkgs) are left in the registry and
+    /// fetched online at apply — the basis for thin-online deploy of a ref.
+    pub async fn pull_thin(&self, reference: &str) -> crate::Result<()> {
+        self.pull_layers(reference, true).await
+    }
+
+    /// True iff every blob (config + all layers) this artifact's manifest
+    /// references is present locally (D-087): distinguishes a full local copy
+    /// from a thin pull, so an `--offline` apply can re-pull in full if needed.
+    pub fn has_all_layers(&self, reference: &str) -> bool {
+        let Ok(m) = self.resolve_manifest(reference) else { return false };
+        let cfg_ok = m["config"]["digest"]
+            .as_str()
+            .map(|d| self.blob_path(strip(d)).exists())
+            .unwrap_or(true);
+        let layers_ok = m["layers"].as_array().map(|ls| {
+            ls.iter().all(|l| {
+                l["digest"].as_str().map(|d| self.blob_path(strip(d)).exists()).unwrap_or(false)
+            })
+        }).unwrap_or(true);
+        cfg_ok && layers_ok
+    }
+
+    async fn pull_layers(&self, reference: &str, thin: bool) -> crate::Result<()> {
         use oci_client::manifest as mt;
         use oci_client::Reference;
 
@@ -230,6 +262,17 @@ impl ImageStore {
         }
         if let Some(ls) = m["layers"].as_array() {
             for l in ls {
+                // Thin pull (D-087): skip `dependency` material layers (fetched
+                // online at apply). recipe + `embedded` (self-authored) + any
+                // non-material layer are always pulled. Missing fetch annotation
+                // ⇒ embedded (old artifacts pull in full — safe).
+                if thin {
+                    let mt_l = l["mediaType"].as_str().unwrap_or("");
+                    let fetch = l["annotations"][ANN_MATERIAL_FETCH].as_str().unwrap_or("embedded");
+                    if mt_l == MT_MATERIAL && fetch == "dependency" {
+                        continue;
+                    }
+                }
                 if let Some(d) = l["digest"].as_str() {
                     digests.push(d.to_string());
                 }

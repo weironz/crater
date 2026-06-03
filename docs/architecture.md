@@ -129,7 +129,7 @@ material.v1     cfg-keepalived    361B          # 内容 = minijinja 模板
 - **内容寻址**:blob 文件名 = 其内容 sha256(改一字节 digest 就变)→ 天然去重(同二进制多处引用只存一份)+ 防篡改。
 - **非 rootfs**:目标机路径不编码进 OCI;`place dest: /usr/local/bin/kubeadm` 是 recipe 在 apply 时决定的。
 - **取用**(`bundle::materialize_component`):遍历 layers,recipe 层 → 写出配方;material 层 → 建 `blobmap[name] = blobs/sha256/<digest>`,供 recipe 的 `place` 等按名引用。
-- **增量/惰性友好**:每个 material 已是独立 layer → [现状] `store.pull` 拉镜像时跳过已有 blob(D-078);[规划] apply 时**只拉计划引用的 layer**(惰性 partial pull),"task 定义得多"不拖垮单次部署。
+- **增量/惰性友好**:每个 material 已是独立 layer → [现状] `store.pull` 拉镜像时跳过已有 blob(D-078);[现状,D-088] `apply <ref>` 默认**瘦拉**(`pull_thin`)—— 只拉 recipe + 自建文件(`embedded`)层,依赖(`dependency`)层留在 registry、apply 时在线现拉;`--offline` 才全量拉做离线 replay。"task 定义得多"不拖垮单次部署。
 
 ### 5.1 OCI 操作栈:协议靠 oci-client,制品语义自写 [现状]
 

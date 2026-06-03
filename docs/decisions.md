@@ -1029,3 +1029,17 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - **制品语义层 = crater 自写**(`store.rs`/`bundle.rs`):本地 store(index.json/oci-layout/内容寻址/tag/retag/list/增量去重)+ B类 artifact 合成与还原(`materialize_component`)。这层任何工具(含 oras)都不提供 —— artifact 的 recipe/material 结构是 crater 的语义。
 - **关键经验**:刻意用低层 `pull_blob`(而非高层 `pull`)—— 高层 `pull` 面向 image,会合成 image-manifest 丢掉 `artifactType` + 自定义 layer mediaType(D-032 已踩坑验证)。
 - **直接收益**:`pull_manifest_raw` + `pull_blob` 天然分离 → **partial pull(选择性拉层)零新依赖**,是「瘦在线部署」(默认只拉 recipe + 自建文件层、依赖层在线现拉;`--offline` 全量)的实现基础。详见 [architecture.md §5.1](architecture.md)。
+
+## 2026-06-03 · 瘦在线部署:三态(纯在线/瘦在线/纯离线)+ 层按来源分类(D-088)
+
+### D-088 apply &lt;ref&gt; 默认只拉 recipe + 自建文件,依赖在线现拉;--offline 才全量
+- **背景**:`apply <ref>` 原本全量拉所有 material blob、走离线 replay。用户要:默认只拉 recipe + 自建配置/模板(轻),依赖在线现拉;`--offline` 才全量拉走离线。
+- **关键洞见(用户)**:自建 config/模板(`src`,**无下载源**)与可联网依赖(`url_tmpl`/`ref`/`packages`)是两类层 —— 前者必须随 recipe 走(否则 ref 部署时控制机无处可寻),后者可在线获取。不是"边界打补丁",是**层重新分类**。
+- **决策**:
+  - **build**:material 层按来源打 annotation `org.crater.material.fetch` = `embedded`(src,无源)| `dependency`(url/ref/pkgs)。缺失视为 `embedded`(老制品安全全拉)。
+  - **pull**:`store.pull_thin` 跳过 `dependency` 层(用 oci-client `pull_manifest_raw` + `pull_blob` 分离 API,零新依赖,D-087);`store.pull` 全量;`has_all_layers` 判本地是否完整。
+  - **引擎**:`PlanContext` 加显式 `offline` 字段(脱离 `offline_blobs.is_some()` 推导);`place`/`extract`/`render_template`/`os_package`/`load_image` 五处取数改 **per-material 三分支**:本地有 blob→用 blob;无 + `offline`→报错(离线包缺料);无 + 在线→现拉(url/registry/apt;`src` 回退控制机本地路径)。
+  - **apply `<ref>`**:默认瘦在线(`pull_thin` + 部分 blobmap + `offline=false`);`--offline` 全量(`pull` + `offline=true`,本地不完整自动补全)。`.oci` 包恒 `offline=true`,`apply -f <file>` 恒在线。
+- **三态对照**:纯在线(`apply -f`,全现拉)/ 瘦在线(`apply <ref>`,recipe+自建文件本地、依赖在线)/ 纯离线(`apply <ref> --offline` 或 `.oci`,全 blob)。
+- **影响**:`engine.rs`(PlanContext.offline + `blob_for` + 五取数点 + 测试 `three_state_place_resolution`)、`bundle.rs`(层 `fetch` annotation + `materialize_component` 只收本地存在的 blob)、`store.rs`(`pull_thin`/`pull_layers`/`has_all_layers` + 常量)、`main.rs`(`--offline` flag + `apply_image_ref` 三态 + `offline` 贯通 `apply_task`/`run_task_on_host`/`ctx.offline`)。
+- **验证**:53 tests 绿;yq 实测:manifest 层 `yq-bin` 标 `fetch=dependency`;blob 在→`place (blob)`;删 blob(模拟瘦拉)默认→`place 在线 curl`;删 blob + `--offline`→识别本地不完整、试图全量补拉。
