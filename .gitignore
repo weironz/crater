@@ -26,3 +26,8 @@ Thumbs.db
 *.oci
 *.tar
 *.log
+
+# 编辑器交换/临时文件
+*.swp
+*.swo
+*~
