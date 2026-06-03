@@ -19,8 +19,9 @@ cd library/yq
 just                                    # 列出命令
 just build                              # 构建到本地库 ~/.crater/store
 just push                               # 构建并推送到 registry
-just save                               # 构建并导出离线 .oci
-just registry=192.168.1.5:5000 push     # 覆盖 registry(私有/离线库)
+just save                                       # 构建并导出离线 .oci
+just registry=192.168.1.5:5000 namespace=lib push  # 覆盖私有/离线库
 ```
 
-默认 `registry := "willdockerhub"`,改 `justfile` 顶部变量即可换成你的命名空间。
+`justfile` 顶部 `registry`(默认 `docker.io`)+ `namespace`(默认 `willdockerhub`)→
+ref = `docker.io/willdockerhub/yq:<version>`。换私有库只改 `registry`。
