@@ -57,6 +57,10 @@ done on local: changed=3 ok=2
 
 - agent 暂只流 stdout（结构化结果后续）。
 - 异构全覆盖需多 arch musl 随发布 + 控制端按 arch 内置选择（现需 `--agent-bin` 或 `dist/` 就位）。
-- ⚠️ `dist/` 的 musl 二进制要**跟代码同步重建**（`scripts/build-musl.sh`）：plan 格式演进后,
-  目标机缓存的旧 agent 会解析失败（实测旧 dist 解析 D-074 批量 load_image plan 报
-  `missing field reference`）。
+- **plan 格式版本检查**：plan 头部带 `format: N`（`engine::PLAN_FORMAT`,序列化结构变更时手动
+  bump）,agent 解析时校验,偏斜给明确指引而非 serde 报错：
+  ```
+  Error: plan 格式 v99 与本 agent 二进制的 v1 不匹配 —— 控制端与 agent 版本偏斜。
+         重建静态 agent(scripts/build-musl.sh)或 --agent-bin 指定新二进制;应急可 --shell
+  ```
+  （此检查之前的旧 dist agent 不认识 `format` 字段,帮不到它们——`dist/` 仍要随代码重建。）

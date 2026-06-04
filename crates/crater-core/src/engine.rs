@@ -559,16 +559,28 @@ pub struct TaskStep {
 /// runs `execute_task` locally — same agent model as the component plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskPlan {
+    /// Plan wire-format version (D-095). The control plane stamps
+    /// [`PLAN_FORMAT`]; the agent refuses a mismatch with rebuild guidance —
+    /// a clear error instead of serde's `missing field` (or worse, silent
+    /// misexecution) when a stale `dist/` agent meets a newer plan.
+    #[serde(default)]
+    pub format: u32,
     pub steps: Vec<TaskStep>,
     #[serde(default)]
     pub handlers: BTreeMap<String, Op>,
 }
+
+/// Bump on ANY serialization change to [`TaskPlan`]/[`TaskStep`]/[`Op`]/
+/// [`ImageItem`] (renamed/removed fields, semantic changes). History:
+///   1 = first stamped version (post D-074 batched ImageImport, D-095).
+pub const PLAN_FORMAT: u32 = 1;
 
 pub fn task_plan_to_yaml(
     steps: &[TaskStep],
     handlers: &BTreeMap<String, Op>,
 ) -> crate::Result<String> {
     let plan = TaskPlan {
+        format: PLAN_FORMAT,
         steps: steps.to_vec(),
         handlers: handlers.clone(),
     };
@@ -576,7 +588,15 @@ pub fn task_plan_to_yaml(
 }
 
 pub fn task_plan_from_yaml(text: &str) -> crate::Result<TaskPlan> {
-    Ok(serde_yaml::from_str(text)?)
+    let plan: TaskPlan = serde_yaml::from_str(text)?;
+    if plan.format != PLAN_FORMAT {
+        anyhow::bail!(
+            "plan 格式 v{} 与本 agent 二进制的 v{PLAN_FORMAT} 不匹配 —— 控制端与 agent 版本偏斜。\
+             重建静态 agent(scripts/build-musl.sh)或 --agent-bin 指定新二进制;应急可 --shell",
+            plan.format
+        );
+    }
+    Ok(plan)
 }
 
 /// Build an executable plan from a task's `actions` (D-037). **All control flow
@@ -2429,5 +2449,41 @@ mod tests {
         assert_eq!(back.len(), 2);
         assert_eq!(shell_check(&back[0]), Some("test -s '/usr/local/bin/x'"));
         assert_eq!(back[1].phase(), Phase::Verify);
+    }
+
+    /// D-095: the task plan carries a wire-format version. The control side
+    /// stamps PLAN_FORMAT; a mismatched (stale-agent / future) plan is refused
+    /// with rebuild guidance instead of a serde `missing field` error.
+    #[test]
+    fn task_plan_format_version_checked() {
+        let steps = vec![TaskStep {
+            op: Op::Shell {
+                phase: Phase::Install,
+                describe: "noop".into(),
+                cmd: "true".into(),
+                soft_fail: false,
+                check: None,
+            },
+            retries: 0,
+            ignore_errors: false,
+            notify: vec![],
+            id: String::new(),
+            throttle: None,
+            awaited_facts: vec![],
+        }];
+        // Round trip: stamped + accepted.
+        let yaml = task_plan_to_yaml(&steps, &BTreeMap::new()).unwrap();
+        assert!(yaml.contains(&format!("format: {PLAN_FORMAT}")));
+        assert_eq!(task_plan_from_yaml(&yaml).unwrap().format, PLAN_FORMAT);
+        // A plan from a different format (or unstamped, pre-D-095 → default 0)
+        // is refused with version-skew guidance.
+        let old = yaml.replace(
+            &format!("format: {PLAN_FORMAT}"),
+            &format!("format: {}", PLAN_FORMAT + 1),
+        );
+        let err = task_plan_from_yaml(&old).unwrap_err().to_string();
+        assert!(err.contains("版本偏斜"), "got: {err}");
+        let unstamped = yaml.replace(&format!("format: {PLAN_FORMAT}\n"), "");
+        assert!(task_plan_from_yaml(&unstamped).is_err());
     }
 }
