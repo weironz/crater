@@ -21,7 +21,7 @@
 | 通用 task（`crater apply <动作>`，Ansible 能力；含离线打包/agent） | [action-tasks.md](action-tasks.md) | D-037~D-046 |
 | 卸载/重置 `crater delete`（由 task `teardown:` 驱动，opt-in） | [delete-teardown.md](delete-teardown.md) | D-049 |
 | 部署状态 `crater task list/show/history`（marker + 控制端 Turso 库） | [task-state.md](task-state.md) | D-051~053 |
-| Web 看板 `crater ui`（Axum + htmx，只读，离线嵌入） | [web-ui.md](web-ui.md) | D-054 |
+| Web 看板 `crater ui`（Axum + htmx；verify/heal/delete 任务流 + token 鉴权） | [web-ui.md](web-ui.md) | D-054/058/099 |
 | YAML 纯数据铁律（残废模板渲染器） | （见 decisions） | D-036 |
 | 幂等回显 + apply 默认执行 | [idempotency-and-apply.md](idempotency-and-apply.md) | D-023/D-024 |
 | 内置模块（action 原语,与 Ansible 对齐） | [modules.md](modules.md) | D-067 |

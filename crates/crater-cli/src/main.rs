@@ -119,6 +119,11 @@ enum Cmd {
         bind: String,
         #[arg(long, default_value_t = 8080)]
         port: u16,
+        /// Access token (D-099): requests must present it (first visit
+        /// `http://host:port/?token=<t>` sets a cookie). REQUIRED when binding
+        /// beyond localhost — the UI can apply/delete deployments.
+        #[arg(long)]
+        token: Option<String>,
     },
     /// Build a task into a B 类 OCI artifact in the local store (like
     /// `docker build`). Export to a file with `crater save`.
@@ -428,7 +433,7 @@ async fn main() -> Result<()> {
             TaskCmd::Show { name, target, verify } => deployments::task_show(&name, target, verify).await,
             TaskCmd::History { limit } => deployments::task_history(limit).await,
         },
-        Cmd::Ui { bind, port } => ui::serve(&bind, port).await,
+        Cmd::Ui { bind, port, token } => ui::serve(&bind, port, token).await,
         Cmd::Build { file, tag, arch, no_cache, set } => {
             build::build_to_store(&file, tag, &arch, &set, no_cache).await
         }

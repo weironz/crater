@@ -1,18 +1,22 @@
-//! `crater ui` (D-054/056/057/058/059): a web dashboard over the deployment
+//! `crater ui` (D-054/056/057/058/059/099): a web dashboard over the deployment
 //! state DB. Axum + htmx (server-rendered fragments, polled). Pure Rust
 //! (hyper/tower/tokio, no C); htmx.js + CSS embedded → works air-gapped.
 //! Sidebar nav (Dashboard / Hosts / Host groups / Tasks). Light default theme +
 //! dark toggle. The UI is a *view* — logic stays in the engine/CLI (D-036);
-//! write actions (Verify/Heal) shell out to the CLI (D-058).
+//! write actions (Verify / Heal / Delete) shell out to the CLI as background
+//! JOBS whose output streams into a polled log panel (D-099); `--token` gates
+//! everything when exposed beyond localhost.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use axum::{
-    extract::Path as AxPath,
+    extract::{Path as AxPath, Request, State},
     http::header,
-    response::{Html, IntoResponse},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Router,
 };
@@ -26,11 +30,148 @@ const HTMX_JS: &[u8] = include_bytes!("../assets/htmx.min.js");
 /// configured inventory). Read at click time; missing ⇒ a runtime note.
 const INVENTORY: &str = "inventory.yaml";
 
-pub async fn serve(bind: &str, port: u16) -> Result<()> {
+// ---- background jobs (D-099) -------------------------------------------------
+// Write actions used to BLOCK the HTTP request until the CLI finished — minutes
+// for a real deployment. Now they spawn the CLI as a job; the UI polls the
+// job's log fragment until it exits.
+
+#[derive(Default)]
+struct Job {
+    title: String,
+    lines: Vec<String>,
+    done: bool,
+    ok: bool,
+}
+
+#[derive(Clone, Default)]
+struct AppState {
+    jobs: Arc<Mutex<BTreeMap<u64, Job>>>,
+    next_id: Arc<Mutex<u64>>,
+    token: Option<String>,
+}
+
+impl AppState {
+    /// Spawn `crater <args>` as a background job; returns the job id.
+    fn spawn_job(&self, title: String, args: Vec<String>) -> u64 {
+        let id = {
+            let mut n = self.next_id.lock().unwrap();
+            *n += 1;
+            *n
+        };
+        self.jobs.lock().unwrap().insert(id, Job { title, ..Default::default() });
+        let jobs = self.jobs.clone();
+        tokio::spawn(async move {
+            let push = |jobs: &Arc<Mutex<BTreeMap<u64, Job>>>, line: String| {
+                if let Some(j) = jobs.lock().unwrap().get_mut(&id) {
+                    j.lines.push(line);
+                }
+            };
+            let exe = match std::env::current_exe() {
+                Ok(e) => e,
+                Err(e) => {
+                    if let Some(j) = jobs.lock().unwrap().get_mut(&id) {
+                        j.lines.push(format!("spawn failed: {e}"));
+                        j.done = true;
+                    }
+                    return;
+                }
+            };
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let child = tokio::process::Command::new(exe)
+                .args(&args)
+                .env("CRATER_LOG", "info")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn();
+            let mut child = match child {
+                Ok(c) => c,
+                Err(e) => {
+                    push(&jobs, format!("spawn failed: {e}"));
+                    if let Some(j) = jobs.lock().unwrap().get_mut(&id) {
+                        j.done = true;
+                    }
+                    return;
+                }
+            };
+            // Interleave stdout+stderr as they arrive (tracing logs go to stderr).
+            let mut out = BufReader::new(child.stdout.take().unwrap()).lines();
+            let mut err = BufReader::new(child.stderr.take().unwrap()).lines();
+            let (jo, je) = (jobs.clone(), jobs.clone());
+            let to = tokio::spawn(async move {
+                while let Ok(Some(l)) = out.next_line().await {
+                    if let Some(j) = jo.lock().unwrap().get_mut(&id) {
+                        j.lines.push(l);
+                    }
+                }
+            });
+            let te = tokio::spawn(async move {
+                while let Ok(Some(l)) = err.next_line().await {
+                    if let Some(j) = je.lock().unwrap().get_mut(&id) {
+                        j.lines.push(l);
+                    }
+                }
+            });
+            let status = child.wait().await;
+            let _ = to.await;
+            let _ = te.await;
+            if let Some(j) = jobs.lock().unwrap().get_mut(&id) {
+                j.ok = status.map(|s| s.success()).unwrap_or(false);
+                j.done = true;
+            }
+        });
+        id
+    }
+}
+
+/// Token gate (D-099): when a token is configured, every request must carry it
+/// — `?token=` (first visit; answered with a cookie redirect), the cookie, or
+/// an `Authorization: Bearer` header. Constant requirement, no sessions.
+async fn auth_mw(State(st): State<AppState>, req: Request, next: Next) -> Response {
+    let Some(want) = &st.token else { return next.run(req).await };
+    // ?token=<t> → set cookie, redirect to clean URL (login-by-link).
+    if let Some(q) = req.uri().query() {
+        if let Some(t) = q.split('&').find_map(|kv| kv.strip_prefix("token=")) {
+            if t == want {
+                return (
+                    [(header::SET_COOKIE, format!("crater_token={t}; Path=/; SameSite=Strict"))],
+                    Redirect::to(req.uri().path()),
+                )
+                    .into_response();
+            }
+        }
+    }
+    let cookie_ok = req
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|c| c.to_str().ok())
+        .is_some_and(|c| c.split(';').any(|kv| kv.trim() == format!("crater_token={want}")));
+    let bearer_ok = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|h| h == format!("Bearer {want}"));
+    if cookie_ok || bearer_ok {
+        return next.run(req).await;
+    }
+    (
+        axum::http::StatusCode::UNAUTHORIZED,
+        Html("<h3>401</h3><p>带 token 访问:<code>http://&lt;host&gt;:&lt;port&gt;/?token=&lt;token&gt;</code>(之后走 cookie)</p>"),
+    )
+        .into_response()
+}
+
+pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
     // Validate the DB is openable up front; handlers re-open per request so they
     // always see the latest writes from the CLI process (Turso cross-process
     // visibility — a fresh handle reads committed state, D-056).
     TursoStore::open().await?;
+    // Exposure guard (D-099): the UI can apply/delete — refuse a non-localhost
+    // bind without a token instead of silently serving the LAN.
+    let local = bind == "127.0.0.1" || bind == "::1" || bind == "localhost";
+    if !local && token.is_none() {
+        anyhow::bail!("--bind {bind} 暴露到本机之外,必须配 --token <t>(UI 能 apply/delete)");
+    }
+    let st = AppState { token, ..Default::default() };
     let app = Router::new()
         .route("/", get(index))
         .route("/view/dashboard", get(view_dashboard))
@@ -43,7 +184,11 @@ pub async fn serve(bind: &str, port: u16) -> Result<()> {
         .route("/api/hosts", get(hosts_fragment))
         .route("/api/verify", post(verify_action))
         .route("/api/apply/{deployment}", post(apply_action))
-        .route("/htmx.min.js", get(htmx_js));
+        .route("/api/delete/{deployment}", post(delete_action))
+        .route("/api/job/{id}", get(job_fragment))
+        .route("/htmx.min.js", get(htmx_js))
+        .layer(middleware::from_fn_with_state(st.clone(), auth_mw))
+        .with_state(st);
     let addr: SocketAddr = format!("{bind}:{port}")
         .parse()
         .map_err(|e| anyhow::anyhow!("bad bind address {bind}:{port}: {e}"))?;
@@ -157,6 +302,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .btn:hover{border-color:var(--accent);color:var(--accent-2)}
   .btn-heal{font-size:.72rem;padding:.18rem .6rem;background:transparent}
   .btn-heal:hover{color:var(--accent-2);border-color:var(--accent)}
+  .btn-danger:hover{color:var(--drift);border-color:var(--drift)}
+  .joblog{margin:0;padding:.7rem 1.25rem;font-size:.74rem;line-height:1.5;color:var(--muted);
+          background:var(--surface-2);border-top:1px solid var(--border);max-height:280px;overflow:auto;white-space:pre-wrap}
   .note{padding:.7rem 1.25rem;color:var(--faint);font-size:.8rem}
   .htmx-request.btn,.htmx-request .btn{opacity:.6;pointer-events:none}
   @media(max-width:820px){.stats{grid-template-columns:repeat(2,1fr)}.sidebar{width:64px}.sidebar .brand span,.nav span,.navlabel{display:none}}
@@ -209,8 +357,12 @@ async fn view_dashboard() -> Html<&'static str> {
 }
 
 async fn view_tasks() -> Html<&'static str> {
+    // `#jobs` is a separate, non-polled area (D-099): a write action's log
+    // panel lives there, safe from the deployments pane's own 5s refresh.
     Html(
-        r#"<section class="panel"><h2><span class="mk">✦</span> Deployments</h2>
+        r#"<section class="panel"><h2><span class="mk">⚙</span> Operations</h2>
+  <div id="jobs"><div class="note">no operation running — verify / heal / delete land here</div></div></section>
+<section class="panel"><h2><span class="mk">✦</span> Deployments</h2>
   <div id="deps-pane" hx-get="/api/deployments" hx-trigger="load, every 5s" hx-swap="innerHTML"><div class="empty">loading…</div></div></section>"#,
     )
 }
@@ -324,7 +476,7 @@ async fn render_deployments() -> String {
         Ok(d) => d,
         Err(e) => return format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string())),
     };
-    let toolbar = "<div class='toolbar'><button class='btn' hx-post='/api/verify' hx-target='#deps-pane' hx-swap='innerHTML'>↻ Verify now</button></div>";
+    let toolbar = "<div class='toolbar'><button class='btn' hx-post='/api/verify' hx-target='#jobs' hx-swap='innerHTML'>↻ Verify now</button></div>";
     if deps.is_empty() {
         return format!("{toolbar}<div class='empty'>no deployments recorded</div>");
     }
@@ -365,8 +517,11 @@ async fn render_deployments() -> String {
             "<span class='pill unknown'><span class='d'></span>unknown</span>".to_string()
         };
         let checked = if a.checked > 0 { state::fmt_epoch(a.checked) } else { "—".to_string() };
+        // heal: plain confirm. delete: TYPE-THE-NAME prompt (D-099) — htmx
+        // sends the answer as HX-Prompt; the server only proceeds on equality.
         let heal = format!(
-            "<td><button class='btn btn-heal' hx-post='/api/apply/{d}' hx-target='#deps-pane' hx-swap='innerHTML' hx-confirm='Re-apply (heal) {d} to its hosts?'>heal</button></td>",
+            "<td><button class='btn btn-heal' hx-post='/api/apply/{d}' hx-target='#jobs' hx-swap='innerHTML' hx-confirm='Re-apply (heal) {d} to its hosts?'>heal</button> \
+             <button class='btn btn-heal btn-danger' hx-post='/api/delete/{d}' hx-target='#jobs' hx-swap='innerHTML' hx-prompt='危险:运行 {d} 的 teardown 卸载。输入部署名确认:'>delete</button></td>",
             d = esc(&dep)
         );
         rows.push_str(&format!(
@@ -460,21 +615,7 @@ async fn history_fragment() -> Html<String> {
     ))
 }
 
-// ---- write actions (shell out to the CLI, D-058) ----------------------------
-
-async fn run_crater(args: &[&str]) -> std::result::Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let out = tokio::process::Command::new(exe)
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-    }
-}
+// ---- write actions: background jobs + polled log panel (D-058/D-099) --------
 
 fn no_inventory_note() -> Html<String> {
     Html(format!(
@@ -482,33 +623,116 @@ fn no_inventory_note() -> Html<String> {
     ))
 }
 
-async fn verify_action() -> Html<String> {
-    if !std::path::Path::new(INVENTORY).exists() {
-        return no_inventory_note();
-    }
-    if let Err(e) = run_crater(&["task", "list", "--verify", "-i", INVENTORY]).await {
-        return Html(format!("<div class='note fail'>verify failed: {}</div>", esc(&e)));
-    }
-    Html(render_deployments().await)
+/// The panel a write action returns: polls the job's log until it exits.
+fn job_panel(id: u64) -> Html<String> {
+    Html(format!(
+        "<div hx-get='/api/job/{id}' hx-trigger='load, every 1s' hx-swap='innerHTML'><div class='note'>启动中…</div></div>"
+    ))
 }
 
-async fn apply_action(AxPath(dep): AxPath<String>) -> Html<String> {
+/// Polled job fragment: last log lines + status. While the job runs, plain 200
+/// keeps the panel's 1s poll alive; when done, htmx's **286** status code stops
+/// the polling — the deployments table (own 5s poll) then shows the new state.
+async fn job_fragment(State(st): State<AppState>, AxPath(id): AxPath<u64>) -> Response {
+    let jobs = st.jobs.lock().unwrap();
+    let Some(j) = jobs.get(&id) else {
+        // 286 also stops the poll for an unknown id (e.g. after a UI restart).
+        return (
+            axum::http::StatusCode::from_u16(286).unwrap(),
+            Html("<div class='note fail'>job not found(UI 重启过?)</div>".to_string()),
+        )
+            .into_response();
+    };
+    let tail: String = j
+        .lines
+        .iter()
+        .rev()
+        .take(14)
+        .rev()
+        .map(|l| format!("{}\n", esc(l)))
+        .collect();
+    let status = if !j.done {
+        "<span class='pill apply'><span class='d'></span>running</span>"
+    } else if j.ok {
+        "<span class='pill ok'><span class='d'></span>完成</span>"
+    } else {
+        "<span class='pill drift'><span class='d'></span>失败</span>"
+    };
+    let body = format!(
+        "<div class='note'><b>{}</b> {status}</div><pre class='joblog mono'>{}</pre>",
+        esc(&j.title),
+        if tail.is_empty() { "…".into() } else { tail }
+    );
+    if j.done {
+        // 286: htmx's "stop polling" status.
+        (axum::http::StatusCode::from_u16(286).unwrap(), Html(body)).into_response()
+    } else {
+        Html(body).into_response()
+    }
+}
+
+async fn verify_action(State(st): State<AppState>) -> Html<String> {
     if !std::path::Path::new(INVENTORY).exists() {
         return no_inventory_note();
     }
-    let source = match TursoStore::open_read().await {
-        Ok(s) => s
-            .list_deployments()
-            .await
-            .ok()
-            .and_then(|ds| ds.into_iter().find(|d| d.deployment == dep).map(|d| d.source)),
-        Err(_) => None,
-    };
-    let Some(source) = source else {
+    let id = st.spawn_job(
+        "verify".into(),
+        vec!["task".into(), "list".into(), "--verify".into(), "-i".into(), INVENTORY.into()],
+    );
+    job_panel(id)
+}
+
+/// Look up a deployment's source ref in the state DB.
+async fn source_of(dep: &str) -> Option<String> {
+    TursoStore::open_read()
+        .await
+        .ok()?
+        .list_deployments()
+        .await
+        .ok()?
+        .into_iter()
+        .find(|d| d.deployment == dep)
+        .map(|d| d.source)
+}
+
+async fn apply_action(State(st): State<AppState>, AxPath(dep): AxPath<String>) -> Html<String> {
+    if !std::path::Path::new(INVENTORY).exists() {
+        return no_inventory_note();
+    }
+    let Some(source) = source_of(&dep).await else {
         return Html(format!("<div class='note fail'>deployment '{}' not found</div>", esc(&dep)));
     };
-    if let Err(e) = run_crater(&["apply", &dep, &source, "-i", INVENTORY]).await {
-        return Html(format!("<div class='note fail'>heal '{}' failed: {}</div>", esc(&dep), esc(&e)));
+    let id = st.spawn_job(
+        format!("heal {dep}"),
+        vec!["apply".into(), dep, source, "-i".into(), INVENTORY.into()],
+    );
+    job_panel(id)
+}
+
+/// Delete a deployment (D-099). Stronger confirm than heal: the button's
+/// `hx-prompt` answer must EQUAL the deployment name (HX-Prompt header) —
+/// type-the-name, AWX/GitHub-style.
+async fn delete_action(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+    AxPath(dep): AxPath<String>,
+) -> Html<String> {
+    if !std::path::Path::new(INVENTORY).exists() {
+        return no_inventory_note();
     }
-    Html(render_deployments().await)
+    let typed = headers.get("HX-Prompt").and_then(|v| v.to_str().ok()).unwrap_or("");
+    if typed != dep {
+        return Html(format!(
+            "<div class='note fail'>未删除:输入 '{}' 与部署名 '{}' 不一致</div>",
+            esc(typed), esc(&dep)
+        ));
+    }
+    let Some(source) = source_of(&dep).await else {
+        return Html(format!("<div class='note fail'>deployment '{}' not found</div>", esc(&dep)));
+    };
+    let id = st.spawn_job(
+        format!("delete {dep}"),
+        vec!["delete".into(), source, "-i".into(), INVENTORY.into()],
+    );
+    job_panel(id)
 }

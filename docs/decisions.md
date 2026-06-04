@@ -1152,3 +1152,16 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **验证**:68 tests 绿(项目制品 round-trip:locked recipe 解析、component 带 ref、task-only 包无项目);真机 73.11:demo-stack(yq+rustfs)build(yq 缓存命中)→ save 115MB 单包(1 project + 2 component,11 blobs)→ 清机 apply:2 play 顺序离线部署(rustfs api/console 200)→ 重跑全幂等(blob cached,changed=0)→ delete 逆序:rustfs 拆净、yq 优雅跳过、零残留。
 - **边界**:同名 task 两版本进一个 project 暂不支持(recipe 目录按名落盘互覆;同 ref 不同输入已在 build 报错兜住);跨 play hostvars、project inspect 仍后续。
 - **关联**:D-083(project)、D-095(blob staging)、D-096(构建缓存)、D-087(thin/offline)。
+
+## 2026-06-04 · UI Phase 1b:后台任务流 + Delete 强确认 + token 鉴权(D-099)
+
+### D-099 UI 写操作改后台任务(286 停轮询日志面板);Delete 输名确认;--token 守门
+
+- **背景**:D-058 的 verify/heal 是**同步 handler**——阻塞 HTTP 请求直到 CLI 跑完,真实部署要几分钟,页面假死且看不到过程;Delete(最危险)当时刻意没做;`--bind 0.0.0.0` 裸奔无鉴权。这三项就是 D-054/058 记下的 Phase 1b 后续。
+- **决策**:
+  - **后台任务流**:写操作 spawn `crater <args>` 子进程(stdout+stderr 逐行进内存 JobStore),立即返回任务面板;面板每 1s 轮询 `/api/job/{id}` 显示日志尾部,完成时服务端回 **htmx 286 状态码**(htmx 原生"停止轮询"语义)+ 成败 pill。面板在独立 `#jobs` 区,不被部署表的 5s 自刷覆盖。日志在内存,UI 重启即失(286 兜底停轮询)。
+  - **Delete**:每行 delete 按钮,`hx-prompt` 弹输入框,服务端校验 `HX-Prompt` 头**等于部署名**才执行(GitHub/AWX 式 type-the-name;heal 仍是普通 confirm)。跑 `crater delete <source> -i inventory.yaml`,凭据约定同 D-058(当前目录 inventory.yaml)。
+  - **鉴权**:`--token <t>` → axum 中间件统一校验 `?token=`(首访 303 + Set-Cookie)/ cookie / `Authorization: Bearer`,失败 401;**暴露守卫**:`--bind` 非 localhost 且无 token → 启动直接报错(UI 能 apply/delete,不允许裸奔到 LAN)。
+- **验证**:68 tests 绿;curl 全矩阵:401/303+cookie/Bearer 200/错 token 401/无 token 非本机 bind 启动拒绝;verify 任务:POST → 面板 → 轮询 200(running)→ 286(完成/失败 + 日志尾,实测 73.13 关机的 `No route to host` 直接呈现);delete 门:空输入/输错名拒绝、输对过门。
+- **边界**:单静态令牌(无多用户/审计);TLS 交给反代;任务日志不落盘。
+- **关联**:D-054(看板)、D-058(写操作)、D-051~053(状态库)。
