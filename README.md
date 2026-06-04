@@ -1,91 +1,173 @@
-# Crater
+<div align="center">
 
-> Deploy anything — 纯 Rust 单二进制、零运行时依赖的**声明式远程执行引擎**(Ansible 心智),
-> 面向国内弱网 / 离线 / 政企环境。在线与离线同一套 task,自举 agent 默认执行。
+# 🛸 crater
+
+**Deploy anything, anywhere — even air-gapped.**
+
+纯 Rust · 单二进制 · 零运行时依赖的声明式远程执行引擎
+在线与离线同一套 YAML,整套环境一个文件交付
+
+[![Release](https://img.shields.io/github/v/release/weironz/crater?color=ea580c&label=release)](https://github.com/weironz/crater/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg?logo=rust)](https://www.rust-lang.org)
+[![Platform](https://img.shields.io/badge/platform-linux%20x86__64%20%7C%20aarch64-lightgrey.svg)](https://github.com/weironz/crater/releases)
+
+[安装](#-安装) · [快速开始](#-快速开始) · [离线交付](#-离线交付整套环境一个文件) · [功能文档](docs/features/README.md) · [模块参考](docs/modules/README.md) · [设计决策](docs/decisions.md)
+
+</div>
+
+---
+
+```console
+$ crater apply rustfs --host 10.0.0.5 --password ***
+[1/5] dir /data/rustfs                              → changed
+[2/5] preflight: docker ready                       → ok
+[3/5] load image (blob) rustfs:1.0.0-beta.5         → changed
+[4/5] container rustfs <- rustfs:1.0.0-beta.5       → changed
+[5/5] verify: rustfs api /health -> 200             → ok
+done: changed=3 ok=2 warn=0
+
+$ crater apply rustfs --host 10.0.0.5 --password ***   # 再跑一次 → 幂等
+done: changed=0 ok=5 warn=0
+```
+
+## 为什么是 crater
+
+面向**弱网 / 离线 / 气隙 / 信创**环境的整套交付,Ansible 的心智、terraform 的预演、docker 的制品分发——压进一个 19MB 的静态二进制:
+
+|   | crater | Ansible | 备注 |
+|---|---|---|---|
+| 运行时依赖 | **无**(musl 静态) | Python + 模块库 | 两端零安装,SSH 即可 |
+| 离线交付 | **一等公民**(OCI 制品) | 自己想办法 | build → 一个文件 → 气隙部署 |
+| YAML | **纯数据**(逻辑全在引擎) | Jinja2 图灵完备 | 可静态分析,模板写 `if/for` 直接报错 |
+| 执行模型 | 自举 agent(本地执行) | SSH 逐任务往返 | 多节点 7min → 17s 的差距来源 |
+| 变更预演 | `crater plan`(连真机探针) | check mode | terraform 习惯 |
+
+## ✨ 特性
+
+- 📦 **离线一包带走** — `build → save → apply`:task 打成 OCI 制品(recipe + 物料,内容寻址);**project 把整套环境(基线→docker→k8s→存储)装进一个 `.oci` 文件**,跨 task 共享 blob 自动去重
+- 🚀 **自举 agent** — 把自己(musl 静态,不挑 glibc)推到目标机本地执行,二进制按 sha256 缓存、离线物料按内容寻址 staging,重复部署零传输
+- 🔍 **`crater plan`** — terraform 式变更预演:连真机只跑只读探针,报告 `✓ ok / ~ would-change / ? unknown`,什么都不执行
+- 🏪 **registry 闭包分发** — project `push/pull` 连同全部 task 制品走私有仓库(zot/Harbor),`apply <ref>` 直连编排
+- ⚡ **构建缓存** — 源未变整体跳过(指纹);物料下载按声明 sha256/URL 寻址;重复 build 秒级
+- 🧩 **声明式模块** — `copy` `template` `service` `package` `docker_container` 等 13 个内置模块,幂等回显 ansible 式 `ok/changed`;复杂交付用 role 复用,准入有[章程](docs/module-charter.md)
+- 🌐 **多节点编排** — `when_role` / `register`+`hostvars` 跨节点传 fact / 组内并发组间串行 / `throttle`,真机验证过 3-master HA k8s
+- 🖥️ **Web 看板** — `crater ui`:部署状态/漂移检测,verify / plan / heal / delete 后台任务流 + 日志面板,token 鉴权,htmx 内嵌**离线可用**
+- 🔐 **安全默认** — SSH host key 校验(TOFU 钉 `~/.crater/known_hosts`)、build/apply 参数分治 gate(冻结闭包不可被 apply 篡改)
+- 🤖 **AI 副驾不司机** — `crater ai "大白话"` 生成 task,引擎确定性校验;`crater doctor` 离线规则诊断
+
+## 📥 安装
+
+**从 Release 下载**(musl 静态,任何 Linux 直接跑):
+
+```bash
+curl -fLO https://github.com/weironz/crater/releases/latest/download/crater-linux-$(uname -m)
+chmod +x crater-linux-$(uname -m) && sudo mv crater-linux-$(uname -m) /usr/local/bin/crater
+crater --version
+```
+
+| 资产 | 架构 | 说明 |
+|---|---|---|
+| `crater-linux-x86_64` | x86_64 | 真机久经验证 |
+| `crater-linux-aarch64` | ARM64(鲲鹏/飞腾/Graviton/树莓派) | qemu 冒烟通过,ARM 真机验证欢迎反馈 |
+
+**从源码构建**:
+
+```bash
+git clone https://github.com/weironz/crater && cd crater
+cargo build --release            # → target/release/crater
+scripts/build-musl.sh all        # 双架构 musl 静态 → dist/
+```
+
+## 🚀 快速开始
 
 ```bash
 crater apply install-yq.yaml                              # 本机
-crater apply yq --host 10.0.0.5,10.0.0.6 --password <pw>  # 少量机器(共用凭据)
-crater apply yq -i inventory.yaml                         # 大量机器(各自凭据)
-crater apply docker.io/library/app:v1 --host 10.0.0.5     # 直接部署镜像/制品
+crater apply yq --host 10.0.0.5,10.0.0.6 --password ***   # 少量机器(共用凭据)
+crater apply yq -i inventory.yaml                         # 机群(各自凭据,crater create inventory 生成)
+crater plan yq -i inventory.yaml                          # 先看会变什么(零执行)
+crater delete yq -i inventory.yaml                        # 卸载(task 自带 teardown 才可用,opt-in)
 ```
 
-## 核心理念
-
-- **YAML 是数据,逻辑在引擎(D-036,不可妥协)**:task YAML 永远是纯声明数据——条件 / 循环 / 计算 / 排序 / 重试全在 Rust;模板渲染器"故意残废",写 `if/for`/表达式直接报错。要 Ansible 的能力,不要它把 YAML 变程序的覆辙(可静态分析是 dry-run / preflight / AI 审核的前提)。
-- **引擎零产品知识(D-017)**:引擎只懂通用原语(`place`/`run_cmd`/`file`/`copy`/`service`…);"装什么"全是 task 数据。加一个可部署对象 = 写一个 task,绝不改 Rust。
-- **task 模型(D-037)**:`crater apply <task>` —— 一组 action(原语 + 参数 + `needs` 依赖)在目标机要达成的状态。装软件只是其一;它能在任意机器做任意事。
-- **自举 agent 默认(D-019/D-044)**:把 crater 二进制(按 sha256 缓存)+ 渲染好的 plan 推到目标,目标**本地执行**(少 SSH 往返);`--shell` 逃生到 agentless。
-- **离线 = OCI artifact(D-033/D-045)**:`crater build` 把 task 打成 **B 类 OCI artifact**(recipe + 物料,内容寻址);registry `push/pull` 或文件 `save/load`;apply 时 recipe-replay。在线 / 离线同一 task。
-
-## 命令
-
-| 形态 | 命令 |
-|---|---|
-| 本机 | `crater apply <task>` |
-| 少量机器(共用凭据) | `crater apply <task> --host a,b --password x`(或 `--key ~/.ssh/id_rsa`) |
-| 大量机器(各自凭据) | `crater apply <task> -i inventory.yaml` |
-| 命名 task | `crater apply yq`(裸名 → 在 `library/` 下递归找 `yq.yaml`) |
-| 文件 / 镜像 / 离线包 | `crater apply x.yaml` / `crater apply docker.io/...` / `crater apply x.oci` |
-| 离线打包 | `crater build -f task.yaml -t <ref>` → `crater save <ref> -o x.oci` |
-| 镜像库 | `crater images` / `pull` / `push` / `tag` / `load` / `registry login` |
-| AI 副驾 | `crater ai "<大白话>" -o task.yaml`(生成并校验 task) |
-| 诊断 / 临时命令 | `crater doctor --file log` / `crater run --host H -- <cmd>` |
-| 生成 inventory | `crater create inventory` |
-
-## task 写法
+task 长这样——**纯数据**,没有模板逻辑:
 
 ```yaml
 name: install-yq
-hosts: all                       # 或 inventory 组名(支持嵌套 groups)
-vars: { version: "4.53.2" }
-materials:                       # 物料闭包(D-034);build 据此打离线包
-  - { name: yq-bin, kind: binary, url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64" }
+hosts: all
+vars:
+  version: "4.44.3"
+materials:                       # 物料闭包:build 据此打离线包,不扫 actions
+  - name: yq-bin
+    kind: file
+    arch: amd64
+    url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64"
 actions:
-  - { id: place,  action: place,   material: yq-bin, dest: /usr/local/bin/yq, mode: "0755" }
-  - { id: verify, action: run_cmd, phase: verify, cmd: "/usr/local/bin/yq --version", needs: [place] }
+  - id: install
+    action: copy                 # 三选一来源:content(内联)/ src(本地文件)/ material(物料)
+    material: yq-bin
+    dest: /usr/local/bin/yq
+    mode: "0755"
+  - id: verify
+    action: shell
+    phase: verify
+    cmd: "yq --version"
+    needs: [install]
 ```
 
-**内置原语(16)**:`pkg_install` `download` `extract` `render_template` `write_file` `systemd_unit` `run_cmd` `place` `load_image` `module` `file` `copy` `service` `lineinfile` `user` `group`。
-**能力**:`needs`(排序)、`when_os`/`when_offline`(封闭枚举条件)、`retries`/`ignore_errors`、`notify`+`handlers`、`register`/`hostvars`(跨节点)、`hosts` 组过滤、嵌套 `groups`。
+## 📦 离线交付:整套环境一个文件
 
-## 快速开始
+```yaml
+# demo-stack.yaml —— project:有序编排多个 task
+name: demo-stack
+plays:
+  - { name: 装 yq,       source: yq,     hosts: all }
+  - { name: 部署 rustfs, source: rustfs, hosts: all }
+```
 
 ```bash
-cargo build && cargo test
-crater apply yq --host 10.0.0.5 --password <pw>        # 命名 task,经自举 agent
-crater apply yq --host 10.0.0.5 --password <pw> --dry-run
-crater create inventory                                 # 生成示例 inventory.yaml
+# 构建机(在线)
+crater build -f demo-stack.yaml            # 逐 play 构建,play source 锁定为制品 ref
+crater save crater/demo-stack:latest -o demo-stack.oci   # 项目 + 全部 task 闭包 → 一个文件
 
-# 离线:打包 → 分发 → 零联网部署
-crater build -f library/yq/yq.yaml -t myreg/yq:1.0      # → 本地库(B 类 artifact)
-crater save myreg/yq:1.0 -o yq.oci                      # 导出文件,拷到离线机
-crater apply yq.oci --host 10.0.0.5 --password <pw>     # recipe-replay
+# 离线现场(零联网)
+crater apply demo-stack.oci -i inventory.yaml            # 按 play 顺序 recipe-replay
+crater delete demo-stack.oci -i inventory.yaml           # 逆序卸载
+
+# 或者走私有 registry(zot / Harbor)
+crater tag crater/demo-stack:latest reg:5000/demo-stack:1
+crater push reg:5000/demo-stack:1          # 闭包 push:task 制品一起走
+crater pull reg:5000/demo-stack:1          # 另一台控制机:闭包 pull
+crater apply reg:5000/demo-stack:1 --offline -i inventory.yaml
 ```
 
-幂等:再跑一次只报 `ok/changed/warn`,已就绪的步骤自动跳过(`changed=0`)。
+## 🧰 命令总览
 
-## 工程结构
+| 类别 | 命令 |
+|---|---|
+| 部署 | `apply` `plan` `delete`(source:task 文件 / 裸名 / project / `.oci` / 镜像 ref) |
+| 离线打包 | `build`(`--set k=v` 覆盖、源指纹缓存、`--no-cache`)· `save` · `load` |
+| 制品库 | `images` `pull` `push` `tag` `rmi` `gc` `inspect` `registry login` |
+| 状态 | `task list/show/history`(`--verify` 漂移检测)· `ui`(看板,`--token` 鉴权) |
+| 工具 | `run`(临时命令)· `cp`(推文件)· `doctor`(离线诊断)· `ai` · `create inventory` |
+
+## 🏗️ 工程结构
 
 ```
 crater/
 ├── crates/
-│   ├── crater-core/   # 引擎:task / component(原语) / engine / executor / source / bundle / store / ai / diagnose
-│   └── crater-cli/    # `crater` 二进制
-├── library/           # 模板/示例库:每个子目录 = 一个自闭环交付(yq/ docker/ mysql/ zot/ k8s/),
-│                      #   含 <名>.yaml + inventory.example + roles/<role>/{role.yaml,files/,templates/};
-│                      #   _template/ 标准骨架、_examples/ 跨交付编排+特性 demo(crater apply <名> 递归找)
-├── roles/             # 全局共享 role(action: role uses: X → 先交付内 roles/X[.yaml|/role.yaml],回退 ./roles)
-└── docs/              # 设计 / 决策 / 功能文档
+│   ├── crater-core/   # 引擎:task / engine(模块 lowering)/ executor(SSH)/ bundle / store
+│   └── crater-cli/    # `crater` 二进制(同一个二进制也是目标机上的 agent)
+├── library/           # 交付库:每个子目录一个自闭环交付(yq/ docker/ rustfs/ zot/ k8s/ …)
+├── docs/
+│   ├── features/      # 功能文档(每功能一篇:介绍 + demo + 真机验证)
+│   ├── modules/       # 模块参考(每模块一篇)
+│   ├── decisions.md   # 架构决策记录(ADR,D-001 起持续追加)
+│   └── module-charter.md  # 模块准入章程(shell → role → 模块的晋升路径)
+└── scripts/build-musl.sh  # 静态二进制构建(x86_64 / aarch64 / all)
 ```
 
-## 文档
-
-- [设计方向 design.md](docs/design.md) ｜ [action 层 action-layer.md](docs/action-layer.md)
-- [功能文档 features/](docs/features/README.md)
-- [决策记录 decisions.md](docs/decisions.md)(D-001~D-046)
-- [文档索引 docs/README.md](docs/README.md)
+设计北极星见 [docs/design.md](docs/design.md):**YAML 是数据、逻辑在引擎**(D-036)、**引擎零产品知识**(D-017)——加一个可部署对象 = 写一个 task,绝不改 Rust。
 
 ## License
 
-Apache-2.0
+[Apache-2.0](LICENSE)
