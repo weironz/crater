@@ -35,16 +35,21 @@ actions:
     runtime: docker
     needs: [docker_ready]
   - id: run
+    # 收敛语义:期望态 = 容器 running 且镜像是期望版本。不满足(没有容器/
+    # 崩溃重启中/版本变了)→ 先删旧再起新;满足 → 跳过(幂等)。
+    # {{.State.Status}}/{{.Config.Image}} 是 docker 自己的模板,引擎原样透传(D-036)。
     action: shell
     cmd: >-
+      docker rm -f rustfs 2>/dev/null;
       docker run -d --name rustfs --restart unless-stopped
       -p {{port}}:9000
       -v {{data_dir}}:/data
       -e RUSTFS_ACCESS_KEY={{access_key}}
       -e RUSTFS_SECRET_KEY={{secret_key}}
       docker.io/rustfs/rustfs:{{version}}
-    # 容器已在跑 → 整步跳过(幂等);改了参数要先 delete 再 apply(容器不可变)
-    check: "docker ps --filter name=^rustfs$ --filter status=running -q | grep -q ."
+    check: >-
+      [ "$(docker inspect -f '{{.State.Status}} {{.Config.Image}}' rustfs 2>/dev/null)"
+      = "running docker.io/rustfs/rustfs:{{version}}" ]
     needs: [img, data_dir]
   - id: verify
     action: shell

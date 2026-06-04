@@ -18,5 +18,5 @@ just push                                                 # 构建 OCI 制品并
 - 凭据默认是**非上游默认**的占位值(`crater-admin`/`crater-changeme`):rustfs
   1.0.0-beta.5 起绑非环回地址时拒绝默认凭据 `rustfsadmin`,会 FATAL 重启。
   生产用 inventory `vars:` 覆盖(`access_key`/`secret_key`,D-082)。
-- 容器不可变:改参数(端口/凭据)先 `crater delete rustfs` 再 apply。
+- 收敛语义:容器没起来/崩溃重启/**版本变了** → 自动删旧起新;在跑且版本符合 → 跳过(幂等)。改端口/凭据(版本不变)仍需先 `crater delete rustfs` 再 apply(探针只比镜像版本)。
 - 版本:`vars.version` 钉具体 tag(默认 `1.0.0-beta.5`,`:latest` 不幂等);`just version=X push` 出别的版本。

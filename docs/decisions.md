@@ -1063,3 +1063,12 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **影响**:`component.rs`(Copy 加字段、删 Place)、`engine.rs`(三态逻辑并入 Copy 分支,describe `place …` → `copy …`/`copy (blob) …`)、`task.rs`(`rewrite_material_refs`)、库内 7 个 yaml 与 docs 全量改写(`materials-and-place.md` → `materials.md`)。**破坏性**:旧 OCI 制品的 recipe 含 `action: place`,新 crater 解析失败 → **需重 build/push**(本仓 willdockerhub/yq 已重发)。
 - **顺带修复(agent 路径 PushFile 缺陷)**:`copy material:` 在 material 带本地 `src:` 时产出 `PushFile`,其 `local_path` 是**控制机路径**;纯在线默认 agent 执行(计划运到目标机跑)会读不到该文件。修复:计划含 `PushFile` 步骤 → 强制控制面 `execute_task`(`run_task_on_host` 分支加 `has_push_file`)。此缺陷在 place 时代即存在,过往验证恰好都走 offline blobmap/本机路径而未暴露。
 - **验证**:55 tests 绿(三态测试改造为 `copy material:` 同逻辑);yq/docker/k8s-ha dry-run 输出同前(describe 前缀变 `copy`);重建 yq OCI 后 `apply <ref>` recipe-replay 正常。
+
+## 2026-06-04 · 镜像物料导出双格式:OCI layout + docker-archive 垫片(D-091)
+
+### D-091 export_oci_archive 给 plain image 附带 manifest.json,老 docker 也能 load
+
+- **背景**:`kind: image` 物料打包为 OCI layout tar(`oci-layout` + `index.json` + `blobs/`)。真机(192.168.73.11,docker 27.3.1 静态包 + 经典 overlay2 存储)离线导入时 `docker load -i` 报 `open …/blobs/json: no such file or directory`——经典存储(未开 containerd image store)的 docker load **不认 OCI layout**,回退 legacy v1 路径(找 `<目录>/json`)。控制机 docker 29 能 load,纯属版本差。
+- **决策**:`store.rs export_oci_archive` 对 **plain image**(manifest 无 `artifactType`)在 OCI layout 之外**附带一个 `manifest.json`**(docker-archive 格式:Config/RepoTags/Layers 指向同一批 `blobs/sha256/...`)。即 buildx `-o type=docker` 的同款双格式:老 docker 读 manifest.json,新 docker / ctr / nerdctl 读 index.json,互不干扰、零体积成本(blob 不重复)。B 类 artifact(有 `artifactType`)永远不会被 docker load,不加垫片。
+- **验证**:本机 docker 29 load 双格式 OK;真机 73.11(docker 27.3.1)离线 `apply willdockerhub/rustfs:1.0.0-beta.5 --offline` → `load image (blob)` 导入成功 → 容器 /health 200。55 tests 绿。
+- **关联**:D-061(image 物料)。rustfs 交付顺带改为**收敛语义**:`docker inspect` 探针比"running + 镜像版本",不符(没容器/崩溃循环/版本变)→ 删旧起新——修复了"Restarting 容器撞 docker run 名字冲突"与"换版本重 apply 不生效"。

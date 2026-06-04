@@ -478,6 +478,29 @@ impl ImageStore {
             "manifests": [m_entry]
         });
         std::fs::write(tmp.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
+        // docker-archive 兼容垫片(plain image only):经典存储(非 containerd
+        // image store)的 `docker load` 不认 OCI layout,会走 legacy v1 路径找
+        // `<dir>/json` 而报 `blobs/json: no such file`。补一个 manifest.json
+        // 指向同一批 blob(buildx `type=docker` 同款双格式)——老 docker 读它,
+        // 新 docker/ctr/nerdctl 读 index.json,互不干扰。B 类 artifact
+        // (artifactType)永远不会被 docker load,不加。
+        if manifest["artifactType"].as_str().is_none() {
+            if let (Some(cfg), Some(ls)) =
+                (manifest["config"]["digest"].as_str(), manifest["layers"].as_array())
+            {
+                let layers: Vec<String> = ls
+                    .iter()
+                    .filter_map(|l| l["digest"].as_str())
+                    .map(|d| format!("blobs/sha256/{}", strip(d)))
+                    .collect();
+                let docker_manifest = json!([{
+                    "Config": format!("blobs/sha256/{}", strip(cfg)),
+                    "RepoTags": [reference],
+                    "Layers": layers,
+                }]);
+                std::fs::write(tmp.join("manifest.json"), serde_json::to_vec_pretty(&docker_manifest)?)?;
+            }
+        }
         crate::bundle::pack(&tmp, out)?;
         let _ = std::fs::remove_dir_all(&tmp);
         Ok(())
