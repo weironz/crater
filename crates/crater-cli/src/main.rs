@@ -813,7 +813,15 @@ async fn apply_source(
         if crater_core::task::is_task_file(&path) {
             info!("{verb}: {src} → task");
             let hosts = target.task_hosts(&path)?;
-            return apply_task(&path, hosts, None, false, !dry_run, shell, teardown, &src, name.as_deref(), None, BTreeMap::new()).await;
+            let opts = RunOpts {
+                offline_blobmap: None,
+                offline: false,
+                do_apply: !dry_run,
+                do_shell: shell,
+                teardown,
+                source: src.clone(),
+            };
+            return apply_task(&path, hosts, opts, name.as_deref(), None, BTreeMap::new()).await;
         }
         anyhow::bail!(
             "{src}: not a task file (needs top-level `actions:`). Component specs are no \
@@ -836,7 +844,15 @@ async fn apply_source(
         if crater_core::task::is_task_file(&named) {
             info!("{verb}: {src} → named task ({})", named.display());
             let hosts = target.task_hosts(&named)?;
-            return apply_task(&named, hosts, None, false, !dry_run, shell, teardown, &src, name.as_deref(), None, BTreeMap::new()).await;
+            let opts = RunOpts {
+                offline_blobmap: None,
+                offline: false,
+                do_apply: !dry_run,
+                do_shell: shell,
+                teardown,
+                source: src.clone(),
+            };
+            return apply_task(&named, hosts, opts, name.as_deref(), None, BTreeMap::new()).await;
         }
     }
     anyhow::bail!(
@@ -904,8 +920,16 @@ async fn apply_project(
                 continue;
             }
         }
+        let opts = RunOpts {
+            offline_blobmap: None,
+            offline: false,
+            do_apply: !dry_run,
+            do_shell: shell,
+            teardown,
+            source: play.source.clone(),
+        };
         apply_task(
-            &src_path, hosts, None, false, !dry_run, shell, teardown, &play.source, Some(&deployment),
+            &src_path, hosts, opts, Some(&deployment),
             play.hosts.clone(), play.vars.clone(),
         )
         .await
@@ -915,15 +939,10 @@ async fn apply_project(
     Ok(())
 }
 
-/// `crater apply <task>.yaml` (D-037): run a generic task across the targets.
-/// Control flow (when-filter, needs-ordering) is in the engine. Host
-/// orchestration mirrors the component pipeline (D-030/D-031): hosts grouped by
-/// role-set run group-by-group (so a producer's `register` lands in `hostvars`
-/// before a consumer group reads it), parallel within a group.
-#[allow(clippy::too_many_arguments)]
-async fn apply_task(
-    path: &Path,
-    hosts: Vec<crater_core::spec::Host>,
+/// How to run a task — the mode flags every apply/delete entry point chooses
+/// (CLI 重构 2/3). Named fields instead of a positional bool-soup at call sites.
+struct RunOpts {
+    /// Packed material blobs (recipe-replay, D-045); None = pure online.
     offline_blobmap: Option<BTreeMap<String, PathBuf>>,
     // Strict-offline (air-gap): missing blob = error, not online fetch (D-087).
     // A thin-online ref carries a partial blobmap with this `false`.
@@ -931,7 +950,36 @@ async fn apply_task(
     do_apply: bool,
     do_shell: bool,
     teardown: bool,
-    source: &str,
+    source: String,
+}
+
+/// Shared read-only context for ONE task run, fixed once `apply_task` has
+/// parsed/expanded the task and grouped the targets. Per-host calls only add
+/// what genuinely varies: the host, the between-groups `hostvars` snapshot,
+/// and the per-group coordinator.
+struct RunContext {
+    task: crater_core::task::TaskFile,
+    spec_dir: PathBuf,
+    /// role → space-joined member addresses, for `{{ groups.<role> }}` (D-071).
+    role_addrs: BTreeMap<String, String>,
+    /// role → (name, addr) members, for the template layer's `groups` (D-075).
+    role_members: BTreeMap<String, Vec<(String, String)>>,
+    /// Ordered (name, roles) of all targets, for `run_once` gating (D-077).
+    target_hosts: Vec<(String, Vec<String>)>,
+    /// Grouping label for `task list` (D-052), default = task name.
+    deployment: String,
+    opts: RunOpts,
+}
+
+/// `crater apply <task>.yaml` (D-037): run a generic task across the targets.
+/// Control flow (when-filter, needs-ordering) is in the engine. Host
+/// orchestration mirrors the component pipeline (D-030/D-031): hosts grouped by
+/// role-set run group-by-group (so a producer's `register` lands in `hostvars`
+/// before a consumer group reads it), parallel within a group.
+async fn apply_task(
+    path: &Path,
+    hosts: Vec<crater_core::spec::Host>,
+    opts: RunOpts,
     name: Option<&str>,
     // Project-play overrides (D-083): retarget the task's group / overlay vars.
     hosts_override: Option<String>,
@@ -958,7 +1006,7 @@ async fn apply_task(
     // Delete is opt-in (D-049): a task only has delete capability if it authored
     // a `teardown:`. No auto-inversion of `actions:` — real cleanup targets
     // runtime state the install steps never created.
-    if teardown && task.teardown.is_empty() {
+    if opts.teardown && task.teardown.is_empty() {
         anyhow::bail!(
             "task '{}' defines no `teardown:` — it has no delete capability \
              (delete is opt-in; author a teardown to enable it)",
@@ -987,12 +1035,12 @@ async fn apply_task(
     }
     info!(
         "{} '{}': {} action(s), hosts={}, {} target(s), mode={}",
-        if teardown { "teardown" } else { "task" },
+        if opts.teardown { "teardown" } else { "task" },
         task.name,
-        if teardown { task.teardown.len() } else { task.actions.len() },
+        if opts.teardown { task.teardown.len() } else { task.actions.len() },
         task.hosts,
         hosts.len(),
-        if do_apply { "apply" } else { "dry-run" }
+        if opts.do_apply { "apply" } else { "dry-run" }
     );
 
     let mut hostvars: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
@@ -1022,9 +1070,13 @@ async fn apply_task(
     let target_hosts: Vec<(String, Vec<String>)> =
         hosts.iter().map(|h| (h.name.clone(), h.roles.clone())).collect();
 
-    if !do_apply {
+    // From here on the run-wide context is fixed; only host / hostvars / coord
+    // vary per call.
+    let rc = RunContext { task, spec_dir, role_addrs, role_members, target_hosts, deployment, opts };
+
+    if !rc.opts.do_apply {
         for h in &hosts {
-            run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, &role_members, &target_hosts, None, offline_blobmap.as_ref(), offline, false, do_shell, teardown, source, &deployment).await?;
+            run_task_on_host(&rc, h, &hostvars, None).await?;
         }
         info!("dry-run only; omit --dry-run to execute");
         return Ok(());
@@ -1055,13 +1107,13 @@ async fn apply_task(
         // a time — e.g. control-plane joins must not race on etcd quorum.
         let serial = group
             .iter()
-            .any(|h| h.roles.iter().any(|r| task.serial_roles.contains(r)));
+            .any(|h| h.roles.iter().any(|r| rc.task.serial_roles.contains(r)));
         if serial {
             // Sequential WITH progressive fact propagation (D-077): each host's
             // registered facts are merged into hostvars BEFORE the next host plans.
             // (Prefer per-step `throttle` over serial_roles — it parallelizes prep.)
             for h in group {
-                let (host_name, regs) = run_task_on_host(&task, h, &spec_dir, &hostvars, &role_addrs, &role_members, &target_hosts, None, offline_blobmap.as_ref(), offline, true, do_shell, teardown, source, &deployment).await?;
+                let (host_name, regs) = run_task_on_host(&rc, h, &hostvars, None).await?;
                 merge_regs(&mut hostvars, &name_roles, &host_name, regs);
                 applied_hosts.push(host_name);
             }
@@ -1077,16 +1129,13 @@ async fn apply_task(
                 }
             }
             let coord = engine::HostCoord::new(seed, group.len());
-            let (coord_ref, task_ref, spec_dir_ref) = (&coord, &task, spec_dir.as_path());
-            let (hostvars_ref, role_addrs_ref, role_members_ref) = (&hostvars, &role_addrs, &role_members);
-            let (target_hosts_ref, offline_ref, deployment_ref) =
-                (target_hosts.as_slice(), offline_blobmap.as_ref(), deployment.as_str());
+            let (rc_ref, hostvars_ref, coord_ref) = (&rc, &hostvars, &coord);
             let results: Vec<Result<(String, Vec<(String, String)>)>> = futures::stream::iter(
                 group.iter().map(|h| async move {
                     // Signal the coordinator on finish so peers awaiting this host's
                     // facts fail fast on error / never-produced rather than blocking
                     // to the timeout (D-077). Facts (if any) are published inside.
-                    let r = run_task_on_host(task_ref, h, spec_dir_ref, hostvars_ref, role_addrs_ref, role_members_ref, target_hosts_ref, Some(coord_ref), offline_ref, offline, true, do_shell, teardown, source, deployment_ref).await;
+                    let r = run_task_on_host(rc_ref, h, hostvars_ref, Some(coord_ref)).await;
                     if r.is_err() {
                         coord_ref.mark_aborted();
                     }
@@ -1119,7 +1168,7 @@ async fn apply_task(
 
     // Record to the control-side aggregate DB (D-051). Best-effort: the markers
     // on the targets are authoritative; the DB is a cache/history for list/UI.
-    if let Err(e) = record_deployments(&task, source, &deployment, teardown, &applied_hosts).await {
+    if let Err(e) = record_deployments(&rc.task, &rc.opts.source, &rc.deployment, rc.opts.teardown, &applied_hosts).await {
         warn!("state DB update failed (targets' markers are authoritative): {e}");
     }
     Ok(())
@@ -1421,23 +1470,18 @@ async fn record_deployments(
     Ok(())
 }
 
+/// Plan + execute one task on one host. The run-wide fixed inputs live in
+/// `rc` (CLI 重构 2/3); only the genuinely per-call ones remain parameters:
+/// the host, the between-groups `hostvars` snapshot, the per-group coordinator.
 async fn run_task_on_host(
-    task: &crater_core::task::TaskFile,
+    rc: &RunContext,
     host: &crater_core::spec::Host,
-    spec_dir: &Path,
     hostvars: &BTreeMap<String, BTreeMap<String, String>>,
-    role_addrs: &BTreeMap<String, String>,
-    role_members: &BTreeMap<String, Vec<(String, String)>>,
-    target_hosts: &[(String, Vec<String>)],
     coord: Option<&engine::HostCoord>,
-    offline_blobmap: Option<&BTreeMap<String, PathBuf>>,
-    offline: bool,
-    do_apply: bool,
-    do_shell: bool,
-    teardown: bool,
-    source: &str,
-    deployment: &str,
 ) -> Result<(String, Vec<(String, String)>)> {
+    let RunContext { task, spec_dir, role_addrs, role_members, target_hosts, deployment, opts } = rc;
+    let RunOpts { offline_blobmap, offline, do_apply, do_shell, teardown, source } = opts;
+    let (offline, do_apply, do_shell, teardown) = (*offline, *do_apply, *do_shell, *teardown);
     if host.is_local() {
         info!("▶ host {} (local)", host.name);
     } else {
@@ -2171,8 +2215,15 @@ async fn apply_oci_bundle(
     info!("offline (task artifact): {} task(s)", mats.len());
     for mc in mats {
         let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
-        apply_task(&recipe_file, hosts.clone(), Some(mc.blobmap), true, do_apply, do_shell, teardown, source, name, None, BTreeMap::new())
-            .await?;
+        let opts = RunOpts {
+            offline_blobmap: Some(mc.blobmap),
+            offline: true, // a .oci bundle is the full closure → strict air-gap
+            do_apply,
+            do_shell,
+            teardown,
+            source: source.to_string(),
+        };
+        apply_task(&recipe_file, hosts.clone(), opts, name, None, BTreeMap::new()).await?;
     }
     let _ = std::fs::remove_dir_all(&dest_root);
     Ok(())
@@ -2404,7 +2455,15 @@ async fn apply_image_ref(
         let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
         if crater_core::task::is_task_file(&recipe_file) {
             info!("image {reference}: crater task artifact → recipe-replay");
-            let res = apply_task(&recipe_file, hosts, Some(mc.blobmap), offline, do_apply, true, teardown, source, name, None, BTreeMap::new()).await;
+            let opts = RunOpts {
+                offline_blobmap: Some(mc.blobmap),
+                offline, // --offline = strict; default thin-online fetches deps live (D-088)
+                do_apply,
+                do_shell: true,
+                teardown,
+                source: source.to_string(),
+            };
+            let res = apply_task(&recipe_file, hosts, opts, name, None, BTreeMap::new()).await;
             let _ = std::fs::remove_dir_all(&recipe_dir);
             return res;
         }
