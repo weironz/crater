@@ -679,7 +679,9 @@ fn auth_path() -> PathBuf {
 }
 
 /// The registry host of a reference (e.g. `docker.io` from `docker.io/library/x`).
-fn registry_of(reference: &str) -> String {
+/// Also drives D-101 closure push/pull: each locked task's remote twin is
+/// `<this>/<bare-lock>`.
+pub fn registry_of(reference: &str) -> String {
     let first = reference.split('/').next().unwrap_or("");
     if first.contains('.') || first.contains(':') || first == "localhost" {
         first.to_string()

@@ -1,7 +1,8 @@
-# project:有序 plays 编排多个 task(在线 + 离线一包)
+# project:有序 plays 编排多个 task(在线 + 离线一包 + registry 闭包)
 
-> ADR: D-083(project/plays)、**D-098(离线 project)** ｜ 代码: `project.rs`、
-> `build.rs build_project_to_store`、`store.rs export_oci_archive`、`apply.rs apply_oci_bundle`
+> ADR: D-083(project/plays)、D-098(离线 project)、**D-101(registry 闭包分发)** ｜ 代码:
+> `project.rs`、`build.rs build_project_to_store`、`store.rs export_oci_archive`、
+> `apply.rs apply_oci_bundle`、`images.rs`(closure push/pull + store 直连编排)
 
 ## 这是什么
 
@@ -53,11 +54,27 @@ crater apply demo-stack.oci -i inv.yaml                   # ③ air-gap:按 play
 - 重跑:blob 全部 `cached, reusing`,changed=0(幂等贯穿)。
 - delete .oci:逆序,rustfs teardown 干净(容器+数据目录无残留),yq `(跳过:未编写 teardown)`。
 
-## 边界 / 后续
+## registry 闭包分发(D-101)
 
-- **registry 分发未实现**:`crater push <project-ref>` 报错引导 save/.oci(push 是单 ref,
-  task 制品不会跟着走);`apply <project-ref>`(store/registry 直连)同样引导。后续做
-  多 ref push/pull 闭包。
+离线 project 的第二条分发通道(第一条是 save/.oci 文件):
+
+```bash
+crater tag crater/demo-stack:latest 192.168.73.12:5000/demo-stack:1
+CRATER_INSECURE_REGISTRIES=192.168.73.12:5000 \
+  crater push 192.168.73.12:5000/demo-stack:1     # 先逐个 push 锁定 task(re-prefix 到目标
+                                                  # registry),再 push 项目制品
+# 另一台控制机:
+crater pull 192.168.73.12:5000/demo-stack:1       # 闭包 pull:task 拉回 + retag 成裸 lock ref
+crater apply 192.168.73.12:5000/demo-stack:1 --offline -i inv.yaml   # store 直连按 play 编排
+```
+
+plan / delete(逆序 + teardown-less play 优雅跳过)对 project-ref 同样可用。**适配私有
+registry**(zot/Harbor,任意 repo 路径);docker.io 的命名空间规则不接受裸 `crater/...`
+路径——公网分发用 save/.oci。真机闭环:zot(crater 自家制品部署在 73.12)→ 闭包 push
+(catalog 出现 crater/yq、crater/rustfs、demo-stack)→ 全新 `CRATER_HOME` 闭包 pull →
+`apply <project-ref>` 清机部署 73.11(rustfs 200)→ plan → delete 拆净。
+
+## 边界 / 后续
 - 同名 task 的两个不同版本进同一 project:bundle 内 recipe 目录按 task 名落盘会互覆,
   暂不支持(build 时同 ref 不同输入已报错兜住大部分)。
 - 跨 play hostvars 传递、project 级 `crater inspect` 仍是 D-083 既有后续。

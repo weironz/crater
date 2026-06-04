@@ -152,10 +152,37 @@ pub(crate) fn human_size(bytes: u64) -> String {
     format!("{v:.1}{}", UNITS[u])
 }
 
+const AT_PROJECT: &str = "application/vnd.crater.project.v1";
+
+/// A project's locked task refs, deduped in play order (D-101 closure walk).
+fn locked_refs(project: &crater_core::project::Project) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in &project.plays {
+        if !out.contains(&p.source) {
+            out.push(p.source.clone());
+        }
+    }
+    out
+}
+
 pub(crate) async fn pull_image(reference: &str) -> Result<()> {
     let store = ImageStore::open()?;
     info!("pulling {reference} → local store ...");
     store.pull(reference).await?;
+    // Project closure pull (D-101): fetch each locked task from the SAME
+    // registry (`<registry>/<bare-lock>` — the twin `push` created), then
+    // retag to the bare lock so the recipe's `source:` resolves locally.
+    let manifest = store.resolve_manifest(reference)?;
+    if manifest["artifactType"].as_str() == Some(AT_PROJECT) {
+        let registry = crater_core::store::registry_of(reference);
+        let project = store.project_recipe(&manifest)?;
+        for l in locked_refs(&project) {
+            let remote = format!("{registry}/{l}");
+            info!("  闭包成员 {l} ← {remote}");
+            store.pull(&remote).await?;
+            store.retag(&remote, &l)?;
+        }
+    }
     info!("pulled {reference}");
     Ok(())
 }
@@ -165,15 +192,26 @@ pub(crate) async fn push_image(reference: &str) -> Result<()> {
     if !store.has(reference) {
         anyhow::bail!("{reference} not in local store (pull or build it first)");
     }
-    // push is single-ref: a project artifact without its task artifacts is
-    // unusable on the other side — point at save/.oci until multi-ref push lands.
-    if store.resolve_manifest(reference)?["artifactType"].as_str()
-        == Some("application/vnd.crater.project.v1")
-    {
-        anyhow::bail!(
-            "'{reference}' 是项目制品,registry 分发未实现(它引用的 task 制品不会一起 push)。\
-             离线分发用 `crater save {reference} -o env.oci`"
-        );
+    // Project closure push (D-101): the recipe locks plays to BARE task refs
+    // (`crater/yq:4.44.3`) — push each as `<registry-of-project-ref>/<lock>`
+    // first, then the project manifest itself. Best fit: PRIVATE registries
+    // (arbitrary repo paths); docker.io's namespace rules won't accept the
+    // bare `crater/...` paths — use `crater save` there.
+    let manifest = store.resolve_manifest(reference)?;
+    if manifest["artifactType"].as_str() == Some(AT_PROJECT) {
+        let registry = crater_core::store::registry_of(reference);
+        let project = store.project_recipe(&manifest)?;
+        for l in locked_refs(&project) {
+            if !store.has(&l) {
+                anyhow::bail!(
+                    "项目锁定的 task 制品 '{l}' 不在本地库 —— 先 `crater build -f <project>.yaml`"
+                );
+            }
+            let remote = format!("{registry}/{l}");
+            store.retag(&l, &remote)?;
+            info!("  push 闭包成员 {l} → {remote}");
+            store.push(&remote).await?;
+        }
     }
     info!("pushing {reference} → registry ...");
     store.push(reference).await?;
@@ -181,9 +219,93 @@ pub(crate) async fn push_image(reference: &str) -> Result<()> {
     Ok(())
 }
 
+/// Ensure `local` is usable from the store — thin for online, FULL closure for
+/// `--offline` (D-087) — fetching from `remote` (its registry twin; same as
+/// `local` for direct refs) and retagging when they differ (D-101).
+async fn ensure_pulled(store: &ImageStore, local: &str, remote: &str, offline: bool) -> Result<()> {
+    if offline {
+        if !store.has(local) || !store.has_all_layers(local) {
+            info!("{local}: pulling full closure (--offline) ← {remote}");
+            store.pull(remote).await?;
+            if remote != local {
+                store.retag(remote, local)?;
+            }
+        }
+    } else if !store.has(local) {
+        info!("{local}: thin pull(recipe + embedded;依赖 apply 时在线取)← {remote}");
+        store.pull_thin(remote).await?;
+        if remote != local {
+            store.retag(remote, local)?;
+        }
+    }
+    Ok(())
+}
+
+/// Materialize ONE crater task artifact from the store and run it through the
+/// task pipeline. `graceful_no_teardown`: project plays skip teardown-less
+/// tasks (D-098 semantics); a direct single-ref delete stays a hard error.
+#[allow(clippy::too_many_arguments)]
+async fn apply_task_artifact(
+    store: &ImageStore,
+    reference: &str,
+    hosts: Vec<crater_core::spec::Host>,
+    do_apply: bool,
+    do_shell: bool,
+    teardown: bool,
+    source: &str,
+    name: Option<&str>,
+    offline: bool,
+    set_overrides: std::collections::BTreeMap<String, String>,
+    plan: bool,
+    hosts_override: Option<String>,
+    var_overrides: std::collections::BTreeMap<String, String>,
+    graceful_no_teardown: bool,
+) -> Result<()> {
+    let manifest = store.resolve_manifest(reference)?;
+    let recipe_dir = std::env::temp_dir()
+        .join(format!("crater-ref-{}-{}", std::process::id(), crate::build::sanitize_ref(reference)));
+    let _ = std::fs::remove_dir_all(&recipe_dir);
+    let Some(mc) = bundle::materialize_component(&manifest, &store.blobs_dir(), &recipe_dir)? else {
+        anyhow::bail!("'{reference}' 不是 crater task 制品(无 recipe)");
+    };
+    let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
+    if !crater_core::task::is_task_file(&recipe_file) {
+        let _ = std::fs::remove_dir_all(&recipe_dir);
+        anyhow::bail!(
+            "'{reference}' is a legacy component artifact; rebuild it as a task \
+             (crater build -f tasks/<name>.yaml)"
+        );
+    }
+    if teardown && graceful_no_teardown {
+        let t = crater_core::task::TaskFile::from_yaml_file(&recipe_file)?;
+        if t.teardown.is_empty() {
+            info!("   (跳过:task '{}' 未编写 teardown)", t.name);
+            let _ = std::fs::remove_dir_all(&recipe_dir);
+            return Ok(());
+        }
+    }
+    info!("image {reference}: crater task artifact → recipe-replay");
+    let opts = RunOpts {
+        offline_blobmap: Some(mc.blobmap),
+        offline, // --offline = strict; default thin-online fetches deps live (D-088)
+        do_apply,
+        // Honor --shell; default is the agent path — blobs are staged
+        // onto the target first (D-095), no more forced control-plane.
+        do_shell,
+        teardown,
+        source: source.to_string(),
+        set_overrides,
+        plan_check: plan,
+    };
+    let res = apply_task(&recipe_file, hosts, opts, name, hosts_override, var_overrides).await;
+    let _ = std::fs::remove_dir_all(&recipe_dir);
+    res
+}
+
 /// `crater apply <image-ref>`: resolve from the local store (pull on miss). A
 /// **crater component artifact** (B 类, D-032) → recipe-replay via `run_pipeline`
-/// (materials feed the recipe offline). A plain container image → extract its
+/// (materials feed the recipe offline). A project artifact → registry/store-
+/// direct play orchestration (D-101). A plain container image → extract its
 /// rootfs layers to `/` on each host (parallel). crater-native, no runtime.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_image_ref(
@@ -199,58 +321,57 @@ pub(crate) async fn apply_image_ref(
     plan: bool,
 ) -> Result<()> {
     let store = ImageStore::open()?;
-    // D-087: strict-offline (air-gap) needs the FULL closure locally — re-pull if
-    // a prior thin pull left `dependency` layers absent. Thin-online (default)
-    // pulls only recipe + `embedded` files; dependencies are fetched online at
-    // apply, so an absent local copy just needs a thin pull.
-    if offline {
-        if !store.has(reference) || !store.has_all_layers(reference) {
-            info!("{reference}: pulling full closure (--offline)");
-            store.pull(reference).await?;
-        }
-    } else if !store.has(reference) {
-        info!("{reference}: thin pull (recipe + embedded files; dependencies fetched online)");
-        store.pull_thin(reference).await?;
-    }
+    ensure_pulled(&store, reference, reference, offline).await?;
 
     // crater task artifact (B 类) → recipe-replay via the task pipeline (D-045).
     let manifest = store.resolve_manifest(reference)?;
-    // A project artifact's closure lives in its referenced task artifacts —
-    // store/registry-direct apply isn't wired yet (D-098 后续). Guard so it
-    // never falls through to the plain-image rootfs-extract path.
-    if manifest["artifactType"].as_str() == Some("application/vnd.crater.project.v1") {
-        anyhow::bail!(
-            "'{reference}' 是项目制品:导出后整包部署(crater save {reference} -o env.oci && \
-             crater apply env.oci -i inv.yaml),在线则直接 apply -f <project>.yaml"
-        );
-    }
-    let recipe_dir = std::env::temp_dir().join(format!("crater-ref-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&recipe_dir);
-    if let Some(mc) = bundle::materialize_component(&manifest, &store.blobs_dir(), &recipe_dir)? {
-        let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
-        if crater_core::task::is_task_file(&recipe_file) {
-            info!("image {reference}: crater task artifact → recipe-replay");
-            let opts = RunOpts {
-                offline_blobmap: Some(mc.blobmap),
-                offline, // --offline = strict; default thin-online fetches deps live (D-088)
-                do_apply,
-                // Honor --shell; default is the agent path — blobs are staged
-                // onto the target first (D-095), no more forced control-plane.
-                do_shell,
-                teardown,
-                source: source.to_string(),
-                set_overrides,
-                plan_check: plan,
-            };
-            let res = apply_task(&recipe_file, hosts, opts, name, None, BTreeMap::new()).await;
-            let _ = std::fs::remove_dir_all(&recipe_dir);
-            return res;
+    // Project artifact (D-101): store/registry-direct orchestration — same
+    // play loop as the bundle path, with each locked task materialized from
+    // the local store (auto-fetched from the project's registry when absent).
+    if manifest["artifactType"].as_str() == Some(AT_PROJECT) {
+        let project = store.project_recipe(&manifest)?;
+        let registry = crater_core::store::registry_of(reference);
+        let verb = if teardown { "delete" } else if plan { "plan" } else { "apply" };
+        let deployment = name.map(|s| s.to_string()).unwrap_or_else(|| project.name.clone());
+        let mut order: Vec<&crater_core::project::Play> = project.plays.iter().collect();
+        if teardown {
+            order.reverse();
         }
-        let _ = std::fs::remove_dir_all(&recipe_dir);
-        anyhow::bail!(
-            "'{reference}' is a legacy component artifact; rebuild it as a task \
-             (crater build -f tasks/<name>.yaml)"
-        );
+        info!("{verb} project '{}'(registry/store 直连): {} play(s){}",
+            project.name, order.len(), if teardown { "(逆序)" } else { "" });
+        let total = order.len();
+        for (i, play) in order.iter().enumerate() {
+            let label = play.name.clone().unwrap_or_else(|| play.source.clone());
+            info!("── play {}/{total}: {label}(source={}, hosts={})",
+                i + 1, play.source, play.hosts.as_deref().unwrap_or("<task 默认>"));
+            if let Some(g) = &play.hosts {
+                let matches = g == "all"
+                    || hosts.iter().any(|h| h.roles.is_empty() || h.name == *g || h.roles.iter().any(|r| r == g));
+                if !matches {
+                    info!("   (跳过:hosts='{g}' 无匹配主机)");
+                    continue;
+                }
+            }
+            // Absent locally → fetch the registry twin `<registry>/<bare-lock>`.
+            let remote = format!("{registry}/{}", play.source);
+            ensure_pulled(&store, &play.source, &remote, offline).await?;
+            apply_task_artifact(
+                &store, &play.source, hosts.clone(), do_apply, do_shell, teardown,
+                source, Some(&deployment), offline, set_overrides.clone(), plan,
+                play.hosts.clone(), play.vars.clone(), true,
+            )
+            .await
+            .map_err(|e| anyhow!("project '{}' play '{label}' 失败:{e}", project.name))?;
+        }
+        info!("{verb} project '{}' 完成", project.name);
+        return Ok(());
+    }
+    if manifest["artifactType"].as_str().is_some() {
+        return apply_task_artifact(
+            &store, reference, hosts, do_apply, do_shell, teardown, source, name,
+            offline, set_overrides, plan, None, BTreeMap::new(), false,
+        )
+        .await;
     }
 
     // Plain container image → rootfs overlay (extract all layers to /).

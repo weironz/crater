@@ -1176,3 +1176,16 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **边界**:不跑 register → 依赖跨主机 fact 的步骤探针含未解析 `{{}}`,HA 类 task 结论可能失真;探针粒度即预测粒度(`test -s` 类验"在不在"不验内容);不展示 diff 内容;teardown 方向用 `delete --dry-run`。
 - **关联**:D-023(幂等探针,被复用)、D-024(dry-run)、D-093(--set gate)。
 - **UI 接线(同日补)**:看板部署表每行加 **plan** 按钮(只读无确认),走 D-099 任务流(`/api/plan/{dep}` spawn `crater plan <source> -i inventory.yaml`),逐主机摘要流进任务面板;curl 实测 n11/n12 各报 `0 会变更, 1 已就位`、关机的 n13 的 ssh 错误呈现在面板并标失败。
+
+## 2026-06-04 · registry 闭包分发:project push/pull/apply 直连(D-101)
+
+### D-101 项目制品经 registry 整体分发:闭包 push(re-prefix)/ 闭包 pull(retag 裸 lock)/ store 直连编排
+
+- **背景**:D-098 的离线 project 只有 save/.oci 文件通道;push/apply 项目 ref 都是报错守卫。有私有 registry(zot/Harbor)做交付分发中心的场景,要"仓库拉"而不是"拷文件"。
+- **决策**:
+  - **push <project-ref>**:解析项目 recipe 的锁定 ref 列表(去重)→ 每个裸 lock(`crater/yq:4.44.3`)retag 成 `<registry-of-project-ref>/<lock>` 并 push → 最后 push 项目制品。registry blob 内容寻址,跨 task 共享层仓库侧自动去重。
+  - **pull <project-ref>**:拉项目制品 → 闭包成员从同 registry 拉 `<registry>/<lock>` → **retag 回裸 lock**,使 recipe 的 `source:` 在本地库可解析(save/.oci/apply 全不用改)。
+  - **apply/plan/delete <project-ref>**:原守卫换成 **store 直连编排**——按 play 顺序(delete 逆序)materialize 各锁定 task 制品走标准管线;本地缺的成员自动从项目所在 registry 补拉(`ensure_pulled`,thin/--offline 语义沿用 D-087/088);teardown-less play 优雅跳过(同 D-098)。重构:`apply_task_artifact` 抽出单制品路径,单 ref 与 project 循环共用。
+  - **适配边界(诚实)**:闭包 ref 是裸 `crater/...` 路径,**私有 registry 任意 repo 路径可用**;docker.io 命名空间规则不接受 → 公网用 save/.oci。
+- **验证**:68 tests 绿;zot 真机闭环(73.12,zot 用 crater 自家制品部署):tag + 闭包 push → catalog `[crater/rustfs, crater/yq, demo-stack]` → **全新 CRATER_HOME**(模拟另一台控制机)闭包 pull(三制品 + 裸 retag)→ `apply <project-ref> --offline` 清机部署 73.11(2 play,rustfs api/console 200)→ `plan <project-ref>` 逐 play 摘要 → `delete <project-ref>` 逆序拆净 + yq 优雅跳过。
+- **关联**:D-098(离线 project)、D-087/088(thin/offline)、D-033(zot 闭环前例)。
