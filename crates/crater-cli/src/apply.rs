@@ -34,8 +34,12 @@ pub(crate) async fn apply_source(
     shell: bool,
     teardown: bool,
     offline: bool,
+    set: &[String],
 ) -> Result<()> {
     let verb = if teardown { "delete" } else { "apply" };
+    // `--set` (D-093): parsed here, GATED per task in `apply_task` (only declared
+    // `stage: apply` params pass — build params are frozen in the artifact).
+    let set_overrides = crate::build::parse_set_overrides(set)?;
     // `<source>` positional, else `-f`.
     let src = source
         .or_else(|| file.map(|p| p.display().to_string()))
@@ -50,12 +54,12 @@ pub(crate) async fn apply_source(
         // — `-i inventory.yaml`, `--host a,b`, or none → local.
         info!("{verb}: {src} → offline (OCI bundle)");
         let hosts = target.hosts()?;
-        return apply_oci_bundle(&path, hosts, !dry_run, shell, teardown, &src, name.as_deref()).await;
+        return apply_oci_bundle(&path, hosts, !dry_run, shell, teardown, &src, name.as_deref(), set_overrides).await;
     }
     if path.is_file() && crater_core::project::is_project_file(&path) {
         // A project (top-level `plays:`, D-083): orchestrate plays in order.
         info!("{verb}: {src} → project");
-        return apply_project(&path, name.as_deref(), &target, dry_run, shell, teardown).await;
+        return apply_project(&path, name.as_deref(), &target, dry_run, shell, teardown, set_overrides).await;
     }
     if path.is_file() {
         // A task file (top-level `actions:`, D-037). Component specs are gone.
@@ -69,6 +73,7 @@ pub(crate) async fn apply_source(
                 do_shell: shell,
                 teardown,
                 source: src.clone(),
+                set_overrides,
             };
             return apply_task(&path, hosts, opts, name.as_deref(), None, BTreeMap::new()).await;
         }
@@ -81,14 +86,14 @@ pub(crate) async fn apply_source(
     if src.contains('/') || src.contains(':') {
         info!("{verb}: {src} → image (local store / registry)");
         let hosts = target.hosts()?;
-        return images::apply_image_ref(&src, hosts, !dry_run, teardown, &src, name.as_deref(), offline).await;
+        return images::apply_image_ref(&src, hosts, !dry_run, teardown, &src, name.as_deref(), offline, set_overrides).await;
     }
     // Named task/project: `crater apply <name>` → first match of <name>.yaml under
     // library/ (then tasks/ for back-compat). D-043/D-085.
     if let Some(named) = find_named(&src) {
         if crater_core::project::is_project_file(&named) {
             info!("{verb}: {src} → named project ({})", named.display());
-            return apply_project(&named, name.as_deref(), &target, dry_run, shell, teardown).await;
+            return apply_project(&named, name.as_deref(), &target, dry_run, shell, teardown, set_overrides).await;
         }
         if crater_core::task::is_task_file(&named) {
             info!("{verb}: {src} → named task ({})", named.display());
@@ -100,6 +105,7 @@ pub(crate) async fn apply_source(
                 do_shell: shell,
                 teardown,
                 source: src.clone(),
+                set_overrides,
             };
             return apply_task(&named, hosts, opts, name.as_deref(), None, BTreeMap::new()).await;
         }
@@ -124,6 +130,7 @@ pub(crate) async fn apply_project(
     dry_run: bool,
     shell: bool,
     teardown: bool,
+    set_overrides: BTreeMap<String, String>,
 ) -> Result<()> {
     use crater_core::project::Project;
     let project = Project::from_yaml_file(path)?;
@@ -176,6 +183,7 @@ pub(crate) async fn apply_project(
             do_shell: shell,
             teardown,
             source: play.source.clone(),
+            set_overrides: set_overrides.clone(),
         };
         apply_task(
             &src_path, hosts, opts, Some(&deployment),
@@ -200,6 +208,38 @@ pub(crate) struct RunOpts {
     pub(crate) do_shell: bool,
     pub(crate) teardown: bool,
     pub(crate) source: String,
+    /// CLI `--set` overrides (D-093) — gated in `apply_task` to declared
+    /// `stage: apply` params only, then applied as the HIGHEST-priority vars
+    /// (above inventory) in `run_task_on_host`.
+    pub(crate) set_overrides: BTreeMap<String, String>,
+}
+
+/// Gate `apply/delete --set` to declared **apply-stage** params (D-093). A built
+/// OCI freezes its build-stage params (materials were fetched against them) —
+/// `--set version=…` at apply would either do nothing or desync recipe ↔ blobs,
+/// so build params are rejected with a pointer to `crater build --set`. Keys not
+/// declared in `params:` at all are rejected too (typo guard; declare the
+/// contract to opt in — D-081).
+pub(crate) fn gate_set_overrides(
+    task: &crater_core::task::TaskFile,
+    overrides: &BTreeMap<String, String>,
+) -> Result<()> {
+    use crater_core::task::ParamStage;
+    for k in overrides.keys() {
+        match task.params.get(k) {
+            Some(p) if p.stage == ParamStage::Apply => {}
+            Some(_) => anyhow::bail!(
+                "--set {k}: 是 build 期参数(stage: build)—— 制品在 build 时已按它冻结物料,\
+                 apply 期覆盖会让 recipe 与 blob 失配。请用 `crater build --set {k}=…` 重建制品"
+            ),
+            None => anyhow::bail!(
+                "--set {k}: 不是该 task 声明的参数。apply 期只能覆盖 params: 里 stage: apply \
+                 的参数(`crater inspect <source>` 看契约);要开放这个键,在 task 的 params: \
+                 里声明它"
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// Shared read-only context for ONE task run, fixed once `apply_task` has
@@ -240,6 +280,14 @@ pub(crate) async fn apply_task(
         task.hosts = h.clone();
     }
     for (k, v) in &var_overrides {
+        task.vars.insert(k.clone(), v.clone());
+    }
+    // Gate CLI `--set` (D-093): a built OCI is a FROZEN closure of its
+    // build-stage params — overriding `version` at apply would desync recipe
+    // and packed blobs. Only declared `stage: apply` params pass; they also
+    // seed task.vars so role expansion below sees them.
+    gate_set_overrides(&task, &opts.set_overrides)?;
+    for (k, v) in &opts.set_overrides {
         task.vars.insert(k.clone(), v.clone());
     }
     // Flatten role bundles (D-080): online from a task file → roles read from
@@ -434,7 +482,7 @@ pub(crate) async fn run_task_on_host(
     coord: Option<&engine::HostCoord>,
 ) -> Result<(String, Vec<(String, String)>)> {
     let RunContext { task, spec_dir, role_addrs, role_members, target_hosts, deployment, opts } = rc;
-    let RunOpts { offline_blobmap, offline, do_apply, do_shell, teardown, source } = opts;
+    let RunOpts { offline_blobmap, offline, do_apply, do_shell, teardown, source, set_overrides: _ } = opts;
     let (offline, do_apply, do_shell, teardown) = (*offline, *do_apply, *do_shell, *teardown);
     if host.is_local() {
         info!("▶ host {} (local)", host.name);
@@ -464,6 +512,11 @@ pub(crate) async fn run_task_on_host(
     // global ⊕ group ⊕ host set (resolved in target_hosts). This is how apply-stage
     // env config (vip/subnet/…) comes from inventory rather than baked in the OCI.
     for (k, v) in &host.vars {
+        ctx.vars.insert(k.clone(), v.clone());
+    }
+    // CLI `--set` (D-093, already gated in apply_task): highest priority —
+    // an explicit operator override beats inventory vars.
+    for (k, v) in &opts.set_overrides {
         ctx.vars.insert(k.clone(), v.clone());
     }
     // Validate the param contract against the merged vars (D-081/082): every
@@ -667,6 +720,7 @@ pub(crate) fn forks_limit() -> usize {
 /// inventory from CLI), set `Artifacts::Offline`, and run `run_pipeline`. So
 /// offline gets the same host grouping / parallelism / register / idempotency —
 /// the only difference is where artifacts come from (the bundle, on control).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_oci_bundle(
     bundle_file: &Path,
     hosts: Vec<crater_core::spec::Host>,
@@ -675,6 +729,7 @@ pub(crate) async fn apply_oci_bundle(
     teardown: bool,
     source: &str,
     name: Option<&str>,
+    set_overrides: BTreeMap<String, String>,
 ) -> Result<()> {
     let dest_root = std::env::temp_dir().join(format!("crater-deploy-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dest_root);
@@ -712,6 +767,7 @@ pub(crate) async fn apply_oci_bundle(
             do_shell,
             teardown,
             source: source.to_string(),
+            set_overrides: set_overrides.clone(),
         };
         apply_task(&recipe_file, hosts.clone(), opts, name, None, BTreeMap::new()).await?;
     }
@@ -787,5 +843,54 @@ pub(crate) fn print_plan(plan: &[Op]) {
             let oneline: String = p.lines().next().unwrap_or("").chars().take(120).collect();
             println!("      $ {oneline}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task_with_params() -> crater_core::task::TaskFile {
+        serde_yaml::from_str(
+            r#"
+name: demo
+params:
+  version:
+    default: "1.0"
+    stage: build
+  vip:
+    required: true
+    stage: apply
+actions:
+  - action: shell
+    cmd: "echo {{version}} {{vip}}"
+"#,
+        )
+        .unwrap()
+    }
+
+    fn kv(k: &str, v: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([(k.to_string(), v.to_string())])
+    }
+
+    /// D-093: apply-stage param passes the gate.
+    #[test]
+    fn set_gate_allows_apply_stage_param() {
+        assert!(gate_set_overrides(&task_with_params(), &kv("vip", "10.0.0.14")).is_ok());
+    }
+
+    /// D-093: a build param is frozen in the artifact — apply-time `--set` is
+    /// rejected with a pointer to `crater build --set`.
+    #[test]
+    fn set_gate_rejects_build_stage_param() {
+        let err = gate_set_overrides(&task_with_params(), &kv("version", "2.0")).unwrap_err();
+        assert!(err.to_string().contains("crater build --set"), "got: {err}");
+    }
+
+    /// D-093: undeclared keys are rejected (typo guard / contract opt-in).
+    #[test]
+    fn set_gate_rejects_undeclared_key() {
+        let err = gate_set_overrides(&task_with_params(), &kv("vipp", "x")).unwrap_err();
+        assert!(err.to_string().contains("不是该 task 声明的参数"), "got: {err}");
     }
 }

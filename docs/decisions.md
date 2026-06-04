@@ -1081,3 +1081,13 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **决策(模块)**:内置 `docker_container`,**community.docker.docker_container 的刻意精简版**:name/image/state(started|stopped|absent)/restart_policy/ports/volumes/env/command/args(裸 flag 逃逸)/runtime(默认 docker,podman 兼容)。收敛:渲染后的 spec 规范化 → sha256 取 12 位 → `--label crater.spec=<指纹>`;探针 = name+running+label 三过滤;不符(没容器/崩溃循环/任何参数变)→ `rm -f`+`run` 重建。容器不可变,无原地 update;**不做** Ansible 的 `comparisons:` 逐项 diff(那需要 API client,crater 是 shell lowering)。凭据只进 Env 不进 label(label 是哈希)。
 - **决策(治理,见 docs/module-charter.md)**:不做代码插件机制(dylib/WASM/外挂进程都破坏单二进制承诺或重复 collections 版本矩阵之痛);"插件"= role + library/ + OCI 分发。新模块准入四条:通用基础设施 / ≥2-3 交付复用 / 幂等收敛须引擎帮忙 / 参数能闭集。晋升路径 shell → role → 模块,需求驱动。规模预期 20-30 个模块;helm/kubectl 因底层自带收敛属"薄模块",到需求时再建。
 - **验证**:56 tests 绿(指纹同/异、absent lowering、action 名表);rustfs.yaml run+teardown 共 24 行裸 shell 缩成 15 行声明;真机:部署 api/console 200 → 重跑 ok(同指纹)→ 改 console_port → 指纹变 → 自动重建且新端口 200 → delete 干净。
+
+## 2026-06-04 · apply --set 受 ParamStage gate(D-093)
+
+### D-093 `apply/delete --set` 只接 `stage: apply` 参数;build 参数报错引导重建
+
+- **背景**:D-089 给 `crater build --set` 后,apply 侧一直没有 CLI 覆盖入口(单机 `--host` 无 inventory 时 apply 期参数只能改 yaml)。但不能照抄 build 的"任意 key 注入 vars":**已 build 的 OCI 是 build 期参数的冻结闭包**——物料按 `version` 取好、blob 按 material key 寻址,apply 时改 `version` 要么无效、要么 recipe 与 blob 失配,等于废掉制品(用户 2026-06-03 指出)。
+- **决策**:`apply`/`delete` 加 `--set KEY=VAL`(可重复),经 **gate**:① 声明为 `stage: apply` 的 param → 放行,作**最高优先级**(盖过 inventory vars,显式操作员意图最大);② `stage: build` → 报错并引导 `crater build --set` 重建;③ 未在 `params:` 声明 → 报错(防 typo;要开放就声明契约,接 D-081)。delete 也带 `--set`:teardown 渲染用的是同一套 vars,卸载要与部署同值。gate 在 `apply_task` 统一执行,五个入口(task 文件/named/project/OCI bundle/image ref)全走它;通过的值同时种进 `task.vars`(role 展开可见)+ `ctx.vars` 最后插入(优先级最高)。
+- **优先级链(低→高)**:param default → task vars → inventory 全局/组/主机 vars → CLI `--set`。
+- **验证**:59 tests 绿(gate 放行/拒 build 参数/拒未声明 key);CLI 实测:`--set vip=…` 渲染进 plan、`--set version=…` 与 `--set vipp=…` 报错文案符合预期。
+- **关联**:D-081(params 契约)、D-082(inventory vars)、D-089(build --set)。

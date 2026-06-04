@@ -76,6 +76,13 @@ enum Cmd {
         /// at apply. Ignored for `.oci` bundles (already full) and task files.
         #[arg(long)]
         offline: bool,
+        /// Override an **apply-stage** param (`stage: apply`, e.g. vip/subnet):
+        /// `--set vip=192.168.73.14`. Repeatable; highest priority (above
+        /// inventory vars). Build-stage params (e.g. version) are REJECTED here —
+        /// a built OCI is a frozen closure; rebuild with `crater build --set`
+        /// (D-093). `crater inspect <source>` shows each param's stage.
+        #[arg(long = "set", value_name = "KEY=VAL")]
+        set: Vec<String>,
     },
     /// Delete/uninstall a task's deployment by running its authored `teardown:`
     /// (D-049). **Opt-in**: only a task that defines `teardown:` has this — there
@@ -94,6 +101,10 @@ enum Cmd {
         /// Force the agentless shell executor instead of the default agent.
         #[arg(long)]
         shell: bool,
+        /// Override an apply-stage param for teardown rendering (same gate as
+        /// `apply --set`, D-093) — supply the same values the deploy used.
+        #[arg(long = "set", value_name = "KEY=VAL")]
+        set: Vec<String>,
     },
     /// Inspect deployment state (D-051): what crater put where, and history.
     Task {
@@ -367,6 +378,7 @@ async fn main() -> Result<()> {
             dry_run,
             shell,
             offline,
+            set,
         } => {
             // Two positional forms: `apply <source>` or `apply <name> <source>`.
             let (name, source) = match (arg1, arg2) {
@@ -374,7 +386,7 @@ async fn main() -> Result<()> {
                 (Some(a), None) => (None, Some(a)),
                 (None, _) => (None, None),
             };
-            apply::apply_source(name, source, file, target, dry_run, shell, false, offline).await
+            apply::apply_source(name, source, file, target, dry_run, shell, false, offline, &set).await
         }
         Cmd::Delete {
             source,
@@ -382,7 +394,8 @@ async fn main() -> Result<()> {
             target,
             dry_run,
             shell,
-        } => apply::apply_source(None, source, file, target, dry_run, shell, true, false).await,
+            set,
+        } => apply::apply_source(None, source, file, target, dry_run, shell, true, false, &set).await,
         Cmd::Task { cmd } => match cmd {
             TaskCmd::List { target, verify } => deployments::task_list(target, verify).await,
             TaskCmd::Show { name, target, verify } => deployments::task_show(&name, target, verify).await,
@@ -563,7 +576,7 @@ async fn component_shortcut(args: Vec<String>) -> Result<()> {
     }
     let name = name.ok_or_else(|| anyhow!("missing task name"))?;
     let target = TargetOpts { inventory, host, user, password, key, port };
-    apply::apply_source(None, Some(name), None, target, dry_run, shell, false, false).await
+    apply::apply_source(None, Some(name), None, target, dry_run, shell, false, false, &[]).await
 }
 
 

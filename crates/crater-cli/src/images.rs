@@ -86,6 +86,7 @@ pub(crate) async fn push_image(reference: &str) -> Result<()> {
 /// **crater component artifact** (B 类, D-032) → recipe-replay via `run_pipeline`
 /// (materials feed the recipe offline). A plain container image → extract its
 /// rootfs layers to `/` on each host (parallel). crater-native, no runtime.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_image_ref(
     reference: &str,
     hosts: Vec<crater_core::spec::Host>,
@@ -94,6 +95,7 @@ pub(crate) async fn apply_image_ref(
     source: &str,
     name: Option<&str>,
     offline: bool,
+    set_overrides: std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
     let store = ImageStore::open()?;
     // D-087: strict-offline (air-gap) needs the FULL closure locally — re-pull if
@@ -125,6 +127,7 @@ pub(crate) async fn apply_image_ref(
                 do_shell: true,
                 teardown,
                 source: source.to_string(),
+                set_overrides,
             };
             let res = apply_task(&recipe_file, hosts, opts, name, None, BTreeMap::new()).await;
             let _ = std::fs::remove_dir_all(&recipe_dir);
