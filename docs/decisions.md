@@ -1205,3 +1205,15 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **交叉编译踩坑**:Ubuntu `gcc-aarch64-linux-gnu` 是 **glibc 头文件**配 musl 链接 → aws-lc 的 C 先炸 fortify `__*_chk`、关掉又炸 glibc 2.38+ 的 `__isoc23_*` 重定向——头/库不匹配打地鼠没完。正解:**musl.cc 真 musl 交叉工具链**(头和 libc 都是 musl),一次通过。`build-musl.sh` 支持 `x86_64|aarch64|all`。
 - **产物**:`crater-linux-aarch64`(15M,`ELF ARM aarch64 statically linked`,qemu-aarch64 冒烟 `crater 0.1.0`)+ `crater-linux-x86_64`(19M,static-pie,真机久经验证)+ sha256sums。**诚实边界:aarch64 无 ARM 真机,端到端未验**(测试环境全 x86_64 克隆机)。
 - **发布**:GitHub Release **v0.1.0**(仓库首个 release),双 arch 二进制 + 校验和。
+
+## 2026-06-05 · requires 环境准入契约:distro/version/arch 三时点校验(D-102)
+
+### D-102 task 声明 `requires:`;apply 全员预检零步骤拒绝;inspect/plan 提前可见
+
+- **背景**(用户指出):`crater apply` 不是谁都能随便跑——os_package 闭包钉死 base OS×版本、镜像物料单 arch、厂商只认证特定发行版(openEuler/麒麟),但引擎只认 Debian/RHEL **两族**:发行版、版本、架构全无校验,`when_os` 还是静默跳过(全过滤时显示"成功"实际没干活)。追问二:「设了 requires 跑起来才知道,是不是太晚」——所以校验必须前移。
+- **决策**:
+  - **声明**:task 级 `requires: { os: [{distro, versions}], arch: [] }`——distro 对 `/etc/os-release` 的 `ID`(发行版,**不是族**),versions 精确或前缀("9" 纳 Rocky 9.4),纯数据无范围表达式(守 D-036);空 = 不限(向后兼容)。`skip_serializing_if` 保持无契约 recipe 干净。
+  - **三时点**,全在执行之前:`inspect` 零连接显示契约(烤进制品);`plan` 连接零执行受同门;apply **全员预检(admission)**——并发探测所有目标 distro/version/arch,**一台不符整体拒绝且列出全部**不符主机,零步骤执行(消灭"跑到第 7 台才发现,前 6 台已动过")。teardown 豁免(已部署的永远可删);dry-run 不连机查不了。
+  - **配套**:`os.rs` 探测升级为 `OsInfo{family, distro, version}`(ID + VERSION_ID);堵 when_os 静默坑——action 全被过滤时 warn「0 步可执行…可能不在适用范围」;`library/rustfs` 声明 `arch: [amd64]` 作库内示例。
+- **验证**:70 tests 绿(check 矩阵:精确/前缀版本、distro≠族、arch 别名、空契约全放行);真机:契约匹配 → `准入通过` 执行;要求 22.04 对 24.04 目标 → 清晰拒绝;双主机 arch 不符 → 两台都列出零步骤;plan 同门;inspect 零连接出「环境要求」行。
+- **关联**:D-036(纯数据)、D-062(os_package 钉 base)、D-048(arch 物料)、D-100(plan)。

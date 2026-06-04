@@ -261,6 +261,8 @@ pub(crate) async fn inspect_source(source: &str, gen_inventory: bool) -> Result<
     let desc = task.description.as_deref().map(|d| format!("  — {d}")).unwrap_or_default();
     println!("{}{}{}", task.name, ver, desc);
     println!("hosts: {}", task.hosts);
+    // Admission contract (D-102) — visible BEFORE touching any machine.
+    println!("环境要求(requires): {}", task.requires.describe());
     println!(
         "角色(inventory 需定义): {}",
         if roles.is_empty() { "(无 / 全部)".to_string() } else { roles.join(", ") }

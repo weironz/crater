@@ -32,6 +32,14 @@ pub struct TaskFile {
     /// resolves against the inventory — NOT an expression (D-036).
     #[serde(default = "default_hosts")]
     pub hosts: String,
+    /// Admission contract (D-102): which target environments this task
+    /// supports (distro / version / arch). Checked at THREE points, all
+    /// before anything executes: `inspect` (zero connection — shown from the
+    /// artifact), `plan` (connected, zero execution), and apply's fleet-wide
+    /// admission pass (ALL targets probed first; one mismatch → nothing runs).
+    /// Absent = unrestricted (backward compatible).
+    #[serde(default, skip_serializing_if = "Requires::is_empty")]
+    pub requires: Requires,
     /// Input contract (D-081, Helm `values.schema`-like): declared parameters
     /// with description / default / required / stage. A param's `default` seeds
     /// the render vars (see [`TaskFile::effective_vars`]); `crater inspect`
@@ -92,6 +100,95 @@ pub struct ParamSpec {
     /// config, supplied at deploy). Drives the online/offline story (D-078/081).
     #[serde(default)]
     pub stage: ParamStage,
+}
+
+/// The task's environment admission contract (D-102). Pure data, engine
+/// compares (D-036) — no version-range expressions; enumerate versions
+/// (prefix matches: `"9"` admits Rocky's `9.4`).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Requires {
+    /// Acceptable OSes — ANY entry matching admits the host. Empty = any OS.
+    #[serde(default)]
+    pub os: Vec<OsRequire>,
+    /// Acceptable architectures (`amd64`/`arm64`, uname spellings accepted as
+    /// aliases via [`crate::arch::Arch`] naming). Empty = any arch.
+    #[serde(default)]
+    pub arch: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OsRequire {
+    /// `/etc/os-release` `ID`, lowercase: `ubuntu` / `debian` / `openeuler` /
+    /// `kylin` / `rocky` … (distro, NOT family — that's the point, D-102).
+    pub distro: String,
+    /// Acceptable `VERSION_ID`s; exact or prefix (`"9"` admits `9.4`,
+    /// `"22.04"` admits `22.04.3`). Empty = every version of this distro.
+    #[serde(default)]
+    pub versions: Vec<String>,
+}
+
+impl Requires {
+    pub fn is_empty(&self) -> bool {
+        self.os.is_empty() && self.arch.is_empty()
+    }
+
+    /// Human-readable contract, for `inspect` and refusal messages.
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.os.is_empty() {
+            let os: Vec<String> = self
+                .os
+                .iter()
+                .map(|r| {
+                    if r.versions.is_empty() {
+                        r.distro.clone()
+                    } else {
+                        format!("{} {}", r.distro, r.versions.join("/"))
+                    }
+                })
+                .collect();
+            parts.push(os.join(" | "));
+        }
+        if !self.arch.is_empty() {
+            parts.push(format!("arch {}", self.arch.join("/")));
+        }
+        if parts.is_empty() { "不限".to_string() } else { parts.join(",") }
+    }
+
+    /// Err(reason) when the detected identity violates the contract (D-102).
+    pub fn check(&self, os: &crate::os::OsInfo, arch: crate::arch::Arch) -> Result<(), String> {
+        if !self.os.is_empty() {
+            let admitted = self.os.iter().any(|r| {
+                r.distro == os.distro
+                    && (r.versions.is_empty()
+                        || r.versions
+                            .iter()
+                            .any(|v| os.version == *v || os.version.starts_with(&format!("{v}."))))
+            });
+            if !admitted {
+                return Err(format!(
+                    "OS 不符:目标是 {} {},task 要求 {}",
+                    if os.distro.is_empty() { "<未知发行版>" } else { &os.distro },
+                    if os.version.is_empty() { "<未知版本>" } else { &os.version },
+                    self.describe()
+                ));
+            }
+        }
+        if !self.arch.is_empty() {
+            let name = arch.as_str();
+            let admitted = self
+                .arch
+                .iter()
+                .any(|a| crate::arch::Arch::from_uname(a) == arch || a == name);
+            if !admitted {
+                return Err(format!(
+                    "架构不符:目标是 {name},task 要求 {}",
+                    self.arch.join("/")
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -691,5 +788,45 @@ actions: []
         let mut provided = ev.clone();
         provided.insert("vip".into(), "192.168.73.14".into());
         assert!(task.validate_params(&provided, None).is_ok()); // supplied → ok
+    }
+}
+
+#[cfg(test)]
+mod requires_tests {
+    use super::*;
+    use crate::arch::Arch;
+    use crate::os::OsInfo;
+
+    fn os(distro: &str, version: &str) -> OsInfo {
+        OsInfo { family: crate::os::OsFamily::Unknown, distro: distro.into(), version: version.into() }
+    }
+
+    /// D-102: distro+version+arch admission — exact/prefix versions, distro
+    /// (not family) granularity, uname aliases for arch, empty = unrestricted.
+    #[test]
+    fn requires_check_matrix() {
+        let req: Requires = serde_yaml::from_str(
+            "os:\n  - distro: ubuntu\n    versions: [\"22.04\", \"24.04\"]\n  - distro: openeuler\narch: [amd64]\n",
+        )
+        .unwrap();
+        // distro+version+arch all admitted
+        assert!(req.check(&os("ubuntu", "24.04"), Arch::Amd64).is_ok());
+        // version prefix: 24.04.1 admitted by "24.04"
+        assert!(req.check(&os("ubuntu", "24.04.1"), Arch::Amd64).is_ok());
+        // openeuler: any version (empty list)
+        assert!(req.check(&os("openeuler", "22.03"), Arch::Amd64).is_ok());
+        // wrong version
+        let e = req.check(&os("ubuntu", "20.04"), Arch::Amd64).unwrap_err();
+        assert!(e.contains("OS 不符"), "{e}");
+        // family-mate but wrong DISTRO (debian != ubuntu — the whole point)
+        assert!(req.check(&os("debian", "12"), Arch::Amd64).is_err());
+        // wrong arch
+        let e = req.check(&os("ubuntu", "24.04"), Arch::Arm64).unwrap_err();
+        assert!(e.contains("架构不符"), "{e}");
+        // empty contract admits anything
+        assert!(Requires::default().check(&os("kylin", "V10"), Arch::Unknown).is_ok());
+        // arch aliases: requirement spelled x86_64 admits Amd64
+        let req2: Requires = serde_yaml::from_str("arch: [x86_64]\n").unwrap();
+        assert!(req2.check(&os("", ""), Arch::Amd64).is_ok());
     }
 }

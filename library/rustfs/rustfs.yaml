@@ -3,6 +3,11 @@
 # 镜像声明为 kind: image 物料:在线 docker pull;build 打成 oci-archive,离线 import(D-061)。
 name: rustfs
 hosts: all
+requires:
+  # 离线镜像物料按 amd64 打包(D-061 单 arch)——推到 ARM 机直接准入拒绝,
+  # 而不是 docker load 后容器起不来才发现(D-102)。发行版不限:依赖是 docker
+  # 而非特定 OS,由 docker_ready preflight 检查。
+  arch: [amd64]
 vars:
   version: "1.0.0-beta.5"      # 镜像 tag(钉具体版本才严格幂等);--set version=X 可覆盖
   data_dir: "/data/rustfs"

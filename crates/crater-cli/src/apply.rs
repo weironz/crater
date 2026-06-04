@@ -317,6 +317,43 @@ pub(crate) async fn apply_task(
     // Optional deployment/grouping label (D-052), default = task name. Only used
     // for `task list` grouping; apply/delete behavior is identical regardless.
     let deployment = name.unwrap_or(&task.name).to_string();
+    // Fleet-wide admission (D-102): when the task declares `requires:`, probe
+    // EVERY target's distro/version/arch FIRST — one mismatch refuses the whole
+    // run before ANY step executes (no "failed on host 7 of 10 with 6 already
+    // mutated"). All failures are listed, not just the first. Exempt: teardown
+    // (you may always delete what's already deployed) and dry-run (offline).
+    if opts.do_apply && !opts.teardown && !task.requires.is_empty() {
+        let req = &task.requires;
+        let checks: Vec<(String, Result<(), String>)> =
+            futures::stream::iter(hosts.iter().map(|h| async move {
+                let outcome = async {
+                    let exec = connect_executor(h, true)
+                        .await
+                        .map_err(|e| format!("连接失败:{e}"))?;
+                    let os = crater_core::os::detect_info_via(exec.as_ref()).await;
+                    let arch = arch::detect_via(exec.as_ref()).await;
+                    req.check(&os, arch)
+                }
+                .await;
+                (h.name.clone(), outcome)
+            }))
+            .buffer_unordered(forks_limit())
+            .collect()
+            .await;
+        let failures: Vec<String> = checks
+            .iter()
+            .filter_map(|(n, r)| r.as_ref().err().map(|e| format!("  {n}: {e}")))
+            .collect();
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "准入失败:{}/{} 台目标不符,未执行任何步骤\n{}",
+                failures.len(),
+                hosts.len(),
+                failures.join("\n")
+            );
+        }
+        info!("准入通过:{} 台目标满足 requires({})", hosts.len(), req.describe());
+    }
     // Delete is opt-in (D-049): a task only has delete capability if it authored
     // a `teardown:`. No auto-inversion of `actions:` — real cleanup targets
     // runtime state the install steps never created.
@@ -594,6 +631,16 @@ pub(crate) async fn run_task_on_host(
     // delete → run the authored `teardown:` actions; apply → `actions`.
     let action_list = if teardown { &task.teardown } else { &task.actions };
     let steps = engine::plan_from_task(action_list, &ctx)?;
+    // Silent-skip trap (D-102): when_os/when_role filtered EVERYTHING out —
+    // the run would report "success" having done nothing. Say so loudly.
+    if steps.is_empty() && !action_list.is_empty() {
+        warn!(
+            "[{}] 0 步可执行:{} 个 action 全被 when_os/when_role 过滤 —— 目标({:?})可能不在该 task 适用范围",
+            host.name,
+            action_list.len(),
+            osf
+        );
+    }
     let handlers = engine::plan_handlers(&task.handlers, &ctx)?;
     info!(
         "[{}] {} {} — {} step(s)",
