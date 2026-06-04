@@ -1,0 +1,35 @@
+# library/rustfs —— 构建 / 推送 / 导出 rustfs 的 OCI 制品(B 类 artifact)。
+# 需要 just:https://github.com/casey/just
+#
+# 用法:
+#   just build / push / save
+#   just registry=192.168.1.5:5000 namespace=lib push   # 私有/离线库
+#   just version=1.0.0 push                 # 出固定版本(tag 与内容一并改)
+#
+# 版本写这里即可:`--set version=...` 保证 tag 与实际镜像 tag 始终一致(D-089)。
+
+registry  := "docker.io"
+namespace := "willdockerhub"
+name      := "rustfs"
+version   := "latest"
+ref       := registry + "/" + namespace + "/" + name + ":" + version
+
+# 列出可用命令(默认)
+default:
+    @just --list
+
+# 构建 OCI 制品到本地库(--set 让 tag 与实际镜像 tag 始终一致)
+build:
+    crater build -f {{name}}.yaml -t {{ref}} --set version={{version}}
+
+# 构建并推送到 registry
+push: build
+    crater push {{ref}}
+
+# 构建并导出为离线 .oci 文件
+save: build
+    crater save {{ref}} -o {{name}}-{{version}}.oci
+
+# 删除本地导出的 .oci
+clean:
+    rm -f *.oci

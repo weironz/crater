@@ -1,0 +1,63 @@
+# rustfs(task):S3 兼容对象存储,**容器化部署**(docker run)。
+# 不装 docker —— preflight 只检查 docker 就绪,缺了响亮报错(装 docker 用 `crater apply docker`)。
+# 镜像声明为 kind: image 物料:在线 docker pull;build 打成 oci-archive,离线 import(D-061)。
+name: rustfs
+hosts: all
+vars:
+  version: "latest"            # 镜像 tag;crater build/apply -f 时 --set version=X 可覆盖
+  data_dir: "/data/rustfs"
+  port: "9000"                 # S3 端点(宿主机映射)
+  access_key: "rustfsadmin"    # 上游默认凭据;生产环境用 inventory vars 覆盖
+  secret_key: "rustfsadmin"
+materials:
+  - name: rustfs-img
+    kind: image
+    ref: "docker.io/rustfs/rustfs:{{version}}"
+actions:
+  - id: docker_ready
+    action: shell
+    phase: preflight
+    cmd: "docker info >/dev/null 2>&1 || { echo 'docker 未就绪:请先部署 docker(crater apply docker)' >&2; exit 1; }"
+  - id: data_dir
+    # 镜像内进程跑在 uid 10001(rustfs)下,bind mount 的宿主机目录必须可写,
+    # 否则容器 FATAL: Permission denied 反复重启。
+    action: file
+    path: /data/rustfs
+    state: directory
+    owner: "10001"
+    group: "10001"
+  - id: img
+    # 在线:docker pull;离线:推包内 oci-archive 并 import(同一份 yaml,来源由形态定)
+    action: load_image
+    material: rustfs-img
+    runtime: docker
+    needs: [docker_ready]
+  - id: run
+    action: shell
+    cmd: >-
+      docker run -d --name rustfs --restart unless-stopped
+      -p {{port}}:9000
+      -v {{data_dir}}:/data
+      -e RUSTFS_ACCESS_KEY={{access_key}}
+      -e RUSTFS_SECRET_KEY={{secret_key}}
+      docker.io/rustfs/rustfs:{{version}}
+    # 容器已在跑 → 整步跳过(幂等);改了参数要先 delete 再 apply(容器不可变)
+    check: "docker ps --filter name=^rustfs$ --filter status=running -q | grep -q ."
+    needs: [img, data_dir]
+  - id: verify
+    action: shell
+    phase: verify
+    cmd: "for i in $(seq 1 15); do curl -s -o /dev/null http://localhost:{{port}}/health && break; sleep 1; done; curl -s -o /dev/null -w 'rustfs /health -> %{http_code}\\n' http://localhost:{{port}}/health"
+    needs: [run]
+teardown:
+  - id: rm_container
+    action: shell
+    cmd: "docker rm -f rustfs 2>/dev/null || true"
+    check: "! docker ps -a --filter name=^rustfs$ -q | grep -q ."
+  # 数据目录(对象数据,容器运行期长出来的):
+  - id: rm_data
+    action: file
+    path: /data/rustfs
+    state: absent
+    needs: [rm_container]
+  # 镜像本身不删:可能被别的容器复用;要清理手动 docker rmi
