@@ -89,7 +89,7 @@ tar -xf /tmp/yq.oci -C /tmp/x && cat /tmp/x/oci-layout /tmp/x/index.json && ls /
 ## build 提速（D-078）
 
 - **增量镜像拉取**：`store.pull` 拉每个 layer 前先看 `blobs/sha256/<digest>` 是否已存在——内容寻址,digest 命中即内容命中,跳过网络。重 build / 多镜像共用基础层只下一次。manifest 仍每次取,移动的 tag 照样拉新层。
-- **并行 file 取材**：`kind: file` 的二进制/压缩包(build 字节大头)并发下载(`buffer_unordered(8)`)。`kind: image`(`index.json` 读改写非并发安全)与 `os_package`(buildah 重)仍串行。
+- **并行 file 取材**：`kind: file` 的二进制/压缩包(build 字节大头)并发下载(`buffer_unordered(8)`)。`os_package`(buildah 重)串行;`kind: image` 已并行,见下条④。
 - 真机:k8s-ha 全套 build 76s(9 镜像各 1~3s 命中缓存、8 个 file ~5s 内并发完成)。
 - **并行镜像拉取(D-078④ 收尾,2026-06-04)**:多个 `kind: image` 物料并发预拉
   (`buffer_unordered(4)`,TLS/manifest 往返叠加),打包循环走"已预拉"快路径不再二次
