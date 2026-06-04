@@ -6,7 +6,8 @@ hosts: all
 vars:
   version: "1.0.0-beta.5"      # 镜像 tag(钉具体版本才严格幂等);--set version=X 可覆盖
   data_dir: "/data/rustfs"
-  port: "9000"                 # S3 端点(宿主机映射)
+  api_port: "9000"             # S3 端点(宿主机映射 → 容器 9000)
+  console_port: "9001"         # Web 控制台(宿主机映射 → 容器 9001)
   # 1.0.0-beta.5 起,绑非环回地址时**拒绝**上游默认凭据 rustfsadmin/rustfsadmin
   # (容器 FATAL 反复重启)。这里给非默认占位值,生产务必用 inventory vars 覆盖(D-082)。
   access_key: "crater-admin"
@@ -35,26 +36,29 @@ actions:
     runtime: docker
     needs: [docker_ready]
   - id: run
-    # 收敛语义:期望态 = 容器 running 且镜像是期望版本。不满足(没有容器/
-    # 崩溃重启中/版本变了)→ 先删旧再起新;满足 → 跳过(幂等)。
-    # {{.State.Status}}/{{.Config.Image}} 是 docker 自己的模板,引擎原样透传(D-036)。
+    # 收敛语义:容器起来时打一个"参数指纹"label(版本+端口+凭据),探针按
+    # name+running+label 三过滤比对 —— **任何参数变了**(不只版本)指纹就不符,
+    # 自动删旧起新;全符合 → 跳过(幂等)。没容器/崩溃重启中同样不符 → 重建。
     action: shell
     cmd: >-
       docker rm -f rustfs 2>/dev/null;
       docker run -d --name rustfs --restart unless-stopped
-      -p {{port}}:9000
+      --label crater_spec={{version}}_{{api_port}}_{{console_port}}_{{access_key}}_{{secret_key}}
+      -p {{api_port}}:9000
+      -p {{console_port}}:9001
       -v {{data_dir}}:/data
       -e RUSTFS_ACCESS_KEY={{access_key}}
       -e RUSTFS_SECRET_KEY={{secret_key}}
       docker.io/rustfs/rustfs:{{version}}
     check: >-
-      [ "$(docker inspect -f '{{.State.Status}} {{.Config.Image}}' rustfs 2>/dev/null)"
-      = "running docker.io/rustfs/rustfs:{{version}}" ]
+      docker ps --filter name=^rustfs$ --filter status=running
+      --filter label=crater_spec={{version}}_{{api_port}}_{{console_port}}_{{access_key}}_{{secret_key}}
+      -q | grep -q .
     needs: [img, data_dir]
   - id: verify
     action: shell
     phase: verify
-    cmd: "for i in $(seq 1 15); do curl -s -o /dev/null http://localhost:{{port}}/health && break; sleep 1; done; curl -s -o /dev/null -w 'rustfs /health -> %{http_code}\\n' http://localhost:{{port}}/health"
+    cmd: "for i in $(seq 1 15); do curl -s -o /dev/null http://localhost:{{api_port}}/health && break; sleep 1; done; curl -s -o /dev/null -w 'rustfs api /health -> %{http_code}\\n' http://localhost:{{api_port}}/health && curl -s -o /dev/null -w 'rustfs console /rustfs/console/ -> %{http_code}\\n' http://localhost:{{console_port}}/rustfs/console/"
     needs: [run]
 teardown:
   - id: rm_container

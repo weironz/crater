@@ -14,9 +14,10 @@ just push                                                 # 构建 OCI 制品并
 
 - 镜像是 `kind: image` 物料:在线 `docker pull`;`crater build` 把镜像打成 oci-archive,
   离线 `docker import` —— 同一份 yaml,在线/离线通吃(D-061)。
-- S3 端点宿主机 `:9000`,数据落 `/data/rustfs`(teardown 会删,镜像不删)。
+- S3 端点宿主机 `:9000`(`api_port`),Web 控制台 `:9001`(`console_port`,路径
+  `/rustfs/console/`);数据落 `/data/rustfs`(teardown 会删,镜像不删)。
 - 凭据默认是**非上游默认**的占位值(`crater-admin`/`crater-changeme`):rustfs
   1.0.0-beta.5 起绑非环回地址时拒绝默认凭据 `rustfsadmin`,会 FATAL 重启。
   生产用 inventory `vars:` 覆盖(`access_key`/`secret_key`,D-082)。
-- 收敛语义:容器没起来/崩溃重启/**版本变了** → 自动删旧起新;在跑且版本符合 → 跳过(幂等)。改端口/凭据(版本不变)仍需先 `crater delete rustfs` 再 apply(探针只比镜像版本)。
+- 收敛语义:容器带"参数指纹" label(版本+端口+凭据),探针比指纹——**任何参数变了**、容器没起来、崩溃重启中 → 自动删旧起新;全符合 → 跳过(幂等)。
 - 版本:`vars.version` 钉具体 tag(默认 `1.0.0-beta.5`,`:latest` 不幂等);`just version=X push` 出别的版本。
