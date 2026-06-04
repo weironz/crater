@@ -1,4 +1,4 @@
-# library/yq —— 构建 / 推送 / 导出 yq 的 OCI 制品(B 类 artifact)。
+# library/docker —— 构建 / 推送 / 导出 docker 的 OCI 制品(B 类 artifact)。
 # 需要 just:https://github.com/casey/just (apt install just / cargo install just / 下载二进制)
 #
 # 用法:
@@ -7,15 +7,15 @@
 #   just push                              # 构建并推送到 registry
 #   just save                              # 构建并导出离线 .oci(拷给 air-gap 机器)
 #   just registry=192.168.1.5:5000 namespace=lib push   # 覆盖私有库 / 离线库
-#   just version=4.45.1 push                # 出别的版本(tag 与内容一并改)
+#   just version=27.4.0 push                # 出别的版本(tag 与内容一并改)
 #
 # 版本写这里即可:`--set version=...` 保证 tag 与实际拉取的版本始终一致(D-089);
-# yq.yaml 的 vars.version 只是直接 `crater apply -f` 时的缺省。
+# docker.yaml 的 vars.version 只是直接 `crater apply -f` 时的缺省。
 
 registry  := "docker.io"        # registry 主机:docker.io / 192.168.1.5:5000(私有/离线)
 namespace := "willdockerhub"    # 命名空间 / 组织
-name      := "yq"
-version   := "4.44.3"
+name      := "docker"
+version   := "27.3.1"
 ref       := registry + "/" + namespace + "/" + name + ":" + version
 
 # 列出可用命令(默认)
