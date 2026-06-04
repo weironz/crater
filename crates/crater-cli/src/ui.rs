@@ -183,6 +183,7 @@ pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
         .route("/api/history", get(history_fragment))
         .route("/api/hosts", get(hosts_fragment))
         .route("/api/verify", post(verify_action))
+        .route("/api/plan/{deployment}", post(plan_action))
         .route("/api/apply/{deployment}", post(apply_action))
         .route("/api/delete/{deployment}", post(delete_action))
         .route("/api/job/{id}", get(job_fragment))
@@ -519,8 +520,12 @@ async fn render_deployments() -> String {
         let checked = if a.checked > 0 { state::fmt_epoch(a.checked) } else { "—".to_string() };
         // heal: plain confirm. delete: TYPE-THE-NAME prompt (D-099) — htmx
         // sends the answer as HX-Prompt; the server only proceeds on equality.
+        // plan: read-only preview, no confirm (D-100). heal: plain confirm.
+        // delete: TYPE-THE-NAME prompt (D-099) — htmx sends the answer as
+        // HX-Prompt; the server only proceeds on equality.
         let heal = format!(
-            "<td><button class='btn btn-heal' hx-post='/api/apply/{d}' hx-target='#jobs' hx-swap='innerHTML' hx-confirm='Re-apply (heal) {d} to its hosts?'>heal</button> \
+            "<td><button class='btn btn-heal' hx-post='/api/plan/{d}' hx-target='#jobs' hx-swap='innerHTML'>plan</button> \
+             <button class='btn btn-heal' hx-post='/api/apply/{d}' hx-target='#jobs' hx-swap='innerHTML' hx-confirm='Re-apply (heal) {d} to its hosts?'>heal</button> \
              <button class='btn btn-heal btn-danger' hx-post='/api/delete/{d}' hx-target='#jobs' hx-swap='innerHTML' hx-prompt='危险:运行 {d} 的 teardown 卸载。输入部署名确认:'>delete</button></td>",
             d = esc(&dep)
         );
@@ -693,6 +698,22 @@ async fn source_of(dep: &str) -> Option<String> {
         .into_iter()
         .find(|d| d.deployment == dep)
         .map(|d| d.source)
+}
+
+/// Preview what a re-apply would change (D-100 wired into the UI): runs
+/// `crater plan <source>` as a job. Read-only — no confirm needed.
+async fn plan_action(State(st): State<AppState>, AxPath(dep): AxPath<String>) -> Html<String> {
+    if !std::path::Path::new(INVENTORY).exists() {
+        return no_inventory_note();
+    }
+    let Some(source) = source_of(&dep).await else {
+        return Html(format!("<div class='note fail'>deployment '{}' not found</div>", esc(&dep)));
+    };
+    let id = st.spawn_job(
+        format!("plan {dep}"),
+        vec!["plan".into(), source, "-i".into(), INVENTORY.into()],
+    );
+    job_panel(id)
 }
 
 async fn apply_action(State(st): State<AppState>, AxPath(dep): AxPath<String>) -> Html<String> {

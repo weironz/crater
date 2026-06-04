@@ -1175,3 +1175,4 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **验证**:68 tests 绿;真机 73.11:空机 plan rustfs `3 会变更`→ apply 后 `1 会变更`(只剩 load_image)→ 手动杀容器注入漂移 → plan 精确翻出 `container ~ would-change` 其余仍 ok;project bundle `offline plan project: 2 play(s)` 零执行。
 - **边界**:不跑 register → 依赖跨主机 fact 的步骤探针含未解析 `{{}}`,HA 类 task 结论可能失真;探针粒度即预测粒度(`test -s` 类验"在不在"不验内容);不展示 diff 内容;teardown 方向用 `delete --dry-run`。
 - **关联**:D-023(幂等探针,被复用)、D-024(dry-run)、D-093(--set gate)。
+- **UI 接线(同日补)**:看板部署表每行加 **plan** 按钮(只读无确认),走 D-099 任务流(`/api/plan/{dep}` spawn `crater plan <source> -i inventory.yaml`),逐主机摘要流进任务面板;curl 实测 n11/n12 各报 `0 会变更, 1 已就位`、关机的 n13 的 ssh 错误呈现在面板并标失败。

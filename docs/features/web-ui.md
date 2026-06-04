@@ -25,6 +25,8 @@ crater ui --bind 0.0.0.0 --port 9000 --token t1 # 对外暴露:无 --token 直�
 写动作用**当前目录的 `inventory.yaml`**(约定,类似 AWX 的预配机群凭据);缺失时按钮返回提示。
 
 - **Verify now**(全局):重跑 `task list --verify`,漂移写回 DB。
+- **Plan**(每行,D-100):`crater plan <source>`——只读变更预演,无需确认;逐主机的
+  `N 会变更, M 已就位` 摘要直接流进任务面板。
 - **Heal**(每行):对该 deployment re-apply 自愈,confirm 弹窗。
 - **Delete**(每行,D-099):跑该 task 的 `teardown:`。**强确认**——`hx-prompt` 要求**输入部署名**,
   服务端校验 `HX-Prompt` 头与部署名相等才执行(GitHub/AWX 式 type-the-name)。
@@ -38,7 +40,7 @@ crater ui --bind 0.0.0.0 --port 9000 --token t1 # 对外暴露:无 --token 直�
 |---|---|
 | `/` `/view/*` | 页面壳 + 各视图(仪表盘/主机/主机组/任务) |
 | `/api/deployments` | 部署表(Status 漂移列 + Checked;heal/delete 按钮) |
-| `/api/verify` `/api/apply/{dep}` `/api/delete/{dep}` | 写操作(POST → 任务面板) |
+| `/api/verify` `/api/plan/{dep}` `/api/apply/{dep}` `/api/delete/{dep}` | 操作(POST → 任务面板;plan 只读) |
 | `/api/job/{id}` | 任务日志片段(运行中 200,结束 286) |
 | `/htmx.min.js` | 嵌入的 htmx(离线) |
 
