@@ -37,6 +37,7 @@ task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible �
 | `lineinfile` | `path`, `line`, `regexp`, `state`, `create` | 确保某行存在/不存在(grep 探针幂等) | `lineinfile` |
 | `user` | `name`, `state`, `system`, `shell`, `home`, `groups` | 确保系统用户存在/不存在(`id` 探针) | `user` |
 | `group` | `name`, `state`, `system` | 确保系统组存在/不存在(`getent` 探针) | `group` |
+| `docker_container` | `name`, `image`, `state`, `ports`, `volumes`, `env`, … | 容器以期望参数在跑:spec 指纹进 label,任何参数变/崩溃循环 → 重建(D-092) | `community.docker.docker_container` 的精简版 |
 
 `shell` 对齐 Ansible 的 `shell` 而**不是 `command`**:crater 的命令默认经过 shell,管道、
 `&&`、`2>/dev/null`、`KUBECONFIG=... cmd` 这些都能用(Ansible 的 `command` 不经 shell、不支持这些)。

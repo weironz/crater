@@ -1322,6 +1322,89 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 },
             }
         }
+        Action::DockerContainer {
+            name, image, state, restart_policy, ports, volumes, env, command, args, runtime,
+        } => {
+            use crate::component::ContainerState;
+            let rt = runtime.as_deref().unwrap_or("docker");
+            let name = render(name, &ctx.vars)?;
+            match state {
+                ContainerState::Absent => Op::Shell {
+                    phase,
+                    describe: format!("container {name} absent"),
+                    cmd: format!("{rt} rm -f '{name}' 2>/dev/null || true"),
+                    soft_fail: false,
+                    check: Some(format!("! {rt} ps -a --filter name=^{name}$ -q | grep -q .")),
+                },
+                ContainerState::Stopped => Op::Shell {
+                    phase,
+                    describe: format!("container {name} stopped"),
+                    cmd: format!("{rt} stop '{name}'"),
+                    soft_fail: false,
+                    check: Some(format!(
+                        "! {rt} ps --filter name=^{name}$ --filter status=running -q | grep -q ."
+                    )),
+                },
+                ContainerState::Started => {
+                    // Fingerprint convergence (D-092): render every spec field,
+                    // hash the canonical form into a `crater.spec` label. check =
+                    // "a RUNNING container with name + matching label exists" —
+                    // absent / crash-looping / ANY param change misses, and the
+                    // cmd replaces the container (immutable, no in-place update).
+                    // Secrets never enter the label (it's a hash).
+                    let image = image.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("docker_container '{name}': `state: started` needs `image`")
+                    })?;
+                    let image = render(image, &ctx.vars)?;
+                    let mut canon = format!("image={image}\n");
+                    let mut flags = String::new();
+                    if let Some(rp) = restart_policy {
+                        canon.push_str(&format!("restart={rp}\n"));
+                        flags.push_str(&format!(" --restart {rp}"));
+                    }
+                    for p in ports {
+                        let p = render(p, &ctx.vars)?;
+                        canon.push_str(&format!("port={p}\n"));
+                        flags.push_str(&format!(" -p {p}"));
+                    }
+                    for v in volumes {
+                        let v = render(v, &ctx.vars)?;
+                        canon.push_str(&format!("volume={v}\n"));
+                        flags.push_str(&format!(" -v {v}"));
+                    }
+                    for (k, v) in env {
+                        let v = render(v, &ctx.vars)?;
+                        canon.push_str(&format!("env={k}={v}\n"));
+                        flags.push_str(&format!(" -e {k}='{v}'"));
+                    }
+                    for a in args {
+                        let a = render(a, &ctx.vars)?;
+                        canon.push_str(&format!("arg={a}\n"));
+                        flags.push_str(&format!(" {a}"));
+                    }
+                    let trailing = match command {
+                        Some(c) => {
+                            let c = render(c, &ctx.vars)?;
+                            canon.push_str(&format!("command={c}\n"));
+                            format!(" {c}")
+                        }
+                        None => String::new(),
+                    };
+                    let fp = crate::bundle::sha256_hex(canon.as_bytes())[..12].to_string();
+                    Op::Shell {
+                        phase,
+                        describe: format!("container {name} <- {image} (spec {fp})"),
+                        cmd: format!(
+                            "{rt} rm -f '{name}' 2>/dev/null; {rt} run -d --name '{name}' --label crater.spec={fp}{flags} {image}{trailing}"
+                        ),
+                        soft_fail: false,
+                        check: Some(format!(
+                            "{rt} ps --filter name=^{name}$ --filter status=running --filter label=crater.spec={fp} -q | grep -q ."
+                        )),
+                    }
+                }
+            }
+        }
     };
     Ok(op)
 }
@@ -1780,6 +1863,62 @@ mod tests {
                 assert_eq!(creates.as_deref(), Some("/usr/local/bin/app"));
             }
             other => panic!("expected UnarchiveMaterial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn docker_container_fingerprint_convergence() {
+        // D-092: the spec fingerprint drives convergence — same spec → same
+        // label in cmd AND check (skip when a matching container runs); any
+        // param change → different fingerprint → the check misses → replace.
+        let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
+        ctx.vars.insert("api_port".into(), "9000".into());
+        let mk = |port: &str| Action::DockerContainer {
+            name: "app".into(),
+            image: Some("docker.io/x/app:1".into()),
+            state: Default::default(),
+            restart_policy: Some("unless-stopped".into()),
+            ports: vec![format!("{port}:9000")],
+            volumes: vec!["/data/app:/data".into()],
+            env: BTreeMap::from([("KEY".to_string(), "v".to_string())]),
+            command: None,
+            args: vec![],
+            runtime: None,
+        };
+        let fp_of = |op: &Op| match op {
+            Op::Shell { cmd, check, .. } => {
+                let fp = cmd.split("crater.spec=").nth(1).unwrap()[..12].to_string();
+                assert!(check.as_ref().unwrap().contains(&format!("crater.spec={fp}")));
+                assert!(check.as_ref().unwrap().contains("status=running"));
+                fp
+            }
+            other => panic!("expected Shell, got {other:?}"),
+        };
+        // {{api_port}} renders BEFORE fingerprinting → var value participates.
+        let a = fp_of(&action_op(Phase::Install, &mk("{{api_port}}"), &ctx).unwrap());
+        let b = fp_of(&action_op(Phase::Install, &mk("9000"), &ctx).unwrap());
+        let c = fp_of(&action_op(Phase::Install, &mk("9001"), &ctx).unwrap());
+        assert_eq!(a, b, "rendered identical specs share a fingerprint");
+        assert_ne!(b, c, "a changed port must change the fingerprint");
+        // state: absent lowers to rm -f with a gone-probe (for teardown).
+        let absent = Action::DockerContainer {
+            name: "app".into(),
+            image: None,
+            state: crate::component::ContainerState::Absent,
+            restart_policy: None,
+            ports: vec![],
+            volumes: vec![],
+            env: BTreeMap::new(),
+            command: None,
+            args: vec![],
+            runtime: None,
+        };
+        match action_op(Phase::Install, &absent, &ctx).unwrap() {
+            Op::Shell { cmd, check, .. } => {
+                assert!(cmd.contains("rm -f 'app'"));
+                assert!(check.unwrap().starts_with("! "));
+            }
+            other => panic!("expected Shell, got {other:?}"),
         }
     }
 

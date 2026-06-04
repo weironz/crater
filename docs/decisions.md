@@ -1072,3 +1072,12 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **决策**:`store.rs export_oci_archive` 对 **plain image**(manifest 无 `artifactType`)在 OCI layout 之外**附带一个 `manifest.json`**(docker-archive 格式:Config/RepoTags/Layers 指向同一批 `blobs/sha256/...`)。即 buildx `-o type=docker` 的同款双格式:老 docker 读 manifest.json,新 docker / ctr / nerdctl 读 index.json,互不干扰、零体积成本(blob 不重复)。B 类 artifact(有 `artifactType`)永远不会被 docker load,不加垫片。
 - **验证**:本机 docker 29 load 双格式 OK;真机 73.11(docker 27.3.1)离线 `apply willdockerhub/rustfs:1.0.0-beta.5 --offline` → `load image (blob)` 导入成功 → 容器 /health 200。55 tests 绿。
 - **关联**:D-061(image 物料)。rustfs 交付顺带改为**收敛语义**:`docker inspect` 探针比"running + 镜像版本",不符(没容器/崩溃循环/版本变)→ 删旧起新——修复了"Restarting 容器撞 docker run 名字冲突"与"换版本重 apply 不生效"。
+
+## 2026-06-04 · docker_container 模块:指纹收敛 + 模块准入治理(D-092)
+
+### D-092 内置 docker_container(精简集),收敛靠 spec 指纹;同时立模块准入四条
+
+- **背景**:rustfs 容器化交付把收敛逻辑手写进 shell(参数 label、`rm -f`+`run`、`docker ps` 三过滤),连踩三坑(探针只认 running 撞名字冲突 / 只比版本漏掉端口变更 / 凭据明文进 label),每个容器交付都要复制一遍——典型的"幂等抽象缺位"。用户同时提出元问题:helm/kubectl 接踵而至,是否要顶层设计/插件机制,代码量会不会爆。
+- **决策(模块)**:内置 `docker_container`,**community.docker.docker_container 的刻意精简版**:name/image/state(started|stopped|absent)/restart_policy/ports/volumes/env/command/args(裸 flag 逃逸)/runtime(默认 docker,podman 兼容)。收敛:渲染后的 spec 规范化 → sha256 取 12 位 → `--label crater.spec=<指纹>`;探针 = name+running+label 三过滤;不符(没容器/崩溃循环/任何参数变)→ `rm -f`+`run` 重建。容器不可变,无原地 update;**不做** Ansible 的 `comparisons:` 逐项 diff(那需要 API client,crater 是 shell lowering)。凭据只进 Env 不进 label(label 是哈希)。
+- **决策(治理,见 docs/module-charter.md)**:不做代码插件机制(dylib/WASM/外挂进程都破坏单二进制承诺或重复 collections 版本矩阵之痛);"插件"= role + library/ + OCI 分发。新模块准入四条:通用基础设施 / ≥2-3 交付复用 / 幂等收敛须引擎帮忙 / 参数能闭集。晋升路径 shell → role → 模块,需求驱动。规模预期 20-30 个模块;helm/kubectl 因底层自带收敛属"薄模块",到需求时再建。
+- **验证**:56 tests 绿(指纹同/异、absent lowering、action 名表);rustfs.yaml run+teardown 共 24 行裸 shell 缩成 15 行声明;真机:部署 api/console 200 → 重跑 ok(同指纹)→ 改 console_port → 指纹变 → 自动重建且新端口 200 → delete 干净。

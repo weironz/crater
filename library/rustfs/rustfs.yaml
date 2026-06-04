@@ -36,24 +36,20 @@ actions:
     runtime: docker
     needs: [docker_ready]
   - id: run
-    # 收敛语义:容器起来时打一个"参数指纹"label(版本+端口+凭据),探针按
-    # name+running+label 三过滤比对 —— **任何参数变了**(不只版本)指纹就不符,
-    # 自动删旧起新;全符合 → 跳过(幂等)。没容器/崩溃重启中同样不符 → 重建。
-    action: shell
-    cmd: >-
-      docker rm -f rustfs 2>/dev/null;
-      docker run -d --name rustfs --restart unless-stopped
-      --label crater_spec={{version}}_{{api_port}}_{{console_port}}_{{access_key}}_{{secret_key}}
-      -p {{api_port}}:9000
-      -p {{console_port}}:9001
-      -v {{data_dir}}:/data
-      -e RUSTFS_ACCESS_KEY={{access_key}}
-      -e RUSTFS_SECRET_KEY={{secret_key}}
-      docker.io/rustfs/rustfs:{{version}}
-    check: >-
-      docker ps --filter name=^rustfs$ --filter status=running
-      --filter label=crater_spec={{version}}_{{api_port}}_{{console_port}}_{{access_key}}_{{secret_key}}
-      -q | grep -q .
+    # docker_container(D-092):引擎对 spec(镜像/端口/卷/env)做指纹收敛 ——
+    # 任何参数变了/容器崩溃重启/不存在 → 自动删旧起新;全符合 → 跳过(幂等)。
+    action: docker_container
+    name: rustfs
+    image: "docker.io/rustfs/rustfs:{{version}}"
+    restart_policy: unless-stopped
+    ports:
+      - "{{api_port}}:9000"
+      - "{{console_port}}:9001"
+    volumes:
+      - "{{data_dir}}:/data"
+    env:
+      RUSTFS_ACCESS_KEY: "{{access_key}}"
+      RUSTFS_SECRET_KEY: "{{secret_key}}"
     needs: [img, data_dir]
   - id: verify
     action: shell
@@ -62,9 +58,9 @@ actions:
     needs: [run]
 teardown:
   - id: rm_container
-    action: shell
-    cmd: "docker rm -f rustfs 2>/dev/null || true"
-    check: "! docker ps -a --filter name=^rustfs$ -q | grep -q ."
+    action: docker_container
+    name: rustfs
+    state: absent
   # 数据目录(对象数据,容器运行期长出来的):
   - id: rm_data
     action: file

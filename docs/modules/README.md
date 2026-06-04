@@ -4,6 +4,7 @@ task 的每个动作(`action:`)调用一个**模块**——引擎内置的最小
 是字段级参考;总览/设计原则(为何对齐 Ansible、改名史)见 [features/modules.md](../features/modules.md)。
 
 > **维护约定:模块有任何变动(字段增删、语义/幂等探针变化),同一提交里更新对应文档。**
+> 什么时候配新建模块:见 [module-charter](../module-charter.md)(准入四条 + 晋升路径)。
 
 ## 索引
 
@@ -19,6 +20,7 @@ task 的每个动作(`action:`)调用一个**模块**——引擎内置的最小
 | [lineinfile](lineinfile.md) | 确保某行存在/不存在 | `lineinfile` |
 | [user](user.md) | 系统用户存在/不存在 | `user` |
 | [group](group.md) | 系统组存在/不存在 | `group` |
+| [docker_container](docker_container.md) | 容器以期望参数在跑(指纹收敛) | community.docker 精简版 |
 | [load_image](load_image.md) | 导入容器镜像物料(在线 pull / 离线 import) | (无内置) |
 | [role](role.md) | 调用可复用角色 | `include_role` |
 

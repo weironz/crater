@@ -513,6 +513,7 @@ actions:
             ("unarchive", "Extract"),
             ("template", "RenderTemplate"),
             ("role", "Module"),
+            ("docker_container", "DockerContainer"),
         ];
         for (name, want) in canonical {
             let yaml = match want {
@@ -521,6 +522,7 @@ actions:
                 "Extract" => format!("action: {name}\nto: /opt"),
                 "RenderTemplate" => format!("action: {name}\nmaterial: a\ndst: /etc/a"),
                 "Module" => format!("action: {name}\nuses: lineinfile"),
+                "DockerContainer" => format!("action: {name}\nname: app\nimage: x:1"),
                 _ => unreachable!(),
             };
             let a: Action = serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -530,6 +532,7 @@ actions:
                 Action::Extract { .. } => "Extract",
                 Action::RenderTemplate { .. } => "RenderTemplate",
                 Action::Module { .. } => "Module",
+                Action::DockerContainer { .. } => "DockerContainer",
                 _ => "other",
             };
             assert_eq!(got, want, "action: {name} should parse to {want}");

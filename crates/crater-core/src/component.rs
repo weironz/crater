@@ -250,6 +250,43 @@ pub enum Action {
         #[serde(default)]
         system: bool,
     },
+    /// Manage a container on the target's runtime — a deliberately SLIM
+    /// community.docker.docker_container (D-092). Convergence is
+    /// fingerprint-based: the engine hashes the rendered spec (image / ports /
+    /// volumes / env / command / args / restart_policy) into a `crater.spec`
+    /// label; a RUNNING container whose label matches is `ok`, anything else
+    /// (absent / crash-looping / any param changed) is replaced (`rm -f` +
+    /// `run`). Containers are immutable — no in-place update, and deliberately
+    /// no Ansible `comparisons:` per-option diff policy.
+    DockerContainer {
+        name: String,
+        /// Image reference; required for `state: started`.
+        #[serde(default)]
+        image: Option<String>,
+        #[serde(default)]
+        state: ContainerState,
+        /// docker `--restart`: no | on-failure | always | unless-stopped.
+        #[serde(default)]
+        restart_policy: Option<String>,
+        /// Port mappings, docker `-p` syntax: "HOST:CONTAINER".
+        #[serde(default)]
+        ports: Vec<String>,
+        /// Bind mounts, docker `-v` syntax: "HOST:CONTAINER".
+        #[serde(default)]
+        volumes: Vec<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+        /// Command appended after the image (raw).
+        #[serde(default)]
+        command: Option<String>,
+        /// Extra raw `run` flags (escape hatch — data, not logic; counted
+        /// into the fingerprint like everything else).
+        #[serde(default)]
+        args: Vec<String>,
+        /// CLI to drive (docker-compatible, e.g. podman); default `docker`.
+        #[serde(default)]
+        runtime: Option<String>,
+    },
 }
 
 /// Desired state for the `file` primitive.
@@ -282,6 +319,16 @@ pub enum Presence {
     Absent,
 }
 
+/// Desired state for `docker_container` (default started).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerState {
+    #[default]
+    Started,
+    Stopped,
+    Absent,
+}
+
 impl Action {
     /// Short human label for build/deploy summaries.
     pub fn kind(&self) -> &'static str {
@@ -298,6 +345,7 @@ impl Action {
             Action::Lineinfile { .. } => "lineinfile",
             Action::User { .. } => "user",
             Action::Group { .. } => "group",
+            Action::DockerContainer { .. } => "docker_container",
         }
     }
 }
