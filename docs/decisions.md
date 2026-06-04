@@ -1165,3 +1165,13 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **验证**:68 tests 绿;curl 全矩阵:401/303+cookie/Bearer 200/错 token 401/无 token 非本机 bind 启动拒绝;verify 任务:POST → 面板 → 轮询 200(running)→ 286(完成/失败 + 日志尾,实测 73.13 关机的 `No route to host` 直接呈现);delete 门:空输入/输错名拒绝、输对过门。
 - **边界**:单静态令牌(无多用户/审计);TLS 交给反代;任务日志不落盘。
 - **关联**:D-054(看板)、D-058(写操作)、D-051~053(状态库)。
+
+## 2026-06-04 · crater plan:terraform 式变更预演(D-100)
+
+### D-100 `crater plan`:连真机只跑只读探针,报告 ok / would-change / unknown / skip
+
+- **背景**:`apply --dry-run` 是纯静态(不连目标机,OS=Unknown、不跑探针),只回答"会做什么",不回答"哪些会真的变"。生产前想要 terraform plan 式的差异预览。用户点名贴 terraform 习惯,独立子命令。
+- **决策**:`crater plan <source>`(apply 的五种 source 形态全支持,`--set` 同 D-093 gate):连目标机、探 OS/arch、lower,然后 `engine::plan_check_task` **只执行每步的只读探针**——Shell(Install)跑 `check:`;WriteFile/PushFile 远端 sha256 比对;unarchive 探 `creates`;os_package 探 check;load_image 固定 would-change(无镜像探针的既有语义);**preflight/verify 的 shell 跳过**(它们是"检查"不是"状态",plan 的契约=除探针外零执行)。四态:`✓ ok / ~ would-change / ? unknown(无探针)/ - skip`,颜色随 TTY 门控。实现:RunOpts 加 `plan_check`,run_task_on_host 在 lower 后、执行前短路(不写 marker、不跑 register);project(在线/离线 bundle)逐 play 各出摘要。
+- **验证**:68 tests 绿;真机 73.11:空机 plan rustfs `3 会变更`→ apply 后 `1 会变更`(只剩 load_image)→ 手动杀容器注入漂移 → plan 精确翻出 `container ~ would-change` 其余仍 ok;project bundle `offline plan project: 2 play(s)` 零执行。
+- **边界**:不跑 register → 依赖跨主机 fact 的步骤探针含未解析 `{{}}`,HA 类 task 结论可能失真;探针粒度即预测粒度(`test -s` 类验"在不在"不验内容);不展示 diff 内容;teardown 方向用 `delete --dry-run`。
+- **关联**:D-023(幂等探针,被复用)、D-024(dry-run)、D-093(--set gate)。

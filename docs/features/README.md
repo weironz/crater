@@ -32,6 +32,7 @@
 | 镜像管理（images/pull/push/tag/rmi/gc + apply &lt;ref&gt;） | [images-registry.md](images-registry.md) | D-018/033/097 |
 | params 契约 + `--set` 覆盖（build/apply 分治 gate） | [params-and-set.md](params-and-set.md) | D-081/089/093 |
 | project 编排（plays;离线整套一包 build→save→apply） | [projects.md](projects.md) | D-083/098 |
+| `crater plan`（terraform 式变更预演,只跑只读探针） | [plan.md](plan.md) | D-100 |
 
 ## 约定
 

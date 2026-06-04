@@ -1618,6 +1618,92 @@ pub async fn execute(ops: &[Op], exec: &dyn Executor) -> crate::Result<()> {
     Ok(())
 }
 
+/// `crater plan` (D-100, terraform-style): probe each step's READ-ONLY
+/// idempotency check against the live target and report what an apply would
+/// do — without executing anything. Outcomes:
+///   ✓ ok            probe passed → already in desired state, apply would skip
+///   ~ would-change  probe failed / import-type step (always runs)
+///   ? unknown       step has no probe (apply would just run it)
+///   - skip          preflight/verify shell (checks, not state; plan runs nothing)
+/// Returns (ok, would_change, unknown, skipped).
+pub async fn plan_check_task(
+    steps: &[TaskStep],
+    exec: &dyn Executor,
+) -> crate::Result<(u32, u32, u32, u32)> {
+    let total = steps.len();
+    let (mut n_ok, mut n_change, mut n_unknown, mut n_skip) = (0u32, 0u32, 0u32, 0u32);
+    // Some(true)=in desired state; Some(false)=would change; None=no probe.
+    enum Out {
+        Probe(Option<bool>),
+        Skip,
+    }
+    for (i, st) in steps.iter().enumerate() {
+        let n = i + 1;
+        let sha_probe = |path: &str| format!("sha256sum '{path}' 2>/dev/null | cut -d' ' -f1");
+        let out = match &st.op {
+            Op::Shell { phase, check, .. } => match (phase, check) {
+                (Phase::Install, Some(c)) => Out::Probe(Some(exec.run(c).await?.ok())),
+                (Phase::Install, None) => Out::Probe(None),
+                // Read-only by convention, but plan's contract is "execute
+                // NOTHING that isn't a probe" — so checks themselves are skipped.
+                (Phase::Preflight | Phase::Verify, _) => Out::Skip,
+            },
+            Op::WriteFile { path, content, .. } => {
+                let want = crate::bundle::sha256_hex(content.as_bytes());
+                let cur = exec.run(&sha_probe(path)).await?;
+                Out::Probe(Some(cur.ok() && cur.stdout.trim() == want))
+            }
+            Op::PushFile { local_path, dest, .. } => match std::fs::read(local_path) {
+                Ok(data) => {
+                    let want = crate::bundle::sha256_hex(&data);
+                    let cur = exec.run(&sha_probe(dest)).await?;
+                    Out::Probe(Some(cur.ok() && cur.stdout.trim() == want))
+                }
+                // Blob not on control (e.g. thin ref) — can't compare.
+                Err(_) => Out::Probe(None),
+            },
+            Op::UnarchiveMaterial { creates: Some(c), .. } => {
+                Out::Probe(Some(exec.run(&format!("test -e '{c}'")).await?.ok()))
+            }
+            Op::UnarchiveMaterial { .. } => Out::Probe(None),
+            Op::PackageInstall { check: Some(c), .. } => {
+                Out::Probe(Some(exec.run(c).await?.ok()))
+            }
+            Op::PackageInstall { .. } => Out::Probe(None),
+            // Imports re-run every apply by design (no image-exists probe).
+            Op::ImageImport { .. } => Out::Probe(Some(false)),
+        };
+        // TTY-gated colors (same policy as paint_status — plain when piped).
+        let tty = {
+            use std::io::IsTerminal;
+            std::io::stdout().is_terminal()
+        };
+        let tint = |code: &str, s: &str| {
+            if tty { format!("\x1b[{code}m{s}\x1b[0m") } else { s.to_string() }
+        };
+        let label = match out {
+            Out::Probe(Some(true)) => {
+                n_ok += 1;
+                tint("32", "✓ ok")
+            }
+            Out::Probe(Some(false)) => {
+                n_change += 1;
+                tint("33", "~ would-change")
+            }
+            Out::Probe(None) => {
+                n_unknown += 1;
+                tint("36", "? unknown(无探针)")
+            }
+            Out::Skip => {
+                n_skip += 1;
+                "- skip(preflight/verify)".to_string()
+            }
+        };
+        tracing::info!("[{n}/{total}] {} → {label}", st.op.describe());
+    }
+    Ok((n_ok, n_change, n_unknown, n_skip))
+}
+
 /// Run one op; return its status plus any lines to surface at INFO (verify
 /// output). Command stdout/stderr otherwise goes to DEBUG.
 async fn exec_one(

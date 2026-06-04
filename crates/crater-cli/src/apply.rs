@@ -35,8 +35,9 @@ pub(crate) async fn apply_source(
     teardown: bool,
     offline: bool,
     set: &[String],
+    plan: bool,
 ) -> Result<()> {
-    let verb = if teardown { "delete" } else { "apply" };
+    let verb = if teardown { "delete" } else if plan { "plan" } else { "apply" };
     // `--set` (D-093): parsed here, GATED per task in `apply_task` (only declared
     // `stage: apply` params pass — build params are frozen in the artifact).
     let set_overrides = crate::build::parse_set_overrides(set)?;
@@ -54,12 +55,12 @@ pub(crate) async fn apply_source(
         // — `-i inventory.yaml`, `--host a,b`, or none → local.
         info!("{verb}: {src} → offline (OCI bundle)");
         let hosts = target.hosts()?;
-        return apply_oci_bundle(&path, hosts, !dry_run, shell, teardown, &src, name.as_deref(), set_overrides).await;
+        return apply_oci_bundle(&path, hosts, !dry_run, shell, teardown, &src, name.as_deref(), set_overrides, plan).await;
     }
     if path.is_file() && crater_core::project::is_project_file(&path) {
         // A project (top-level `plays:`, D-083): orchestrate plays in order.
         info!("{verb}: {src} → project");
-        return apply_project(&path, name.as_deref(), &target, dry_run, shell, teardown, set_overrides).await;
+        return apply_project(&path, name.as_deref(), &target, dry_run, shell, teardown, set_overrides, plan).await;
     }
     if path.is_file() {
         // A task file (top-level `actions:`, D-037). Component specs are gone.
@@ -74,6 +75,7 @@ pub(crate) async fn apply_source(
                 teardown,
                 source: src.clone(),
                 set_overrides,
+                plan_check: plan,
             };
             return apply_task(&path, hosts, opts, name.as_deref(), None, BTreeMap::new()).await;
         }
@@ -86,14 +88,14 @@ pub(crate) async fn apply_source(
     if src.contains('/') || src.contains(':') {
         info!("{verb}: {src} → image (local store / registry)");
         let hosts = target.hosts()?;
-        return images::apply_image_ref(&src, hosts, !dry_run, shell, teardown, &src, name.as_deref(), offline, set_overrides).await;
+        return images::apply_image_ref(&src, hosts, !dry_run, shell, teardown, &src, name.as_deref(), offline, set_overrides, plan).await;
     }
     // Named task/project: `crater apply <name>` → first match of <name>.yaml under
     // library/ (then tasks/ for back-compat). D-043/D-085.
     if let Some(named) = find_named(&src) {
         if crater_core::project::is_project_file(&named) {
             info!("{verb}: {src} → named project ({})", named.display());
-            return apply_project(&named, name.as_deref(), &target, dry_run, shell, teardown, set_overrides).await;
+            return apply_project(&named, name.as_deref(), &target, dry_run, shell, teardown, set_overrides, plan).await;
         }
         if crater_core::task::is_task_file(&named) {
             info!("{verb}: {src} → named task ({})", named.display());
@@ -106,6 +108,7 @@ pub(crate) async fn apply_source(
                 teardown,
                 source: src.clone(),
                 set_overrides,
+                plan_check: plan,
             };
             return apply_task(&named, hosts, opts, name.as_deref(), None, BTreeMap::new()).await;
         }
@@ -131,10 +134,11 @@ pub(crate) async fn apply_project(
     shell: bool,
     teardown: bool,
     set_overrides: BTreeMap<String, String>,
+    plan: bool,
 ) -> Result<()> {
     use crater_core::project::Project;
     let project = Project::from_yaml_file(path)?;
-    let verb = if teardown { "delete" } else { "apply" };
+    let verb = if teardown { "delete" } else if plan { "plan" } else { "apply" };
     if project.plays.is_empty() {
         anyhow::bail!("project '{}' 没有 plays", project.name);
     }
@@ -193,6 +197,7 @@ pub(crate) async fn apply_project(
             teardown,
             source: play.source.clone(),
             set_overrides: set_overrides.clone(),
+            plan_check: plan,
         };
         apply_task(
             &src_path, hosts, opts, Some(&deployment),
@@ -221,6 +226,9 @@ pub(crate) struct RunOpts {
     /// `stage: apply` params only, then applied as the HIGHEST-priority vars
     /// (above inventory) in `run_task_on_host`.
     pub(crate) set_overrides: BTreeMap<String, String>,
+    /// `crater plan` (D-100): connect + probe each step's read-only check,
+    /// execute nothing. Implies do_apply=true (we DO connect, unlike dry-run).
+    pub(crate) plan_check: bool,
 }
 
 /// Gate `apply/delete --set` to declared **apply-stage** params (D-093). A built
@@ -491,7 +499,7 @@ pub(crate) async fn run_task_on_host(
     coord: Option<&engine::HostCoord>,
 ) -> Result<(String, Vec<(String, String)>)> {
     let RunContext { task, spec_dir, role_addrs, role_members, target_hosts, deployment, opts } = rc;
-    let RunOpts { offline_blobmap, offline, do_apply, do_shell, teardown, source, set_overrides: _ } = opts;
+    let RunOpts { offline_blobmap, offline, do_apply, do_shell, teardown, source, set_overrides: _, plan_check } = opts;
     let (offline, do_apply, do_shell, teardown) = (*offline, *do_apply, *do_shell, *teardown);
     if host.is_local() {
         info!("▶ host {} (local)", host.name);
@@ -597,6 +605,13 @@ pub(crate) async fn run_task_on_host(
     if !do_apply {
         let ops: Vec<Op> = steps.iter().map(|s| s.op.clone()).collect();
         print_plan(&ops);
+        return Ok((host.name.clone(), Vec::new()));
+    }
+    // `crater plan` (D-100): probe the live target read-only, execute nothing —
+    // and write no markers, run no registers (early return).
+    if *plan_check {
+        let (ok, ch, unk, skip) = engine::plan_check_task(&steps, exec.as_ref()).await?;
+        info!("[{}] plan: {ch} 会变更, {ok} 已就位, {unk} 未知, {skip} 跳过", host.name);
         return Ok((host.name.clone(), Vec::new()));
     }
     // Default: self-bootstrap agent runs the task plan on the target (D-044).
@@ -740,6 +755,7 @@ pub(crate) async fn apply_oci_bundle(
     source: &str,
     name: Option<&str>,
     set_overrides: BTreeMap<String, String>,
+    plan: bool,
 ) -> Result<()> {
     let dest_root = std::env::temp_dir().join(format!("crater-deploy-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dest_root);
@@ -770,7 +786,7 @@ pub(crate) async fn apply_oci_bundle(
     // A project bundle (D-098): orchestrate plays in order against the bundled
     // task artifacts (locked by ref at build). Delete runs plays in REVERSE.
     if let Some(project) = bundle::read_artifact_project(&dest_root)? {
-        let verb = if teardown { "delete" } else { "apply" };
+        let verb = if teardown { "delete" } else if plan { "plan" } else { "apply" };
         let deployment = name.map(|s| s.to_string()).unwrap_or_else(|| project.name.clone());
         let mut order: Vec<&crater_core::project::Play> = project.plays.iter().collect();
         if teardown {
@@ -820,6 +836,7 @@ pub(crate) async fn apply_oci_bundle(
                 teardown,
                 source: source.to_string(),
                 set_overrides: set_overrides.clone(),
+                plan_check: plan,
             };
             apply_task(
                 &recipe_file, hosts.clone(), opts, Some(&deployment),
@@ -844,6 +861,7 @@ pub(crate) async fn apply_oci_bundle(
             teardown,
             source: source.to_string(),
             set_overrides: set_overrides.clone(),
+            plan_check: plan,
         };
         apply_task(&recipe_file, hosts.clone(), opts, name, None, BTreeMap::new()).await?;
     }

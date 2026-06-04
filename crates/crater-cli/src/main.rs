@@ -84,6 +84,25 @@ enum Cmd {
         #[arg(long = "set", value_name = "KEY=VAL")]
         set: Vec<String>,
     },
+    /// Preview what an apply WOULD change (terraform-style, D-100): connect to
+    /// the targets, probe each step's read-only idempotency check, and report
+    /// ✓ ok / ~ would-change / ? unknown(no probe) / - skip(preflight/verify).
+    /// Executes nothing. (`apply --dry-run` is the offline/static variant —
+    /// it prints the plan without connecting.)
+    Plan {
+        /// `<source>` like apply: task.yaml | x.oci | image ref | named task/project.
+        source: Option<String>,
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        #[command(flatten)]
+        target: TargetOpts,
+        /// For an image/artifact source: probe against the FULL local closure.
+        #[arg(long)]
+        offline: bool,
+        /// Apply-stage param overrides, same gate as `apply --set` (D-093).
+        #[arg(long = "set", value_name = "KEY=VAL")]
+        set: Vec<String>,
+    },
     /// Delete/uninstall a task's deployment by running its authored `teardown:`
     /// (D-049). **Opt-in**: only a task that defines `teardown:` has this — there
     /// is NO auto-inversion of `actions:` (real cleanup, e.g. kubeadm reset or
@@ -418,7 +437,10 @@ async fn main() -> Result<()> {
                 (Some(a), None) => (None, Some(a)),
                 (None, _) => (None, None),
             };
-            apply::apply_source(name, source, file, target, dry_run, shell, false, offline, &set).await
+            apply::apply_source(name, source, file, target, dry_run, shell, false, offline, &set, false).await
+        }
+        Cmd::Plan { source, file, target, offline, set } => {
+            apply::apply_source(None, source, file, target, false, false, false, offline, &set, true).await
         }
         Cmd::Delete {
             source,
@@ -427,7 +449,7 @@ async fn main() -> Result<()> {
             dry_run,
             shell,
             set,
-        } => apply::apply_source(None, source, file, target, dry_run, shell, true, false, &set).await,
+        } => apply::apply_source(None, source, file, target, dry_run, shell, true, false, &set, false).await,
         Cmd::Task { cmd } => match cmd {
             TaskCmd::List { target, verify } => deployments::task_list(target, verify).await,
             TaskCmd::Show { name, target, verify } => deployments::task_show(&name, target, verify).await,
@@ -612,7 +634,7 @@ async fn component_shortcut(args: Vec<String>) -> Result<()> {
     }
     let name = name.ok_or_else(|| anyhow!("missing task name"))?;
     let target = TargetOpts { inventory, host, user, password, key, port };
-    apply::apply_source(None, Some(name), None, target, dry_run, shell, false, false, &[]).await
+    apply::apply_source(None, Some(name), None, target, dry_run, shell, false, false, &[], false).await
 }
 
 

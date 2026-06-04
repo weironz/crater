@@ -196,6 +196,7 @@ pub(crate) async fn apply_image_ref(
     name: Option<&str>,
     offline: bool,
     set_overrides: std::collections::BTreeMap<String, String>,
+    plan: bool,
 ) -> Result<()> {
     let store = ImageStore::open()?;
     // D-087: strict-offline (air-gap) needs the FULL closure locally — re-pull if
@@ -239,6 +240,7 @@ pub(crate) async fn apply_image_ref(
                 teardown,
                 source: source.to_string(),
                 set_overrides,
+                plan_check: plan,
             };
             let res = apply_task(&recipe_file, hosts, opts, name, None, BTreeMap::new()).await;
             let _ = std::fs::remove_dir_all(&recipe_dir);
