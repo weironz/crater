@@ -1197,3 +1197,11 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **并发地基(本来就欠的债)**:`write_index` 原 `fs::write` 是截断后写——并发读者读到**半截文件**(竞态单测真实抓到 `EOF while parsing`)→ 改 tmp+rename **原子替换**;读-改-写(tag/remove)加进程内 `index_lock` 防 lost update。10 路并发 retag 单测三连绿。
 - **验证**:69 tests 绿;3 镜像 task 真机 build:`pre-pull 3 image material(s) (parallel)` → 全部"已预拉"打包,store gc 体检 0 孤儿、引用完整。
 - **关联**:D-078(①增量④file 并发)、D-096(构建缓存)。至此 D-078 全部四项完结。
+
+
+## 2026-06-04 · aarch64 musl 构建 + 首个 GitHub Release v0.1.0
+
+- **定位(用户纠偏)**:不是"每份 crater 随身带全架构"——同构机群(绝大多数)由对应 arch 的控制端**推自己**(`select_agent_binary` 第三优先级,既有);要补的是**发布矩阵**:ARM 用户得有 ARM 版 crater 可拿。`dist/` 多 arch 只服务异构混群(一台控制机管 x86+ARM),可选。
+- **交叉编译踩坑**:Ubuntu `gcc-aarch64-linux-gnu` 是 **glibc 头文件**配 musl 链接 → aws-lc 的 C 先炸 fortify `__*_chk`、关掉又炸 glibc 2.38+ 的 `__isoc23_*` 重定向——头/库不匹配打地鼠没完。正解:**musl.cc 真 musl 交叉工具链**(头和 libc 都是 musl),一次通过。`build-musl.sh` 支持 `x86_64|aarch64|all`。
+- **产物**:`crater-linux-aarch64`(15M,`ELF ARM aarch64 statically linked`,qemu-aarch64 冒烟 `crater 0.1.0`)+ `crater-linux-x86_64`(19M,static-pie,真机久经验证)+ sha256sums。**诚实边界:aarch64 无 ARM 真机,端到端未验**(测试环境全 x86_64 克隆机)。
+- **发布**:GitHub Release **v0.1.0**(仓库首个 release),双 arch 二进制 + 校验和。

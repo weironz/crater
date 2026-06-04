@@ -57,7 +57,10 @@ done on local: changed=3 ok=2
 ## 边界 / 后续
 
 - agent 暂只流 stdout（结构化结果后续）。
-- 异构全覆盖需多 arch musl 随发布 + 控制端按 arch 内置选择（现需 `--agent-bin` 或 `dist/` 就位）。
+- **多 arch**:`build-musl.sh aarch64|all` 产 `dist/crater-linux-aarch64`(musl.cc 交叉工具链,
+  Ubuntu 的 gnu cross-gcc 会因 glibc 头文件符号偏斜失败,见脚本注释);qemu-aarch64 冒烟通过,
+  **ARM 真机端到端待验**。发布矩阵(GitHub Release v0.1.0 起)双 arch 各一份 musl 静态——
+  同构机群用对应 arch 的 crater 当控制端即可(推自己),`dist/` 异构混群才需要。
 - **plan 格式版本检查**：plan 头部带 `format: N`（`engine::PLAN_FORMAT`,序列化结构变更时手动
   bump）,agent 解析时校验,偏斜给明确指引而非 serde 报错：
   ```
