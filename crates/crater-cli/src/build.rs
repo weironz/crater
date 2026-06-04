@@ -418,6 +418,7 @@ pub(crate) async fn build_task_to_store(
     // loop below (same order, same `{{arch}}` var handling) so both agree.
     let recipe = serde_yaml::to_string(&task)?.into_bytes();
     let mut material_descs: Vec<String> = Vec::new();
+    let mut image_refs: Vec<String> = Vec::new();
     for m in &task.materials {
         if m.kind == MaterialKind::File {
             if !want_arch.is_empty() {
@@ -445,7 +446,11 @@ pub(crate) async fn build_task_to_store(
             }
         } else if m.kind == MaterialKind::Image {
             if let Some(r) = &m.reference {
-                material_descs.push(format!("img:{}:{}", m.name, ctx.rendered_url(r)?));
+                let rendered = ctx.rendered_url(r)?;
+                material_descs.push(format!("img:{}:{rendered}", m.name));
+                // Collected here (same ordered walk, same `{{arch}}` state as
+                // the fetch loop) for the concurrent pre-pull below (D-078④).
+                image_refs.push(rendered);
             }
         } else if m.kind == MaterialKind::OsPackage {
             let pkgs: Vec<String> = m.packages.values().flatten().cloned().collect();
@@ -465,6 +470,29 @@ pub(crate) async fn build_task_to_store(
     {
         info!("{reference} 已在本地库且源未变(指纹 {})— 构建缓存命中,跳过(--no-cache 强制重建)", &fingerprint[..12]);
         return Ok(reference);
+    }
+
+    // Parallel image pre-pull (D-078④): pull all image materials concurrently
+    // — the per-image cost is mostly TLS + manifest round-trips, which stack
+    // nicely. Blob writes are content-addressed (safe); index tagging is
+    // serialized by the store's index lock. The pack loop below then hits the
+    // already-pulled fast path (D-078① digest skip).
+    if image_refs.len() > 1 {
+        use futures::StreamExt;
+        info!("  pre-pull {} image material(s) (parallel)", image_refs.len());
+        let store = ImageStore::open()?;
+        let results: Vec<Result<()>> = futures::stream::iter(image_refs.iter().map(|r| {
+            let store = &store;
+            async move {
+                store.pull(r).await.map_err(|e| anyhow!("pull image {r}: {e}"))
+            }
+        }))
+        .buffer_unordered(4)
+        .collect()
+        .await;
+        for r in results {
+            r?;
+        }
     }
 
     let mut materials: Vec<(String, bool, Vec<u8>)> = Vec::new(); // (key, embedded?, bytes) — D-087
@@ -534,9 +562,15 @@ pub(crate) async fn build_task_to_store(
                 .ok_or_else(|| anyhow!("image material '{}' has no `ref`", m.name))?;
             let reference = ctx.rendered_url(reference)?; // substitute {{version}} (offline ctx → no mirror rewrite)
             let key = PlanContext::material_blob_key(m);
-            info!("  pull image material {key} <- {reference}");
             let store = ImageStore::open()?;
-            store.pull(&reference).await.map_err(|e| anyhow!("pull image {reference}: {e}"))?;
+            if image_refs.len() > 1 {
+                // Already fetched by the parallel pre-pull (D-078④) — packing
+                // reads straight from the store, no second manifest round-trip.
+                info!("  image material {key} <- {reference}(已预拉)");
+            } else {
+                info!("  pull image material {key} <- {reference}");
+                store.pull(&reference).await.map_err(|e| anyhow!("pull image {reference}: {e}"))?;
+            }
             let tmp = std::env::temp_dir().join(format!("crater-img-{}-{}.tar", std::process::id(), sanitize_ref(&key)));
             store.export_oci_archive(&reference, &tmp).map_err(|e| anyhow!("export image {reference}: {e}"))?;
             let data = std::fs::read(&tmp)?;

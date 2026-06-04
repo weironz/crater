@@ -41,6 +41,15 @@ pub struct ImageStore {
     pub root: PathBuf,
 }
 
+/// Serializes index.json read-modify-write (D-078④): the blob store is
+/// content-addressed (concurrent writes are naturally safe), but the index is
+/// a whole-file rewrite — two concurrent pulls tagging at once would lose one
+/// entry. Process-wide; the critical section is a few sync fs ops, no awaits.
+fn index_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 impl ImageStore {
     /// `$CRATER_HOME` or `~/.crater`.
     pub fn home() -> PathBuf {
@@ -82,7 +91,12 @@ impl ImageStore {
         Ok(serde_json::from_slice(&std::fs::read(self.root.join("index.json"))?)?)
     }
     fn write_index(&self, v: &serde_json::Value) -> crate::Result<()> {
-        std::fs::write(self.root.join("index.json"), serde_json::to_vec_pretty(v)?)?;
+        // Atomic replace (D-078④): `fs::write` truncates THEN writes, so a
+        // concurrent reader could see a torn/empty file. tmp + rename gives
+        // readers a complete snapshot always; index_lock guards lost updates.
+        let tmp = self.root.join("index.json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(v)?)?;
+        std::fs::rename(&tmp, self.root.join("index.json"))?;
         Ok(())
     }
 
@@ -149,7 +163,10 @@ impl ImageStore {
     }
 
     /// Tag (add/replace) a manifest in the index under `reference`.
+    /// Read-modify-write under [`index_lock`] — concurrent pulls (D-078④
+    /// parallel image fetch) must not lose each other's entries.
     fn tag(&self, reference: &str, manifest_digest: &str, size: u64) -> crate::Result<()> {
+        let _g = index_lock().lock().unwrap();
         let mut idx = self.read_index()?;
         let arr = idx["manifests"].as_array_mut().unwrap();
         arr.retain(|m| m["annotations"][ANN_REF].as_str() != Some(reference));
@@ -166,6 +183,7 @@ impl ImageStore {
     /// rmi`). Blobs stay — content-addressed and possibly shared with other
     /// refs; `gc()` sweeps the ones nothing references anymore.
     pub fn remove(&self, reference: &str) -> crate::Result<bool> {
+        let _g = index_lock().lock().unwrap();
         let mut idx = self.read_index()?;
         let arr = idx["manifests"].as_array_mut().unwrap();
         let before = arr.len();
@@ -753,6 +771,31 @@ mod tests {
         } ] });
         std::fs::write(store.root.join("index.json"), serde_json::to_vec(&idx).unwrap()).unwrap();
         store
+    }
+
+    /// D-078④: concurrent index tagging must not lose entries — N parallel
+    /// retags of one manifest all land (the index_lock serializes the
+    /// read-modify-write; without it this test loses entries reliably).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_retags_all_land() {
+        let dir = std::env::temp_dir().join(format!("crater-idxlock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = std::sync::Arc::new(fake_store(&dir));
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let st = store.clone();
+            handles.push(tokio::task::spawn_blocking(move || {
+                st.retag("t/x:1", &format!("t/alias:{i}")).unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        let refs: Vec<String> = store.list().unwrap().into_iter().map(|s| s.reference).collect();
+        for i in 0..10 {
+            assert!(refs.contains(&format!("t/alias:{i}")), "alias {i} lost; got {refs:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// D-097: gc keeps everything the index reaches (manifest → config/layers)

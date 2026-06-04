@@ -1189,3 +1189,11 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - **适配边界(诚实)**:闭包 ref 是裸 `crater/...` 路径,**私有 registry 任意 repo 路径可用**;docker.io 命名空间规则不接受 → 公网用 save/.oci。
 - **验证**:68 tests 绿;zot 真机闭环(73.12,zot 用 crater 自家制品部署):tag + 闭包 push → catalog `[crater/rustfs, crater/yq, demo-stack]` → **全新 CRATER_HOME**(模拟另一台控制机)闭包 pull(三制品 + 裸 retag)→ `apply <project-ref> --offline` 清机部署 73.11(2 play,rustfs api/console 200)→ `plan <project-ref>` 逐 play 摘要 → `delete <project-ref>` 逆序拆净 + yq 优雅跳过。
 - **关联**:D-098(离线 project)、D-087/088(thin/offline)、D-033(zot 闭环前例)。
+
+
+## 2026-06-04 · D-078④ 收尾:并行镜像拉取(index 原子写 + 锁)
+
+- **实现**:build 在指纹遍历时顺带收集渲染后的 image ref(同一有序遍历,`{{arch}}` 状态一致),fetch 前 `buffer_unordered(4)` 并发预拉;打包循环命中"已预拉"跳过二次 manifest round-trip(单镜像 task 不预拉,行为不变)。
+- **并发地基(本来就欠的债)**:`write_index` 原 `fs::write` 是截断后写——并发读者读到**半截文件**(竞态单测真实抓到 `EOF while parsing`)→ 改 tmp+rename **原子替换**;读-改-写(tag/remove)加进程内 `index_lock` 防 lost update。10 路并发 retag 单测三连绿。
+- **验证**:69 tests 绿;3 镜像 task 真机 build:`pre-pull 3 image material(s) (parallel)` → 全部"已预拉"打包,store gc 体检 0 孤儿、引用完整。
+- **关联**:D-078(①增量④file 并发)、D-096(构建缓存)。至此 D-078 全部四项完结。
