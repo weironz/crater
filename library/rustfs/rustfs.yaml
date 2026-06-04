@@ -4,11 +4,13 @@
 name: rustfs
 hosts: all
 vars:
-  version: "latest"            # 镜像 tag;crater build/apply -f 时 --set version=X 可覆盖
+  version: "1.0.0-beta.5"      # 镜像 tag(钉具体版本才严格幂等);--set version=X 可覆盖
   data_dir: "/data/rustfs"
   port: "9000"                 # S3 端点(宿主机映射)
-  access_key: "rustfsadmin"    # 上游默认凭据;生产环境用 inventory vars 覆盖
-  secret_key: "rustfsadmin"
+  # 1.0.0-beta.5 起,绑非环回地址时**拒绝**上游默认凭据 rustfsadmin/rustfsadmin
+  # (容器 FATAL 反复重启)。这里给非默认占位值,生产务必用 inventory vars 覆盖(D-082)。
+  access_key: "crater-admin"
+  secret_key: "crater-changeme"
 materials:
   - name: rustfs-img
     kind: image

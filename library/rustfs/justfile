@@ -11,7 +11,7 @@
 registry  := "docker.io"
 namespace := "willdockerhub"
 name      := "rustfs"
-version   := "latest"
+version   := "1.0.0-beta.5"
 ref       := registry + "/" + namespace + "/" + name + ":" + version
 
 # 列出可用命令(默认)
