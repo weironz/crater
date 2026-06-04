@@ -29,7 +29,7 @@
 | 自举 agent（默认执行模型，贯穿 task；离线 blob 先推后跑） | [self-bootstrap-agent.md](self-bootstrap-agent.md) | D-019/027/044/095 |
 | 多节点 + 跨节点 register/hostvars + 并发 | [multi-node-and-cluster.md](multi-node-and-cluster.md) | D-030/D-031 |
 | 离线 OCI（build/save/load/pull，recipe-replay；构建缓存） | [offline-oci.md](offline-oci.md) | D-018/033/045/096 |
-| 镜像管理（images/pull/push/tag/login + apply &lt;ref&gt;） | [images-registry.md](images-registry.md) | D-018/033 |
+| 镜像管理（images/pull/push/tag/rmi/gc + apply &lt;ref&gt;） | [images-registry.md](images-registry.md) | D-018/033/097 |
 | params 契约 + `--set` 覆盖（build/apply 分治 gate） | [params-and-set.md](params-and-set.md) | D-081/089/093 |
 
 ## 约定

@@ -1126,3 +1126,15 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **验证**:66 tests 绿(cache key 优先级、指纹对 recipe/物料/arch 各输入敏感、坏缓存丢弃);实测:yq 重建 4.4s→0.2s、同源换 tag 0.4s(下载缓存命中零网络)、--no-cache 强制重取、改 zot `src:` 文件→指纹变→重建→revert 后回写一致再命中、rustfs image 物料重建 10.2s→0.16s(不再触 registry)。os_package 缓存与 file 同构未真机验证(buildah 重)。
 - **后续**:并行镜像拉取(`index.json` 锁)仍未做;cache GC(目前只增不减,同 /var/lib/crater/blobs)。
 - **关联**:D-078(build 提速①④)、D-089(--set 进指纹经 recipe)。
+
+## 2026-06-04 · crater rmi + crater gc:库引用删除与四类缓存/孤儿回收(D-097)
+
+### D-097 `rmi` 删引用、`gc` mark-and-sweep 回收孤儿 blob + 三类缓存
+
+- **背景**:本地库只进不出——没有删引用的命令,重建同 ref 会把旧 manifest/layers 留成孤儿(实测攒了 172 个 blob、3.1GB);D-095 的目标机 staged-blob 缓存与 D-096 的下载缓存也只增不减。
+- **决策**:
+  - **`crater rmi <ref>`**:从 index.json 删引用(像 docker rmi);blob 内容寻址、可能与其他 ref 共享,**不动**。
+  - **`crater gc [--dry-run] [--cache] [--host/-i]`**:① store mark-and-sweep——从 index 出发标记 manifest→config/layers,经嵌套 `manifests`(multi-arch index)递归,扫掉 `blobs/sha256/` 里无人引用的;② `cache/builds/` 里 ref 已不在库的过期指纹 sidecar;③ `--cache` 连下载缓存(file/ospkg)一起清;④ 显式给目标(`--host`/`-i`)时清各目标机 `/var/lib/crater/blobs`(staged 缓存,下次 apply 重 stage)。四类全是缓存/孤儿,可随时重建。裸 `gc` 不碰本机目标(`has_explicit_targets` gate,localhost 兜底语义在这里是错的)。
+- **验证**:67 tests 绿(假 store 上 dry-run 不删/孤儿扫掉/链保留/rmi 后整链可扫/重复 rmi no-op);真仓库:dry-run 报 172 个 3.1GB,**与独立 python 实现的可达集逐一一致**(双算法核对)后真删,35 个引用完好、离线 apply 正常;目标机 119.6MB staged 缓存清除后 apply 自动重 stage。
+- **边界**:gc 与并发 build/pull 不互斥(单用户 CLI,先不加锁);旧版残留的「索引注解藏 digest」格式不存在(已核对全部注解仅 ref.name)。
+- **关联**:D-078/096(缓存)、D-095(staged blobs)、D-018(store)。

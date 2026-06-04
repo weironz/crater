@@ -159,6 +159,66 @@ impl ImageStore {
         self.write_index(&idx)
     }
 
+    /// `crater rmi <ref>`: drop the reference from the index (like `docker
+    /// rmi`). Blobs stay — content-addressed and possibly shared with other
+    /// refs; `gc()` sweeps the ones nothing references anymore.
+    pub fn remove(&self, reference: &str) -> crate::Result<bool> {
+        let mut idx = self.read_index()?;
+        let arr = idx["manifests"].as_array_mut().unwrap();
+        let before = arr.len();
+        arr.retain(|m| m["annotations"][ANN_REF].as_str() != Some(reference));
+        let removed = arr.len() < before;
+        if removed {
+            self.write_index(&idx)?;
+        }
+        Ok(removed)
+    }
+
+    /// Garbage-collect unreferenced blobs (mark-and-sweep). Mark: every digest
+    /// reachable from the index — manifest blobs, their `config` + `layers`,
+    /// recursing through nested indexes (`manifests`, multi-arch). Sweep: files
+    /// under `blobs/sha256/` nobody references. `dry_run` reports only.
+    /// Returns (blobs swept, bytes freed).
+    pub fn gc(&self, dry_run: bool) -> crate::Result<(usize, u64)> {
+        let idx = self.read_index()?;
+        let mut keep: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut queue: Vec<String> = idx["manifests"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|m| m["digest"].as_str()).map(|d| strip(d).to_string()).collect())
+            .unwrap_or_default();
+        while let Some(d) = queue.pop() {
+            if !keep.insert(d.clone()) {
+                continue; // already marked
+            }
+            // A reachable blob that parses as JSON may reference further blobs
+            // (manifest: config+layers; nested index: manifests).
+            let Ok(bytes) = std::fs::read(self.blob_path(&d)) else { continue };
+            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+            if let Some(c) = v["config"]["digest"].as_str() {
+                queue.push(strip(c).to_string());
+            }
+            for arr in [&v["layers"], &v["manifests"]] {
+                if let Some(items) = arr.as_array() {
+                    queue.extend(items.iter().filter_map(|l| l["digest"].as_str()).map(|s| strip(s).to_string()));
+                }
+            }
+        }
+        let mut swept = 0usize;
+        let mut freed = 0u64;
+        for entry in std::fs::read_dir(self.blobs_dir())?.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if keep.contains(&name) {
+                continue;
+            }
+            freed += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            swept += 1;
+            if !dry_run {
+                std::fs::remove_file(entry.path())?;
+            }
+        }
+        Ok((swept, freed))
+    }
+
     /// Pull an image/artifact from a registry into the store (pure Rust,
     /// oci-client). We store the **raw manifest bytes** (via `pull_manifest_raw`)
     /// so `artifactType` + custom layer mediaTypes survive the round-trip — the
@@ -612,5 +672,65 @@ fn auth_for(reference: &str) -> oci_client::secrets::RegistryAuth {
         RegistryAuth::Basic(c.username, c.password)
     } else {
         RegistryAuth::Anonymous
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal store on disk: index → manifest → {config, layer}; one orphan.
+    fn fake_store(dir: &std::path::Path) -> ImageStore {
+        let store = ImageStore { root: dir.to_path_buf() };
+        std::fs::create_dir_all(store.blobs_dir()).unwrap();
+        let put = |name: &str, data: &[u8]| {
+            let d = crate::bundle::sha256_hex(data);
+            std::fs::write(store.blobs_dir().join(&d), data).unwrap();
+            d
+        };
+        let config = put("config", b"{\"cfg\":true}");
+        let layer = put("layer", b"layer-bytes");
+        let manifest = serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "config": { "digest": format!("sha256:{config}") },
+            "layers": [ { "digest": format!("sha256:{layer}") } ],
+        }))
+        .unwrap();
+        let mdigest = put("manifest", &manifest);
+        put("orphan", b"unreferenced-bytes");
+        let idx = json!({ "schemaVersion": 2, "manifests": [ {
+            "mediaType": MT_MANIFEST,
+            "digest": format!("sha256:{mdigest}"),
+            "size": manifest.len(),
+            "annotations": { ANN_REF: "t/x:1" }
+        } ] });
+        std::fs::write(store.root.join("index.json"), serde_json::to_vec(&idx).unwrap()).unwrap();
+        store
+    }
+
+    /// D-097: gc keeps everything the index reaches (manifest → config/layers)
+    /// and sweeps the rest; dry-run deletes nothing; after `remove(ref)` the
+    /// whole chain becomes sweepable.
+    #[test]
+    fn gc_mark_and_sweep_with_rmi() {
+        let dir = std::env::temp_dir().join(format!("crater-store-gc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = fake_store(&dir);
+        let n_blobs = || std::fs::read_dir(store.blobs_dir()).unwrap().count();
+        assert_eq!(n_blobs(), 4); // manifest + config + layer + orphan
+
+        let (swept, freed) = store.gc(true).unwrap(); // dry-run
+        assert_eq!((swept, n_blobs()), (1, 4), "dry-run reports but keeps");
+        assert!(freed > 0);
+
+        let (swept, _) = store.gc(false).unwrap();
+        assert_eq!((swept, n_blobs()), (1, 3), "orphan swept, chain kept");
+
+        assert!(store.remove("t/x:1").unwrap());
+        assert!(!store.remove("t/x:1").unwrap(), "second remove is a no-op");
+        let (swept, _) = store.gc(false).unwrap();
+        assert_eq!((swept, n_blobs()), (3, 0), "unreferenced chain swept");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

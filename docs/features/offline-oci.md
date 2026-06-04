@@ -95,7 +95,7 @@ tar -xf /tmp/yq.oci -C /tmp/x && cat /tmp/x/oci-layout /tmp/x/index.json && ls /
 
 ## 构建缓存（D-096）
 
-两层,都在 `~/.crater/cache/`(随时可 `rm -rf`,只影响速度):
+两层,都在 `~/.crater/cache/`(只影响速度;回收用 `crater gc --cache`,D-097):
 
 - **下载缓存**:`kind: file` 按**声明 `sha256`**(内容寻址,换 URL/镜像源也命中)或
   渲染后 URL 的哈希寻址,存 `cache/file/<key>`;`kind: os_package` 按

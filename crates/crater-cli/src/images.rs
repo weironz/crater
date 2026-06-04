@@ -16,6 +16,95 @@ use crater_core::store::ImageStore;
 
 use crate::apply::{apply_task, forks_limit, RunOpts};
 
+/// `crater rmi <ref>` (D-097): drop the reference; blobs stay until `gc`.
+pub(crate) fn remove_image(reference: &str) -> Result<()> {
+    let store = ImageStore::open()?;
+    if !store.remove(reference)? {
+        anyhow::bail!("'{reference}' not in local store(`crater images` 看现有引用)");
+    }
+    info!("removed {reference}(blob 仍按内容寻址保留,`crater gc` 回收无引用的)");
+    Ok(())
+}
+
+fn human(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1}GB", bytes as f64 / 1e9)
+    } else if bytes >= 1_000_000 {
+        format!("{:.1}MB", bytes as f64 / 1e6)
+    } else {
+        format!("{:.1}kB", bytes as f64 / 1e3)
+    }
+}
+
+/// `crater gc` (D-097): reclaim disk.
+///   1. store: mark-and-sweep unreferenced blobs (after `rmi`/rebuilds);
+///   2. stale build fingerprints (`cache/builds/` whose ref left the store);
+///   3. `--cache`: the whole download cache (file/ospkg, D-096);
+///   4. `--host`/`-i`: each TARGET's staged-blob cache (`/var/lib/crater/blobs`,
+///      D-095) — safe, next apply re-stages.
+/// `--dry-run` reports without deleting. All four are caches/orphans: nothing
+/// a deployment or a later build can't recreate.
+pub(crate) async fn gc(cache: bool, dry_run: bool, target: crate::target::TargetOpts) -> Result<()> {
+    let tag = if dry_run { "(dry-run)" } else { "" };
+    let store = ImageStore::open()?;
+    // 1. store blobs.
+    let (swept, freed) = store.gc(dry_run)?;
+    info!("store: {swept} 个无引用 blob,{} {tag}", human(freed));
+    // 2. stale build fingerprints: sidecar files whose sanitized ref no longer
+    //    matches any stored reference.
+    let live: std::collections::BTreeSet<String> = store
+        .list()?
+        .iter()
+        .map(|i| crate::build::sanitize_ref(&i.reference))
+        .collect();
+    let builds_dir = crate::build::cache_dir().join("builds");
+    let (mut fp_swept, mut fp_freed) = (0usize, 0u64);
+    if let Ok(rd) = std::fs::read_dir(&builds_dir) {
+        for e in rd.flatten() {
+            if !live.contains(&e.file_name().to_string_lossy().to_string()) {
+                fp_freed += e.metadata().map(|m| m.len()).unwrap_or(0);
+                fp_swept += 1;
+                if !dry_run {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
+    info!("build 指纹: {fp_swept} 个过期 sidecar,{} {tag}", human(fp_freed));
+    // 3. download cache (opt-in: it SAVES future fetches; only --cache drops it).
+    if cache {
+        let mut dl_freed = 0u64;
+        for sub in ["file", "ospkg"] {
+            let dir = crate::build::cache_dir().join(sub);
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for e in rd.flatten() {
+                    dl_freed += e.metadata().map(|m| m.len()).unwrap_or(0);
+                }
+            }
+            if !dry_run {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+        info!("下载缓存: {} {tag}", human(dl_freed));
+    }
+    // 4. targets' staged-blob cache (only when targets were given explicitly —
+    //    a bare `crater gc` must not "clean" localhost).
+    if target.has_explicit_targets() {
+        for host in target.hosts()? {
+            let exec = crate::target::connect_executor(&host, true).await?;
+            let du = exec
+                .run("du -sb /var/lib/crater/blobs 2>/dev/null | cut -f1")
+                .await?;
+            let bytes: u64 = du.stdout.trim().parse().unwrap_or(0);
+            if !dry_run {
+                exec.run("rm -rf /var/lib/crater/blobs").await?;
+            }
+            info!("[{}] staged blobs: {} {tag}", host.name, human(bytes));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn list_images() -> Result<()> {
     let store = ImageStore::open()?;
     let imgs = store.list()?;

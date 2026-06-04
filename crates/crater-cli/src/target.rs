@@ -36,6 +36,12 @@ pub(crate) struct TargetOpts {
 }
 
 impl TargetOpts {
+    /// True iff the user explicitly named targets (`-i` / `--host`) — for
+    /// commands like `gc` where the localhost fallback would be wrong.
+    pub(crate) fn has_explicit_targets(&self) -> bool {
+        self.inventory.is_some() || self.host.is_some()
+    }
+
     /// Resolve to a concrete host list: inventory > `--host` > localhost.
     pub(crate) fn hosts(&self) -> Result<Vec<crater_core::spec::Host>> {
         target_hosts(

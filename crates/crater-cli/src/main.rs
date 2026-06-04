@@ -251,6 +251,27 @@ enum Cmd {
         /// New reference to point at the same manifest (e.g. a registry address).
         target: String,
     },
+    /// Remove a reference from the local store, like `docker rmi` (D-097).
+    /// Blobs are content-addressed and possibly shared — they stay until
+    /// `crater gc` sweeps the unreferenced ones.
+    Rmi {
+        /// Reference to remove, e.g. `crater/yq:4.40.5`.
+        reference: String,
+    },
+    /// Garbage-collect crater storage (D-097): sweep store blobs nothing
+    /// references and stale build fingerprints. `--cache` also wipes the
+    /// download cache; `--host`/`-i` additionally clears the staged-blob cache
+    /// on TARGETS (`/var/lib/crater/blobs`, D-095 — re-staged on next apply).
+    Gc {
+        /// Also wipe the download cache (~/.crater/cache/{file,ospkg}).
+        #[arg(long)]
+        cache: bool,
+        /// Report what would be freed, delete nothing.
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        target: TargetOpts,
+    },
     /// Registry credentials.
     Registry {
         #[command(subcommand)]
@@ -434,6 +455,8 @@ async fn main() -> Result<()> {
             info!("loaded {} → {r}", file.display());
             Ok(())
         }
+        Cmd::Rmi { reference } => images::remove_image(&reference),
+        Cmd::Gc { cache, dry_run, target } => images::gc(cache, dry_run, target).await,
         Cmd::Tag { source, target } => {
             ImageStore::open()?.retag(&source, &target)?;
             info!("tagged {source} → {target}");

@@ -40,7 +40,8 @@ agent 的 LocalExecutor 读 staged blob,和控制端读原 blob 语义一致。
 - **去重**：多个步骤引用同一 blob 只推一次。
 - 仍走控制端逐步驱动的只剩三种：`--shell`、本机目标、需要跨主机协调的步骤
   （throttle / 等待 hostvars,D-077——agent 之间无通道,k8s-HA 的串行 join 保持控制端路径）。
-- 清理：staged blob 不随 delete 清除（是缓存）,要回收 `rm -rf /var/lib/crater/blobs`。
+- 清理：staged blob 不随 delete 清除（是缓存）,回收用 `crater gc --host <h>`（D-097,
+  下次 apply 自动重 stage）。
 
 ```
 [<host>] agent: staging blob ~/.crater/store/blobs/sha256/20dc… (109584896 bytes) -> /var/lib/crater/blobs/20dc…

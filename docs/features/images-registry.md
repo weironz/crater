@@ -62,7 +62,22 @@ crater apply 192.168.73.5:5000/yq:4.53.2 --host 192.168.73.12 --password 123456
 - `pull` hello-world → 库；`images` 列出；`apply docker.io/library/hello-world:latest --host .12` → `/hello`（ELF）落地。
 - **闭环（zot）**：`build → load → push`（zot catalog 出现 yq）→ 清库 → `apply <zot地址>`（真 pull）→ n12 上 `yq --version` v4.53.2、可执行。
 
+## 删除与回收：`crater rmi` + `crater gc`（D-097）
+
+```bash
+crater rmi crater/yq:4.40.5      # 删引用(像 docker rmi);blob 内容寻址共享,先留着
+crater gc --dry-run              # 体检:无引用 blob / 过期 build 指纹,只报告
+crater gc                        # 回收(mark-and-sweep:index 可达的 manifest/config/layers 全保留)
+crater gc --cache                # 连下载缓存(~/.crater/cache/{file,ospkg},D-096)一起清
+crater gc --host <h> --password <pw>   # 另清目标机 staged-blob 缓存(/var/lib/crater/blobs,D-095)
+```
+
+四类回收对象全是缓存/孤儿——部署和后续 build 都能自动重建,放心清。目标机清理只在
+显式给 `-i`/`--host` 时发生(裸 `crater gc` 不会"清理本机")。
+实测:重建/rmi 积累的 172 个孤儿 blob 一次回收 **3.1GB**,清后 35 个引用全部完好
+(离线 apply 验证);rust 与独立 python 实现的可达集完全一致(双算法核对)。
+
 ## 边界 / 后续
 
 - `apply <ref>`：**crater B 类 artifact**（`artifactType` 命中）→ recipe-replay（取 recipe + material blob，走在线同一引擎，`copy material:` 按名落地，D-033/D-034/D-090）；**普通容器镜像**（无 artifactType）→ 把所有层展开到 `/`（rootfs 覆盖语义，适合 crater/sealos 式镜像；任意镜像展开到 `/` 会铺满其容器根文件系统，按需使用）。
-- 多 arch manifest-list 的平台选择、镜像签名（N4）、库 GC、registry TLS/认证 后续。
+- 多 arch manifest-list 的平台选择、镜像签名（N4）、registry TLS/认证 后续。
