@@ -14,6 +14,7 @@ OS 族(debian/rhel)各列各的包名。在线走系统源;离线走打包好的
 - 在线:`apt-get install -y` / `dnf install -y`;探针 `dpkg -s` / `rpm -q`(全部已装 → ok)。
 - 离线(material 有 blob):推送闭包到目标,`apt-get install ./*.deb` / `dnf install ./*.rpm`(本地装,不出网)。
 - 三态同 copy:有 blob 用 blob;无 blob + 严格离线报错;无 blob + 在线走系统源。
+- **日志标来源**:`install packages (blob): [..]` = 推包内闭包本地装;`(target repo)` = 目标机自己的源在线装。
 
 ## 示例
 

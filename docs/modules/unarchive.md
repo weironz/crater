@@ -15,6 +15,7 @@
 ## 语义 / 幂等
 
 - `material` → `UnarchiveMaterial` op(blob 或 url);`from` → `tar -xf` shell。
+- **日志标来源**(D-088 三态可见):`unarchive (blob) name@arch -> to` = 取 OCI 包内 blob;`unarchive name <- <url> -> to` = apply 时在线现拉。
 - 不写 `creates` 则每次重解(覆盖安全);写上才幂等——声明解压产物里的关键文件(如 `dockerd`)。
 
 ## 示例

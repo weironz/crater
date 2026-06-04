@@ -20,6 +20,7 @@
   2. **无 blob + 严格离线** → 报错(气隙不允许现拉);
   3. **无 blob + 在线** → material 有 `src` 则从控制机推送;有 `url_tmpl` 则目标机自己 `curl`(探针 `test -s dest`)。
 - material 的 arch 变体按目标机 `uname -m` 选;`{{arch}}` 注入 url 模板(D-064)。
+- **日志标来源**:`copy (blob) name@arch -> dest` = 取包内 blob;`copy name <- <url或本地路径>` = 在线获取。
 - 计划含 `PushFile`(blob / material-src)时强制控制面执行(agent 读不到控制机路径)。
 - `src` 与 `material` 的取舍:`src` 直读文本内联,**不进 BOM、不打包**;要离线分发/二进制 → 声明 material。
 

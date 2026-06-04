@@ -17,6 +17,7 @@ crater 自有模块(Ansible 无内置对应):把 `kind: image` 物料弄进目�
 - 物料的 `ref` 即镜像引用(`{{var}}` 可渲染);build 时 pull 成 oci-archive blob 打进 OCI。
 - 三态:有 blob → 推送 + import;无 blob + 严格离线 → 报错;无 blob + 在线 → 运行时 pull。
 - 目标机已有同 ref 镜像 → 跳过(运行时 images 探针)。
+- **日志标来源**:`load image (blob) <ref>` = 导入包内 oci-archive;`(pull)` = 运行时在线 pull;批量显示 `(N blob, M pull)`。
 
 ## 示例
 

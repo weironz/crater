@@ -841,9 +841,13 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 }
                 None => None,
             };
+            // Source marker (D-088): `(blob)` = packed deb/rpm closure pushed
+            // from control; `(target repo)` = the target installs from its own
+            // package source online.
+            let src_tag = if local_archive.is_some() { "blob" } else { "target repo" };
             Op::PackageInstall {
                 phase,
-                describe: format!("install packages: [{}]", pkgs.join(", ")),
+                describe: format!("install packages ({src_tag}): [{}]", pkgs.join(", ")),
                 packages: pkgs,
                 family: family.to_string(),
                 local_archive,
@@ -875,9 +879,18 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                     };
                     (None, Some(ctx.source.rewrite(&raw)))
                 };
+                // Describe carries the SOURCE (D-088 三态可见): `(blob)` = from
+                // the packed OCI layer; `<- url` = fetched online at apply.
+                let describe = match (&local_archive, &url) {
+                    (Some(_), _) => {
+                        format!("unarchive (blob) {} -> {to_s}", PlanContext::material_blob_key(m))
+                    }
+                    (_, Some(u)) => format!("unarchive {name} <- {u} -> {to_s}"),
+                    _ => unreachable!("either blob or url set above"),
+                };
                 Op::UnarchiveMaterial {
                     phase,
-                    describe: format!("unarchive {name} -> {to_s}"),
+                    describe,
                     to: to_s,
                     strip: *strip,
                     creates: creates_s,
@@ -992,10 +1005,14 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 };
                 images.push(ImageItem { reference, local_archive });
             }
+            // Source marker (D-088): `(blob)` = packed oci-archive imported;
+            // `(pull)` = the runtime pulls the ref online.
+            let n_blob = images.iter().filter(|i| i.local_archive.is_some()).count();
             let describe = if images.len() == 1 {
-                format!("load image {}", images[0].reference)
+                let tag = if n_blob == 1 { "blob" } else { "pull" };
+                format!("load image ({tag}) {}", images[0].reference)
             } else {
-                format!("load {} images", images.len())
+                format!("load {} images ({n_blob} blob, {} pull)", images.len(), images.len() - n_blob)
             };
             Op::ImageImport {
                 phase,
