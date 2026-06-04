@@ -165,6 +165,16 @@ pub(crate) async fn push_image(reference: &str) -> Result<()> {
     if !store.has(reference) {
         anyhow::bail!("{reference} not in local store (pull or build it first)");
     }
+    // push is single-ref: a project artifact without its task artifacts is
+    // unusable on the other side — point at save/.oci until multi-ref push lands.
+    if store.resolve_manifest(reference)?["artifactType"].as_str()
+        == Some("application/vnd.crater.project.v1")
+    {
+        anyhow::bail!(
+            "'{reference}' 是项目制品,registry 分发未实现(它引用的 task 制品不会一起 push)。\
+             离线分发用 `crater save {reference} -o env.oci`"
+        );
+    }
     info!("pushing {reference} → registry ...");
     store.push(reference).await?;
     info!("pushed {reference}");
@@ -204,6 +214,15 @@ pub(crate) async fn apply_image_ref(
 
     // crater task artifact (B 类) → recipe-replay via the task pipeline (D-045).
     let manifest = store.resolve_manifest(reference)?;
+    // A project artifact's closure lives in its referenced task artifacts —
+    // store/registry-direct apply isn't wired yet (D-098 后续). Guard so it
+    // never falls through to the plain-image rootfs-extract path.
+    if manifest["artifactType"].as_str() == Some("application/vnd.crater.project.v1") {
+        anyhow::bail!(
+            "'{reference}' 是项目制品:导出后整包部署(crater save {reference} -o env.oci && \
+             crater apply env.oci -i inv.yaml),在线则直接 apply -f <project>.yaml"
+        );
+    }
     let recipe_dir = std::env::temp_dir().join(format!("crater-ref-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&recipe_dir);
     if let Some(mc) = bundle::materialize_component(&manifest, &store.blobs_dir(), &recipe_dir)? {

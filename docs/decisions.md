@@ -1138,3 +1138,17 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **验证**:67 tests 绿(假 store 上 dry-run 不删/孤儿扫掉/链保留/rmi 后整链可扫/重复 rmi no-op);真仓库:dry-run 报 172 个 3.1GB,**与独立 python 实现的可达集逐一一致**(双算法核对)后真删,35 个引用完好、离线 apply 正常;目标机 119.6MB staged 缓存清除后 apply 自动重 stage。
 - **边界**:gc 与并发 build/pull 不互斥(单用户 CLI,先不加锁);旧版残留的「索引注解藏 digest」格式不存在(已核对全部注解仅 ref.name)。
 - **关联**:D-078/096(缓存)、D-095(staged blobs)、D-018(store)。
+
+## 2026-06-04 · 离线 project:整套环境一包 build→save→apply(D-098)
+
+### D-098 项目制品锁定 play ref;save 导出项目+全部 task 闭包;apply .oci 离线编排
+
+- **背景**:D-083 的 project 只有在线形态——大型交付(host-init→docker→k8s→存储)离线时只能逐 task build/save/load,"一个 U 盘交付整套环境"的主场故事缺最后一环。
+- **决策**:
+  - **build** `crater build -f project.yaml`:逐 play 构建 task 制品(默认 tag,play `vars` 参与 build 覆盖、CLI `--set` 更高;D-096 缓存逐 task 生效),然后造**项目制品**(`artifactType: application/vnd.crater.project.v1`,recipe = play `source` 全部**锁定**为构建出的 task ref 的 project yaml,无物料层)。同 ref 不同输入(文件/vars)→ 报错(锁定不许静默指向后者)。
+  - **save**:导出项目制品时**连同每个锁定 ref 的 task 闭包**进同一 OCI layout——blob 内容寻址,跨 task 共享物料天然去重;index 多 manifest(项目 + 各 task),`write_artifact_index` 按 manifest 真实 artifactType 标注。
+  - **apply/delete .oci**:解包发现项目制品(`read_artifact_project`)→ 按 play 顺序(delete 逆序)对包内 task 制品编排,play 的 hosts 匹配/跳过、vars 覆盖与在线一致;每个 play 走标准 task 离线管线(blobmap → D-095 staging → agent)。**顺手落 D-083 后续**:project delete 对无 teardown 的 play 优雅跳过(在线+离线;单 task delete 仍硬错误)。
+  - **守卫**:`push <project-ref>` / `apply <project-ref>`(store/registry 直连)报错引导 save/.oci——push 是单 ref,task 制品不会跟着走;registry 闭包分发列为后续。
+- **验证**:68 tests 绿(项目制品 round-trip:locked recipe 解析、component 带 ref、task-only 包无项目);真机 73.11:demo-stack(yq+rustfs)build(yq 缓存命中)→ save 115MB 单包(1 project + 2 component,11 blobs)→ 清机 apply:2 play 顺序离线部署(rustfs api/console 200)→ 重跑全幂等(blob cached,changed=0)→ delete 逆序:rustfs 拆净、yq 优雅跳过、零残留。
+- **边界**:同名 task 两版本进一个 project 暂不支持(recipe 目录按名落盘互覆;同 ref 不同输入已在 build 报错兜住);跨 play hostvars、project inspect 仍后续。
+- **关联**:D-083(project)、D-095(blob staging)、D-096(构建缓存)、D-087(thin/offline)。

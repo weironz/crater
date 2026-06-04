@@ -37,16 +37,85 @@ pub(crate) async fn build_to_store(
     set: &[String],
     no_cache: bool,
 ) -> Result<()> {
-    // `crater build` only builds tasks now (D-046): a task → B 类 artifact whose
-    // recipe IS the task YAML.
+    let overrides = parse_set_overrides(set)?;
+    // A project (top-level `plays:`, D-098): build every play's task artifact,
+    // then a project artifact whose recipe locks each play to its built ref.
+    if crater_core::project::is_project_file(file) {
+        return build_project_to_store(file, tag, arch_filter, &overrides, no_cache).await;
+    }
+    // Otherwise a task (D-046): task → B 类 artifact whose recipe IS the task YAML.
     if !crater_core::task::is_task_file(file) {
         anyhow::bail!(
-            "{}: not a task file (needs top-level `actions:`). `crater build` builds tasks.",
+            "{}: not a task file (needs top-level `actions:`) or project (top-level `plays:`).",
             file.display()
         );
     }
-    let overrides = parse_set_overrides(set)?;
-    build_task_to_store(file, tag, arch_filter, &overrides, no_cache).await
+    build_task_to_store(file, tag, arch_filter, &overrides, no_cache).await?;
+    Ok(())
+}
+
+/// `crater build -f project.yaml` (D-098): the offline story for a whole
+/// environment. Each play's task is built into the store (D-096 caches apply
+/// per task), then a PROJECT artifact is stored whose recipe is the project
+/// with every play `source` REWRITTEN to the built task ref (a lock). `crater
+/// save <project-ref>` then exports project + all task closures as one .oci.
+async fn build_project_to_store(
+    file: &Path,
+    tag: Option<String>,
+    arch_filter: &[String],
+    overrides: &BTreeMap<String, String>,
+    no_cache: bool,
+) -> Result<()> {
+    use crater_core::project::Project;
+    let mut project = Project::from_yaml_file(file)?;
+    if project.plays.is_empty() {
+        anyhow::bail!("project '{}' 没有 plays", project.name);
+    }
+    info!("build project '{}': {} play(s)", project.name, project.plays.len());
+    // Build each play's task. Play vars participate as build overrides (they
+    // may pin versions → affect materials), CLI --set wins over play vars.
+    // Same default ref reached from two plays must mean the same inputs —
+    // otherwise the lock would silently point both at the second build.
+    let mut built: BTreeMap<String, (PathBuf, BTreeMap<String, String>)> = BTreeMap::new();
+    let total = project.plays.len();
+    for (i, play) in project.plays.iter_mut().enumerate() {
+        let label = play.name.clone().unwrap_or_else(|| play.source.clone());
+        let task_file = find_named(&play.source)
+            .filter(|f| crater_core::task::is_task_file(f))
+            .ok_or_else(|| anyhow!("play '{label}': task '{}' 未找到(路径或 library/**/{}.yaml)", play.source, play.source))?;
+        let mut play_overrides = play.vars.clone();
+        for (k, v) in overrides {
+            play_overrides.insert(k.clone(), v.clone());
+        }
+        info!("── build play {}/{total}: {label}({})", i + 1, task_file.display());
+        let task_ref =
+            build_task_to_store(&task_file, None, arch_filter, &play_overrides, no_cache).await?;
+        if let Some((prev_file, prev_vars)) = built.get(&task_ref) {
+            if (prev_file, prev_vars) != (&task_file, &play_overrides) {
+                anyhow::bail!(
+                    "play '{label}' 与之前的 play 构建出同一个 ref '{task_ref}' 但输入不同 \
+                     (任务文件或 vars 不一致)—— 锁定会指向后者。请用不同 version(进默认 tag)区分"
+                );
+            }
+        }
+        built.insert(task_ref.clone(), (task_file, play_overrides));
+        play.source = task_ref; // the lock: offline replay resolves by ref
+    }
+    // Store the project artifact (recipe = locked project, no material layers).
+    let reference = tag.unwrap_or_else(|| format!("crater/{}:latest", project.name));
+    let recipe = serde_yaml::to_string(&project)?.into_bytes();
+    let stage_root = std::env::temp_dir().join(format!("crater-projimg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&stage_root);
+    let stage = bundle::BundleStage::new(stage_root.clone())?;
+    let ir = stage.store_project_artifact(&reference, &project.name, &recipe)?;
+    stage.write_artifact_index(&[ir])?;
+    let tmp_oci = std::env::temp_dir().join(format!("crater-projbuild-{}.oci", std::process::id()));
+    bundle::pack(&stage_root, &tmp_oci)?;
+    ImageStore::open()?.import_all(&tmp_oci)?;
+    let _ = std::fs::remove_dir_all(&stage_root);
+    let _ = std::fs::remove_file(&tmp_oci);
+    info!("built project {reference}(锁定 {} 个 task 制品)→ 本地库;`crater save {reference} -o <x>.oci` 导出整套", built.len());
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -292,13 +361,15 @@ pub(crate) fn build_os_package_repo(base: &str, family: &str, pkgs: &[String]) -
     Ok(data)
 }
 
+/// Build one task into the store; returns the artifact REFERENCE (the default
+/// `crater/<name>:<version>` or `tag`) — project builds lock plays to it.
 pub(crate) async fn build_task_to_store(
     file: &Path,
     tag: Option<String>,
     arch_filter: &[String],
     overrides: &BTreeMap<String, String>,
     no_cache: bool,
-) -> Result<()> {
+) -> Result<String> {
     use crater_core::component::MaterialKind;
     use crater_core::task::TaskFile;
 
@@ -393,7 +464,7 @@ pub(crate) async fn build_task_to_store(
         && std::fs::read_to_string(&fp_file).is_ok_and(|s| s.trim() == fingerprint)
     {
         info!("{reference} 已在本地库且源未变(指纹 {})— 构建缓存命中,跳过(--no-cache 强制重建)", &fingerprint[..12]);
-        return Ok(());
+        return Ok(reference);
     }
 
     let mut materials: Vec<(String, bool, Vec<u8>)> = Vec::new(); // (key, embedded?, bytes) — D-087
@@ -531,7 +602,7 @@ pub(crate) async fn build_task_to_store(
     }
     // Record the source fingerprint (D-096) so an unchanged rebuild can skip.
     cache_put(&fp_file, fingerprint.as_bytes());
-    Ok(())
+    Ok(reference)
 }
 
 #[cfg(test)]

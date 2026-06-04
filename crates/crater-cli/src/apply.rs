@@ -176,6 +176,15 @@ pub(crate) async fn apply_project(
                 continue;
             }
         }
+        // Project delete skips teardown-less plays (D-098; single-task delete
+        // stays a hard error — opt-in semantics unchanged).
+        if teardown {
+            let t = crater_core::task::TaskFile::from_yaml_file(&src_path)?;
+            if t.teardown.is_empty() {
+                info!("   (跳过:task '{}' 未编写 teardown)", t.name);
+                continue;
+            }
+        }
         let opts = RunOpts {
             offline_blobmap: None,
             offline: false,
@@ -758,6 +767,72 @@ pub(crate) async fn apply_oci_bundle(
             bundle_file.display()
         );
     }
+    // A project bundle (D-098): orchestrate plays in order against the bundled
+    // task artifacts (locked by ref at build). Delete runs plays in REVERSE.
+    if let Some(project) = bundle::read_artifact_project(&dest_root)? {
+        let verb = if teardown { "delete" } else { "apply" };
+        let deployment = name.map(|s| s.to_string()).unwrap_or_else(|| project.name.clone());
+        let mut order: Vec<&crater_core::project::Play> = project.plays.iter().collect();
+        if teardown {
+            order.reverse();
+        }
+        info!(
+            "offline {verb} project '{}': {} play(s){}",
+            project.name,
+            order.len(),
+            if teardown { "(逆序)" } else { "" }
+        );
+        let total = order.len();
+        for (i, play) in order.iter().enumerate() {
+            let label = play.name.clone().unwrap_or_else(|| play.source.clone());
+            let mc = mats
+                .iter()
+                .find(|m| m.reference == play.source)
+                .ok_or_else(|| anyhow!("bundle 不含 play '{label}' 锁定的制品 '{}'", play.source))?;
+            info!("── play {}/{total}: {label}(source={}, hosts={})",
+                i + 1, play.source, play.hosts.as_deref().unwrap_or("<task 默认>"));
+            // Project delete skips plays with no authored teardown (D-083 后续):
+            // single-task delete stays a hard error (opt-in), but aborting a
+            // multi-play teardown halfway over one optional play helps nobody.
+            if teardown {
+                let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
+                let t = crater_core::task::TaskFile::from_yaml_file(&recipe_file)?;
+                if t.teardown.is_empty() {
+                    info!("   (跳过:task '{}' 未编写 teardown)", t.name);
+                    continue;
+                }
+            }
+            // Same group-match/skip semantics as the online project path (D-083).
+            if let Some(g) = &play.hosts {
+                let matches = g == "all"
+                    || hosts.iter().any(|h| h.roles.is_empty() || h.name == *g || h.roles.iter().any(|r| r == g));
+                if !matches {
+                    info!("   (跳过:hosts='{g}' 无匹配主机)");
+                    continue;
+                }
+            }
+            let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
+            let opts = RunOpts {
+                offline_blobmap: Some(mc.blobmap.clone()),
+                offline: true,
+                do_apply,
+                do_shell,
+                teardown,
+                source: source.to_string(),
+                set_overrides: set_overrides.clone(),
+            };
+            apply_task(
+                &recipe_file, hosts.clone(), opts, Some(&deployment),
+                play.hosts.clone(), play.vars.clone(),
+            )
+            .await
+            .map_err(|e| anyhow!("project '{}' play '{label}' 失败:{e}", project.name))?;
+        }
+        let _ = std::fs::remove_dir_all(&dest_root);
+        info!("offline {verb} project '{}' 完成", project.name);
+        return Ok(());
+    }
+
     info!("offline (task artifact): {} task(s)", mats.len());
     for mc in mats {
         let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");

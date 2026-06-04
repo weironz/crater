@@ -20,6 +20,9 @@ const ANN_REF: &str = "org.opencontainers.image.ref.name";
 // skip `dependency` material layers on a thin pull.
 const MT_MATERIAL: &str = "application/vnd.crater.material.v1";
 const ANN_MATERIAL_FETCH: &str = "org.crater.material.fetch";
+// Project artifact typing (D-098) — kept in sync with bundle.rs.
+const AT_PROJECT: &str = "application/vnd.crater.project.v1";
+const MT_RECIPE: &str = "application/vnd.crater.recipe.v1+yaml";
 
 #[derive(Debug, Clone)]
 pub struct StoredImage {
@@ -494,14 +497,36 @@ impl ImageStore {
     /// the file round-trips through `load`/`apply <file>`.
     pub fn export_oci_archive(&self, reference: &str, out: &std::path::Path) -> crate::Result<()> {
         let idx = self.read_index()?;
-        let entry = idx["manifests"]
-            .as_array()
-            .and_then(|a| a.iter().find(|m| m["annotations"][ANN_REF].as_str() == Some(reference)))
-            .ok_or_else(|| anyhow::anyhow!("image '{reference}' not in local store"))?;
-        let mdig_full = entry["digest"].as_str().unwrap_or("").to_string();
-        let msize = entry["size"].as_u64().unwrap_or(0);
-        let mdig = strip(&mdig_full);
-        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(self.blob_path(mdig))?)?;
+        let find = |reference: &str| -> crate::Result<(String, u64)> {
+            let entry = idx["manifests"]
+                .as_array()
+                .and_then(|a| a.iter().find(|m| m["annotations"][ANN_REF].as_str() == Some(reference)))
+                .ok_or_else(|| anyhow::anyhow!("image '{reference}' not in local store"))?;
+            Ok((
+                entry["digest"].as_str().unwrap_or("").to_string(),
+                entry["size"].as_u64().unwrap_or(0),
+            ))
+        };
+        // Closure to export: the ref itself, PLUS — for a project artifact
+        // (D-098) — every play's locked task artifact ref, so one .oci ships
+        // the whole environment (blobs are content-addressed → shared layers
+        // across tasks land once).
+        let (mdig_full, msize) = find(reference)?;
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(self.blob_path(strip(&mdig_full)))?)?;
+        let mut refs: Vec<(String, String, u64)> = vec![(reference.to_string(), mdig_full, msize)];
+        if manifest["artifactType"].as_str() == Some(AT_PROJECT) {
+            let project = self.project_recipe(&manifest)?;
+            for play in &project.plays {
+                if refs.iter().any(|(r, _, _)| r == &play.source) {
+                    continue; // two plays sharing one task artifact → ship once
+                }
+                let (d, s) = find(&play.source).map_err(|e| {
+                    anyhow::anyhow!("project play source '{}' 不在本地库:{e}(先 crater build -f <project>.yaml)", play.source)
+                })?;
+                refs.push((play.source.clone(), d, s));
+            }
+        }
 
         let tmp = std::env::temp_dir().join(format!("crater-save-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -509,33 +534,41 @@ impl ImageStore {
         std::fs::create_dir_all(&blobs)?;
         std::fs::write(tmp.join("oci-layout"), br#"{"imageLayoutVersion":"1.0.0"}"#)?;
         let copy = |d: &str| -> crate::Result<()> {
+            // copy is idempotent across shared blobs (content-addressed names).
             std::fs::copy(self.blob_path(strip(d)), blobs.join(strip(d)))?;
             Ok(())
         };
-        copy(mdig)?;
-        if let Some(c) = manifest["config"]["digest"].as_str() {
-            copy(c)?;
-        }
-        if let Some(ls) = manifest["layers"].as_array() {
-            for l in ls {
-                if let Some(d) = l["digest"].as_str() {
-                    copy(d)?;
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        for (r, mdig_full, msize) in &refs {
+            let mdig = strip(mdig_full);
+            let man: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(self.blob_path(mdig))?)?;
+            copy(mdig)?;
+            if let Some(c) = man["config"]["digest"].as_str() {
+                copy(c)?;
+            }
+            if let Some(ls) = man["layers"].as_array() {
+                for l in ls {
+                    if let Some(d) = l["digest"].as_str() {
+                        copy(d)?;
+                    }
                 }
             }
-        }
-        let mut m_entry = json!({
-            "mediaType": MT_MANIFEST,
-            "digest": mdig_full,
-            "size": msize,
-            "annotations": { ANN_REF: reference }
-        });
-        if let Some(at) = manifest["artifactType"].as_str() {
-            m_entry["artifactType"] = json!(at);
+            let mut m_entry = json!({
+                "mediaType": MT_MANIFEST,
+                "digest": mdig_full,
+                "size": msize,
+                "annotations": { ANN_REF: r }
+            });
+            if let Some(at) = man["artifactType"].as_str() {
+                m_entry["artifactType"] = json!(at);
+            }
+            entries.push(m_entry);
         }
         let index = json!({
             "schemaVersion": 2,
             "mediaType": "application/vnd.oci.image.index.v1+json",
-            "manifests": [m_entry]
+            "manifests": entries
         });
         std::fs::write(tmp.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
         // docker-archive 兼容垫片(plain image only):经典存储(非 containerd
@@ -569,6 +602,18 @@ impl ImageStore {
     /// The parsed OCI manifest of a stored image (to detect crater artifacts).
     pub fn resolve_manifest(&self, reference: &str) -> crate::Result<serde_json::Value> {
         Ok(serde_json::from_slice(&self.manifest_blob(reference)?)?)
+    }
+
+    /// Parse the LOCKED project out of a project-artifact manifest (D-098):
+    /// its recipe layer is the project yaml with play `source`s = task refs.
+    pub fn project_recipe(&self, manifest: &serde_json::Value) -> crate::Result<crate::project::Project> {
+        let d = manifest["layers"]
+            .as_array()
+            .and_then(|ls| ls.iter().find(|l| l["mediaType"].as_str() == Some(MT_RECIPE)))
+            .and_then(|l| l["digest"].as_str())
+            .ok_or_else(|| anyhow::anyhow!("project artifact has no recipe layer"))?;
+        let bytes = std::fs::read(self.blob_path(strip(d)))?;
+        Ok(serde_yaml::from_slice(&bytes)?)
     }
 
     /// blobs/sha256 dir (for materializing artifact layers).
