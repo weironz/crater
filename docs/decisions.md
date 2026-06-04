@@ -1101,3 +1101,14 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **验证**:60 tests 绿(TOFU round-trip:首连钉/重连过/换 key 拒/异端口各自 TOFU);真机 73.11 五场景:首连钉 key → 重连静默 → 篡改成假 key 拒连(`Unknown server key`)→ env 跳过可连 → 删行重钉。
 - **意外发现**:73.11/73.12 是同模板克隆,**host key 完全相同**——TOFU 防不了克隆机互相冒充(文档已提醒:生产模板应清 `/etc/ssh/ssh_host_*` 重新生成)。也回头解释了 D-030 时代 k3s node-password 撞名的环境背景。
 - **关联**:D-008(russh 直连)。代码里最后一个 `TODO(security)` 清零。
+
+## 2026-06-04 · 离线路径 agent 化:blob 先推后 agent 跑(D-095)
+
+### D-095 agent 路径吃下离线计划:控制端 blob 内容寻址 staged 到目标机,计划改写后本地执行
+
+- **背景**:task 的 agent 化(D-044)一直留着一个洞——计划里只要有读**控制端文件**的步骤(`PushFile`,以及 `unarchive`/`load_image`/`os_package` 的离线 `local_archive`),就整体退回控制端逐步驱动,每步一次 SSH 往返;离线大制品部署(正是 crater 的主场)反而享受不到 agent 的提速。
+- **决策**:`run_task_via_agent` 起跑前 **stage blobs**:扫描计划(含 handlers)收集控制端路径 → 去重 → 逐个按 **sha256 内容寻址**推到目标机 `/var/lib/crater/blobs/<digest>`(已有同 hash 跳过,重复 apply 零传输)→ 把 Op 里的路径改写成 staged 目标本地路径(新增 `Op::offline_blob_paths_mut` 统一四种变体)。之后 agent 的 LocalExecutor `std::fs::read` staged blob,与控制端读原 blob 语义完全一致,执行代码零改动。控制端逐步驱动只剩三种情况:`--shell`(显式逃生)、本机目标、**需要跨主机协调的步骤**(`throttle`/`awaited_facts` 非空且在并发组里,D-077——agent 无互联通道,k8s-HA 串行 join 不受影响)。顺带修掉 `images.rs` 里 `do_shell: true` 的硬编码(镜像源现在尊重 `--shell`,默认 agent)。
+- **验证**:62 tests 绿(staging 去重/改写、缓存跳过、blob 路径收集);真机 73.11/73.12:yq 离线(PushFile)staging 10MB → agent `done on local`,重跑 `blob cached, reusing` + ok;rustfs 离线(ImageImport 110MB)staged 导入 → api/console 200,重跑零传输;双主机并发各自 agent;`--shell` 逃生口回归正常。
+- **踩坑**:目标机缓存的旧 dist musl agent 解析新 plan 报 `missing field reference`(D-074 批量 load_image 改了 ImageItem 结构)——以前离线不走 agent 没暴露。**dist/ 二进制须随代码重建**(scripts/build-musl.sh),文档已记。
+- **边界**:staged blob 是缓存,delete 不清(回收 `rm -rf /var/lib/crater/blobs`);跨主机协调步骤仍控制端(agent 化它=引入常驻通信,违背 design.md §5.3 一发一收模型,不做)。
+- **关联**:D-044(task agent 化)、D-045(recipe-replay)、D-077(协调)、D-087(thin/offline)。

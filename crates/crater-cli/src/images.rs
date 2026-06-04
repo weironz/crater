@@ -91,6 +91,7 @@ pub(crate) async fn apply_image_ref(
     reference: &str,
     hosts: Vec<crater_core::spec::Host>,
     do_apply: bool,
+    do_shell: bool,
     teardown: bool,
     source: &str,
     name: Option<&str>,
@@ -124,7 +125,9 @@ pub(crate) async fn apply_image_ref(
                 offline_blobmap: Some(mc.blobmap),
                 offline, // --offline = strict; default thin-online fetches deps live (D-088)
                 do_apply,
-                do_shell: true,
+                // Honor --shell; default is the agent path — blobs are staged
+                // onto the target first (D-095), no more forced control-plane.
+                do_shell,
                 teardown,
                 source: source.to_string(),
                 set_overrides,

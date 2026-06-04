@@ -195,6 +195,22 @@ impl Op {
         }
     }
 
+    /// CONTROL-side blob paths this Op reads at execution time (the offline
+    /// material ships). Mutable so the agent path can rewrite them to staged
+    /// TARGET-local paths before serializing the plan (D-095) — after which the
+    /// same execution code works under the agent's LocalExecutor.
+    pub fn offline_blob_paths_mut(&mut self) -> Vec<&mut std::path::PathBuf> {
+        match self {
+            Op::PushFile { local_path, .. } => vec![local_path],
+            Op::UnarchiveMaterial { local_archive: Some(p), .. } => vec![p],
+            Op::PackageInstall { local_archive: Some(p), .. } => vec![p],
+            Op::ImageImport { images, .. } => {
+                images.iter_mut().filter_map(|i| i.local_archive.as_mut()).collect()
+            }
+            _ => vec![],
+        }
+    }
+
     /// The `hostvars.*` template keys this Op references but that weren't resolved
     /// at plan time (D-077): cross-host facts to await before executing.
     pub fn unresolved_hostvar_keys(&self) -> Vec<String> {

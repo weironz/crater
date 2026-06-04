@@ -26,7 +26,7 @@
 | 幂等回显 + apply 默认执行 | [idempotency-and-apply.md](idempotency-and-apply.md) | D-023/D-024 |
 | 内置模块（action 原语,与 Ansible 对齐） | [modules.md](modules.md) | D-067 |
 | 角色 role（可复用子程序,数据定义） | [roles.md](roles.md) | D-029 |
-| 自举 agent（默认执行模型，贯穿 task） | [self-bootstrap-agent.md](self-bootstrap-agent.md) | D-019/027/044 |
+| 自举 agent（默认执行模型，贯穿 task；离线 blob 先推后跑） | [self-bootstrap-agent.md](self-bootstrap-agent.md) | D-019/027/044/095 |
 | 多节点 + 跨节点 register/hostvars + 并发 | [multi-node-and-cluster.md](multi-node-and-cluster.md) | D-030/D-031 |
 | 离线 OCI（build/save/load/pull，recipe-replay） | [offline-oci.md](offline-oci.md) | D-018/033/045 |
 | 镜像管理（images/pull/push/tag/login + apply &lt;ref&gt;） | [images-registry.md](images-registry.md) | D-018/033 |

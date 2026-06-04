@@ -86,7 +86,7 @@ pub(crate) async fn apply_source(
     if src.contains('/') || src.contains(':') {
         info!("{verb}: {src} → image (local store / registry)");
         let hosts = target.hosts()?;
-        return images::apply_image_ref(&src, hosts, !dry_run, teardown, &src, name.as_deref(), offline, set_overrides).await;
+        return images::apply_image_ref(&src, hosts, !dry_run, shell, teardown, &src, name.as_deref(), offline, set_overrides).await;
     }
     // Named task/project: `crater apply <name>` → first match of <name>.yaml under
     // library/ (then tasks/ for back-compat). D-043/D-085.
@@ -591,17 +591,18 @@ pub(crate) async fn run_task_on_host(
         return Ok((host.name.clone(), Vec::new()));
     }
     // Default: self-bootstrap agent runs the task plan on the target (D-044).
-    // Offline (blobs on control), --shell, or local → control-plane execute_task.
-    // A PushFile step reads a CONTROL-side path at execution time (e.g. `copy
-    // material:` whose material is a local `src:` file) — the agent on the
-    // target can't reach it, so such plans must also execute control-plane.
-    let has_push_file = steps.iter().any(|s| matches!(s.op, Op::PushFile { .. }));
-    if offline_blobmap.is_some() || do_shell || host.is_local() || has_push_file {
+    // Control-side blobs (offline materials / `copy src:`) are no obstacle —
+    // the agent path STAGES them onto the target first and rewrites the plan
+    // (D-095). Control-plane execute_task remains only where the agent
+    // genuinely can't go: --shell (explicit escape), local targets (nothing to
+    // ship), and steps needing the cross-host coordinator (throttle / awaited
+    // facts, D-077 — agents have no channel to each other, so e.g. k8s-HA's
+    // serialized joins keep the control-plane path).
+    let needs_coord = coord.is_some()
+        && steps.iter().any(|s| s.throttle.is_some() || !s.awaited_facts.is_empty());
+    if do_shell || host.is_local() || needs_coord {
         engine::execute_task(&steps, &handlers, exec.as_ref(), coord).await?;
     } else {
-        // Agent path runs the plan on the target without the control-side coord;
-        // cross-host throttle/awaited-facts (D-077) only apply to control-plane
-        // execute (the offline branch above, which HA always takes).
         agent::run_task_via_agent(exec.as_ref(), &steps, &handlers, None).await?;
     }
 
