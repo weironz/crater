@@ -134,6 +134,12 @@ enum Cmd {
         /// `--arch amd64,arm64`. Default: pack every declared arch variant.
         #[arg(long, value_delimiter = ',')]
         arch: Vec<String>,
+        /// Bypass the build caches (D-096): re-fetch every material and rebuild
+        /// even if the ref exists with an unchanged source fingerprint. Use when
+        /// an upstream TAG moved (e.g. `latest`) — the fingerprint only sees the
+        /// declared source, not remote content.
+        #[arg(long)]
+        no_cache: bool,
         /// Override a build-stage param without editing the yaml (D-089), e.g.
         /// `--set version=4.55.1`. Repeatable. Overrides the param's `default`
         /// (and the default tag's `<version>`), so a CI/justfile builds any
@@ -402,7 +408,9 @@ async fn main() -> Result<()> {
             TaskCmd::History { limit } => deployments::task_history(limit).await,
         },
         Cmd::Ui { bind, port } => ui::serve(&bind, port).await,
-        Cmd::Build { file, tag, arch, set } => build::build_to_store(&file, tag, &arch, &set).await,
+        Cmd::Build { file, tag, arch, no_cache, set } => {
+            build::build_to_store(&file, tag, &arch, &set, no_cache).await
+        }
         Cmd::Inspect { source, gen_inventory } => build::inspect_source(&source, gen_inventory).await,
         Cmd::Save { reference, output } => {
             ImageStore::open()?.export_oci_archive(&reference, &output)?;

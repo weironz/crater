@@ -3,7 +3,7 @@
 //! synthesis (D-048/D-061), and the artifact/param contract inspector (D-081).
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use tracing::info;
@@ -30,7 +30,13 @@ pub(crate) fn parse_set_overrides(set: &[String]) -> Result<BTreeMap<String, Str
 
 /// `crater build -f spec [-t ref]`: build the B 类 artifact(s) and store them in
 /// the local store (~/.crater/store), like `docker build`. Export with `save`.
-pub(crate) async fn build_to_store(file: &Path, tag: Option<String>, arch_filter: &[String], set: &[String]) -> Result<()> {
+pub(crate) async fn build_to_store(
+    file: &Path,
+    tag: Option<String>,
+    arch_filter: &[String],
+    set: &[String],
+    no_cache: bool,
+) -> Result<()> {
     // `crater build` only builds tasks now (D-046): a task → B 类 artifact whose
     // recipe IS the task YAML.
     if !crater_core::task::is_task_file(file) {
@@ -40,7 +46,61 @@ pub(crate) async fn build_to_store(file: &Path, tag: Option<String>, arch_filter
         );
     }
     let overrides = parse_set_overrides(set)?;
-    build_task_to_store(file, tag, arch_filter, &overrides).await
+    build_task_to_store(file, tag, arch_filter, &overrides, no_cache).await
+}
+
+// ---------------------------------------------------------------------------
+// Build caches (D-096): download cache + whole-build fingerprint
+// ---------------------------------------------------------------------------
+
+/// `~/.crater/cache` — build-time caches, content/source-addressed. Safe to
+/// `rm -rf` anytime (it only ever saves refetches/rebuilds).
+pub(crate) fn cache_dir() -> PathBuf {
+    ImageStore::home().join("cache")
+}
+
+/// Cache key for a `file` material download: the DECLARED `sha256` when present
+/// (content-addressed — survives URL/mirror changes), else the hash of the
+/// rendered source URL (refetched only when the URL itself changes).
+pub(crate) fn file_cache_key(declared_sha: Option<&str>, raw_url: &str) -> String {
+    match declared_sha {
+        Some(s) => s.to_string(),
+        None => crater_core::bundle::sha256_hex(raw_url.as_bytes()),
+    }
+}
+
+/// Read a cached blob; verify against a declared sha256 when given (a corrupt
+/// cache entry is dropped, not trusted).
+fn cache_get(path: &Path, declared_sha: Option<&str>) -> Option<Vec<u8>> {
+    let data = std::fs::read(path).ok()?;
+    if let Some(want) = declared_sha {
+        if crater_core::bundle::sha256_hex(&data) != want {
+            let _ = std::fs::remove_file(path);
+            return None;
+        }
+    }
+    Some(data)
+}
+
+fn cache_put(path: &Path, data: &[u8]) {
+    // Best-effort: a failed cache write must never fail the build.
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, data);
+}
+
+/// Whole-build fingerprint (D-096): hash of the role-expanded recipe + every
+/// material's SOURCE descriptor (rendered URL/ref, local-file content hash,
+/// os_package base+packages) + the arch filter. Same fingerprint + ref already
+/// in store ⇒ rebuilding would reproduce the same artifact, so build skips.
+/// NOTE: an upstream tag/URL whose CONTENT moved is invisible here — pin
+/// versions, or escape with `--no-cache`.
+fn build_fingerprint(recipe: &[u8], material_descs: &[String], arch_filter: &[String]) -> String {
+    let mut parts = vec![crater_core::bundle::sha256_hex(recipe)];
+    parts.extend_from_slice(material_descs);
+    parts.push(format!("arch={}", arch_filter.join(",")));
+    crater_core::bundle::sha256_hex(parts.join("\n").as_bytes())
 }
 
 /// `crater inspect <source>` (D-081): print a task/OCI's input contract — params
@@ -237,6 +297,7 @@ pub(crate) async fn build_task_to_store(
     tag: Option<String>,
     arch_filter: &[String],
     overrides: &BTreeMap<String, String>,
+    no_cache: bool,
 ) -> Result<()> {
     use crater_core::component::MaterialKind;
     use crater_core::task::TaskFile;
@@ -279,6 +340,62 @@ pub(crate) async fn build_task_to_store(
         ctx.vars.insert(k.clone(), v.clone());
     }
     ctx.offline = true; // build wants raw URLs (no mirror rewrite) from rendered_url (D-087)
+
+    // Whole-build cache (D-096): fingerprint the SOURCES (recipe + material
+    // descriptors) before any fetching. Ref already built from identical
+    // sources → skip the whole build. Descriptor rendering mirrors the fetch
+    // loop below (same order, same `{{arch}}` var handling) so both agree.
+    let recipe = serde_yaml::to_string(&task)?.into_bytes();
+    let mut material_descs: Vec<String> = Vec::new();
+    for m in &task.materials {
+        if m.kind == MaterialKind::File {
+            if !want_arch.is_empty() {
+                if let Some(a) = m.arch {
+                    if !want_arch.contains(&a) {
+                        continue;
+                    }
+                }
+            }
+            let key = PlanContext::material_blob_key(m);
+            if let Some(tmpl) = &m.url_tmpl {
+                if let Some(a) = m.arch {
+                    ctx.vars.insert("arch".to_string(), a.as_str().to_string());
+                }
+                let raw = ctx.rendered_url(tmpl)?;
+                material_descs.push(format!(
+                    "file:{key}:{raw}:{}",
+                    m.sha256.as_deref().unwrap_or("")
+                ));
+            } else if let Some(src) = &m.src {
+                // Local file: the CONTENT is the source — edits invalidate.
+                let data = std::fs::read(spec_dir.join(src))
+                    .map_err(|e| anyhow!("read material {key} from {}: {e}", spec_dir.join(src).display()))?;
+                material_descs.push(format!("src:{key}:{}", crater_core::bundle::sha256_hex(&data)));
+            }
+        } else if m.kind == MaterialKind::Image {
+            if let Some(r) = &m.reference {
+                material_descs.push(format!("img:{}:{}", m.name, ctx.rendered_url(r)?));
+            }
+        } else if m.kind == MaterialKind::OsPackage {
+            let pkgs: Vec<String> = m.packages.values().flatten().cloned().collect();
+            material_descs.push(format!(
+                "pkg:{}:{}:{}",
+                m.name,
+                m.base.as_deref().unwrap_or(""),
+                pkgs.join(",")
+            ));
+        }
+    }
+    let fingerprint = build_fingerprint(&recipe, &material_descs, arch_filter);
+    let fp_file = cache_dir().join("builds").join(sanitize_ref(&reference));
+    if !no_cache
+        && ImageStore::open()?.has(&reference)
+        && std::fs::read_to_string(&fp_file).is_ok_and(|s| s.trim() == fingerprint)
+    {
+        info!("{reference} 已在本地库且源未变(指纹 {})— 构建缓存命中,跳过(--no-cache 强制重建)", &fingerprint[..12]);
+        return Ok(());
+    }
+
     let mut materials: Vec<(String, bool, Vec<u8>)> = Vec::new(); // (key, embedded?, bytes) — D-087
     for m in &task.materials {
         if m.kind == MaterialKind::File {
@@ -298,11 +415,33 @@ pub(crate) async fn build_task_to_store(
                     ctx.vars.insert("arch".to_string(), a.as_str().to_string());
                 }
                 let raw = ctx.rendered_url(tmpl)?;
-                let url = online.rewrite(&raw);
-                info!("  fetch material {key} <- {raw}");
-                let (data, _) = source::fetch_best(&url)
-                    .await
-                    .map_err(|e| anyhow!("fetch material {key}: {e}"))?;
+                // Download cache (D-096): addressed by declared sha256 (content)
+                // or by the rendered URL (source). `--no-cache` forces a refetch.
+                let ckey = file_cache_key(m.sha256.as_deref(), &raw);
+                let cpath = cache_dir().join("file").join(&ckey);
+                let cached = if no_cache { None } else { cache_get(&cpath, m.sha256.as_deref()) };
+                let data = match cached {
+                    Some(data) => {
+                        info!("  material {key} <- 缓存({})", cpath.display());
+                        data
+                    }
+                    None => {
+                        let url = online.rewrite(&raw);
+                        info!("  fetch material {key} <- {raw}");
+                        let (data, _) = source::fetch_best(&url)
+                            .await
+                            .map_err(|e| anyhow!("fetch material {key}: {e}"))?;
+                        // Verify a declared digest BEFORE caching/packing.
+                        if let Some(want) = &m.sha256 {
+                            let got = crater_core::bundle::sha256_hex(&data);
+                            if &got != want {
+                                anyhow::bail!("material {key}: sha256 不符(声明 {want},实际 {got})");
+                            }
+                        }
+                        cache_put(&cpath, &data);
+                        data
+                    }
+                };
                 materials.push((key, false, data)); // has url_tmpl → dependency layer (D-087)
             } else if let Some(src) = &m.src {
                 // Hand-authored local file (D-066): read from the task dir and
@@ -348,16 +487,33 @@ pub(crate) async fn build_task_to_store(
                 anyhow::bail!("os_package material '{}' has no packages for family '{family}'", m.name);
             }
             let key = PlanContext::material_blob_key(m);
-            info!("  build os_package {key} <- {base} [{}] (buildah)", pkgs.join(" "));
-            let data = build_os_package_repo(base, family, &pkgs)?;
-            info!("    packed closure ({} bytes)", data.len());
+            // Download cache (D-096): the buildah closure is minutes of work;
+            // addressed by hash(base + family + packages).
+            let ckey = crater_core::bundle::sha256_hex(
+                format!("{base}|{family}|{}", pkgs.join(",")).as_bytes(),
+            );
+            let cpath = cache_dir().join("ospkg").join(format!("{ckey}.tar"));
+            let cached = if no_cache { None } else { cache_get(&cpath, None) };
+            let data = match cached {
+                Some(data) => {
+                    info!("  os_package {key} <- 缓存({})", cpath.display());
+                    data
+                }
+                None => {
+                    info!("  build os_package {key} <- {base} [{}] (buildah)", pkgs.join(" "));
+                    let data = build_os_package_repo(base, family, &pkgs)?;
+                    info!("    packed closure ({} bytes)", data.len());
+                    cache_put(&cpath, &data);
+                    data
+                }
+            };
             materials.push((key, false, data)); // os_package source → dependency layer (D-087)
         }
     }
 
     // Recipe = the ROLE-EXPANDED task (flat, self-contained), not the raw file —
     // so offline replay needs no role files (D-080). Note: drops source comments.
-    let recipe = serde_yaml::to_string(&task)?.into_bytes();
+    // (Serialized once above for the build fingerprint, D-096.)
     let stage_root = std::env::temp_dir().join(format!("crater-taskimg-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&stage_root);
     let stage = bundle::BundleStage::new(stage_root.clone())?;
@@ -373,5 +529,45 @@ pub(crate) async fn build_task_to_store(
     for r in &refs {
         info!("built {r} → 本地库(~/.crater/store)");
     }
+    // Record the source fingerprint (D-096) so an unchanged rebuild can skip.
+    cache_put(&fp_file, fingerprint.as_bytes());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D-096: declared sha256 wins (content-addressed); otherwise the key is
+    /// derived from the rendered URL (source-addressed).
+    #[test]
+    fn file_cache_key_prefers_declared_sha() {
+        assert_eq!(file_cache_key(Some("abc123"), "https://x/v1"), "abc123");
+        let by_url = file_cache_key(None, "https://x/v1");
+        assert_eq!(by_url, crater_core::bundle::sha256_hex(b"https://x/v1"));
+        assert_ne!(by_url, file_cache_key(None, "https://x/v2"));
+    }
+
+    /// D-096: the build fingerprint reacts to every source input — recipe,
+    /// material descriptors, arch filter — and only to them.
+    #[test]
+    fn build_fingerprint_tracks_all_sources() {
+        let base = build_fingerprint(b"recipe", &["file:a:url:".into()], &[]);
+        assert_eq!(base, build_fingerprint(b"recipe", &["file:a:url:".into()], &[]));
+        assert_ne!(base, build_fingerprint(b"recipe2", &["file:a:url:".into()], &[]));
+        assert_ne!(base, build_fingerprint(b"recipe", &["file:a:url2:".into()], &[]));
+        assert_ne!(base, build_fingerprint(b"recipe", &["file:a:url:".into()], &["amd64".into()]));
+    }
+
+    /// D-096: a corrupt cache entry (declared sha mismatch) is dropped, not used.
+    #[test]
+    fn cache_get_drops_corrupt_entries() {
+        let p = std::env::temp_dir().join(format!("crater-cache-test-{}", std::process::id()));
+        std::fs::write(&p, b"good content").unwrap();
+        let sha = crater_core::bundle::sha256_hex(b"good content");
+        assert_eq!(cache_get(&p, Some(&sha)).unwrap(), b"good content");
+        std::fs::write(&p, b"tampered").unwrap();
+        assert!(cache_get(&p, Some(&sha)).is_none(), "corrupt entry rejected");
+        assert!(!p.exists(), "corrupt entry deleted");
+    }
 }

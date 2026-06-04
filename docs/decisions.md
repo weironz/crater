@@ -1113,3 +1113,16 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **版本检查(同日补)**:TaskPlan 加 `format: N`(`PLAN_FORMAT` 常量,Op/TaskStep/ImageItem 序列化变更时手动 bump),控制端打戳、agent 解析时校验,偏斜报「重建 scripts/build-musl.sh / --agent-bin / 应急 --shell」而非 serde `missing field`。预存量旧 agent 不认识该字段救不了,从 v1 起的偏斜全可检出。63 tests 绿;实测 format:99 喂 agent 报版本偏斜、正常 apply 无感。
 - **边界**:staged blob 是缓存,delete 不清(回收 `rm -rf /var/lib/crater/blobs`);跨主机协调步骤仍控制端(agent 化它=引入常驻通信,违背 design.md §5.3 一发一收模型,不做)。
 - **关联**:D-044(task agent 化)、D-045(recipe-replay)、D-077(协调)、D-087(thin/offline)。
+
+## 2026-06-04 · 构建缓存:下载缓存 + 整体指纹缓存 + --no-cache(D-096)
+
+### D-096 build 两层缓存:物料下载按内容/源寻址,整体按源指纹跳过
+
+- **背景**:D-078 做了①增量镜像拉取④并行 file 取材,②下载缓存③整体缓存一直挂着。每次 `just build` 即使源毫无变化也要重新下二进制、重新打包、image 物料重触 registry——迭代体验差,且控制端断网时连"重建一个内容没变的制品"都做不到。
+- **决策**:两层缓存,都在 `~/.crater/cache/`(可随时 rm -rf):
+  - **下载缓存**:file 物料 key=声明 `sha256`(内容寻址)否则渲染 URL 哈希,存 `cache/file/`;os_package key=`hash(base+family+pkgs)` 存 `cache/ospkg/`。声明 sha256 的物料取回与读缓存都校验,损坏条目删除重取(`cache_get` 不信任坏缓存)。image 物料不另设缓存(D-078① pull 已增量)。
+  - **整体缓存**:指纹=hash(役展开 recipe + 物料源描述符(URL/ref/src 内容哈希/base+pkgs)+ arch 过滤),sidecar 存 `cache/builds/<sanitized-ref>`;`store.has(ref)` 且指纹同 → 整体跳过。**取材前**计算,命中时零 I/O 零网络。
+  - **`--no-cache`** 绕过两层。**诚实边界**:指纹只看声明的源,上游 tag/asset 内容漂移不可见——钉版本,或 --no-cache。
+- **验证**:66 tests 绿(cache key 优先级、指纹对 recipe/物料/arch 各输入敏感、坏缓存丢弃);实测:yq 重建 4.4s→0.2s、同源换 tag 0.4s(下载缓存命中零网络)、--no-cache 强制重取、改 zot `src:` 文件→指纹变→重建→revert 后回写一致再命中、rustfs image 物料重建 10.2s→0.16s(不再触 registry)。os_package 缓存与 file 同构未真机验证(buildah 重)。
+- **后续**:并行镜像拉取(`index.json` 锁)仍未做;cache GC(目前只增不减,同 /var/lib/crater/blobs)。
+- **关联**:D-078(build 提速①④)、D-089(--set 进指纹经 recipe)。

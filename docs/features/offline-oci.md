@@ -91,7 +91,27 @@ tar -xf /tmp/yq.oci -C /tmp/x && cat /tmp/x/oci-layout /tmp/x/index.json && ls /
 - **增量镜像拉取**：`store.pull` 拉每个 layer 前先看 `blobs/sha256/<digest>` 是否已存在——内容寻址,digest 命中即内容命中,跳过网络。重 build / 多镜像共用基础层只下一次。manifest 仍每次取,移动的 tag 照样拉新层。
 - **并行 file 取材**：`kind: file` 的二进制/压缩包(build 字节大头)并发下载(`buffer_unordered(8)`)。`kind: image`(`index.json` 读改写非并发安全)与 `os_package`(buildah 重)仍串行。
 - 真机:k8s-ha 全套 build 76s(9 镜像各 1~3s 命中缓存、8 个 file ~5s 内并发完成)。
-- 未做(后续):file/os_package 下载缓存(`~/.crater/cache`)、整体构建缓存(源未变即跳过)、`--no-cache`、并行镜像拉取(需 `index.json` 锁)。
+- 下载缓存与整体构建缓存已落地,见下节(D-096);并行镜像拉取仍未做(需 `index.json` 锁)。
+
+## 构建缓存（D-096）
+
+两层,都在 `~/.crater/cache/`(随时可 `rm -rf`,只影响速度):
+
+- **下载缓存**:`kind: file` 按**声明 `sha256`**(内容寻址,换 URL/镜像源也命中)或
+  渲染后 URL 的哈希寻址,存 `cache/file/<key>`;`kind: os_package` 按
+  `hash(base+family+packages)` 存 `cache/ospkg/`(buildah 闭包要几分钟,收益最大)。
+  声明了 `sha256` 的物料,**取回与读缓存都校验**——损坏的缓存条目直接删掉重取。
+- **整体构建缓存**:指纹 = hash(役展开后的 recipe + 各物料**源描述符**(渲染后 URL/ref、
+  本地 `src:` 文件内容哈希、os_package base+包列表)+ `--arch` 过滤),sidecar 存
+  `cache/builds/<ref>`。`ref` 已在本地库且指纹未变 → **整体跳过**:
+  ```
+  crater/yq:4.44.3 已在本地库且源未变(指纹 a79ffef65fdb)— 构建缓存命中,跳过(--no-cache 强制重建)
+  ```
+- **`--no-cache`**:绕过两层(强制重 fetch + 重建)。**什么时候必须用**:指纹只看声明的源,
+  上游 **tag 内容漂移**(如 `latest`、被覆盖的 release asset)察觉不到——钉版本是正道,
+  临时逃生用 `--no-cache`。
+- 实测:yq 重建 4.4s→0.2s;同源换 tag 0.4s(物料零网络);rustfs(110MB image 物料)
+  10.2s→0.16s(不再触 registry);改 `src:` 文件内容 → 指纹变 → 自动重建。
 
 ## 边界 / 后续
 
