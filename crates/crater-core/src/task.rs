@@ -443,8 +443,10 @@ fn rewrite_material_refs(action: &mut Action, map: &BTreeMap<String, String>) {
         }
     };
     match action {
-        Action::Place { material, .. } | Action::RenderTemplate { material, .. } => one(material),
-        Action::Extract { material, .. } | Action::PkgInstall { material, .. } => opt(material),
+        Action::RenderTemplate { material, .. } => one(material),
+        Action::Copy { material, .. }
+        | Action::Extract { material, .. }
+        | Action::PkgInstall { material, .. } => opt(material),
         Action::LoadImage { material, materials, .. } => {
             opt(material);
             for m in materials {
@@ -480,7 +482,7 @@ materials:
   - { name: yq-bin, kind: file, url_tmpl: "https://x/{{version}}/yq" }
 actions:
   - id: place_yq
-    action: place
+    action: copy
     material: yq-bin
     dest: /usr/local/bin/yq
     mode: "0755"
@@ -495,7 +497,7 @@ actions:
         assert_eq!(t.hosts, "all");
         assert_eq!(t.actions.len(), 2);
         assert_eq!(t.actions[0].id.as_deref(), Some("place_yq"));
-        assert!(matches!(t.actions[0].action, Action::Place { .. }));
+        assert!(matches!(t.actions[0].action, Action::Copy { material: Some(_), .. }));
         assert_eq!(t.actions[1].phase, Phase::Verify);
         assert_eq!(t.actions[1].needs, vec!["place_yq".to_string()]);
     }

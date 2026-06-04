@@ -9,7 +9,7 @@
 
 | 层 | 形态 | 改 Rust |
 |---|---|---|
-| 1 内置模块 | Rust enum(shell/place/package/file…,见 [modules.md](modules.md)) | 是(精选) |
+| 1 内置模块 | Rust enum(shell/copy/package/file…,见 [modules.md](modules.md)) | 是(精选) |
 | **2 角色(role)** | `roles/<name>.yaml`(params+check+act 模板) | **否**(已实现的契约地基) |
 | 3 外部模块 | 脚本/静态二进制 + JSON 契约(agent 送达) | 否(后续) |
 | 4 `shell`+`check` | 裸命令 + 探针 | 否 |
@@ -56,7 +56,7 @@ materials:                                   # ← role 自己的离线闭包(D-
     kind: file
     url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64"
 actions:                                     # ← 多步配方(不止一条命令)
-  - { id: place, action: place, material: bin, dest: /usr/local/bin/yq, mode: "0755" }
+  - { id: place, action: copy, material: bin, dest: /usr/local/bin/yq, mode: "0755" }
 ```
 ```yaml
 # task 引用
@@ -76,7 +76,7 @@ planner 排序都按一份**扁平 task** 走,无需感知 role。
 关键收益:
 - **materials 随 role 走**:复用 role = 复用它的闭包;闭包在展开时自动上浮进 OCI。
 - **OCI 自包含**:build 时已扁平化进 recipe,**离线 apply 不需要 role 文件**(真机验证:移走
-  `roles/yq.yaml` 后 `crater apply crater/demo-roles:latest` 仍 `place (offline) install_yq.bin`)。
+  `roles/yq.yaml` 后 `crater apply crater/demo-roles:latest` 仍 `copy (blob) install_yq.bin`)。
 - 同一 role 多次引用用不同步 id → 不同前缀,**不冲突**。
 - 别的步 `needs: [install_yq]` → 自动指向 role 的**终端动作**(role 内无人依赖的)。
 

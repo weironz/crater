@@ -36,7 +36,7 @@ wrote /tmp/yq.oci (1 component artifact(s), … bytes) — OCI artifact (applica
 ```
 
 **load = recipe-replay**：apply 识别 `artifactType` → 取出 task recipe + material blob（按名建
-blobmap）→ 走**和在线完全相同的 task 引擎**(`plan_from_task`)跑离线（D-020/D-045）：`place`
+blobmap）→ 走**和在线完全相同的 task 引擎**(`plan_from_task`)跑离线（D-020/D-045）：`copy material:`
 从包内 blob 推送、extract/write_file/systemd 照常 replay、verify 收尾。**没有伪 rootfs、没有
 `tar -xpf -C /` 覆盖宿主根**。
 
@@ -66,7 +66,7 @@ crater save 192.168.73.5:5000/yq:1.0 -o /tmp/yq.oci              # → 离线文
 crater load /tmp/yq.oci                                          # → 库(用包内 ref.name)
 crater apply 192.168.73.5:5000/yq:1.0 --host <host> --password <pw>
 ```
-期望：`crater task artifact → recipe-replay` → `place (offline) yq-bin -> /usr/local/bin/yq` → `yq --version` v4.53.2。
+期望：`crater task artifact → recipe-replay` → `copy (blob) yq-bin -> /usr/local/bin/yq` → `yq --version` v4.53.2。
 
 **经 registry 分发**（build → push → 另一台 pull/apply，见 [images-registry.md](images-registry.md)）：
 ```bash
@@ -83,7 +83,7 @@ tar -xf /tmp/yq.oci -C /tmp/x && cat /tmp/x/oci-layout /tmp/x/index.json && ls /
 
 ## 验证（真机 192.168.73.11/.12）
 
-- yq B 类 artifact：`build`（`recipe + 1 material(s)`）→ `load` → `push` 到 zot（manifest 带 `artifactType` + recipe/material 层）→ 清本地 store → `apply <zot>/yq --host .12`（`pull_blob` 取自定义层 → recipe-replay → `place (offline) yq-bin`）→ `yq --version` v4.53.2。
+- yq B 类 artifact：`build`（`recipe + 1 material(s)`）→ `load` → `push` 到 zot（manifest 带 `artifactType` + recipe/material 层）→ 清本地 store → `apply <zot>/yq --host .12`（`pull_blob` 取自定义层 → recipe-replay → `copy (blob) yq-bin`）→ `yq --version` v4.53.2。
 - 包结构经校验：`oci-layout`/`index.json`/`blobs/sha256` 齐全；组件 manifest 为 `artifactType` 制品，layer 为 recipe + material（**无伪 rootfs config / 假 image 层**）。
 
 ## build 提速（D-078）

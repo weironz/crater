@@ -5,7 +5,7 @@
 #   file(url)       —— containerd/runc/cni/crictl/kubeadm/kubelet/kubectl 静态二进制;
 #                      flannel 清单(从官方 release 下载)
 #   file(src)       —— 官方不提供、需人工维护的文件:systemd unit / drop-in / 配置
-#                      (放在同级 files/,build 读本地、place 原样推送,copy 语义,不渲染)
+#                      (放在同级 files/,build 读本地、copy material 原样推送,不渲染)
 #   image           —— 控制面 7 镜像(CN 镜像源)+ flannel 2 镜像;build pull 进包、apply ctr import 到 k8s.io
 #   os_package      —— conntrack/socat/ipset/ethtool(buildah 在 ubuntu:24.04 解闭包打 .deb)
 # 目标:ubuntu 24.04 / amd64。kubeadm init 用 image-repository 同 CN 源 → 预载不拉。
@@ -142,7 +142,7 @@ actions:
     cmd: "sed -ri '/\\sswap\\s/s/^([^#])/#\\1/' /etc/fstab"
     check: "! grep -Eq '^[^#].*\\sswap\\s' /etc/fstab"
   - id: modules_conf
-    action: place
+    action: copy
     material: cfg-modules
     dest: /etc/modules-load.d/k8s.conf
   - id: modprobe
@@ -151,7 +151,7 @@ actions:
     cmd: "modprobe overlay && modprobe br_netfilter"
     check: "lsmod | grep -q br_netfilter"
   - id: sysctl_conf
-    action: place
+    action: copy
     material: cfg-sysctl
     dest: /etc/sysctl.d/k8s.conf
   - id: sysctl_apply
@@ -174,7 +174,7 @@ actions:
     creates: /usr/local/bin/containerd
     needs: [deps]
   - id: runc
-    action: place
+    action: copy
     material: runc
     dest: /usr/local/sbin/runc
     mode: "0755"
@@ -197,18 +197,18 @@ actions:
     creates: /usr/local/bin/crictl
     needs: [deps]
   - id: crictl_cfg
-    action: place
+    action: copy
     material: cfg-crictl
     dest: /etc/crictl.yaml
 
   - id: ctd_cfg
-    action: place
+    action: copy
     material: cfg-containerd
     dest: /etc/containerd/config.toml
     needs: [ctd_extract]
     notify: [restart_containerd]
   - id: ctd_unit
-    action: place
+    action: copy
     material: unit-containerd
     dest: /etc/systemd/system/containerd.service
     needs: [ctd_extract]
@@ -221,30 +221,30 @@ actions:
 
   # —— kubeadm / kubelet / kubectl ——
   - id: kubeadm
-    action: place
+    action: copy
     material: kubeadm
     dest: /usr/local/bin/kubeadm
     mode: "0755"
     needs: [deps]
   - id: kubelet_bin
-    action: place
+    action: copy
     material: kubelet
     dest: /usr/local/bin/kubelet
     mode: "0755"
     needs: [deps]
   - id: kubectl
-    action: place
+    action: copy
     material: kubectl
     dest: /usr/local/bin/kubectl
     mode: "0755"
     needs: [deps]
   - id: kubelet_unit
-    action: place
+    action: copy
     material: unit-kubelet
     dest: /etc/systemd/system/kubelet.service
     needs: [kubelet_bin]
   - id: kubelet_dropin
-    action: place
+    action: copy
     material: dropin-kubeadm
     dest: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
     needs: [kubelet_unit]
@@ -276,7 +276,7 @@ actions:
 
   # —— CNI(flannel,官方清单)——
   - id: flannel_manifest
-    action: place
+    action: copy
     material: flannel-manifest
     dest: /etc/kubernetes/kube-flannel.yml
     needs: [kubeconfig]

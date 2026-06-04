@@ -46,7 +46,7 @@ materials:                     # 物料闭包(D-034),crater build 据此打离�
     url_tmpl: ".../v{{version}}/yq_linux_amd64"
 actions:
   - id: place_yq
-    action: place
+    action: copy
     material: yq-bin
     dest: /usr/local/bin/yq
     mode: "0755"
@@ -84,13 +84,13 @@ action 项字段(全是引擎读得懂的封闭词汇,**无需执行即可静态
 ## 内置模块(Rust 白盒)
 
 模块名 D-067 起对齐 Ansible;完整两类清单(与 Ansible 对齐 / crater 自有)+ 别名表见
-[modules.md](modules.md)。`shell` `place` `unarchive` `template` `copy`
+[modules.md](modules.md)。`shell` `unarchive` `template` `copy`
 `package` `load_image` `role`,以及 D-037-b 补齐的:
 
 | 模块 | 参数 | 引擎语义(幂等) |
 |---|---|---|
 | `file` | `path` + `state: directory\|absent\|touch` + `mode/owner/group` | `mkdir -p`/`rm -rf`/`touch`;探针 `test -d`/`test ! -e`/`test -e` |
-| `copy` | `dest` + `content`(内联,渲染)**或** `src`(控制端文件) + `mode` | 内联内容或读控制端文件**进 plan**(agent 也能写),sha256 幂等 + chmod;文本 only(二进制走 `place`) |
+| `copy` | `dest` + 三选一来源:`content`(内联,渲染)/ `src`(控制端文本文件,内联进 plan)/ `material`(物料引用,二进制安全、arch 变体、可打包,D-090) + `mode` | sha256 幂等 + chmod;在线/离线由引擎按 material 三态解析 |
 | `service` | `name` + `state: started\|stopped\|restarted` + `enabled` | systemd start/stop/restart + enable/disable;started/stopped 探针 `is-active` |
 | `lineinfile` | `path` + `line` + `regexp?` + `state` + `create` | present 时(有 regexp)删匹配行 + append(即替换);探针 `grep -qxF` |
 | `user` | `name` + `state` + `system/shell/home/groups` | `useradd`/`userdel`;探针 `id` |
@@ -127,7 +127,7 @@ crater apply examples/install-yq.yaml -i inventory.yaml                 # 层3 i
 ```
 
 - 三层全部装好 yq v4.53.2(本机直跑 / `--host` 经自举 agent / `-i` 两台并行)。
-- 引擎条件过滤生效:声明 3 个 action,目标非 rhel → `rhel_only` 被滤,plan 实际 2 步(`[Install] place` → `[Verify] verify`)。
+- 引擎条件过滤生效:声明 3 个 action,目标非 rhel → `rhel_only` 被滤,plan 实际 2 步(`[Install] copy` → `[Verify] verify`)。
 - `needs` 排序、`{{version}}` 取值正确。
 
 **真实 daemon 服务**(`crater apply docker --host <h>` → `tasks/docker.yaml`):`pkg_install` 装 docker.io + `write_file` daemon.json(CN mirror,`notify` 重启 handler)+ `service` started/enabled + verify。真机 n11:docker v29 active、mirror `docker.m.daocloud.io` 生效、cgroup=systemd;再跑 `changed=0 ok=4`、daemon 未变 → handler **不**触发。整套经自举 agent 在目标本地执行。
@@ -144,7 +144,7 @@ crater apply <reg>/yq:1.0 --host <h>            # pull → recipe-replay
 crater apply yq.oci --host <h>                  # .oci 文件 → recipe-replay
 ```
 
-recipe-replay:apply 检测 artifact 的 recipe 是 task(`is_task_file`)→ 走 `plan_from_task`(离线 `place` 从包内 blob 推送)、控制端 `execute_task`(blobs 在控制端)。component recipe 仍走旧 `run_pipeline`(兼容)。
+recipe-replay:apply 检测 artifact 的 recipe 是 task(`is_task_file`)→ 走 `plan_from_task`(离线 `copy` 从包内 blob 推送)、控制端 `execute_task`(blobs 在控制端)。component recipe 仍走旧 `run_pipeline`(兼容)。
 
 ## 边界 / 后续(D-037-b)
 
@@ -154,9 +154,9 @@ recipe-replay:apply 检测 artifact 的 recipe 是 task(`is_task_file`)→ 走 `
 - 原语已补 **file/copy/service**(D-039)、**lineinfile/user/group**(D-040)。
 - register/hostvars(D-041)、handlers/notify + `retries/ignore_errors` 运行时 + `hosts` 组过滤(D-042)均已实现。
 - 命名 task 库 + 嵌套 `groups:`(D-043)、task 默认走自举 agent + `--shell` 逃生(D-044)均已实现。
-- **task 模型(D-037)功能完整**:actions/needs/phase/when、materials/place、register/hostvars、retries/ignore_errors、handlers/notify、hosts 组过滤、命名 task 库、嵌套 groups、自举 agent、16 原语。
+- **task 模型(D-037)功能完整**:actions/needs/phase/when、materials/copy、register/hostvars、retries/ignore_errors、handlers/notify、hosts 组过滤、命名 task 库、嵌套 groups、自举 agent、16 原语。
 - 命名 task 库(裸名 `crater apply <task>` 解析新 actions 格式)后续;现阶段裸名仍解析 `components/`(旧格式兼容)。
 
 ## 关联
 
-ADR [D-037](../decisions.md)(形态+分期)、[D-036](../decisions.md)(YAML 不写逻辑)、[D-035](../decisions.md)(三层 targeting)、[D-034](../decisions.md)(materials/place)。
+ADR [D-037](../decisions.md)(形态+分期)、[D-036](../decisions.md)(YAML 不写逻辑)、[D-035](../decisions.md)(三层 targeting)、[D-034](../decisions.md)(materials/place,place 现已并入 copy,D-090)。

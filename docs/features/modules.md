@@ -29,7 +29,7 @@ task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible �
 | `package` | `packages: {debian:[..], rhel:[..]}`, `material` | 装系统包。在线走系统源;离线设 `material` 指向 `kind: os_package` 物料(D-062) | `package`/`apt`/`yum` |
 | `unarchive` | `to`, `from`, `strip`, `creates` | 解压 tar/tgz 到 `to`。`creates` 已存在则跳过(幂等) | `unarchive` |
 | `template` | `material`, `dst` | 用 **minijinja** 渲染模板物料(`kind: file` 的 `.j2`,打进 OCI 离线自洽)写到 `dst`。支持 `{% for %}`/`{{ }}`;上下文含标量 var + 结构化 `groups.<role>`=`[{name,ip}]`(D-075) | `template` |
-| `copy` | `dest`, `content` 或 `src`, `mode` | 写文件到目标:`content` 写内联内容(渲染 {{var}}),或 `src` 拷控制端文件(内联进 plan,文本,sha256 幂等)。二选一 | `copy`(content= / src=) |
+| `copy` | `dest`, `content` / `src` / `material` 三选一, `mode` | 写文件到目标:`content` 内联(渲染 {{var}});`src` 拷控制端文本文件(内联进 plan);`material` 引用 `materials:` 物料(二进制安全、arch 变体,在线目标机下载 `url_tmpl`、离线推 OCI blob,D-034/D-090)。sha256 幂等 | Ansible 把 `get_url` 与 `copy` 分开;crater 用一个 `copy` 统一,来源由字段定 |
 | `file` | `path`, `state`(directory/absent/touch), `mode`, `owner`, `group` | 管路径状态:建目录 / 删 / touch | `file` |
 | `service` | `name`, `state`(started/stopped/restarted), `enabled` | 管 systemd 服务(自带 daemon-reload + enable + start/stop/restart,is-active/is-enabled 幂等) | `service`/`systemd` |
 | `lineinfile` | `path`, `line`, `regexp`, `state`, `create` | 确保某行存在/不存在(grep 探针幂等) | `lineinfile` |
@@ -45,7 +45,6 @@ task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible �
 
 | crater 模块 | 参数 | 作用 | 为什么没对齐 |
 |---|---|---|---|
-| `place` | `material`, `dest`, `mode` | 放置一个 `materials:` 声明的物料:在线目标机自己下载 `url_tmpl`,离线控制端推打进 OCI 的 blob(D-034) | Ansible 把"下载"`get_url` 与"拷贝"`copy` 分开;crater 用物料逻辑名统一,在线/离线由后端定 |
 | `load_image` | `material`, `namespace`, `runtime` | 导入 `kind: image` 物料:离线推 oci-archive 并 `ctr import`,在线运行时 pull(D-061) | Ansible 无内置镜像导入(社区模块) |
 
 ## 改名对照(旧名已废弃,不再解析)
@@ -74,4 +73,4 @@ cargo test -p crater-core action_names_are_ansible_module_names_only
 ## 关联
 
 - ADR:[D-067](../decisions.md)(模块名对齐 Ansible)、[D-029](../decisions.md)(模块四层模型/角色)、[D-036](../decisions.md)(YAML 纯数据,逻辑在 Rust)。
-- 相关:[roles.md](roles.md)(可复用角色)、[action-tasks.md](action-tasks.md)、[materials-and-place.md](materials-and-place.md)。
+- 相关:[roles.md](roles.md)(可复用角色)、[action-tasks.md](action-tasks.md)、[materials.md](materials.md)。

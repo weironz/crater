@@ -75,7 +75,7 @@ materials:
     ref: "docker.io/library/app:{{version}}"
 actions:
   - id: place
-    action: place
+    action: copy
     material: app-bin
     dest: /usr/local/bin/app
     mode: "0755"
@@ -109,9 +109,9 @@ actions:
 1. **上传**：分块 base64 over SSH 推送 `x.oci`（D-009，已验证 10MB+ 可行）。
 2. **解包**：目标机侧 crater（agent 模式）展开 OCI Layout；按 digest **自校验**（内容寻址，无需额外 sha256 步骤）。
 3. **物料落地**：
-   - 文件物料 → `place` 按 **material 名**从包内 blob 推到 `dest`（与在线 `place` 同一动作，仅来源不同）。
+   - 文件物料 → `copy material:` 按 **material 名**从包内 blob 推到 `dest`（与在线同一动作，仅来源不同）。
    - 容器镜像 → 探测本地运行时（`nerdctl/docker/podman/ctr`，复用 `LoadImage` 的探测，D-017）`image import` / `load`；**或**推送到目标网内的**临时 registry**（F13），多节点指过去，避免每台塞一份。
-4. **执行计划**：跑同一套 task 引擎，离线模式下 `place` 解析为 push-from-blob（`engine.rs offline_blobs` 按 material 名索引），与在线唯一区别是字节来自包内而非 `curl`。
+4. **执行计划**：跑同一套 task 引擎，离线模式下 `copy material:` 解析为 push-from-blob（`engine.rs offline_blobs` 按 material 名索引），与在线唯一区别是字节来自包内而非 `curl`。
 
 ---
 

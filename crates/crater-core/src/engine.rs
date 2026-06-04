@@ -850,62 +850,6 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 check,
             }
         }
-        Action::Place { material, dest, mode } => {
-            let dest = dest.display().to_string();
-            // Pick the variant matching the target arch (D-048), online or off.
-            let m = ctx.resolve_material(material)?;
-            if let Some(local) = ctx.blob_for(m) {
-                // A packed blob (strict-offline, or the embedded-file layer of a
-                // thin-online pull): push it verbatim, keyed by name (or name@arch).
-                let key = PlanContext::material_blob_key(m);
-                Op::PushFile {
-                    phase,
-                    describe: format!("place (blob) {key} -> {dest}"),
-                    local_path: local,
-                    dest,
-                    mode: mode.clone(),
-                }
-            } else if ctx.offline {
-                let key = PlanContext::material_blob_key(m);
-                anyhow::bail!("offline bundle missing material '{key}'")
-            } else if let Some(src) = &m.src {
-                // Online + hand-authored local file (D-066): push it from the
-                // control machine's task dir (no URL to curl). Copy semantics.
-                let local = ctx.component_dir.join(src);
-                Op::PushFile {
-                    phase,
-                    describe: format!("place {material} <- {}", local.display()),
-                    local_path: local,
-                    dest,
-                    mode: mode.clone(),
-                }
-            } else {
-                // Online: the target fetches the variant's declared URL itself.
-                let tmpl = m.url_tmpl.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("place: material '{material}' has no url_tmpl or src for online fetch")
-                })?;
-                // {{arch}} = the resolved material's arch (single source, D-064).
-                let raw = if let Some(a) = m.arch {
-                    let mut vars = ctx.vars.clone();
-                    vars.insert("arch".to_string(), a.as_str().to_string());
-                    render(tmpl, &vars)?
-                } else {
-                    render(tmpl, &ctx.vars)?
-                };
-                let url = ctx.source.rewrite(&raw);
-                let mut cmd = format!("curl -fL --retry 3 -o '{dest}' '{url}'");
-                if let Some(mode) = mode {
-                    cmd.push_str(&format!(" && chmod {mode} '{dest}'"));
-                }
-                Op::Shell {
-                    phase,
-                    describe: format!("place {material} <- {url}"),
-                    cmd,
-                    soft_fail: false,
-                    check: Some(format!("test -s '{dest}'")),
-                }
-            }
-        }
         Action::Extract { to, from, material, strip, creates } => {
             let to_s = to.display().to_string();
             let creates_s = creates.as_ref().map(|p| p.display().to_string());
@@ -1105,38 +1049,100 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 check,
             }
         }
-        Action::Copy { dest, src, content, mode } => {
-            // ansible `copy`: inline `content` OR a control-side `src` file
-            // (read + inlined so it works under the agent, which can't reach
-            // control-side paths — text only; binaries go through `place`).
-            let content = match (content.as_deref(), src.as_deref()) {
-                (Some(c), None) => render(c, &ctx.vars)?,
-                (None, Some(s)) => {
-                    let src_path = ctx.component_dir.join(s);
-                    let bytes = std::fs::read(&src_path)
-                        .map_err(|e| anyhow::anyhow!("copy: read {}: {e}", src_path.display()))?;
-                    String::from_utf8(bytes).map_err(|_| {
-                        anyhow::anyhow!(
-                            "copy: {} is not UTF-8 (use `place` for binaries)",
-                            src_path.display()
-                        )
-                    })?
+        Action::Copy { dest, src, content, material, mode } => {
+            // ansible `copy` (D-090): the source is EXACTLY ONE of
+            //   content  — inline text, rendered, inlined into the plan;
+            //   src      — control-side text file, read + inlined (agent-safe);
+            //   material — a BOM entry (binary-safe, arch variants, packs into
+            //              the OCI; absorbed the former `place` primitive).
+            if (content.is_some() as u8) + (src.is_some() as u8) + (material.is_some() as u8) != 1 {
+                return Err(anyhow::anyhow!(
+                    "copy: set exactly one of `content` / `src` / `material`"
+                ));
+            }
+            if let Some(name) = material {
+                // Pick the variant matching the target arch (D-048), online or off.
+                let dest = dest.display().to_string();
+                let m = ctx.resolve_material(name)?;
+                if let Some(local) = ctx.blob_for(m) {
+                    // A packed blob (strict-offline, or the embedded-file layer of
+                    // a thin-online pull): push it verbatim, keyed by name (or
+                    // name@arch).
+                    let key = PlanContext::material_blob_key(m);
+                    Op::PushFile {
+                        phase,
+                        describe: format!("copy (blob) {key} -> {dest}"),
+                        local_path: local,
+                        dest,
+                        mode: mode.clone(),
+                    }
+                } else if ctx.offline {
+                    let key = PlanContext::material_blob_key(m);
+                    anyhow::bail!("offline bundle missing material '{key}'")
+                } else if let Some(src) = &m.src {
+                    // Online + hand-authored local file (D-066): push it from the
+                    // control machine's task dir (no URL to curl).
+                    let local = ctx.component_dir.join(src);
+                    Op::PushFile {
+                        phase,
+                        describe: format!("copy {name} <- {}", local.display()),
+                        local_path: local,
+                        dest,
+                        mode: mode.clone(),
+                    }
+                } else {
+                    // Online: the target fetches the variant's declared URL itself.
+                    let tmpl = m.url_tmpl.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("copy: material '{name}' has no url_tmpl or src for online fetch")
+                    })?;
+                    // {{arch}} = the resolved material's arch (single source, D-064).
+                    let raw = if let Some(a) = m.arch {
+                        let mut vars = ctx.vars.clone();
+                        vars.insert("arch".to_string(), a.as_str().to_string());
+                        render(tmpl, &vars)?
+                    } else {
+                        render(tmpl, &ctx.vars)?
+                    };
+                    let url = ctx.source.rewrite(&raw);
+                    let mut cmd = format!("curl -fL --retry 3 -o '{dest}' '{url}'");
+                    if let Some(mode) = mode {
+                        cmd.push_str(&format!(" && chmod {mode} '{dest}'"));
+                    }
+                    Op::Shell {
+                        phase,
+                        describe: format!("copy {name} <- {url}"),
+                        cmd,
+                        soft_fail: false,
+                        check: Some(format!("test -s '{dest}'")),
+                    }
                 }
-                (Some(_), Some(_)) => {
-                    return Err(anyhow::anyhow!("copy: set either `content` or `src`, not both"))
+            } else {
+                let content = match (content.as_deref(), src.as_deref()) {
+                    (Some(c), _) => render(c, &ctx.vars)?,
+                    (_, Some(s)) => {
+                        let src_path = ctx.component_dir.join(s);
+                        let bytes = std::fs::read(&src_path)
+                            .map_err(|e| anyhow::anyhow!("copy: read {}: {e}", src_path.display()))?;
+                        String::from_utf8(bytes).map_err(|_| {
+                            anyhow::anyhow!(
+                                "copy: {} is not UTF-8 (use `material` for binaries)",
+                                src_path.display()
+                            )
+                        })?
+                    }
+                    _ => unreachable!("exactly-one source validated above"),
+                };
+                let describe = match src.as_deref() {
+                    Some(s) => format!("copy {s} -> {}", dest.display()),
+                    None => format!("write file {}", dest.display()),
+                };
+                Op::WriteFile {
+                    phase,
+                    describe,
+                    path: dest.display().to_string(),
+                    content,
+                    mode: mode.clone(),
                 }
-                (None, None) => return Err(anyhow::anyhow!("copy: needs `content` or `src`")),
-            };
-            let describe = match src.as_deref() {
-                Some(s) => format!("copy {s} -> {}", dest.display()),
-                None => format!("write file {}", dest.display()),
-            };
-            Op::WriteFile {
-                phase,
-                describe,
-                path: dest.display().to_string(),
-                content,
-                mode: mode.clone(),
             }
         }
         Action::Service {
@@ -1761,12 +1767,14 @@ mod tests {
     }
 
     #[test]
-    fn three_state_place_resolution() {
-        // D-087: `place` resolves a material per-material, not by a global offline
-        // flag — blob present → use blob; absent + strict-offline → error; absent
-        // + online → fetch. This makes thin-online (partial blobmap) deploy work.
-        let place = |name: &str| Action::Place {
-            material: name.into(),
+    fn three_state_copy_material_resolution() {
+        // D-087/D-090: `copy material:` resolves per-material, not by a global
+        // offline flag — blob present → use blob; absent + strict-offline →
+        // error; absent + online → fetch. Makes thin-online (partial blobmap) work.
+        let place = |name: &str| Action::Copy {
+            material: Some(name.into()),
+            src: None,
+            content: None,
             dest: PathBuf::from("/usr/local/bin/x"),
             mode: Some("0755".into()),
         };
@@ -2074,11 +2082,13 @@ mod tests {
         let mut ctx = PlanContext::new(OsFamily::Debian, "1.0".into(), PathBuf::from("."));
         ctx.add_material(test_material("x", "https://example.com/x"));
 
-        // place (online) -> check that the artifact already exists
+        // copy material (online) -> check that the artifact already exists
         let dl = action_op(
             Phase::Install,
-            &Action::Place {
-                material: "x".into(),
+            &Action::Copy {
+                material: Some("x".into()),
+                src: None,
+                content: None,
                 dest: PathBuf::from("/usr/local/bin/x"),
                 mode: None,
             },
@@ -2222,8 +2232,10 @@ mod tests {
         let plan = vec![
             action_op(
                 Phase::Install,
-                &Action::Place {
-                    material: "x".into(),
+                &Action::Copy {
+                    material: Some("x".into()),
+                    src: None,
+                    content: None,
                     dest: PathBuf::from("/usr/local/bin/x"),
                     mode: None,
                 },

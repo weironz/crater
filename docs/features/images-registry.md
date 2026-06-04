@@ -53,7 +53,7 @@ crater push 192.168.73.5:5000/yq:4.53.2               # → zot；curl .../v2/_c
 rm -rf ~/.crater/store                                # 清本地库，强制从 zot 拉
 crater apply 192.168.73.5:5000/yq:4.53.2 --host 192.168.73.12 --password 123456
 #  → "not in local store → pulling"（真从 zot 拉）→ "crater component artifact → recipe-replay"
-#  → place (offline) yq-bin -> /usr/local/bin/yq → v4.53.2、可执行
+#  → copy (blob) yq-bin -> /usr/local/bin/yq → v4.53.2、可执行
 ```
 
 ## 验证（真机）
@@ -64,5 +64,5 @@ crater apply 192.168.73.5:5000/yq:4.53.2 --host 192.168.73.12 --password 123456
 
 ## 边界 / 后续
 
-- `apply <ref>`：**crater B 类 artifact**（`artifactType` 命中）→ recipe-replay（取 recipe + material blob，走在线同一引擎，`place` 按名落地，D-033/D-034）；**普通容器镜像**（无 artifactType）→ 把所有层展开到 `/`（rootfs 覆盖语义，适合 crater/sealos 式镜像；任意镜像展开到 `/` 会铺满其容器根文件系统，按需使用）。
+- `apply <ref>`：**crater B 类 artifact**（`artifactType` 命中）→ recipe-replay（取 recipe + material blob，走在线同一引擎，`copy material:` 按名落地，D-033/D-034/D-090）；**普通容器镜像**（无 artifactType）→ 把所有层展开到 `/`（rootfs 覆盖语义，适合 crater/sealos 式镜像；任意镜像展开到 `/` 会铺满其容器根文件系统，按需使用）。
 - 多 arch manifest-list 的平台选择、镜像签名（N4）、库 GC、registry TLS/认证 后续。

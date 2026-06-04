@@ -10,7 +10,7 @@
 
 术语(全文固定):
 - **task**:一个高层目标(文件或命名),如 `install-yq`。= 有序的 **action** 列表 + 物料 + targeting。
-- **action**:task 里的一项,一次**原语调用**(`place` / `run_cmd` / `copy` …)。
+- **action**:task 里的一项,一次**原语调用**(`copy` / `shell` / `service` …)。
 - "`crater apply <动作>`"里的"动作"= 一个 task。
 
 **这不改变 D-036,只是把能力做大**:task 仍是纯声明数据,所有控制流(循环/条件/计算/排序/重试/幂等)在 Rust。
@@ -52,7 +52,7 @@ materials:                 # 物料闭包(D-034),build 据此打离线包
     url_tmpl: "https://.../v{{version}}/yq_linux_amd64"
 actions:                   # 动作清单;依赖用 needs 声明,排序由引擎做
   - id: place_yq
-    action: place
+    action: copy
     material: yq-bin
     dest: /usr/local/bin/yq
     mode: "0755"
@@ -94,14 +94,14 @@ actions:                   # 动作清单;依赖用 needs 声明,排序由引擎
 
 > 模块名 D-067 起对齐 Ansible(`run_cmd→shell`、`pkg_install→package`、`extract→unarchive`、`render_template→template`、`write_file` 并入 `copy`、`module→role`),旧名全留别名。完整清单见 [features/modules.md](features/modules.md)。
 
-- **内置模块**:`shell`、`place`、`unarchive`、`template`、`copy`(内联 content 或 src 文件)、`package`、`load_image`、`role`、`file`、`service`、`lineinfile`、`user`、`group`(`download` 已删,获取外部文件统一走 `place`+`materials`,D-047;`systemd_unit` 已并入 `service`,D-069)。
+- **内置模块**:`shell`、`unarchive`、`template`、`copy`(content 内联 / src 控制端文件 / material 物料引用,D-090)、`package`、`load_image`、`role`、`file`、`service`、`lineinfile`、`user`、`group`(`download` 已删,获取外部文件统一走 `copy material:`+`materials`,D-047;`systemd_unit` 已并入 `service`,D-069;`place` 已并入 `copy`,D-090)。
 - **建议补齐(Ansible 高频,白盒收益大)**:
   - `file`(建/删/权限/属主/软链,幂等)
   - `copy`(推控制端文件到目标,幂等 sha256 比对)
   - `service`(`systemd_unit` 泛化:start/stop/restart/enable)
   - `lineinfile`(幂等改一行配置)
   - `user` / `group`
-- **不新增、用现有**:`command/shell`=`run_cmd`,`template`=`render_template`,`get_url`=`place`(声明 material),`unarchive`=`extract`(只做别名映射,不增种类)。
+- **不新增、用现有**:`command/shell`=`run_cmd`,`template`=`render_template`,`get_url`=`copy material:`(声明 material),`unarchive`=`extract`(只做别名映射,不增种类)。
 
 总数控制在 ~15–20,远未触及 30 上限——上限是给"真高频白盒需求"留的,不是用来堆的。
 
@@ -109,7 +109,7 @@ actions:                   # 动作清单;依赖用 needs 声明,排序由引擎
 
 - `component.yaml` 是 task 的**一个特例**(目标恰好是"装某产品")。`preflight/install/verify` 三段 → 合并为有序 `actions` + 可选 `phase` 标签(或保留三段,二选一,见 §8)。
 - **命名 task 库**:保留 `components/` 作为库(裸名 `crater apply yq` 解析它),或更名 `tasks/`(见 §8)。
-- `materials`(D-034)、`place`、register/hostvars(D-030)、DAG(needs)、幂等(D-023)、targeting 三层(D-035)**全部直接复用**——这次是"把已有积木重组为通用 task 模型 + 补几个原语",不是推倒重来。
+- `materials`(D-034)、`copy material:`、register/hostvars(D-030)、DAG(needs)、幂等(D-023)、targeting 三层(D-035)**全部直接复用**——这次是"把已有积木重组为通用 task 模型 + 补几个原语",不是推倒重来。
 - **渐进迁移**:旧 `component.yaml` 继续可加载(兼容),新写法用 `actions`。yq/docker/es/node_exporter/zot 不破坏。
 
 ## 7. 明确不做(防止滑回 Ansible 坑)

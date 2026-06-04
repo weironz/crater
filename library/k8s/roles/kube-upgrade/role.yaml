@@ -8,7 +8,7 @@ materials:
   - { name: kubectl, kind: file, arch: amd64, url_tmpl: "https://dl.k8s.io/release/v{{version}}/bin/linux/amd64/kubectl" }
 actions:
   - id: place_kubeadm                      # 先换 kubeadm(惰性,未重启)
-    action: place
+    action: copy
     material: kubeadm
     dest: /usr/local/bin/kubeadm
     mode: "0755"
@@ -39,13 +39,13 @@ actions:
     needs: [place_kubeadm]
     cmd: "kubeadm upgrade node"
   - id: place_kubelet                      # 换 kubelet/kubectl(在 upgrade 之后)
-    action: place
+    action: copy
     material: kubelet
     dest: /usr/local/bin/kubelet
     mode: "0755"
     needs: [cp_node, w_node]
   - id: place_kubectl
-    action: place
+    action: copy
     material: kubectl
     dest: /usr/local/bin/kubectl
     mode: "0755"

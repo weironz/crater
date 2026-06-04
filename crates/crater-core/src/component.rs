@@ -154,20 +154,6 @@ pub enum Action {
         #[serde(default)]
         with: BTreeMap<String, serde_yaml::Value>,
     },
-    /// Place a declared material (D-034) at `dest`, optionally `chmod mode`.
-    /// References a `materials:` entry by logical name — NOT a physical URL. The
-    /// engine resolves it per mode: online, the target fetches the material's
-    /// `url_tmpl`; offline, the control side pushes the packed blob (content-
-    /// verified). This is the online/offline-unifying primitive: one spec line,
-    /// the source backend decides where the bytes come from.
-    Place {
-        material: String,
-        dest: PathBuf,
-        /// chmod mode (e.g. "0755"); folded into the place so a binary lands
-        /// executable in one idempotent step (no separate `chmod` run_cmd).
-        #[serde(default)]
-        mode: Option<String>,
-    },
     /// Load one or more `kind: image` materials (D-061). Use `material` for one
     /// or `materials: [..]` for a batch (D-074) — they share one runtime probe
     /// and `namespace`. Online: the runtime pulls each `ref`. Offline: the
@@ -196,17 +182,26 @@ pub enum Action {
         #[serde(default)]
         group: Option<String>,
     },
-    /// Write a file to the target — ansible `copy` (D-037-b / D-068). Provide
-    /// EITHER `content` (inline text, `{{var}}`-rendered) OR `src` (a control-side
-    /// file under the task dir, inlined into the plan so it works under the agent
-    /// too — text only; binaries go through `place`). Written idempotently
-    /// (sha256) + optional chmod.
+    /// Put a file at `dest` — ansible `copy` (D-037-b / D-068 / D-090). The
+    /// source is EXACTLY ONE of:
+    ///   `content`  — inline text, `{{var}}`-rendered;
+    ///   `src`      — a control-side file under the task dir, inlined into the
+    ///                plan so it works under the agent too (text only);
+    ///   `material` — a `materials:` entry by logical name (binary-safe,
+    ///                arch-variants, D-090 absorbed the former `place`). The
+    ///                engine resolves it per mode: online, the target fetches
+    ///                the material's `url_tmpl` (or control pushes its `src`);
+    ///                offline, the control side pushes the packed blob
+    ///                (content-verified).
+    /// Written idempotently (sha256) + optional chmod.
     Copy {
         dest: PathBuf,
         #[serde(default)]
         src: Option<String>,
         #[serde(default)]
         content: Option<String>,
+        #[serde(default)]
+        material: Option<String>,
         #[serde(default)]
         mode: Option<String>,
     },
@@ -295,7 +290,6 @@ impl Action {
             Action::Extract { .. } => "unarchive",
             Action::RenderTemplate { .. } => "template",
             Action::RunCmd { .. } => "shell",
-            Action::Place { .. } => "place",
             Action::Module { .. } => "role",
             Action::LoadImage { .. } => "load_image",
             Action::File { .. } => "file",

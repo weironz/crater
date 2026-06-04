@@ -32,7 +32,7 @@ install:
   # offline-push. `mode` folds the chmod in (no separate run_cmd). Idempotent:
   # offline-push skips when the remote sha256 already matches; online curl
   # skips when the file is already present.
-  - action: place
+  - action: copy
     material: yq-bin
     dest: /usr/local/bin/yq
     mode: "0755"

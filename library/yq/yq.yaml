@@ -1,18 +1,19 @@
 name: yq
 description: "install yq"
-hosts: all                      # all / 组名 / 主机名
+hosts: all
 
 vars:
-  version: "4.44.3"             # 默认版本;crater build --set version=X 可覆盖
+  version: "4.44.3"
 
 materials:
   - name: yq-bin
     kind: file
-    url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64"
+    arch: amd64
+    url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_{{arch}}"
 
 actions:
   - id: install
-    action: place
+    action: copy
     material: yq-bin
     dest: /usr/local/bin/yq
     mode: "0755"

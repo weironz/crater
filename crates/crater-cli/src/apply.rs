@@ -539,7 +539,11 @@ pub(crate) async fn run_task_on_host(
     }
     // Default: self-bootstrap agent runs the task plan on the target (D-044).
     // Offline (blobs on control), --shell, or local → control-plane execute_task.
-    if offline_blobmap.is_some() || do_shell || host.is_local() {
+    // A PushFile step reads a CONTROL-side path at execution time (e.g. `copy
+    // material:` whose material is a local `src:` file) — the agent on the
+    // target can't reach it, so such plans must also execute control-plane.
+    let has_push_file = steps.iter().any(|s| matches!(s.op, Op::PushFile { .. }));
+    if offline_blobmap.is_some() || do_shell || host.is_local() || has_push_file {
         engine::execute_task(&steps, &handlers, exec.as_ref(), coord).await?;
     } else {
         // Agent path runs the plan on the target without the control-side coord;

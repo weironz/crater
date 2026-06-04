@@ -12,7 +12,7 @@
 |---|---|---|---|
 | k8s | kubeadm init、装包 | etcd 数据、CNI 网卡、iptables/ipvs | **`kubeadm reset`** + 删目录 |
 | mysql | 装包、写 my.cnf | `/var/lib/mysql`（mysqld 首次 init 建的） | stop + purge + 删数据目录 |
-| docker | place 二进制、写 unit | `/var/lib/docker`、`/var/lib/containerd`（镜像/容器/卷） | stop + 删数据目录 + 删 binary/unit |
+| docker | copy 二进制、写 unit | `/var/lib/docker`、`/var/lib/containerd`（镜像/容器/卷） | stop + 删数据目录 + 删 binary/unit |
 
 `kubeadm reset` 就是铁证——k8s 专门写了 reset，因为 init 撤不出来。所以清理是**产品知识 → 数据**
 （和「装是数据」对称，守 D-017）：写成 `teardown:`，引擎只负责跑，用的还是同一套幂等原语

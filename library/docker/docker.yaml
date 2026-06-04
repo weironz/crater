@@ -32,19 +32,19 @@ actions:
     strip: 1
     creates: /usr/local/bin/dockerd
   - id: containerd_unit
-    action: place
+    action: copy
     material: containerd-unit
     dest: /etc/systemd/system/containerd.service
     needs: [extract]
     notify: [reload_systemd]
   - id: docker_unit
-    action: place
+    action: copy
     material: docker-unit
     dest: /etc/systemd/system/docker.service
     needs: [extract]
     notify: [reload_systemd]
   - id: daemon
-    action: place
+    action: copy
     material: daemon-json
     dest: /etc/docker/daemon.json
     needs: [extract]

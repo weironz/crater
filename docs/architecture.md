@@ -80,7 +80,7 @@ crater 作用在 **Helm 的下面那一层**:Helm 管"已存在 K8s 集群里的
 ### 4.2 "制品类型即在线/离线开关" [现状]
 
 **crater 不设 `offline: true` 开关** —— 你 apply 的东西决定模式:
-- `crater apply -f x.yaml` → 无 blob → **在线**:`place`/`unarchive`/`load_image` 现拉 `url_tmpl`/`ref`/apt。
+- `crater apply -f x.yaml` → 无 blob → **在线**:`copy`/`unarchive`/`load_image` 现拉 `url_tmpl`/`ref`/apt。
 - `crater apply x.oci` → 有 blob(`PlanContext.offline_blobs` 被设) → **离线**:同样的 op 改成推已烤好的 blob。
 
 **同一份 recipe,两种模式零改动**,引擎自动切 fetch / replay。不像 kubespray 要手动改一堆 `*_url` 变量。
@@ -127,8 +127,8 @@ material.v1     cfg-keepalived    361B          # 内容 = minijinja 模板
 
 关键性质:
 - **内容寻址**:blob 文件名 = 其内容 sha256(改一字节 digest 就变)→ 天然去重(同二进制多处引用只存一份)+ 防篡改。
-- **非 rootfs**:目标机路径不编码进 OCI;`place dest: /usr/local/bin/kubeadm` 是 recipe 在 apply 时决定的。
-- **取用**(`bundle::materialize_component`):遍历 layers,recipe 层 → 写出配方;material 层 → 建 `blobmap[name] = blobs/sha256/<digest>`,供 recipe 的 `place` 等按名引用。
+- **非 rootfs**:目标机路径不编码进 OCI;`copy dest: /usr/local/bin/kubeadm` 是 recipe 在 apply 时决定的。
+- **取用**(`bundle::materialize_component`):遍历 layers,recipe 层 → 写出配方;material 层 → 建 `blobmap[name] = blobs/sha256/<digest>`,供 recipe 的 `copy material:` 等按名引用。
 - **增量/惰性友好**:每个 material 已是独立 layer → [现状] `store.pull` 拉镜像时跳过已有 blob(D-078);[现状,D-088] `apply <ref>` 默认**瘦拉**(`pull_thin`)—— 只拉 recipe + 自建文件(`embedded`)层,依赖(`dependency`)层留在 registry、apply 时在线现拉;`--offline` 才全量拉做离线 replay。"task 定义得多"不拖垮单次部署。
 
 ### 5.1 OCI 操作栈:协议靠 oci-client,制品语义自写 [现状]
@@ -216,7 +216,7 @@ task/role ──声明──▶ 契约(params + 角色)
 - register / hostvars / groups(kubekey 式嵌套 + `derive_roles` 角色推导)
 - inventory 三级 vars(全局/组/主机,覆盖 task params 默认,D-082)
 - **project 编排**(有序 plays,每 play 引用 task + hosts/vars 覆盖,delete 逆序;在线+file source,D-083)
-- `template`(minijinja)、place/unarchive/load_image/copy/service…
+- `template`(minijinja)、copy(content/src/material)/unarchive/load_image/service…
 - **role 长全**(自带 materials/actions/handlers/params,展开扁平化,D-080)
 - **`params:` 富契约 + `crater inspect` + `--gen-inventory` + apply 前校验**(D-081)
 - build 提速:增量镜像拉取 + file 并发取材(D-078)

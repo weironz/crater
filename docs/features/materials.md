@@ -1,4 +1,4 @@
-# 物料闭包 `materials:` + `action: place`（D-034）
+# 物料闭包 `materials:` + `action: copy`（D-034）
 
 ## 这是什么 / 解决什么
 
@@ -11,8 +11,8 @@
 上自然装不起来。根因是"依赖"和"动作"耦合在一起。
 
 `materials:` 把"这个组件需要什么"抽出来单独声明，`build` **只读这一段**就知道要打包什么；
-`place` 让 `install` 只管"把某个物料放到哪"，"从 GitHub 拉还是从离线包取"交给引擎按
-在线/离线决定。**一份组件描述，在线/离线两种形态通吃。**
+`copy material:` 让 `install` 只管"把某个物料放到哪"，"从 GitHub 拉还是从离线包取"交给引擎按
+在线/离线决定（D-090 起 `place` 原语并入 `copy`，一个原语三种来源：`content`/`src`/`material`）。**一份组件描述，在线/离线两种形态通吃。**
 
 ```yaml
 materials:                 # ← build 读这一段，绝不扫 install
@@ -21,7 +21,7 @@ materials:                 # ← build 读这一段，绝不扫 install
     url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64"
 
 install:
-  - action: place          # ← 按逻辑名引用，不写死 URL
+  - action: copy          # ← 按逻辑名引用，不写死 URL
     material: yq-bin
     dest: /usr/local/bin/yq
     mode: "0755"           # chmod 折进来，一步落地可执行
@@ -29,12 +29,12 @@ install:
 
 引擎语义：
 
-| 形态 | `place yq-bin` 做什么 |
+| 形态 | `copy material: yq-bin` 做什么 |
 |------|----------------------|
 | **在线** | 目标机自己 `curl` material 的 `url_tmpl` → `dest` → `chmod mode`；已存在则跳过（幂等 ok） |
 | **离线** | 控制端把**打进 OCI 包的 blob**（按 material 名索引）推到 `dest` → `chmod mode`；远端 sha256 已匹配则跳过 |
 
-`mode` 之所以折进 `place`：二进制要在同一幂等步里落地为可执行，省掉一条单独的 `chmod` run_cmd。
+`mode` 之所以折进 `copy`：二进制要在同一幂等步里落地为可执行，省掉一条单独的 `chmod` run_cmd。
 
 ## 本地文件 material（`src`，D-066）
 
@@ -48,20 +48,20 @@ materials:
     src: files/containerd.service
 actions:
   - id: ctd_unit
-    action: place
+    action: copy
     material: unit-containerd
     dest: /etc/systemd/system/containerd.service
 ```
 
 - **build**:从 `<task 目录>/files/...` 读取,和 url 下载的物料一样打成 blob(同 key)。
-- **place**:在线从控制机 task 目录 `PushFile` 推送,离线从 OCI 包取 blob——都是 **copy 语义,原样推送、不做 `{{}}` 渲染**(对标 Ansible 的 `copy: src=files/`;要渲染用 `render_template`)。
+- **copy material**:在线从控制机 task 目录 `PushFile` 推送,离线从 OCI 包取 blob——**原样推送、不做 `{{}}` 渲染**(要渲染用 `template`)。注意与 `copy src:` 的区别:`src` 直读文本内联进计划(不打包、不进 BOM),`material` 走物料闭包(打包、二进制安全)。
 
 好处:task.yaml **不再内联任何文件内容**——要么 url 下载、要么 `files/` 维护,文件可独立 diff、审阅、复用,杜绝大段 `content: |` 把 YAML 撑爆。
 
 ## 多 arch material（D-048）
 
 二进制是按 CPU arch 编的，所以 `kind: file` 带一个 **arch 维度**：同名 material 各声明
-一个 `arch`，`place` 按目标机 `uname -m`（归一化 `x86_64→amd64`/`aarch64→arm64`）选变体。
+一个 `arch`，`copy` 按目标机 `uname -m`（归一化 `x86_64→amd64`/`aarch64→arm64`）选变体。
 URL 里 arch 命名各项目不一（docker `x86_64`、yq `amd64`），故**每变体写全自己的 url**，
 不用 `{{arch}}` 占位（引擎不塞命名映射表）。
 
@@ -85,8 +85,8 @@ materials:
 | 维度 | build | apply |
 |------|-------|-------|
 | **打包** | 默认打**所有**声明的 arch 变体,每个一层、按 `name@arch` 标注;`--arch amd64[,arm64]` 收窄 | — |
-| **在线** | — | `place` 选目标 arch 变体 → 目标机 curl 该变体 url |
-| **离线** | blob 按 `name@arch` 进 OCI artifact | `place (offline)` 按 `name@arch` 从包内取对应 arch 的 blob |
+| **在线** | — | `copy` 选目标 arch 变体 → 目标机 curl 该变体 url |
+| **离线** | blob 按 `name@arch` 进 OCI artifact | `copy (blob)` 按 `name@arch` 从包内取对应 arch 的 blob |
 
 > 注:本期 `name@arch` 多 blob 同装一个 artifact(离线正确);registry 路径「按 arch 只 pull
 > 自己那条」的 **OCI image index** 优化为后续项(D-048 待续)。`kind: image` 复用镜像原生
@@ -98,10 +98,10 @@ materials:
 
 ```bash
 crater yq --host <host> --password <pw>
-# [1/2] place yq-bin <- https://.../yq_linux_amd64 → changed
+# [1/2] copy yq-bin <- https://.../yq_linux_amd64 → changed
 # [2/2] run: /usr/local/bin/yq --version → ok
 # done: changed=1 ok=1
-crater yq --host <host> --password <pw>     # 再跑：place → ok, changed=0（幂等）
+crater yq --host <host> --password <pw>     # 再跑：copy → ok, changed=0（幂等）
 ```
 
 ### 离线（B 类 artifact，build 从 materials 抓料）
@@ -117,13 +117,13 @@ CRATER_INSECURE_REGISTRIES=<registry> crater push <registry>/yq:4.53.2
 # 另一台（或清空 ~/.crater/store 后）：
 CRATER_INSECURE_REGISTRIES=<registry> crater apply <registry>/yq:4.53.2 --host <host> --password <pw>
 #   ...: crater component artifact → recipe-replay
-#   [1/2] place (offline) yq-bin -> /usr/local/bin/yq → changed   ← 按 material 名取包内 blob
+#   [1/2] copy (blob) yq-bin -> /usr/local/bin/yq → changed   ← 按 material 名取包内 blob
 ```
 
 打进包的每个物料是一层 `application/vnd.crater.material.v1`，按 **material 名**
-（`org.crater.material.name`）标注；离线 `place` 就按这个名字从包里取 blob，与在线引用同名。
+（`org.crater.material.name`）标注；离线 `copy` 就按这个名字从包里取 blob，与在线引用同名。
 
-## 真机验证（2026-05-31）
+## 真机验证（2026-05-31，当时原语还叫 `place`，D-090 后同逻辑改名 `copy`）
 
 - 在线 `crater yq --host 192.168.73.11`：首次 `place yq-bin` changed=1（chmod 折入），再跑 changed=0（幂等 ok），`yq --version` = v4.53.2。
 - 离线：`build`（日志 `fetch material yq-bin`，按名打包）→ `load` → `push` 到 zot → 清本地 store → `apply <zot>/yq:m --host 192.168.73.12` → `place (offline) yq-bin -> /usr/local/bin/yq` → n12 `yq --version` = v4.53.2。

@@ -1053,3 +1053,13 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **影响**:`main.rs`(`Cmd::Build` 加 `--set`、`parse_set_overrides`、`build_to_store`/`build_task_to_store` 透传并注入)。`library/yq/justfile`:build recipe 改 `crater build … --set version={{version}}`,`version` 默认从 `yq.yaml` 取、`just version=X` 临时覆盖时 tag 与内容一并改,footgun 消除。
 - **验证**:53 tests 绿;`crater build -f library/yq/yq.yaml --set version=4.40.5`(不带 `-t`)→ 拉 `v4.40.5`、默认 tag `crater/yq:4.40.5`;`just version=4.40.5 build` → URL 与 tag 均 4.40.5,默认 `just build` 仍 yaml 的 4.44.3。
 - **后续(规划)**:`apply --set` 若加,**必须 gate 到只允许 apply 期 param**(`stage: apply`,如 vip/subnet —— 不影响 materials,离线安全);build 期 param(如 `version`)在 apply 时 `--set` 要**报错**,引导去 `crater build --set version=X` 重建。理由(用户指出 2026-06-03):**已 build 的 OCI 是某确定版本的冻结闭包** —— 离线 `place` 从 blob 取(按 material key),apply 时改 `version` 要么无效、要么让 blob 与 recipe 失配,等于废掉这个制品(在线 `apply -f` 因 material 现拉才侥幸无害)。crater 已有 `ParamStage`(build 时 `validate_params(.., Some(Build))`、apply 时 `None` 校验全部),gate 天然可做:apply 的 `--set` 只接 `stage: apply` 的 key。**单机 `apply --host` 无 inventory 时的 ad-hoc 覆盖入口**也走这个受限 `--set`。
+
+## 2026-06-04 · place 并入 copy:一个原语三种来源(D-090)
+
+### D-090 删除 place,copy 的来源三选一:content / src / material
+
+- **背景**:`copy`(content 内联 / src 控制端文件)与 `place`(material 物料引用)本质都是"把一份内容放到目标机路径",只是**来源**不同。两个原语让作者多记一个名字、多一次"该用哪个"的选择;Ansible 用户的直觉是 `copy`。用户拍板:彻底合并,**不留别名**。
+- **决策**:`Action::Copy` 增加 `material: Option<String>`,与 `content`/`src` **三选一**(多给/不给均报错)。material 分支原样继承 place 的全部语义:三态解析(blob → `PushFile`;缺 blob + 严格离线 → 报错;在线 → `src` 推送或目标机 curl `url_tmpl`)、arch 变体(D-048)、`mode` 折入。`Action::Place` 变体**删除**——`action: place` 直接解析失败,不做别名(D-070 同款"无别名"原则)。
+- **影响**:`component.rs`(Copy 加字段、删 Place)、`engine.rs`(三态逻辑并入 Copy 分支,describe `place …` → `copy …`/`copy (blob) …`)、`task.rs`(`rewrite_material_refs`)、库内 7 个 yaml 与 docs 全量改写(`materials-and-place.md` → `materials.md`)。**破坏性**:旧 OCI 制品的 recipe 含 `action: place`,新 crater 解析失败 → **需重 build/push**(本仓 willdockerhub/yq 已重发)。
+- **顺带修复(agent 路径 PushFile 缺陷)**:`copy material:` 在 material 带本地 `src:` 时产出 `PushFile`,其 `local_path` 是**控制机路径**;纯在线默认 agent 执行(计划运到目标机跑)会读不到该文件。修复:计划含 `PushFile` 步骤 → 强制控制面 `execute_task`(`run_task_on_host` 分支加 `has_push_file`)。此缺陷在 place 时代即存在,过往验证恰好都走 offline blobmap/本机路径而未暴露。
+- **验证**:55 tests 绿(三态测试改造为 `copy material:` 同逻辑);yq/docker/k8s-ha dry-run 输出同前(describe 前缀变 `copy`);重建 yq OCI 后 `apply <ref>` recipe-replay 正常。

@@ -1,4 +1,4 @@
-# zot(task):OCI registry。place 二进制 + 建目录 + 写 config/unit + 起服务。
+# zot(task):OCI registry。copy 二进制(material) + 建目录 + 写 config/unit + 起服务。
 # config 变更 → notify 重启 handler。
 name: zot
 hosts: all
@@ -11,7 +11,7 @@ materials:
     url_tmpl: "https://github.com/project-zot/zot/releases/download/v{{version}}/zot-linux-amd64"
 actions:
   - id: bin
-    action: place
+    action: copy
     material: zot-bin
     dest: /usr/local/bin/zot
     mode: "0755"

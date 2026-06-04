@@ -77,7 +77,7 @@ export CRATER_INSECURE_REGISTRIES=192.168.73.5:5000
 
 # 层1 本机
 crater apply app01 192.168.73.5:5000/yq:m
-#  ▶ host localhost (local) → place (offline) yq-bin -> /usr/local/bin/yq → changed
+#  ▶ host localhost (local) → copy (blob) yq-bin -> /usr/local/bin/yq → changed
 
 # 层2 少量机器（逗号多主机，共用密码）
 crater apply app01 192.168.73.5:5000/yq:m --host 192.168.73.11,192.168.73.12 --user root --password 123456

@@ -7,7 +7,7 @@
 - **幂等契约**：每步 `check → act → report`。读类步骤（preflight/verify）只读、报 `ok`/`warn`；安装类步骤先跑幂等探针，命中则跳过、报 `ok`，否则执行、报 `changed`。写文件按 sha256 比对。重跑安全。
 - **apply 默认执行**：`apply` 动词本身即执行；预览用 `--dry-run`（去掉了多余的 `--apply`）。
 
-探针来源（数据/通用规则，守 D-017）：`place`=`test -s dest`、`pkg_install`=`dpkg -s`/`rpm -q`、`service`/`systemd_unit`=`is-enabled`/`is-active`、`extract` 支持 `creates:`（已解出某文件则跳过）、`run_cmd` 支持 YAML 里写 `check:`（均 ansible `creates:` 风格）。non-idempotent 的命令（如 `systemctl daemon-reload`）宜放进 **handler**，靠 `notify` 仅在相关文件变更时触发。
+探针来源（数据/通用规则，守 D-017）：`copy material:`(在线 url)=`test -s dest`、`pkg_install`=`dpkg -s`/`rpm -q`、`service`/`systemd_unit`=`is-enabled`/`is-active`、`extract` 支持 `creates:`（已解出某文件则跳过）、`run_cmd` 支持 YAML 里写 `check:`（均 ansible `creates:` 风格）。non-idempotent 的命令（如 `systemctl daemon-reload`）宜放进 **handler**，靠 `notify` 仅在相关文件变更时触发。
 
 ## 基本 demo
 
@@ -19,7 +19,7 @@ crater yq --host <host> --password <pw>             # 再执行 → 全 ok（幂
 
 期望输出（第二次）：
 ```
-[1/2] place yq-bin -> /usr/local/bin/yq → ok  # test -s 命中，跳过（mode 已折入 place）
+[1/2] copy yq-bin -> /usr/local/bin/yq → ok  # test -s 命中，跳过（mode 已折入 copy）
 [2/2] run: /usr/local/bin/yq --version → ok
 done on local: changed=0 ok=2 warn=0 (2 step(s))
 ```

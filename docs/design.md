@@ -25,7 +25,7 @@ Crater 是一个**领域无关的、跑在 SSH 上的声明式远程执行引擎
 
 | 允许在代码里 | 禁止在代码里（必须是数据） |
 |---|---|
-| 通用原语：`place`/`extract`/`render_template`/`write_file`/`systemd_unit`/`run_cmd`/`pkg_install`/`load_image`… | 产品名、服务名、别名、镜像源、诊断规则、依赖关系 |
+| 通用原语：`copy`/`unarchive`/`template`/`shell`/`service`/`package`/`load_image`… | 产品名、服务名、别名、镜像源、诊断规则、依赖关系 |
 | 幂等契约、DAG 排序、SSH 执行、OCI 打包/解包、镜像导入机制 | 「es 其实是 elasticsearch」「docker 的服务叫 docker」「装 mysql 要哪些 OS 包」 |
 
 **判据**：新增一个可部署对象 = 写一个 `tasks/<name>.yaml`（task：原语 + 物料），**绝不改 Rust 重编译**。
@@ -70,7 +70,7 @@ Crater 是一个**领域无关的、跑在 SSH 上的声明式远程执行引擎
           │                                │
   目标机自己拉(curl/apt/                目标机零联网：制品来自
   runtime pull)，CN 镜像               推送过来的 OCI 包，
-  源 fallback                          place→push-from-blob,
+  源 fallback                          copy→push-from-blob,
           │                            镜像→本地导入/临时 registry
           └───────────────┬────────────────┘
                    同一个 Executor（SSH/Local）执行
@@ -123,7 +123,7 @@ bundle.oci  (tar of an OCI layout)
 
 ### 4.2 apply（隔离目标机）`crater apply <ref>|x.oci --host ...`
 1. 从本地库 / registry / 文件取 artifact，分块上传到目标机（D-009）。
-2. digest 自校验 → 识别 `artifactType` → **recipe-replay**：用 `plan_from_task` 离线回放（`place` 从包内 blob 推送），控制端 `execute_task`。
+2. digest 自校验 → 识别 `artifactType` → **recipe-replay**：用 `plan_from_task` 离线回放（`copy material:` 从包内 blob 推送），控制端 `execute_task`。
 3. 与在线**同一套 task 引擎**，仅「制品从哪来」分叉（D-020）。
 
 ### 4.3 OCI 用法分 A/B：容器镜像 vs 物料包（D-032）
@@ -216,7 +216,7 @@ crater 有两种把动作落到目标机的方式。**agent 是默认执行模�
 
 | 层 | 形态 | 何时用 | 改 Rust? | 类比 ansible |
 |---|---|---|---|---|
-| **1 内置类型化** | Rust enum 变体（place/pkg_install/systemd_unit/file/copy/service/user/lineinfile…），typed + 幂等 + OS 抽象，lower 成 shell | 通用高频、需幂等/OS 抽象的核心 | 是（刻意精选 ~15-20） | ansible-core 模块 |
+| **1 内置类型化** | Rust enum 变体（copy/pkg_install/file/service/user/lineinfile…），typed + 幂等 + OS 抽象，lower 成 shell | 通用高频、需幂等/OS 抽象的核心 | 是（刻意精选 ~15-20） | ansible-core 模块 |
 | **2 数据定义** | `modules/<name>.yaml`：`params` + `check:` + `act:` 模板，引擎渲染后 lower 成 `Op::Shell{check,cmd}` | 简单可复用幂等操作，零代码 | 否（放目录即加载） | — (crater 特有，最轻) |
 | **3 外部 module** | 脚本/静态二进制 + JSON 契约（收 params+check_mode，吐 `{status,changed,msg}`），agent 送到目标机跑 | 复杂逻辑、第三方生态 | 否（开放生态） | collection / Galaxy |
 | **4 `run_cmd`+`check`** | 裸命令 + 幂等探针 | 一次性长尾、逃生口 | 否 | command/shell |
