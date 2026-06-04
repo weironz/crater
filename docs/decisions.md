@@ -1091,3 +1091,13 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **优先级链(低→高)**:param default → task vars → inventory 全局/组/主机 vars → CLI `--set`。
 - **验证**:59 tests 绿(gate 放行/拒 build 参数/拒未声明 key);CLI 实测:`--set vip=…` 渲染进 plan、`--set version=…` 与 `--set vipp=…` 报错文案符合预期。
 - **关联**:D-081(params 契约)、D-082(inventory vars)、D-089(build --set)。
+
+## 2026-06-04 · SSH host key 校验:known_hosts + TOFU(D-094)
+
+### D-094 `check_server_key` 从 accept-all 改为钉 `~/.crater/known_hosts`(accept-new)
+
+- **背景**:`executor.rs` 的 `check_server_key` 一直是 accept-all(代码里唯一的 `TODO(security)`),公网仓库挂着扎眼,且离线交付场景控制端↔目标机之间完全可被中间人。
+- **决策**:ansible 式 **accept-new**:首连记录(TOFU)→ 再连校验 → **key 变了拒连**(ERROR 给指纹+行号+处置指引);`CRATER_HOST_KEY_CHECKING=0|false|no|off` 整体跳过(临时 VM/重装频繁)。known_hosts 用 **crater 自己的 `~/.crater/known_hosts`**(`$CRATER_HOME` 可挪):绝不写坏操作员的 `~/.ssh/known_hosts`,测试/CI 也可密闭。实现全靠 russh-keys 现成的 `check_known_hosts_path`(三态:匹配/未知/`KeyChanged{line}`)+ `learn_known_hosts_path`,零新依赖;钉不进去(只读 fs)降级 warn 放行——首用信任本来就没指望持久化,but key 冲突永远 fail-closed。
+- **验证**:60 tests 绿(TOFU round-trip:首连钉/重连过/换 key 拒/异端口各自 TOFU);真机 73.11 五场景:首连钉 key → 重连静默 → 篡改成假 key 拒连(`Unknown server key`)→ env 跳过可连 → 删行重钉。
+- **意外发现**:73.11/73.12 是同模板克隆,**host key 完全相同**——TOFU 防不了克隆机互相冒充(文档已提醒:生产模板应清 `/etc/ssh/ssh_host_*` 重新生成)。也回头解释了 D-030 时代 k3s node-password 撞名的环境背景。
+- **关联**:D-008(russh 直连)。代码里最后一个 `TODO(security)` 清零。

@@ -14,7 +14,7 @@
 
 | 功能 | 文档 | ADR |
 |------|------|-----|
-| SSH 执行器（russh）+ run/push | [ssh-executor.md](ssh-executor.md) | D-008/D-009 |
+| SSH 执行器（russh）+ run/push + host key 校验 | [ssh-executor.md](ssh-executor.md) | D-008/D-009/D-094 |
 | 引擎零产品知识（装万物地基） | [engine-zero-product-knowledge.md](engine-zero-product-knowledge.md) | D-017 |
 |  物料闭包 `materials:` + `copy material:` | [materials.md](materials.md) | D-034 |
 | apply 三层目标（本机/--host/-i）+ SSH key 认证 | [apply-targets.md](apply-targets.md) | D-035 |

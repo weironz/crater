@@ -94,7 +94,10 @@ use std::sync::Arc;
 use russh::client;
 use russh::ChannelMsg;
 
-struct ClientHandler;
+struct ClientHandler {
+    host: String,
+    port: u16,
+}
 
 #[async_trait]
 impl client::Handler for ClientHandler {
@@ -103,10 +106,73 @@ impl client::Handler for ClientHandler {
     // russh 0.45: the key type lives at `russh::keys::key::PublicKey`.
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::key::PublicKey,
+        server_public_key: &russh::keys::key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // TODO(security): pin/verify host keys (known_hosts). Accept-all for now.
-        Ok(true)
+        // Pin host keys in ~/.crater/known_hosts, trust-on-first-use (D-094).
+        Ok(verify_host_key(&self.host, self.port, server_public_key))
+    }
+}
+
+/// Host-key policy (D-094), ansible-style `accept-new` by default:
+///   - first connection → record the key in `~/.crater/known_hosts`, proceed;
+///   - recorded & matching → proceed;
+///   - recorded & DIFFERENT → refuse (possible MITM / reinstalled host);
+///   - `CRATER_HOST_KEY_CHECKING=0|false|no|off` → skip entirely (ephemeral VMs).
+/// crater keeps its own file (not ~/.ssh/known_hosts): it must never corrupt the
+/// operator's OpenSSH state, and `$CRATER_HOME` keeps tests/CI hermetic.
+fn verify_host_key(host: &str, port: u16, key: &russh::keys::key::PublicKey) -> bool {
+    if let Ok(v) = std::env::var("CRATER_HOST_KEY_CHECKING") {
+        if matches!(v.as_str(), "0" | "false" | "no" | "off") {
+            return true;
+        }
+    }
+    let path = crate::store::ImageStore::home().join("known_hosts");
+    verify_host_key_at(host, port, key, &path)
+}
+
+/// Testable core of `verify_host_key` — same policy against an explicit file.
+fn verify_host_key_at(
+    host: &str,
+    port: u16,
+    key: &russh::keys::key::PublicKey,
+    path: &std::path::Path,
+) -> bool {
+    use russh::keys::Error as KeyError;
+    match russh::keys::check_known_hosts_path(host, port, key, path) {
+        Ok(true) => true,
+        // Unknown host (or no file yet) → TOFU: pin it and proceed.
+        Ok(false) => match russh::keys::learn_known_hosts_path(host, port, key, path) {
+            Ok(()) => {
+                tracing::info!(
+                    "ssh: 首次连接 {host}:{port},已钉其 host key(SHA256:{},记录于 {})",
+                    key.fingerprint(),
+                    path.display()
+                );
+                true
+            }
+            Err(e) => {
+                // Couldn't persist the pin — still first-use trust, just warn.
+                tracing::warn!(
+                    "ssh: 无法记录 {host}:{port} 的 host key 到 {}:{e}(本次仍继续)",
+                    path.display()
+                );
+                true
+            }
+        },
+        Err(KeyError::KeyChanged { line }) => {
+            tracing::error!(
+                "ssh: {host}:{port} 的 HOST KEY 已变化!现指纹 SHA256:{},与 {} 第 {line} 行不符 \
+                 —— 可能是中间人攻击,也可能主机重装过。确认无误后删除该行重连;\
+                 临时跳过校验:CRATER_HOST_KEY_CHECKING=0",
+                key.fingerprint(),
+                path.display()
+            );
+            false
+        }
+        Err(e) => {
+            tracing::error!("ssh: 读 known_hosts {} 失败:{e}(拒绝连接)", path.display());
+            false
+        }
     }
 }
 
@@ -145,7 +211,8 @@ impl SshExecutor {
         auth: &SshAuth,
     ) -> crate::Result<Self> {
         let config = Arc::new(client::Config::default());
-        let mut handle = client::connect(config, (host, port), ClientHandler)
+        let handler = ClientHandler { host: host.to_string(), port };
+        let mut handle = client::connect(config, (host, port), handler)
             .await
             .map_err(|e| anyhow::anyhow!("ssh connect {host}:{port} failed: {e}"))?;
         // russh 0.45: authenticate_* return Result<bool>.
@@ -246,5 +313,40 @@ impl Executor for SshExecutor {
 
     fn label(&self) -> &str {
         &self.label
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gen_key() -> russh::keys::key::PublicKey {
+        russh::keys::key::KeyPair::generate_ed25519()
+            .expect("ed25519 keygen")
+            .clone_public_key()
+            .expect("public half")
+    }
+
+    /// D-094 TOFU round-trip: unknown host → pinned (file written) → match;
+    /// a DIFFERENT key for the same host:port → refused (KeyChanged).
+    #[test]
+    fn host_key_tofu_pin_then_refuse_changed() {
+        let dir = std::env::temp_dir().join(format!("crater-kh-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("known_hosts");
+
+        let key = gen_key();
+        // First use: unknown → learn + accept.
+        assert!(verify_host_key_at("192.0.2.7", 22, &key, &path));
+        assert!(path.is_file(), "first use must pin the key");
+        // Second use, same key: recorded match → accept.
+        assert!(verify_host_key_at("192.0.2.7", 22, &key, &path));
+        // Same host:port presents a DIFFERENT key → refuse.
+        let other = gen_key();
+        assert!(!verify_host_key_at("192.0.2.7", 22, &other, &path));
+        // A different port is a different endpoint → its own TOFU, accepted.
+        assert!(verify_host_key_at("192.0.2.7", 2222, &other, &path));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
