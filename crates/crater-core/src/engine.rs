@@ -897,6 +897,13 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 // D-073: fetch the material AND extract in one step. Offline → the
                 // packed blob; online → its url_tmpl (arch-injected like `place`).
                 let m = ctx.resolve_material(name)?;
+                // unzip materials (D-103) are already a SINGLE extracted file —
+                // there's no archive left to unarchive; place them with `copy`.
+                if m.unzip.is_some() {
+                    anyhow::bail!(
+                        "unarchive: material '{name}' 声明了 unzip(控制端已解成单文件)—— 用 copy 放置它"
+                    );
+                }
                 let (local_archive, url) = if let Some(local) = ctx.blob_for(m) {
                     (Some(local), None)
                 } else if ctx.offline {
@@ -1144,6 +1151,14 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                         mode: mode.clone(),
                     }
                 } else {
+                    // unzip materials (D-103) never curl on the target — the CLI
+                    // pre-extracts control-side and registers a blob before
+                    // lowering. Reaching here means that registration was skipped.
+                    if m.unzip.is_some() {
+                        anyhow::bail!(
+                            "copy: material '{name}' 声明了 unzip(控制端解包)但未预取为 blob —— apply/plan 会自动做,请勿绕过"
+                        );
+                    }
                     // Online: the target fetches the variant's declared URL itself.
                     let tmpl = m.url_tmpl.as_deref().ok_or_else(|| {
                         anyhow::anyhow!("copy: material '{name}' has no url_tmpl or src for online fetch")
@@ -2308,6 +2323,7 @@ mod tests {
             packages: Default::default(),
             base: None,
             sha256: None,
+            unzip: None,
         }
     }
 

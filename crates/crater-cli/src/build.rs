@@ -159,6 +159,63 @@ fn cache_put(path: &Path, data: &[u8]) {
     let _ = std::fs::write(path, data);
 }
 
+/// D-103: `unzip:` materials are extracted CONTROL-SIDE (targets may lack
+/// `unzip`; GNU tar can't read zip). Ensure the extracted member for material
+/// `m` (rendered download URL `raw_url`) sits in the download cache and return
+/// its path — apply/plan register it as a blob so `copy` lowers to PushFile.
+/// `fetch: false` (--dry-run) just computes the deterministic path: nothing is
+/// downloaded and the file may not exist (nothing executes either).
+pub(crate) async fn ensure_unzip_blob(
+    m: &crater_core::component::Material,
+    raw_url: &str,
+    fetch: bool,
+) -> Result<PathBuf> {
+    let member = m.unzip.as_deref().ok_or_else(|| anyhow!("material '{}' has no unzip", m.name))?;
+    let ckey = file_cache_key(m.sha256.as_deref(), raw_url);
+    let out = cache_dir()
+        .join("file")
+        .join(format!("{ckey}.unzip.{}", &crater_core::bundle::sha256_hex(member.as_bytes())[..12]));
+    if out.exists() || !fetch {
+        return Ok(out);
+    }
+    // Serialize concurrent extraction (hosts plan in parallel): first one
+    // fetches + extracts, the rest hit the rename'd file.
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _g = LOCK.lock().await;
+    if out.exists() {
+        return Ok(out);
+    }
+    let zpath = cache_dir().join("file").join(&ckey);
+    let zip = match cache_get(&zpath, m.sha256.as_deref()) {
+        Some(z) => z,
+        None => {
+            let url = OnlineSource::with_default_mirrors().rewrite(raw_url);
+            info!("  fetch material {} <- {raw_url}", m.name);
+            let (data, _) = source::fetch_best(&url)
+                .await
+                .map_err(|e| anyhow!("fetch material {}: {e}", m.name))?;
+            if let Some(want) = &m.sha256 {
+                let got = crater_core::bundle::sha256_hex(&data);
+                if &got != want {
+                    anyhow::bail!("material {}: sha256 不符(声明 {want},实际 {got})", m.name);
+                }
+            }
+            cache_put(&zpath, &data);
+            data
+        }
+    };
+    info!("  unzip material {}: 控制端解出成员 '{member}'(D-103)", m.name);
+    let bytes = crater_core::zip::extract_member(&zip, member)?;
+    // Atomic publish (tmp + rename): a concurrent reader never sees a torn file.
+    let tmp = out.with_extension(format!("tmp.{}", std::process::id()));
+    if let Some(dir) = out.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&tmp, &bytes)?;
+    std::fs::rename(&tmp, &out)?;
+    Ok(out)
+}
+
 /// Whole-build fingerprint (D-096): hash of the role-expanded recipe + every
 /// material's SOURCE descriptor (rendered URL/ref, local-file content hash,
 /// os_package base+packages) + the arch filter. Same fingerprint + ref already
@@ -436,10 +493,13 @@ pub(crate) async fn build_task_to_store(
                     ctx.vars.insert("arch".to_string(), a.as_str().to_string());
                 }
                 let raw = ctx.rendered_url(tmpl)?;
-                material_descs.push(format!(
-                    "file:{key}:{raw}:{}",
-                    m.sha256.as_deref().unwrap_or("")
-                ));
+                let mut desc =
+                    format!("file:{key}:{raw}:{}", m.sha256.as_deref().unwrap_or(""));
+                // D-103: a different member out of the same zip = different content.
+                if let Some(u) = &m.unzip {
+                    desc.push_str(&format!(":unzip={u}"));
+                }
+                material_descs.push(desc);
             } else if let Some(src) = &m.src {
                 // Local file: the CONTENT is the source — edits invalidate.
                 let data = std::fs::read(spec_dir.join(src))
@@ -543,8 +603,20 @@ pub(crate) async fn build_task_to_store(
                         data
                     }
                 };
+                // D-103: zip-only upstreams — the member's bytes ARE the material.
+                // Extracted HERE (control side), so the packed blob / offline path
+                // carries a plain file and targets never need `unzip`.
+                let data = if let Some(member) = &m.unzip {
+                    info!("  unzip material {key}: 控制端解出成员 '{member}'(D-103)");
+                    crater_core::zip::extract_member(&data, member)?
+                } else {
+                    data
+                };
                 materials.push((key, false, data)); // has url_tmpl → dependency layer (D-087)
             } else if let Some(src) = &m.src {
+                if m.unzip.is_some() {
+                    anyhow::bail!("material '{key}': `unzip` 只支持 url_tmpl 下载物料(本地 src 请直接放解开的文件)");
+                }
                 // Hand-authored local file (D-066): read from the task dir and
                 // pack verbatim, same blob key `place` resolves offline.
                 let path = spec_dir.join(src);

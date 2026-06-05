@@ -58,6 +58,33 @@ actions:
 
 好处:task.yaml **不再内联任何文件内容**——要么 url 下载、要么 `files/` 维护,文件可独立 diff、审阅、复用,杜绝大段 `content: |` 把 YAML 撑爆。
 
+## zip 包里的二进制(`unzip:`,D-103)
+
+有的上游**只发 zip**(如 RustFS),而 zip 在目标机上是死路:GNU tar 解不了 zip,
+`unzip` 不保证存在,air-gap 更装不上。`url_tmpl` 物料声明 `unzip: <成员路径>` 后,
+下载物当 zip 处理、**该成员的字节才是物料**——解包发生在**控制端**(纯 Rust reader,
+零目标机依赖):
+
+```yaml
+materials:
+  - name: rustfs-bin
+    kind: file
+    arch: amd64
+    url_tmpl: "https://github.com/rustfs/rustfs/releases/download/{{version}}/rustfs-linux-x86_64-musl-v{{version}}.zip"
+    unzip: rustfs          # zip 内这个成员就是要的二进制
+actions:
+  - action: copy
+    material: rustfs-bin   # 下游只见解开的二进制,用 copy 放置
+    dest: /usr/local/bin/rustfs
+    mode: "0755"
+```
+
+- **build**:fetch → 解出成员 → 成员字节打进 OCI 层(声明 `sha256` 验的是 **zip 本体**)。
+- **在线 apply/plan**:lower 前控制端预取(zip 进 D-096 下载缓存,与 build 共键)、
+  解包注册成 blob → `copy` lower 成 PushFile,目标机永远见不到 zip。
+- 防呆:只配 `url_tmpl`(本地 `src` 请直接放解开的文件);`unarchive` 引用 unzip
+  物料会报错引导用 `copy`(成员已是单文件,没有"归档"可解)。
+
 ## 多 arch material（D-048）
 
 二进制是按 CPU arch 编的，所以 `kind: file` 带一个 **arch 维度**：同名 material 各声明

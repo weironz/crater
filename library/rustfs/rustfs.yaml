@@ -1,75 +1,209 @@
-# rustfs(task):S3 兼容对象存储,**容器化部署**(docker run)。
-# 不装 docker —— preflight 只检查 docker 就绪,缺了响亮报错(装 docker 用 `crater apply docker`)。
-# 镜像声明为 kind: image 物料:在线 docker pull;build 打成 oci-archive,离线 import(D-061)。
+# rustfs(task):S3 兼容对象存储,**二进制 + systemd 部署**(官方 Linux 安装路线)。
+# 三种形态同一份 yaml,由 volumes 一个参数驱动(与官方 RUSTFS_VOLUMES 语法 1:1):
+#   单机单盘  (默认)         volumes=/data/rustfs0
+#   单机多盘  --set volumes='/data/rustfs{0...3}'
+#   多机多盘  -i inv.yaml --set volumes='http://node{1...4}:9000/data/rustfs{0...3}'
+#             (volumes 里的每个节点都要在 inventory 里;主机名需可解析,preflight 会查)
+# 上游只发 zip:物料声明 unzip: rustfs,控制端解包出二进制(D-103),目标机零依赖。
+# musl 静态二进制 + amd64/arm64 双物料变体 → 不需要 requires(发行版/架构都不限)。
 name: rustfs
 hosts: all
-requires:
-  # 离线镜像物料按 amd64 打包(D-061 单 arch)——推到 ARM 机直接准入拒绝,
-  # 而不是 docker load 后容器起不来才发现(D-102)。发行版不限:依赖是 docker
-  # 而非特定 OS,由 docker_ready preflight 检查。
-  arch: [amd64]
-vars:
-  version: "1.0.0-beta.5"      # 镜像 tag(钉具体版本才严格幂等);--set version=X 可覆盖
-  data_dir: "/data/rustfs"
-  api_port: "9000"             # S3 端点(宿主机映射 → 容器 9000)
-  console_port: "9001"         # Web 控制台(宿主机映射 → 容器 9001)
-  # 1.0.0-beta.5 起,绑非环回地址时**拒绝**上游默认凭据 rustfsadmin/rustfsadmin
-  # (容器 FATAL 反复重启)。这里给非默认占位值,生产务必用 inventory vars 覆盖(D-082)。
-  access_key: "crater-admin"
-  secret_key: "crater-changeme"
+params:
+  version:
+    description: RustFS 版本(GitHub release tag)
+    default: "1.0.0-beta.7"
+    stage: build
+  volumes:
+    description: RUSTFS_VOLUMES 表达式,决定单机单盘/单机多盘/多机多盘(见顶部注释)
+    default: "/data/rustfs0"
+    stage: apply
+  port:
+    description: S3 端点端口
+    default: "9000"
+    stage: apply
+  access_key:
+    description: 管理凭据(生产务必用 inventory vars 或 --set 覆盖,D-082)
+    default: "crater-admin"
+    stage: apply
+  secret_key:
+    description: 管理凭据(生产务必覆盖)
+    default: "crater-changeme"
+    stage: apply
+  bypass_disk_check:
+    description: "true 时跳过 rustfs 的物理磁盘独立性校验(多盘目录同一块盘时必需)——仅测试/CI,生产保持 false"
+    default: "false"
+    stage: apply
 materials:
-  - name: rustfs-img
-    kind: image
-    ref: "docker.io/rustfs/rustfs:{{version}}"
+  # 上游 zip 内只有一个 rustfs 二进制 —— unzip 在控制端抽出它(D-103)。
+  # sha256 不钉:钉了会跨版本失配;version 钉 release tag 已保证可复现。
+  - name: rustfs-bin
+    kind: file
+    arch: amd64
+    url_tmpl: "https://github.com/rustfs/rustfs/releases/download/{{version}}/rustfs-linux-x86_64-musl-v{{version}}.zip"
+    unzip: rustfs
+  - name: rustfs-bin
+    kind: file
+    arch: arm64
+    url_tmpl: "https://github.com/rustfs/rustfs/releases/download/{{version}}/rustfs-linux-aarch64-musl-v{{version}}.zip"
+    unzip: rustfs
 actions:
-  - id: docker_ready
+  - id: systemd_ready
     action: shell
     phase: preflight
-    cmd: "docker info >/dev/null 2>&1 || { echo 'docker 未就绪:请先部署 docker(crater apply docker)' >&2; exit 1; }"
-  - id: data_dir
-    # 镜像内进程跑在 uid 10001(rustfs)下,bind mount 的宿主机目录必须可写,
-    # 否则容器 FATAL: Permission denied 反复重启。
+    cmd: "command -v systemctl >/dev/null 2>&1 || { echo 'systemd 不可用:本 task 以 systemd 托管 rustfs' >&2; exit 1; }"
+  - id: port_free
+    # 端口被"别人"占(比如旧容器化部署的 rustfs)→ 服务会 Address-in-use 崩,
+    # 而 health 探针还被冒名顶替返回 200 —— 必须在动手前响亮拒绝。
+    # 自己的 rustfs.service 在跑 = 重复 apply,放行。
+    action: shell
+    phase: preflight
+    cmd: |
+      systemctl is-active --quiet rustfs && exit 0
+      if ss -ntl 2>/dev/null | grep -q ":{{port}} "; then
+        echo "端口 {{port}} 已被其它进程占用(rustfs.service 未在跑)——先清掉占用者(旧容器化部署用 docker rm -f rustfs)" >&2
+        exit 1
+      fi
+  - id: nodes_resolvable
+    # 多机多盘:volumes 是 http://node{1...4}:9000/... ,每台都必须能解析
+    # 其它节点的主机名,否则集群无法组建(官方要求 /etc/hosts 或 DNS)。
+    # 单机形态(无 http 前缀)直接通过。展开函数同 data_dirs,见其注释。
+    action: shell
+    phase: preflight
+    cmd: |
+      case '{{volumes}}' in http*) ;; *) exit 0 ;; esac
+      expand() { local pre rest range post i e; case "$1" in
+        *\{*...*\}*) pre=${1%%\{*}; rest=${1#*\{}; range=${rest%%\}*}; post=${rest#*\}}
+          i=${range%%.*}; e=${range##*.}
+          while [ "$i" -le "$e" ]; do expand "$pre$i$post"; i=$((i+1)); done ;;
+        *) printf '%s\n' "$1" ;;
+      esac; }
+      miss=''
+      for h in $(for v in '{{volumes}}'; do expand "$v"; done | sed -E 's|^https?://||; s|[:/].*||' | sort -u); do
+        case "$h" in *[!0-9.]*) ;; *) continue ;; esac   # 纯 IP 字面量无需解析
+        getent hosts "$h" >/dev/null 2>&1 || miss="$miss $h"
+      done
+      [ -z "$miss" ] || { echo "无法解析节点:$miss(补 /etc/hosts 或 DNS 后重试)" >&2; exit 1; }
+  - id: binary
+    action: copy
+    material: rustfs-bin
+    dest: /usr/local/bin/rustfs
+    mode: "0755"
+    notify: [restart_rustfs]
+  - id: data_dirs
+    # 本机数据目录从 volumes 推导:展开 {a...b} 区间、剥掉 http://host:port
+    # 前缀(多机形态下每个节点的本地盘路径相同,这正是官方 MNMD 的约定)。
+    # POSIX sh,dash/bash 都可跑;mkdir -p 幂等,check 探所有目录已存在。
+    action: shell
+    cmd: |
+      expand() { local pre rest range post i e; case "$1" in
+        *\{*...*\}*) pre=${1%%\{*}; rest=${1#*\{}; range=${rest%%\}*}; post=${rest#*\}}
+          i=${range%%.*}; e=${range##*.}
+          while [ "$i" -le "$e" ]; do expand "$pre$i$post"; i=$((i+1)); done ;;
+        *) printf '%s\n' "$1" ;;
+      esac; }
+      for v in '{{volumes}}'; do expand "$v"; done | sed -E 's|^https?://[^/]*||' | sort -u |
+      while read -r d; do mkdir -p "$d" && chmod 750 "$d"; done
+    check: |
+      expand() { local pre rest range post i e; case "$1" in
+        *\{*...*\}*) pre=${1%%\{*}; rest=${1#*\{}; range=${rest%%\}*}; post=${rest#*\}}
+          i=${range%%.*}; e=${range##*.}
+          while [ "$i" -le "$e" ]; do expand "$pre$i$post"; i=$((i+1)); done ;;
+        *) printf '%s\n' "$1" ;;
+      esac; }
+      for d in $(for v in '{{volumes}}'; do expand "$v"; done | sed -E 's|^https?://[^/]*||' | sort -u); do
+        test -d "$d" || exit 1
+      done
+  - id: log_dir
     action: file
-    path: /data/rustfs
+    path: /var/logs/rustfs
     state: directory
-    owner: "10001"
-    group: "10001"
-  - id: img
-    # 在线:docker pull;离线:推包内 oci-archive 并 import(同一份 yaml,来源由形态定)
-    action: load_image
-    material: rustfs-img
-    runtime: docker
-    needs: [docker_ready]
-  - id: run
-    # docker_container(D-092):引擎对 spec(镜像/端口/卷/env)做指纹收敛 ——
-    # 任何参数变了/容器崩溃重启/不存在 → 自动删旧起新;全符合 → 跳过(幂等)。
-    action: docker_container
+    mode: "0750"
+  - id: config
+    # 官方环境文件;改凭据/端口/volumes → notify 重启收敛。
+    action: copy
+    content: |
+      RUSTFS_ACCESS_KEY={{access_key}}
+      RUSTFS_SECRET_KEY={{secret_key}}
+      RUSTFS_VOLUMES="{{volumes}}"
+      RUSTFS_ADDRESS=":{{port}}"
+      RUSTFS_CONSOLE_ENABLE=true
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK={{bypass_disk_check}}
+      RUST_LOG=error
+      RUSTFS_OBS_LOG_DIRECTORY="/var/logs/rustfs/"
+    dest: /etc/default/rustfs
+    mode: "0600"
+    notify: [restart_rustfs]
+  - id: unit
+    action: copy
+    content: |
+      [Unit]
+      Description=RustFS S3-compatible object storage (crater)
+      After=network-online.target
+      [Service]
+      EnvironmentFile=-/etc/default/rustfs
+      ExecStart=/usr/local/bin/rustfs $RUSTFS_VOLUMES
+      Restart=on-failure
+      RestartSec=2
+      LimitNOFILE=1048576
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/rustfs.service
+    mode: "0644"
+    notify: [restart_rustfs]
+  - id: svc
+    action: service
     name: rustfs
-    image: "docker.io/rustfs/rustfs:{{version}}"
-    restart_policy: unless-stopped
-    ports:
-      - "{{api_port}}:9000"
-      - "{{console_port}}:9001"
-    volumes:
-      - "{{data_dir}}:/data"
-    env:
-      RUSTFS_ACCESS_KEY: "{{access_key}}"
-      RUSTFS_SECRET_KEY: "{{secret_key}}"
-    needs: [img, data_dir]
+    state: started
+    enabled: true
+    needs: [binary, data_dirs, log_dir, config, unit]
   - id: verify
+    # 先核身份(rustfs.service 真在跑,防别的进程冒名顶替占着端口答 200),
+    # 再探康健。多机形态首启要等所有节点到齐组建纠删码集,放宽到 30s。
     action: shell
     phase: verify
-    cmd: "for i in $(seq 1 15); do curl -s -o /dev/null http://localhost:{{api_port}}/health && break; sleep 1; done; curl -s -o /dev/null -w 'rustfs api /health -> %{http_code}\\n' http://localhost:{{api_port}}/health && curl -s -o /dev/null -w 'rustfs console /rustfs/console/ -> %{http_code}\\n' http://localhost:{{console_port}}/rustfs/console/"
-    needs: [run]
-teardown:
-  - id: rm_container
-    action: docker_container
+    cmd: "systemctl is-active --quiet rustfs || { echo 'rustfs.service 未运行' >&2; journalctl -u rustfs -n 5 --no-pager >&2; exit 1; }; for i in $(seq 1 30); do curl -s -o /dev/null http://localhost:{{port}}/health && break; sleep 1; done; curl -s -o /dev/null -w 'rustfs s3 /health -> %{http_code}\\n' http://localhost:{{port}}/health"
+    needs: [svc]
+handlers:
+  - id: restart_rustfs
+    action: service
     name: rustfs
-    state: absent
-  # 数据目录(对象数据,容器运行期长出来的):
-  - id: rm_data
+    state: restarted
+teardown:
+  - id: svc_off
+    action: service
+    name: rustfs
+    state: stopped
+    enabled: false
+  - id: rm_unit
     action: file
-    path: /data/rustfs
+    path: /etc/systemd/system/rustfs.service
     state: absent
-    needs: [rm_container]
-  # 镜像本身不删:可能被别的容器复用;要清理手动 docker rmi
+    needs: [svc_off]
+  - id: rm_config
+    action: file
+    path: /etc/default/rustfs
+    state: absent
+    needs: [svc_off]
+  - id: rm_binary
+    action: file
+    path: /usr/local/bin/rustfs
+    state: absent
+    needs: [svc_off]
+  - id: rm_logs
+    action: file
+    path: /var/logs/rustfs
+    state: absent
+    needs: [svc_off]
+  - id: rm_data
+    # 对象数据(运行期长出来的)也删 —— delete 即彻底卸载;只想停服务别用 delete。
+    action: shell
+    cmd: |
+      expand() { local pre rest range post i e; case "$1" in
+        *\{*...*\}*) pre=${1%%\{*}; rest=${1#*\{}; range=${rest%%\}*}; post=${rest#*\}}
+          i=${range%%.*}; e=${range##*.}
+          while [ "$i" -le "$e" ]; do expand "$pre$i$post"; i=$((i+1)); done ;;
+        *) printf '%s\n' "$1" ;;
+      esac; }
+      for v in '{{volumes}}'; do expand "$v"; done | sed -E 's|^https?://[^/]*||' | sort -u |
+      while read -r d; do rm -rf "$d"; done
+    needs: [svc_off]

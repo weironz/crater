@@ -16,7 +16,7 @@
 |------|------|-----|
 | SSH 执行器（russh）+ run/push + host key 校验 | [ssh-executor.md](ssh-executor.md) | D-008/D-009/D-094 |
 | 引擎零产品知识（装万物地基） | [engine-zero-product-knowledge.md](engine-zero-product-knowledge.md) | D-017 |
-|  物料闭包 `materials:` + `copy material:` | [materials.md](materials.md) | D-034 |
+|  物料闭包 `materials:` + `copy material:`(含 `unzip:` 控制端解包) | [materials.md](materials.md) | D-034/048/103 |
 | apply 三层目标（本机/--host/-i）+ SSH key 认证 | [apply-targets.md](apply-targets.md) | D-035 |
 | 通用 task（`crater apply <动作>`，Ansible 能力；含离线打包/agent） | [action-tasks.md](action-tasks.md) | D-037~D-046 |
 | 卸载/重置 `crater delete`（由 task `teardown:` 驱动，opt-in） | [delete-teardown.md](delete-teardown.md) | D-049 |

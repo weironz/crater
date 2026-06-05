@@ -37,4 +37,7 @@ actions:
 
 ## 关联
 
-ADR:D-073(material 直取)、D-048(arch)。相关:[copy](copy.md)、[materials](../features/materials.md)。
+- 归档格式是 **tar 系**(tar/tgz/…,目标机 `tar -xf`);**zip 不行**(GNU tar 解不了,
+  目标机 unzip 不保证有)——zip 里抽单文件用物料的 `unzip:` 字段 + `copy`(控制端解包,D-103)。
+
+ADR:D-073(material 直取)、D-048(arch)、D-103(unzip)。相关:[copy](copy.md)、[materials](../features/materials.md)。

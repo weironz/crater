@@ -628,6 +628,39 @@ pub(crate) async fn run_task_on_host(
         ctx.offline_blobs = Some(bm.clone());
         ctx.offline = offline;
     }
+    // D-103: `unzip:` materials are extracted CONTROL-SIDE — register the
+    // extracted member as a blob BEFORE lowering, so `copy` becomes a PushFile
+    // and the target never sees the zip (it may lack `unzip`; tar can't read
+    // zip). Online/thin-online only: a packed blob already carries the
+    // extracted bytes; strict offline keeps its missing-blob error; --dry-run
+    // computes the cache path without fetching (prints intent, executes nothing).
+    if !ctx.offline {
+        for m in &task.materials {
+            use crater_core::component::MaterialKind;
+            if m.kind != MaterialKind::File || m.unzip.is_none() || ctx.blob_for(m).is_some() {
+                continue;
+            }
+            // Only the variant this target resolves to (D-048) — don't fetch
+            // the arm64 zip to deploy an amd64 host.
+            if m.arch.is_some_and(|a| a != ctx.target_arch) {
+                continue;
+            }
+            let Some(tmpl) = &m.url_tmpl else { continue }; // src+unzip rejected at build
+            // RAW url (no mirror rewrite) = the build-side cache key (D-096);
+            // {{arch}} resolves from the material itself (D-064).
+            let raw = if let Some(a) = m.arch {
+                let mut vars = ctx.vars.clone();
+                vars.insert("arch".to_string(), a.as_str().to_string());
+                engine::render(tmpl, &vars)?
+            } else {
+                engine::render(tmpl, &ctx.vars)?
+            };
+            let path = crate::build::ensure_unzip_blob(m, &raw, do_apply).await?;
+            ctx.offline_blobs
+                .get_or_insert_with(Default::default)
+                .insert(PlanContext::material_blob_key(m), path);
+        }
+    }
     // delete → run the authored `teardown:` actions; apply → `actions`.
     let action_list = if teardown { &task.teardown } else { &task.actions };
     let steps = engine::plan_from_task(action_list, &ctx)?;

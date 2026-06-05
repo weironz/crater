@@ -65,9 +65,16 @@ pub struct Material {
     /// this material's offline support to that OS×version (× `arch`).
     #[serde(default)]
     pub base: Option<String>,
-    /// Optional content digest (sha256 hex, no prefix). Verified if present.
+    /// Optional content digest (sha256 hex, no prefix). Verified if present
+    /// (against the DOWNLOAD — i.e. the zip itself when `unzip` is set).
     #[serde(default)]
     pub sha256: Option<String>,
+    /// `file` + `url_tmpl`: the download is a ZIP and this member's bytes ARE
+    /// the material (D-103). Extracted on the CONTROL side (build pack /
+    /// online pre-fetch) — targets need no `unzip`, and offline blobs carry
+    /// the extracted file. For upstreams that ship binaries zip-only (RustFS).
+    #[serde(default)]
+    pub unzip: Option<String>,
 }
 
 /// The three kinds of material a component can declare (D-034), distinguished by

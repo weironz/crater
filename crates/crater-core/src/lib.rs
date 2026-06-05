@@ -28,6 +28,7 @@ pub mod spec;
 pub mod state;
 pub mod store;
 pub mod task;
+pub mod zip;
 
 /// Crate-wide result type.
 pub use anyhow::Result;

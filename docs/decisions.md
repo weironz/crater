@@ -1217,3 +1217,37 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   - **配套**:`os.rs` 探测升级为 `OsInfo{family, distro, version}`(ID + VERSION_ID);堵 when_os 静默坑——action 全被过滤时 warn「0 步可执行…可能不在适用范围」;`library/rustfs` 声明 `arch: [amd64]` 作库内示例。
 - **验证**:70 tests 绿(check 矩阵:精确/前缀版本、distro≠族、arch 别名、空契约全放行);真机:契约匹配 → `准入通过` 执行;要求 22.04 对 24.04 目标 → 清晰拒绝;双主机 arch 不符 → 两台都列出零步骤;plan 同门;inspect 零连接出「环境要求」行。
 - **关联**:D-036(纯数据)、D-062(os_package 钉 base)、D-048(arch 物料)、D-100(plan)。
+
+## 2026-06-05 · D-103:`unzip:` 物料(控制端解包)+ rustfs 二进制化(单盘/多盘/多机)
+
+- **背景**:RustFS 等上游只发 **zip** 包,而 zip 在目标机上是死路:GNU tar 解不了 zip,
+  `unzip` 又不保证存在(air-gap 更装不了)。同时 rustfs task 要从容器化改为官方推荐的
+  二进制 + systemd 路线。
+- **决定**:`kind: file` 物料新增 `unzip: <成员路径>`——下载物是 zip、**该成员的字节才是
+  物料**。解包发生在**控制端**(纯 Rust 极简 zip reader,`zip.rs`,stored/deflate +
+  zip64,零新依赖,复用 flate2):
+  - **build**:fetch(声明 sha256 验的是 zip 本体)→ 解出成员 → 成员字节打进 OCI 层。
+    离线链路(save/apply/agent staging)看到的就是普通文件,目标机零依赖。
+  - **在线 apply/plan**:lower 前预取——zip 进下载缓存(D-096,与 build 共键)、成员
+    解到 `<ckey>.unzip.<hash>`,注册成 blob → `copy` 自然 lower 成 PushFile,目标机
+    **永远见不到 zip**。`--dry-run` 只算确定性缓存路径不下载。并发主机预取由进程内
+    锁串行,原子 tmp+rename 发布。
+  - 防呆:`unzip` 只配 `url_tmpl`(src 直接放解开的文件);`unarchive` 引用 unzip 物料
+    报错引导用 `copy`;构建指纹追加 `:unzip=<member>`(不声明不追加,存量指纹不动)。
+- **rustfs 二进制化**:三种形态一份 yaml,`volumes` 一个 apply 参数驱动(与官方
+  `RUSTFS_VOLUMES` 语法 1:1):`/data/rustfs0`(单机单盘,默认)/ `/data/rustfs{0...3}`
+  (单机多盘)/ `http://node{1...4}:9000/data/rustfs{0...3}`(多机多盘)。本机数据目录
+  从 volumes **推导**(POSIX sh 递归展开 `{a...b}` + 剥 `http://host:port` 前缀),
+  preflight 查多机主机名可解析(纯 IP 跳过)+ **端口被外人占**(旧容器化部署冒名顶替
+  答 200 的真坑,verify 同时核 `is-active` 身份);`bypass_disk_check` 参数对应上游
+  `RUSTFS_UNSAFE_BYPASS_DISK_CHECK`(测试 VM 多目录同盘必需,生产保持 false)。
+  双架构物料 + musl 静态 → **requires 整个删掉**(发行版/架构都不限)。
+- **验证(真机 73.11/.12)**:单机单盘 apply→幂等→plan 全干净;单机多盘 4 目录 + 磁盘
+  校验 bypass;多机多盘 2 节点×2 盘 IP 区间表达式组真集群(**n11 写桶/对象,n12 读回**,
+  S3 sigv4 跨节点),幂等 changed=0 数据健在;主机名不可解析 → preflight 全员响亮拒绝;
+  build 双架构 495MB 制品 → save → 离线 apply(`blob cached, reusing`:build 端解包与
+  apply 端预取字节同 sha,内容寻址互证)→ delete 全清。73 tests 绿(+3 zip)。
+- **已知边界**:分布式**首启**期间 config/unit 的 notify 会在 run 末重启服务,两台重启
+  时刻不同步可能撞上格式化窗口(真机撞过一次 `inconsistent drive found`;全节点停服清
+  数据目录同启即愈)。根治思路(后续):service 步骤本 run 刚 `started→changed` 时抑制
+  同名 `restarted` handler 的冗余重启。
