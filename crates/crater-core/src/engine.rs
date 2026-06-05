@@ -606,6 +606,10 @@ pub fn plan_from_task(
     actions: &[crate::task::ActionStep],
     ctx: &PlanContext,
 ) -> crate::Result<Vec<TaskStep>> {
+    // `loop:` macro-expansion first (D-105): one authored step per item, ids
+    // suffixed `@<i>`, `needs` on the original id remapped to all expansions.
+    let actions = crate::task::expand_loops(actions)?;
+    let actions = &actions[..];
     let offline = ctx.offline;
     let os = ctx.os;
 
@@ -704,6 +708,11 @@ pub fn plan_handlers(
 ) -> crate::Result<BTreeMap<String, Op>> {
     let mut out = BTreeMap::new();
     for h in handlers {
+        // Handlers are notify targets keyed by a single id — `loop` would split
+        // that id and break every `notify:` reference (D-105 V1 boundary).
+        if !h.loop_items.is_empty() {
+            anyhow::bail!("handler 不支持 loop(notify 按单一 id 触发);要多个就写多个 handler");
+        }
         let id = h
             .id
             .clone()
@@ -2294,6 +2303,7 @@ mod tests {
             retries: 0,
             ignore_errors: false,
             notify: vec![],
+            loop_items: vec![],
             action: Action::RunCmd { cmd: "true".into(), check: None },
         };
         let actions = vec![step("common", ""), step("init", "bootstrap"), step("join", "worker")];
@@ -2326,6 +2336,7 @@ mod tests {
             retries: 0,
             ignore_errors: false,
             notify: vec![],
+            loop_items: vec![],
             action: Action::RunCmd { cmd: "kubeadm init".into(), check: None },
         };
         let actions = std::slice::from_ref(&init);

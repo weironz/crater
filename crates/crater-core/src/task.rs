@@ -251,10 +251,86 @@ pub struct ActionStep {
     /// Handler ids to trigger when this step reports `changed` (D-037-b).
     #[serde(default)]
     pub notify: Vec<String>,
+    /// Step-level iteration — ansible `loop` (D-105). A list of SCALARS (pure
+    /// data, no expressions); the step is macro-expanded at plan time into one
+    /// step per item, with `{{item}}` substituted into every string field of
+    /// the action (data-level, so it works for ALL modules/fields uniformly).
+    /// Expanded ids get an `@<index>` suffix; other steps' `needs` referencing
+    /// the original id are remapped to ALL expanded steps. Items may themselves
+    /// contain `{{var}}` — substitution happens first, normal var rendering
+    /// after, so `loop: ["{{port}}", 9001]` composes. Not allowed on handlers.
+    #[serde(rename = "loop", default, skip_serializing_if = "Vec::is_empty")]
+    pub loop_items: Vec<serde_yaml::Value>,
     /// The primitive + its params, flattened so the YAML stays flat:
     /// `{ id, action: place, dest: …, needs: [..] }`.
     #[serde(flatten)]
     pub action: Action,
+}
+
+/// D-105: expand `loop:` steps into per-item steps (see [`ActionStep::loop_items`]).
+/// Every returned step has an EXPLICIT id (auto ids are resolved against the
+/// ORIGINAL indices first, so expansion can't shift `action<i>` references).
+pub fn expand_loops(actions: &[ActionStep]) -> crate::Result<Vec<ActionStep>> {
+    use serde_yaml::Value;
+    // Walk a YAML tree substituting `{{item}}` in every string scalar.
+    fn subst(v: &mut Value, item: &str) {
+        match v {
+            Value::String(s) if s.contains("{{item}}") => *s = s.replace("{{item}}", item),
+            Value::Sequence(xs) => xs.iter_mut().for_each(|x| subst(x, item)),
+            Value::Mapping(m) => m.values_mut().for_each(|x| subst(x, item)),
+            _ => {}
+        }
+    }
+    let mut out: Vec<ActionStep> = Vec::new();
+    let mut remap: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (i, s) in actions.iter().enumerate() {
+        let base = s.id.clone().unwrap_or_else(|| format!("action{i}"));
+        if s.loop_items.is_empty() {
+            let mut step = s.clone();
+            step.id = Some(base);
+            out.push(step);
+            continue;
+        }
+        let mut expanded_ids = Vec::new();
+        for (j, item) in s.loop_items.iter().enumerate() {
+            let item = match item {
+                Value::String(x) => x.clone(),
+                Value::Number(n) => n.to_string(),
+                Value::Bool(b) => b.to_string(),
+                other => anyhow::bail!(
+                    "step '{base}': loop 项只支持标量(字符串/数字/布尔),收到 {other:?}"
+                ),
+            };
+            // Data-level expansion: serialize the action, substitute, re-parse —
+            // uniform across all modules and fields (no per-field allowlist).
+            let mut av = serde_yaml::to_value(&s.action)?;
+            subst(&mut av, &item);
+            let action: Action = serde_yaml::from_value(av).map_err(|e| {
+                anyhow::anyhow!("step '{base}' loop[{j}] ({item}): 代入 {{{{item}}}} 后解析失败:{e}")
+            })?;
+            let id = format!("{base}@{j}");
+            expanded_ids.push(id.clone());
+            let mut step = s.clone();
+            step.id = Some(id);
+            step.loop_items = Vec::new();
+            step.action = action;
+            out.push(step);
+        }
+        remap.insert(base, expanded_ids);
+    }
+    // `needs: [<looped id>]` now means "after ALL of its expansions".
+    if !remap.is_empty() {
+        for step in &mut out {
+            if step.needs.iter().any(|n| remap.contains_key(n)) {
+                step.needs = step
+                    .needs
+                    .iter()
+                    .flat_map(|n| remap.get(n).cloned().unwrap_or_else(|| vec![n.clone()]))
+                    .collect();
+            }
+        }
+    }
+    Ok(out)
 }
 
 impl TaskFile {
@@ -568,6 +644,51 @@ pub fn is_task_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loop_expands_per_item_and_remaps_needs() {
+        // D-105: 3 items → 3 steps with @i ids and {{item}} substituted;
+        // a downstream `needs` on the looped id fans out to all expansions;
+        // composing {{var}} inside items survives untouched for later render.
+        let yaml = r#"
+name: t
+actions:
+  - id: gate
+    action: wait_for
+    port: "{{item}}"
+    state: stopped
+    timeout: 3
+    loop: ["{{port}}", 9001, 9002]
+  - id: go
+    action: shell
+    cmd: "echo go"
+    needs: [gate]
+"#;
+        let t: TaskFile = serde_yaml::from_str(yaml).unwrap();
+        let steps = expand_loops(&t.actions).unwrap();
+        assert_eq!(steps.len(), 4);
+        let ids: Vec<&str> = steps.iter().map(|s| s.id.as_deref().unwrap()).collect();
+        assert_eq!(ids, ["gate@0", "gate@1", "gate@2", "go"]);
+        match &steps[1].action {
+            Action::WaitFor { port, .. } => assert_eq!(port.as_deref(), Some("9001")),
+            _ => panic!("wait_for expected"),
+        }
+        match &steps[0].action {
+            // item "{{port}}" passes through for normal var rendering later.
+            Action::WaitFor { port, .. } => assert_eq!(port.as_deref(), Some("{{port}}")),
+            _ => panic!("wait_for expected"),
+        }
+        assert_eq!(steps[3].needs, ["gate@0", "gate@1", "gate@2"]);
+
+        // Non-scalar items are refused loudly.
+        let bad = r#"
+name: t
+actions:
+  - { action: shell, cmd: "echo {{item}}", loop: [{a: 1}] }
+"#;
+        let t: TaskFile = serde_yaml::from_str(bad).unwrap();
+        assert!(expand_loops(&t.actions).unwrap_err().to_string().contains("标量"));
+    }
 
     #[test]
     fn parses_task_with_flattened_action() {

@@ -175,6 +175,8 @@ ansible-aligned: shell(cmd,check), package(packages:{debian:[..],rhel:[..]}),
   service(name,state,enabled), lineinfile(path,line,regexp),
   user(name,...), group(name,...), role(uses,with),
   wait_for(port OR path, host, state, timeout, delay).
+Any step may carry `loop: [scalar,...]` (ansible loop): the step expands per
+item with `{{item}}` substituted into its fields (not allowed on handlers).
 crater-specific (offline/material model): place(material,dest,mode),
   load_image(material OR materials:[..], namespace, runtime).
 Note: `copy` writes a file — give `content` (inline text) or `src` (a control-side

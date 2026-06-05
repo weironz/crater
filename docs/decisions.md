@@ -1286,3 +1286,24 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   不齐):dry-run 校验 plan 形态(渲染/排序/三台都有)+ 单测;73.13 回来后跑一遍即可。
 - 其余 task(k8s-online/offline、mysql、docker)无手搓等待:kubeadm 自带阻塞重试,
   不叠加冗余 wait。
+
+## 2026-06-05 · D-105:步骤级 `loop:`(ansible loop/with_items)
+
+- **背景**:rustfs 查两个端口要写两个几乎相同的 wait_for 步骤——查 10 个呢?(用户点出)
+  重复步骤是 ansible `loop` 的标准场景。
+- **决定**:`ActionStep` 新增 `loop:`——**标量列表**(字符串/数字/布尔;纯数据,无表达式,
+  守 D-036),plan 期**宏展开**:一步变 N 步,`{{item}}` 代入。
+- **实现要点**:
+  - **数据级替换**(`expand_loops`,task.rs):action 序列化 → 走遍 YAML 树替换所有字符串
+    标量里的 `{{item}}` → 反序列化。对**所有模块所有字段**统一生效,不维护"哪些字段可循环"
+    的白名单;代入后类型不符(如 `timeout: "{{item}}"` 配字符串项)在重解析处响亮报错。
+  - 展开 id = `<原id>@<序号>`;**自动 id 以原始下标先行固化**(`action<i>` 引用不被展开
+    挪位)。其它步骤 `needs:` 引用被循环的 id → 重映射为全部展开步(语义:等它们全部)。
+  - **可组合**:loop 项本身可含 `{{var}}`(`loop: ["{{port}}", 9001]`)——`{{item}}` 代入
+    在先、常规 vars 渲染在后,互不干扰。
+  - **V1 边界**:项只许标量(map/list 报错);handler 不许 loop(notify 按单一 id 触发,
+    展开会拆散引用;要多个写多个 handler)。
+- **验证**:75 tests 绿(展开/代入/needs 扇出/`{{var}}` 穿透/非标量拒绝);rustfs 端口闸
+  两步合一(`loop: ["{{port}}", 9001]`),真机:dry-run 展开成两闸、全新装两闸秒过、
+  重跑被占即拒、delete 正常。
+- **关联**:D-036(纯数据:列表不是表达式)、D-104(wait_for)、D-067(对齐 ansible)。

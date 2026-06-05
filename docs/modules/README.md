@@ -41,6 +41,9 @@ task 的每个动作(`action:`)调用一个**模块**——引擎内置的最小
   retries: 2              # 失败重试次数
   ignore_errors: true     # 重试后仍失败只 warn 不中断
   phase: install|verify|preflight  # 默认 install
+  loop: [a, b, 9001]      # 步骤级迭代(D-105):一步按项展开成 N 步,{{item}} 代入
+                          # 任意字段;id 变 <id>@<i>,别人 needs 原 id = 等全部展开步。
+                          # 项只许标量,可含 {{var}};handler 不支持 loop
 ```
 
 条件是**封闭枚举**(when_os/when_role/when_offline),不是自由表达式——逻辑在 Rust 引擎,

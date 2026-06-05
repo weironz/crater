@@ -47,21 +47,16 @@ materials:
     url_tmpl: "https://github.com/rustfs/rustfs/releases/download/{{version}}/rustfs-linux-aarch64-musl-v{{version}}.zip"
     unzip: rustfs
 actions:
-  # 端口闸(wait_for state: stopped,对齐 ansible 同款用法):被占就直接退,
-  # 不管占用者是谁(严格语义)。S3 口与控制台口(上游默认 9001)都查——
-  # 旧容器化部署映射的是 9000-9001 两个口,只查一个会漏半截。
-  - id: port_s3_free
+  # 端口闸(wait_for state: stopped + loop,D-104/105):被占就直接退,不管
+  # 占用者是谁(严格语义)。S3 口与控制台口(上游默认 9001)都查——旧容器化
+  # 部署映射的是 9000-9001 两个口,只查一个会漏半截。
+  - id: port_free
     action: wait_for
-    port: "{{port}}"
+    port: "{{item}}"
     state: stopped
     timeout: 3
     phase: preflight
-  - id: port_console_free
-    action: wait_for
-    port: 9001
-    state: stopped
-    timeout: 3
-    phase: preflight
+    loop: ["{{port}}", 9001]
   - id: nodes_resolvable
     # 多机多盘:volumes 是 http://node{1...4}:9000/... ,每台都必须能解析
     # 其它节点的主机名,否则集群无法组建(官方要求 /etc/hosts 或 DNS)。
