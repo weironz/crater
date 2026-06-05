@@ -220,29 +220,19 @@ actions:
     needs: [ctd_cfg, ctd_unit, runc, cni_confdir]
 
   # —— kubeadm / kubelet / kubectl ——
-  - id: kubeadm
+  - id: kube_bins
+    # kubeadm/kubelet/kubectl 三件套:只差名字,loop 一步收(D-105)。
     action: copy
-    material: kubeadm
-    dest: /usr/local/bin/kubeadm
+    material: "{{item}}"
+    dest: "/usr/local/bin/{{item}}"
     mode: "0755"
     needs: [deps]
-  - id: kubelet_bin
-    action: copy
-    material: kubelet
-    dest: /usr/local/bin/kubelet
-    mode: "0755"
-    needs: [deps]
-  - id: kubectl
-    action: copy
-    material: kubectl
-    dest: /usr/local/bin/kubectl
-    mode: "0755"
-    needs: [deps]
+    loop: [kubeadm, kubelet, kubectl]
   - id: kubelet_unit
     action: copy
     material: unit-kubelet
     dest: /etc/systemd/system/kubelet.service
-    needs: [kubelet_bin]
+    needs: [kube_bins]
   - id: kubelet_dropin
     action: copy
     material: dropin-kubeadm
@@ -265,7 +255,7 @@ actions:
   # —— 起集群 ——
   - id: kubeadm_init
     action: shell
-    needs: [svc_kubelet, kubeadm, load_images]
+    needs: [svc_kubelet, kube_bins, load_images]
     cmd: "kubeadm init --pod-network-cidr={{pod_cidr}} --image-repository {{image_repo}} --kubernetes-version v{{version}} --cri-socket=unix:///run/containerd/containerd.sock"
     check: "test -f /etc/kubernetes/admin.conf"
   - id: kubeconfig

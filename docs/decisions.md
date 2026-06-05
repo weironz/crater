@@ -1307,3 +1307,19 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   两步合一(`loop: ["{{port}}", 9001]`),真机:dry-run 展开成两闸、全新装两闸秒过、
   重跑被占即拒、delete 正常。
 - **关联**:D-036(纯数据:列表不是表达式)、D-104(wait_for)、D-067(对齐 ansible)。
+
+### D-105 补:loop 库内推广 + role×loop 组合修复
+
+- **收口**:k8s-ha / k8s-offline 的 kubeadm/kubelet/kubectl 三连 copy → `kube_bins`
+  一步(`loop: [kubeadm, kubelet, kubectl]`,material/dest 都派生自 item);docker 的
+  containerd/docker 双 unit → `units` 一步;kube-upgrade role 的 place_kubelet/kubectl
+  → `place_kube`。不收的留痕:ctd/cni/crictl 三个 unarchive(to/strip/creates 多处
+  不相关差异,标量 item 表达不了)、mysql 双 svc(差在 when_os 步级字段)。
+- **组合修复(真 bug)**:role 展开会给 role 私有 material 改名加前缀并按**精确名**重写
+  action 引用——`material: "{{item}}"` 在那一刻不是具体名,错过重写 → apply 报
+  unknown material。修:role 的 actions 在前缀重写**之前**先 `expand_loops`(loop 是
+  纯宏,提前展开无害);task 顶层 loop 仍在 plan 期展开,不对称但各自正确。
+- **验证**:75 tests 绿;四个 task dry-run plan 形态正确(k8s-upgrade 经 role 展开出
+  `upgrade.kubelet/kubectl` 前缀物料并正确解析);docker 真机 apply 幂等 changed=0。
+  k8s-ha/offline 全链路未真机重验(73.13 关机/离线构建重),dry-run 还揪出 k8s-offline
+  一处 `needs: [kubeadm]` 旧 id 引用,已改 `kube_bins`。

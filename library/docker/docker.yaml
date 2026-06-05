@@ -31,18 +31,14 @@ actions:
     to: /usr/local/bin
     strip: 1
     creates: /usr/local/bin/dockerd
-  - id: containerd_unit
+  - id: units
+    # containerd/docker 两个 unit 只差名字:loop 一步收(D-105)。
     action: copy
-    material: containerd-unit
-    dest: /etc/systemd/system/containerd.service
+    material: "{{item}}-unit"
+    dest: "/etc/systemd/system/{{item}}.service"
     needs: [extract]
     notify: [reload_systemd]
-  - id: docker_unit
-    action: copy
-    material: docker-unit
-    dest: /etc/systemd/system/docker.service
-    needs: [extract]
-    notify: [reload_systemd]
+    loop: [containerd, docker]
   - id: daemon
     action: copy
     material: daemon-json
@@ -56,13 +52,13 @@ actions:
     name: containerd
     state: started
     enabled: true
-    needs: [containerd_unit]
+    needs: [units]
   - id: svc_docker
     action: service
     name: docker
     state: started
     enabled: true
-    needs: [svc_containerd, docker_unit, daemon]
+    needs: [svc_containerd, units, daemon]
   - id: verify
     action: shell
     phase: verify

@@ -38,24 +38,19 @@ actions:
     throttle: 1
     needs: [place_kubeadm]
     cmd: "kubeadm upgrade node"
-  - id: place_kubelet                      # 换 kubelet/kubectl(在 upgrade 之后)
+  - id: place_kube                         # 换 kubelet/kubectl(在 upgrade 之后;loop,D-105)
     action: copy
-    material: kubelet
-    dest: /usr/local/bin/kubelet
+    material: "{{item}}"
+    dest: "/usr/local/bin/{{item}}"
     mode: "0755"
     needs: [cp_node, w_node]
-  - id: place_kubectl
-    action: copy
-    material: kubectl
-    dest: /usr/local/bin/kubectl
-    mode: "0755"
-    needs: [cp_node, w_node]
+    loop: [kubelet, kubectl]
   - id: restart_kubelet                    # 重启 kubelet 切到新版(逐台)
     action: service
     name: kubelet
     state: restarted
     throttle: 1
-    needs: [place_kubelet]
+    needs: [place_kube]
   - id: uncordon                           # control-plane:恢复调度
     action: shell
     when_role: [controlplane]

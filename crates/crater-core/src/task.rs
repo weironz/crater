@@ -446,7 +446,11 @@ fn expand_steps(
 
         // Render the role's params into its actions/materials/handlers, then
         // recursively expand any nested roles inside it.
+        // `loop:` expands FIRST (D-105): the material-name prefix rewrite below
+        // matches by exact name, so `material: "{{item}}"` must already be a
+        // concrete name when it runs. Loop is a pure macro — early is harmless.
         let ractions: Vec<ActionStep> = render_yaml(&role.actions, &with_vars)?;
+        let ractions = expand_loops(&ractions)?;
         let mut rmaterials: Vec<Material> = render_yaml(&role.materials, &with_vars)?;
         // Make role-private file/template `src:` absolute (relative to the role dir),
         // so the role is self-contained no matter where it's used (D-086).
