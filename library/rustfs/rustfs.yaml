@@ -152,13 +152,20 @@ actions:
     state: started
     enabled: true
     needs: [binary, data_dirs, log_dir, config, unit]
+  - id: wait_ready
+    # 等 S3 端点开门(wait_for,D-104)。多机形态首启要等所有节点到齐
+    # 组建纠删码集,30s 窗口。
+    action: wait_for
+    port: "{{port}}"
+    timeout: 30
+    phase: verify
+    needs: [svc]
   - id: verify
-    # 先核身份(rustfs.service 真在跑,防别的进程冒名顶替占着端口答 200),
-    # 再探康健。多机形态首启要等所有节点到齐组建纠删码集,放宽到 30s。
+    # 先核身份(rustfs.service 真在跑,防别的进程冒名顶替占着端口答 200),再探健康。
     action: shell
     phase: verify
-    cmd: "systemctl is-active --quiet rustfs || { echo 'rustfs.service 未运行' >&2; journalctl -u rustfs -n 5 --no-pager >&2; exit 1; }; for i in $(seq 1 30); do curl -s -o /dev/null http://localhost:{{port}}/health && break; sleep 1; done; curl -s -o /dev/null -w 'rustfs s3 /health -> %{http_code}\\n' http://localhost:{{port}}/health"
-    needs: [svc]
+    cmd: "systemctl is-active --quiet rustfs || { echo 'rustfs.service 未运行' >&2; journalctl -u rustfs -n 5 --no-pager >&2; exit 1; }; curl -s -o /dev/null -w 'rustfs s3 /health -> %{http_code}\\n' http://localhost:{{port}}/health"
+    needs: [wait_ready]
 handlers:
   - id: restart_rustfs
     action: service

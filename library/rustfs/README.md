@@ -30,7 +30,8 @@ just push                                            # 构建 OCI 制品并推 r
   多机形态每节点本地盘路径相同(官方 MNMD 约定)。
 - preflight 两道闸,都是真坑:**端口未被外人占**(典型:旧容器化部署的 rustfs
   还在跑——它会冒名顶替答 200,必须先 `docker rm -f rustfs`);多机主机名全部可解析
-  (纯 IP 跳过)。verify 先核 `systemctl is-active` 身份再探 `/health`。
+  (纯 IP 跳过)。verify 先 `wait_for` 等端口开门(D-104),再核 `systemctl is-active`
+  身份、探 `/health`。
 - 端口:S3 端点 `:9000`(`port` 参数),Web 控制台 `:9001`(上游默认,路径
   `/rustfs/console/`);日志 `/var/logs/rustfs/`(上游约定路径)。
 - 凭据默认非上游默认值(`crater-admin`/`crater-changeme`),生产用 inventory `vars:`

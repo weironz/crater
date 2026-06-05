@@ -212,6 +212,29 @@ pub enum Action {
         #[serde(default)]
         mode: Option<String>,
     },
+    /// Wait for a condition before continuing — ansible `wait_for` (D-104).
+    /// EXACTLY ONE of `port` (TCP connect probe, on the target) / `path`.
+    /// Read-only: lowers to a pure probe loop, changes nothing. `port`/`host`
+    /// are `{{var}}`-rendered (ports are routinely apply params). The probe
+    /// chain is `nc -z` → `bash /dev/tcp` (covers mainstream + busybox).
+    WaitFor {
+        #[serde(default, deserialize_with = "de_opt_string_or_num")]
+        port: Option<String>,
+        /// With `port`; default 127.0.0.1 (the target itself).
+        #[serde(default)]
+        host: Option<String>,
+        #[serde(default)]
+        path: Option<PathBuf>,
+        /// started|present = open/exists (default), stopped|absent = closed/gone.
+        #[serde(default)]
+        state: WaitState,
+        /// Seconds to keep probing before failing loudly. Default 30.
+        #[serde(default)]
+        timeout: Option<u32>,
+        /// Initial sleep before the first probe. Default 0.
+        #[serde(default)]
+        delay: Option<u32>,
+    },
     /// Manage a systemd service — ansible `service`/`systemd` (D-037-b / D-069).
     /// Does daemon-reload, then enable/disable + start/stop/restart. Idempotent
     /// for started/stopped/enabled (is-active / is-enabled probes).
@@ -308,6 +331,43 @@ pub enum FileState {
     Touch,
 }
 
+/// Desired condition for `wait_for` (D-104), mirroring ansible's values:
+/// `started`/`present` both mean "open / exists" (the default), `stopped`/
+/// `absent` both mean "closed / gone" — pick whichever reads naturally for
+/// a port vs a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitState {
+    #[default]
+    Started,
+    Stopped,
+    Present,
+    Absent,
+}
+
+impl WaitState {
+    /// Collapse the four names onto the two meanings.
+    pub fn wants_positive(&self) -> bool {
+        matches!(self, WaitState::Started | WaitState::Present)
+    }
+}
+
+/// YAML lets `port: 9000` arrive as a number while we want the string form
+/// (it gets `{{var}}`-rendered like `cmd`). Accept both.
+fn de_opt_string_or_num<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    let v: Option<serde_yaml::Value> = Option::deserialize(d)?;
+    match v {
+        None | Some(serde_yaml::Value::Null) => Ok(None),
+        Some(serde_yaml::Value::String(s)) => Ok(Some(s)),
+        Some(serde_yaml::Value::Number(n)) => Ok(Some(n.to_string())),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "expected number or string, got {other:?}"
+        ))),
+    }
+}
+
 /// Desired runtime state for the `service` primitive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -348,6 +408,7 @@ impl Action {
             Action::LoadImage { .. } => "load_image",
             Action::File { .. } => "file",
             Action::Copy { .. } => "copy",
+            Action::WaitFor { .. } => "wait_for",
             Action::Service { .. } => "service",
             Action::Lineinfile { .. } => "lineinfile",
             Action::User { .. } => "user",

@@ -1213,6 +1213,53 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 }
             }
         }
+        Action::WaitFor { port, host, path, state, timeout, delay } => {
+            // ansible `wait_for` (D-104): a read-only probe loop — succeed the
+            // moment the condition holds, fail LOUDLY after `timeout`. Replaces
+            // every hand-rolled `for i in $(seq 1 30); do …; sleep 1; done`.
+            if (port.is_some() as u8) + (path.is_some() as u8) != 1 {
+                return Err(anyhow::anyhow!("wait_for: set exactly one of `port` / `path`"));
+            }
+            let timeout = timeout.unwrap_or(30);
+            let positive = state.wants_positive();
+            let (probe, what) = if let Some(p) = port {
+                // port/host are rendered like `cmd` — ports are routinely params.
+                let p = render(p, &ctx.vars)?;
+                let h = match host {
+                    Some(h) => render(h, &ctx.vars)?,
+                    None => "127.0.0.1".to_string(),
+                };
+                // TCP connect, ON the target. `nc -z` when present (incl.
+                // busybox), else bash's /dev/tcp — the ops run under `sh`
+                // (often dash), so /dev/tcp must go through an explicit bash.
+                let connect = format!(
+                    "{{ if command -v nc >/dev/null 2>&1; then nc -z -w 2 '{h}' '{p}' >/dev/null 2>&1; else bash -c 'exec 3<>/dev/tcp/{h}/{p}' >/dev/null 2>&1; fi; }}"
+                );
+                (connect, format!("port {h}:{p} {}", if positive { "open" } else { "closed" }))
+            } else {
+                let p = path.as_ref().unwrap().display().to_string();
+                (
+                    format!("test -e '{p}'"),
+                    format!("{p} {}", if positive { "present" } else { "absent" }),
+                )
+            };
+            let probe = if positive { probe } else { format!("! {probe}") };
+            let head = match delay.unwrap_or(0) {
+                0 => String::new(),
+                d => format!("sleep {d}; "),
+            };
+            Op::Shell {
+                phase,
+                describe: format!("wait_for {what} ≤{timeout}s"),
+                cmd: format!(
+                    "{head}i=0; while [ $i -lt {timeout} ]; do if {probe}; then exit 0; fi; sleep 1; i=$((i+1)); done; echo 'wait_for 超时({timeout}s):{what}' >&2; exit 1"
+                ),
+                soft_fail: false,
+                // Already satisfied → skip the loop entirely (reports `ok`);
+                // also what `crater plan` runs as its read-only probe (D-100).
+                check: Some(probe),
+            }
+        }
         Action::Service {
             name,
             state,
@@ -2104,6 +2151,56 @@ mod tests {
             Op::PushFile { local_path, .. } => assert_eq!(local_path, PathBuf::from("/blob/cfg")),
             other => panic!("expected PushFile from blob, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn wait_for_lowers_to_probe_loop() {
+        // D-104: port renders vars, probe doubles as the skip-check; negative
+        // states negate the probe; port/path are exactly-one.
+        use crate::component::WaitState;
+        let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
+        ctx.vars.insert("api_port".into(), "6443".into());
+        let port_wait = Action::WaitFor {
+            port: Some("{{api_port}}".into()),
+            host: None,
+            path: None,
+            state: WaitState::Started,
+            timeout: Some(60),
+            delay: None,
+        };
+        match action_op(Phase::Verify, &port_wait, &ctx).unwrap() {
+            Op::Shell { cmd, check, describe, .. } => {
+                assert!(cmd.contains("127.0.0.1' '6443'"), "renders {{{{api_port}}}}: {cmd}");
+                assert!(cmd.contains("-lt 60"), "timeout in loop: {cmd}");
+                assert!(cmd.contains("/dev/tcp/127.0.0.1/6443"), "bash fallback: {cmd}");
+                assert!(check.is_some(), "single probe doubles as skip-check");
+                assert!(describe.contains("port 127.0.0.1:6443 open"), "{describe}");
+            }
+            _ => panic!("wait_for → shell"),
+        }
+        let path_gone = Action::WaitFor {
+            port: None,
+            host: None,
+            path: Some(PathBuf::from("/var/run/x.lock")),
+            state: WaitState::Absent,
+            timeout: None,
+            delay: None,
+        };
+        match action_op(Phase::Install, &path_gone, &ctx).unwrap() {
+            Op::Shell { check, .. } => {
+                assert_eq!(check.as_deref(), Some("! test -e '/var/run/x.lock'"));
+            }
+            _ => panic!("wait_for → shell"),
+        }
+        let both = Action::WaitFor {
+            port: Some("1".into()),
+            host: None,
+            path: Some(PathBuf::from("/x")),
+            state: WaitState::Started,
+            timeout: None,
+            delay: None,
+        };
+        assert!(action_op(Phase::Install, &both, &ctx).is_err(), "port+path must error");
     }
 
     #[test]

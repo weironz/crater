@@ -1251,3 +1251,25 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   时刻不同步可能撞上格式化窗口(真机撞过一次 `inconsistent drive found`;全节点停服清
   数据目录同启即愈)。根治思路(后续):service 步骤本 run 刚 `started→changed` 时抑制
   同名 `restarted` handler 的冗余重启。
+
+## 2026-06-05 · D-104:`wait_for` 模块(等端口/路径,对齐 ansible)
+
+- **背景**:"等服务开门/旧进程退出/socket 出现"是部署刚需,此前全靠手搓
+  `for i in $(seq 1 30); do …; sleep 1; done`(rustfs verify、k8s 等),重复、易错、
+  超时报错不统一。Ansible 的 `wait_for` 正是这个原语。
+- **决定**:新增 `action: wait_for`——`port`(TCP 连接探测,目标机上发起)或 `path`
+  (`test -e`)二选一;`state` 四值两义(`started`/`present`=开/存在,`stopped`/`absent`
+  =关/消失);`timeout`(默认 30s)到点**响亮失败**;`delay` 首探前置睡眠。
+  守模块宪章:只读原语、lower 成带 `check:` 的 Shell op、零引擎产品知识。
+- **实现要点**:
+  - 单次探针**兼任 `check:`**:条件已成立 → 整步 ok 跳过;`crater plan` 复用同一探针
+    (D-100 只读契约白得)。等到了报 changed("这步真等了")。
+  - 步骤经 `sh -c`(常是 dash)跑 → `/dev/tcp` 不可直用:探测链 `nc -z -w 2`(含
+    busybox)→ `bash -c 'exec 3<>/dev/tcp/…'` 兜底;两者皆无 → 一直失败 → 超时报错,
+    不会误判成功。
+  - `port`/`host` 过 `{{var}}` 渲染(端口常是 apply 参数);YAML 数字/字符串都收
+    (`de_opt_string_or_num`)。
+- **验证**:74 tests 绿(lowering:渲染/超时/负探针/port+path 互斥);rustfs verify 换用
+  `wait_for port {{port}}`(真机首启 ok、幂等 ok、plan 干净);负面用例等 19999 端口
+  3s 超时响亮失败。
+- **关联**:D-067(模块对齐 ansible)、D-100(plan 探针)、module-charter。

@@ -34,6 +34,7 @@ task 的每个动作(`action:`)调用一个**模块(module)**——和 Ansible �
 | `copy` | `dest`, `content` / `src` / `material` 三选一, `mode` | 写文件到目标:`content` 内联(渲染 {{var}});`src` 拷控制端文本文件(内联进 plan);`material` 引用 `materials:` 物料(二进制安全、arch 变体,在线目标机下载 `url_tmpl`、离线推 OCI blob,D-034/D-090)。sha256 幂等 | Ansible 把 `get_url` 与 `copy` 分开;crater 用一个 `copy` 统一,来源由字段定 |
 | `file` | `path`, `state`(directory/absent/touch), `mode`, `owner`, `group` | 管路径状态:建目录 / 删 / touch | `file` |
 | `service` | `name`, `state`(started/stopped/restarted), `enabled` | 管 systemd 服务(自带 daemon-reload + enable + start/stop/restart,is-active/is-enabled 幂等) | `service`/`systemd` |
+| `wait_for` | `port` / `path` 二选一, `host`, `state`, `timeout`, `delay` | 等端口开/关、路径出现/消失;已成立跳过(ok),超时响亮失败(D-104) | `wait_for` |
 | `lineinfile` | `path`, `line`, `regexp`, `state`, `create` | 确保某行存在/不存在(grep 探针幂等) | `lineinfile` |
 | `user` | `name`, `state`, `system`, `shell`, `home`, `groups` | 确保系统用户存在/不存在(`id` 探针) | `user` |
 | `group` | `name`, `state`, `system` | 确保系统组存在/不存在(`getent` 探针) | `group` |

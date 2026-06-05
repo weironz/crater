@@ -173,7 +173,8 @@ ansible-aligned: shell(cmd,check), package(packages:{debian:[..],rhel:[..]}),
   unarchive(to, material, strip, creates), template(material, dst),
   copy(dest, content OR src, mode), file(path,state,mode),
   service(name,state,enabled), lineinfile(path,line,regexp),
-  user(name,...), group(name,...), role(uses,with).
+  user(name,...), group(name,...), role(uses,with),
+  wait_for(port OR path, host, state, timeout, delay).
 crater-specific (offline/material model): place(material,dest,mode),
   load_image(material OR materials:[..], namespace, runtime).
 Note: `copy` writes a file — give `content` (inline text) or `src` (a control-side

@@ -17,6 +17,7 @@ task 的每个动作(`action:`)调用一个**模块**——引擎内置的最小
 | [package](package.md) | 装系统包,离线走 os_package 物料闭包 | `package`/`apt`/`yum` |
 | [unarchive](unarchive.md) | 解压:物料直取或目标机已有文件 | `unarchive` |
 | [service](service.md) | systemd 服务:enable/start/stop/restart | `service`/`systemd` |
+| [wait_for](wait_for.md) | 等端口开/关、路径出现/消失,超时响亮失败 | `wait_for` |
 | [lineinfile](lineinfile.md) | 确保某行存在/不存在 | `lineinfile` |
 | [user](user.md) | 系统用户存在/不存在 | `user` |
 | [group](group.md) | 系统组存在/不存在 | `group` |
