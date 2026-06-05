@@ -47,23 +47,21 @@ materials:
     url_tmpl: "https://github.com/rustfs/rustfs/releases/download/{{version}}/rustfs-linux-aarch64-musl-v{{version}}.zip"
     unzip: rustfs
 actions:
-  - id: port_free
-    # 只问一个事实:{{port}} 上监听的进程是谁(ss -p 给进程名)。
-    #   没人听            → 放行(全新安装 / 服务没起)
-    #   听者叫 rustfs     → 放行(幂等重跑,自己占着)
-    #   听者是别人        → 响亮拒绝(典型:旧容器化部署的 docker-proxy 还占着,
-    #                       它会冒名顶替答 200,而新服务 Address-in-use 崩)
-    # 不看 systemctl is-active:服务"在跑"不等于"占着这个端口"——改 port 参数
-    # 重 apply 时服务还听着旧端口,新端口被谁占着只有 ss 知道。
-    action: shell
+  # 端口闸(wait_for state: stopped,对齐 ansible 同款用法):被占就直接退,
+  # 不管占用者是谁(严格语义)。S3 口与控制台口(上游默认 9001)都查——
+  # 旧容器化部署映射的是 9000-9001 两个口,只查一个会漏半截。
+  - id: port_s3_free
+    action: wait_for
+    port: "{{port}}"
+    state: stopped
+    timeout: 3
     phase: preflight
-    cmd: |
-      out=$(ss -Hntlp "sport = :{{port}}" 2>/dev/null)
-      [ -z "$out" ] && exit 0
-      case "$out" in *'"rustfs"'*) exit 0 ;; esac
-      echo "端口 {{port}} 已被其它进程占用——先清掉占用者(旧容器化部署用 docker rm -f rustfs):" >&2
-      echo "$out" >&2
-      exit 1
+  - id: port_console_free
+    action: wait_for
+    port: 9001
+    state: stopped
+    timeout: 3
+    phase: preflight
   - id: nodes_resolvable
     # 多机多盘:volumes 是 http://node{1...4}:9000/... ,每台都必须能解析
     # 其它节点的主机名,否则集群无法组建(官方要求 /etc/hosts 或 DNS)。

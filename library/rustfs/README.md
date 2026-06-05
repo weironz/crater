@@ -28,14 +28,15 @@ just push                                            # 构建 OCI 制品并推 r
   一个制品推 x86 机群和 ARM 机群都行,apply 按目标 `uname -m` 自动选。
 - 本机数据目录从 `volumes` **推导**(展开 `{a...b}`、剥 `http://host:port` 前缀),
   多机形态每节点本地盘路径相同(官方 MNMD 约定)。
-- preflight 两道闸,都是真坑:**端口未被外人占**(典型:旧容器化部署的 rustfs
-  还在跑——它会冒名顶替答 200,必须先 `docker rm -f rustfs`);多机主机名全部可解析
-  (纯 IP 跳过)。verify 先 `wait_for` 等端口开门(D-104),再核 `systemctl is-active`
-  身份、探 `/health`。
+- preflight 端口闸(`wait_for state: stopped`,D-104):9000(S3)与 9001(控制台)
+  **被占就直接拒**,不管占用者是谁(严格语义)。这意味着**对在跑实例重复 apply 也会
+  被自己占的端口拒掉**——要改配置/重铺,先 `crater delete`(teardown 不走此闸)或
+  `systemctl stop rustfs` 再 apply。多机主机名解析照查(纯 IP 跳过)。
+  verify 先 `wait_for` 等端口开门,再核 `systemctl is-active` 身份、探 `/health`。
 - 端口:S3 端点 `:9000`(`port` 参数),Web 控制台 `:9001`(上游默认,路径
   `/rustfs/console/`);日志 `/var/logs/rustfs/`(上游约定路径)。
 - 凭据默认非上游默认值(`crater-admin`/`crater-changeme`),生产用 inventory `vars:`
-  或 `--set` 覆盖(D-082);改凭据/端口/volumes → notify 自动重启收敛。
+  或 `--set` 覆盖(D-082)。
 - `bypass_disk_check=true` 对应上游 `RUSTFS_UNSAFE_BYPASS_DISK_CHECK`:多盘目录落在
   **同一块物理盘**时(测试 VM)必需,生产保持 false——rustfs 会拒绝同盘多目录组纠删码。
 - 版本:`version` 是 build 参数(GitHub release tag,默认 `1.0.0-beta.7`);
@@ -45,8 +46,7 @@ just push                                            # 构建 OCI 制品并推 r
 
 - **多机首启竞态**:首次 apply 时 config/unit 必然 changed → run 末 handler 重启服务,
   多台重启时刻不完全同步,可能撞上集群初始格式化窗口报 `inconsistent drive found`。
-  补救:全节点 `systemctl stop rustfs` → 清空数据目录 → 同时 start(或重跑一遍 apply,
-  配置无变更不再触发重启)。
+  补救:全节点 `systemctl stop rustfs` → 清空数据目录 → 同时 start。
 - 多机形态要求时间同步(`timedatectl` 查)与节点间 9000 互通,官方建议 XFS、禁 NFS。
 
 真机验证(2026-06-05,Ubuntu 24.04 ×2):三形态 apply/幂等/plan/delete 全过;
