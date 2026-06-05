@@ -1,9 +1,12 @@
 # rustfs(task):S3 兼容对象存储,**二进制 + systemd 部署**(官方 Linux 安装路线)。
-# 三种形态同一份 yaml,由 volumes 一个参数驱动(与官方 RUSTFS_VOLUMES 语法 1:1):
-#   单机单盘  (默认)         volumes=/data/rustfs0
-#   单机多盘  --set volumes='/data/rustfs{0...3}'
-#   多机多盘  -i inv.yaml --set volumes='http://node{1...4}:9000/data/rustfs{0...3}'
-#             (volumes 里的每个节点都要在 inventory 里;主机名需可解析,preflight 会查)
+# 三种形态同一份 yaml,volumes(与官方 RUSTFS_VOLUMES 语法 1:1)+ data_dirs 两个
+# apply 参数驱动——环境配置进 inventory vars(D-082),不写进制品:
+#   单机单盘  (默认)volumes=/data/rustfs0
+#   单机多盘  volumes=/data/rustfs{0...3}                       + data_dirs 列全 4 目录
+#   多机多盘  volumes=http://node{1...4}:9000/data/rustfs{0...3} + data_dirs 列全(见
+#             inventory.example.yaml;节点主机名需各机可解析,时间需同步)
+# 显式优于推导:data_dirs 直接声明本机数据目录(空格分隔),不从 volumes 的
+# {a...b} 区间表达式反推——两者不一致时 rustfs 启动自会报错。
 # 上游只发 zip:物料声明 unzip: rustfs,控制端解包出二进制(D-103),目标机零依赖。
 # musl 静态二进制 + amd64/arm64 双物料变体 → 不需要 requires(发行版/架构都不限)。
 name: rustfs
@@ -15,6 +18,10 @@ params:
     stage: build
   volumes:
     description: RUSTFS_VOLUMES 表达式,决定单机单盘/单机多盘/多机多盘(见顶部注释)
+    default: "/data/rustfs0"
+    stage: apply
+  data_dirs:
+    description: 本机数据目录列表(空格分隔),与 volumes 的本地路径一致;多机时各节点同值
     default: "/data/rustfs0"
     stage: apply
   port:
@@ -56,27 +63,7 @@ actions:
     state: stopped
     timeout: 3
     phase: preflight
-    loop: ["{{port}}", 9001]
-  - id: nodes_resolvable
-    # 多机多盘:volumes 是 http://node{1...4}:9000/... ,每台都必须能解析
-    # 其它节点的主机名,否则集群无法组建(官方要求 /etc/hosts 或 DNS)。
-    # 单机形态(无 http 前缀)直接通过。展开函数同 data_dirs,见其注释。
-    action: shell
-    phase: preflight
-    cmd: |
-      case '{{volumes}}' in http*) ;; *) exit 0 ;; esac
-      expand() { local pre rest range post i e; case "$1" in
-        *\{*...*\}*) pre=${1%%\{*}; rest=${1#*\{}; range=${rest%%\}*}; post=${rest#*\}}
-          i=${range%%.*}; e=${range##*.}
-          while [ "$i" -le "$e" ]; do expand "$pre$i$post"; i=$((i+1)); done ;;
-        *) printf '%s\n' "$1" ;;
-      esac; }
-      miss=''
-      for h in $(for v in '{{volumes}}'; do expand "$v"; done | sed -E 's|^https?://||; s|[:/].*||' | sort -u); do
-        case "$h" in *[!0-9.]*) ;; *) continue ;; esac   # 纯 IP 字面量无需解析
-        getent hosts "$h" >/dev/null 2>&1 || miss="$miss $h"
-      done
-      [ -z "$miss" ] || { echo "无法解析节点:$miss(补 /etc/hosts 或 DNS 后重试)" >&2; exit 1; }
+    loop: [9000, 9001]
   - id: binary
     action: copy
     material: rustfs-bin
@@ -84,29 +71,10 @@ actions:
     mode: "0755"
     notify: [restart_rustfs]
   - id: data_dirs
-    # 本机数据目录从 volumes 推导:展开 {a...b} 区间、剥掉 http://host:port
-    # 前缀(多机形态下每个节点的本地盘路径相同,这正是官方 MNMD 的约定)。
-    # POSIX sh,dash/bash 都可跑;mkdir -p 幂等,check 探所有目录已存在。
+    # data_dirs 是声明好的目录列表(空格分隔,shell 自然分词),不做任何推导。
     action: shell
-    cmd: |
-      expand() { local pre rest range post i e; case "$1" in
-        *\{*...*\}*) pre=${1%%\{*}; rest=${1#*\{}; range=${rest%%\}*}; post=${rest#*\}}
-          i=${range%%.*}; e=${range##*.}
-          while [ "$i" -le "$e" ]; do expand "$pre$i$post"; i=$((i+1)); done ;;
-        *) printf '%s\n' "$1" ;;
-      esac; }
-      for v in '{{volumes}}'; do expand "$v"; done | sed -E 's|^https?://[^/]*||' | sort -u |
-      while read -r d; do mkdir -p "$d" && chmod 750 "$d"; done
-    check: |
-      expand() { local pre rest range post i e; case "$1" in
-        *\{*...*\}*) pre=${1%%\{*}; rest=${1#*\{}; range=${rest%%\}*}; post=${rest#*\}}
-          i=${range%%.*}; e=${range##*.}
-          while [ "$i" -le "$e" ]; do expand "$pre$i$post"; i=$((i+1)); done ;;
-        *) printf '%s\n' "$1" ;;
-      esac; }
-      for d in $(for v in '{{volumes}}'; do expand "$v"; done | sed -E 's|^https?://[^/]*||' | sort -u); do
-        test -d "$d" || exit 1
-      done
+    cmd: "mkdir -p {{data_dirs}} && chmod 750 {{data_dirs}}"
+    check: "for d in {{data_dirs}}; do test -d \"$d\" || exit 1; done"
   - id: log_dir
     action: file
     path: /var/logs/rustfs
@@ -198,13 +166,5 @@ teardown:
   - id: rm_data
     # 对象数据(运行期长出来的)也删 —— delete 即彻底卸载;只想停服务别用 delete。
     action: shell
-    cmd: |
-      expand() { local pre rest range post i e; case "$1" in
-        *\{*...*\}*) pre=${1%%\{*}; rest=${1#*\{}; range=${rest%%\}*}; post=${rest#*\}}
-          i=${range%%.*}; e=${range##*.}
-          while [ "$i" -le "$e" ]; do expand "$pre$i$post"; i=$((i+1)); done ;;
-        *) printf '%s\n' "$1" ;;
-      esac; }
-      for v in '{{volumes}}'; do expand "$v"; done | sed -E 's|^https?://[^/]*||' | sort -u |
-      while read -r d; do rm -rf "$d"; done
+    cmd: "rm -rf {{data_dirs}}"
     needs: [svc_off]

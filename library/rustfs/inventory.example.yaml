@@ -1,0 +1,25 @@
+# rustfs 多机多盘(MNMD)示范 inventory:4 节点 × 4 盘,"16+EC:4" 纠删码。
+# 复制改成你的机器,然后一条命令拉起整个集群(零 --set):
+#   crater apply rustfs -i my-inventory.yaml
+#
+# 环境配置全部走 inventory vars(D-082),制品保持环境无关:
+#   volumes   官方 RUSTFS_VOLUMES 语法,所有节点同值(多机约定)
+#   data_dirs 每节点本机数据目录(空格分隔),与 volumes 的本地路径一致
+#
+# 前置要求(官方):
+#   - volumes 里的主机名(node1..node4)在**每台节点**都可解析(/etc/hosts 或 DNS);
+#     用 IP 区间(如 http://10.0.0.{1...4}:9000/...)则免解析
+#   - 各节点时间同步(timedatectl 查);节点间 9000 互通
+#   - 每个数据目录独立物理盘,推荐 XFS,严禁 NFS;同盘多目录仅测试可用
+#     (vars 加 bypass_disk_check: "true")
+inventory:
+  vars:
+    volumes: "http://node{1...4}:9000/data/rustfs{0...3}"
+    data_dirs: "/data/rustfs0 /data/rustfs1 /data/rustfs2 /data/rustfs3"
+    access_key: "change-me-ak"        # 生产务必改(D-082)
+    secret_key: "change-me-sk"
+  hosts:
+    - { name: node1, address: 10.0.0.1, user: root, password: "changeme" }
+    - { name: node2, address: 10.0.0.2, user: root, password: "changeme" }
+    - { name: node3, address: 10.0.0.3, user: root, password: "changeme" }
+    - { name: node4, address: 10.0.0.4, user: root, password: "changeme" }
