@@ -48,17 +48,22 @@ materials:
     unzip: rustfs
 actions:
   - id: port_free
-    # 端口被"别人"占(比如旧容器化部署的 rustfs)→ 服务会 Address-in-use 崩,
-    # 而 health 探针还被冒名顶替返回 200 —— 必须在动手前响亮拒绝。
-    # 自己的 rustfs.service 在跑 = 重复 apply,放行。
+    # 只问一个事实:{{port}} 上监听的进程是谁(ss -p 给进程名)。
+    #   没人听            → 放行(全新安装 / 服务没起)
+    #   听者叫 rustfs     → 放行(幂等重跑,自己占着)
+    #   听者是别人        → 响亮拒绝(典型:旧容器化部署的 docker-proxy 还占着,
+    #                       它会冒名顶替答 200,而新服务 Address-in-use 崩)
+    # 不看 systemctl is-active:服务"在跑"不等于"占着这个端口"——改 port 参数
+    # 重 apply 时服务还听着旧端口,新端口被谁占着只有 ss 知道。
     action: shell
     phase: preflight
     cmd: |
-      systemctl is-active --quiet rustfs && exit 0
-      if ss -ntl 2>/dev/null | grep -q ":{{port}} "; then
-        echo "端口 {{port}} 已被其它进程占用(rustfs.service 未在跑)——先清掉占用者(旧容器化部署用 docker rm -f rustfs)" >&2
-        exit 1
-      fi
+      out=$(ss -Hntlp "sport = :{{port}}" 2>/dev/null)
+      [ -z "$out" ] && exit 0
+      case "$out" in *'"rustfs"'*) exit 0 ;; esac
+      echo "端口 {{port}} 已被其它进程占用——先清掉占用者(旧容器化部署用 docker rm -f rustfs):" >&2
+      echo "$out" >&2
+      exit 1
   - id: nodes_resolvable
     # 多机多盘:volumes 是 http://node{1...4}:9000/... ,每台都必须能解析
     # 其它节点的主机名,否则集群无法组建(官方要求 /etc/hosts 或 DNS)。
