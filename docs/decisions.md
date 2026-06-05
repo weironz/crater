@@ -1273,3 +1273,16 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   `wait_for port {{port}}`(真机首启 ok、幂等 ok、plan 干净);负面用例等 19999 端口
   3s 超时响亮失败。
 - **关联**:D-067(模块对齐 ansible)、D-100(plan 探针)、module-charter。
+
+### D-104 补:库内推广(zot 循环替换 + k8s-ha wait_lb)
+
+- **zot**:verify 的 `for i in $(seq 1 15)` curl 循环 → `wait_for port 5000` + 单次
+  `/v2/` 检查(真机 73.11:首启 ok、幂等 changed=0;73.12 的基础设施 zot 未动)。
+- **k8s-ha**:补了一个**该等没等**的真空窗——`svc_keepalived` restart 后 VIP 漂移要
+  一两秒,而 init/cp_join 都走 `--control-plane-endpoint`(VIP:8443)。新增 `wait_lb`
+  (`wait_for port 8443 host {{vip}}`,haproxy 不论后端死活都先监听,TCP 通 = VIP 在位
+  + haproxy 在跑),init/cp_join 改 needs 它。worker 不需要:`worker_join` 等的 join
+  fact 在 init 完成后才发布,彼时 VIP 必在。**HA 全链路未真机重验**(73.13 关机,三节点
+  不齐):dry-run 校验 plan 形态(渲染/排序/三台都有)+ 单测;73.13 回来后跑一遍即可。
+- 其余 task(k8s-online/offline、mysql、docker)无手搓等待:kubeadm 自带阻塞重试,
+  不叠加冗余 wait。

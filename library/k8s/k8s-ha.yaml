@@ -362,6 +362,17 @@ actions:
     enabled: true
     when_role: [controlplane]
     needs: [keepalived_iface, svc_haproxy]
+  # LB 真就绪再动 kubeadm(wait_for,D-104):keepalived restart 后 VIP 漂移要一两秒,
+  # 而 init / cp_join 都走 --control-plane-endpoint(VIP:8443)。haproxy 不论后端死活
+  # 都先监听 8443,所以 TCP 通 = VIP 在位 + haproxy 在跑,堵住"init 撞上 VIP 未就位"
+  # 的窗口。worker 不需要:worker_join 等的 join fact 在 init 完成后才发布,彼时 VIP 必在。
+  - id: wait_lb
+    action: wait_for
+    port: 8443
+    host: "{{vip}}"
+    timeout: 30
+    when_role: [controlplane]
+    needs: [svc_keepalived]
 
   # ========== init 节点:controlplane 第一台(run_once,D-077)==========
   # 无独立 bootstrap 角色:run_once 取 controlplane 组首台作 init 节点(kubeadm init);
@@ -370,7 +381,7 @@ actions:
     action: shell
     when_role: [controlplane]
     run_once: true
-    needs: [svc_kubelet, svc_keepalived, load_images]
+    needs: [svc_kubelet, wait_lb, load_images]
     cmd: "kubeadm init --control-plane-endpoint {{control_plane_endpoint}} --upload-certs --pod-network-cidr={{pod_cidr}} --image-repository {{image_repo}} --kubernetes-version v{{version}} --cri-socket=unix:///run/containerd/containerd.sock"
     check: "test -f /etc/kubernetes/admin.conf"
   - id: kubeconfig
@@ -413,7 +424,7 @@ actions:
     # needs kubeadm_init: on the init node this orders cp_join AFTER init so its
     # check (kubelet.conf exists) skips it; on the other masters kubeadm_init is
     # run_once-filtered, so the need is auto-satisfied and cp_join runs (D-077).
-    needs: [svc_kubelet, svc_keepalived, load_images, kubeadm_init]
+    needs: [svc_kubelet, wait_lb, load_images, kubeadm_init]
     cmd: "{{hostvars.controlplane.join}} --control-plane --certificate-key {{hostvars.controlplane.certkey}} --cri-socket=unix:///run/containerd/containerd.sock"
     check: "test -f /etc/kubernetes/kubelet.conf"
   - id: master_kubeconfig

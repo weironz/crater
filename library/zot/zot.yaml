@@ -42,11 +42,18 @@ actions:
     state: started
     enabled: true
     needs: [unit]
+  - id: wait_ready
+    # 等 registry 开门(wait_for,D-104);端口随 files/config.json(5000)。
+    action: wait_for
+    port: 5000
+    timeout: 15
+    phase: verify
+    needs: [svc]
   - id: verify
     action: shell
     phase: verify
-    cmd: "for i in $(seq 1 15); do curl -sf http://localhost:5000/v2/ -o /dev/null && break; sleep 1; done; curl -s -o /dev/null -w 'zot /v2/ -> %{http_code}\\n' http://localhost:5000/v2/"
-    needs: [svc]
+    cmd: "curl -s -o /dev/null -w 'zot /v2/ -> %{http_code}\\n' http://localhost:5000/v2/"
+    needs: [wait_ready]
 handlers:
   - id: restart_zot
     action: service
