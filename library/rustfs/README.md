@@ -28,7 +28,7 @@ just push                                            # 构建 OCI 制品并推 r
   一个制品推 x86 机群和 ARM 机群都行,apply 按目标 `uname -m` 自动选。
 - 本机数据目录从 `volumes` **推导**(展开 `{a...b}`、剥 `http://host:port` 前缀),
   多机形态每节点本地盘路径相同(官方 MNMD 约定)。
-- preflight 三道闸:systemd 可用;**端口未被外人占**(典型:旧容器化部署的 rustfs
+- preflight 两道闸,都是真坑:**端口未被外人占**(典型:旧容器化部署的 rustfs
   还在跑——它会冒名顶替答 200,必须先 `docker rm -f rustfs`);多机主机名全部可解析
   (纯 IP 跳过)。verify 先核 `systemctl is-active` 身份再探 `/health`。
 - 端口:S3 端点 `:9000`(`port` 参数),Web 控制台 `:9001`(上游默认,路径

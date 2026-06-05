@@ -47,10 +47,6 @@ materials:
     url_tmpl: "https://github.com/rustfs/rustfs/releases/download/{{version}}/rustfs-linux-aarch64-musl-v{{version}}.zip"
     unzip: rustfs
 actions:
-  - id: systemd_ready
-    action: shell
-    phase: preflight
-    cmd: "command -v systemctl >/dev/null 2>&1 || { echo 'systemd 不可用:本 task 以 systemd 托管 rustfs' >&2; exit 1; }"
   - id: port_free
     # 端口被"别人"占(比如旧容器化部署的 rustfs)→ 服务会 Address-in-use 崩,
     # 而 health 探针还被冒名顶替返回 200 —— 必须在动手前响亮拒绝。
