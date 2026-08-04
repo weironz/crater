@@ -15,7 +15,11 @@ _*.txt
 _*.log
 
 # Editors / OS / tooling
-.claude/
+# .claude/ 默认忽略,但项目级共享配置(settings.json / skills)入库;
+# settings.local.json 等本机私有配置继续排除
+.claude/*
+!.claude/settings.json
+!.claude/skills/
 .idea/
 .vscode/
 .DS_Store
@@ -31,3 +35,6 @@ Thumbs.db
 *.swp
 *.swo
 *~
+# Added by code-review-graph
+.code-review-graph/
+.env
