@@ -1,0 +1,315 @@
+//! 机群视角 —— `on:` selector 判定的依据。
+//!
+//! 在此之前引擎是**逐台独立**跑的:每台机器互不知情,于是 `on:` 只能被忽略
+//! (真 bug:写了 `on: role.controlplane` 的资源会在**每一台**机器上跑)。
+//! `first()` / `rest()` 更是无从谈起 —— 它们需要跨主机的**稳定序**。
+//!
+//! 这里只放**静态成员信息**(名字 + 组),它从 inventory 就能得到,不必连机器。
+//! 与之相对,`substrate.*` 是连上之后才知道的单机事实,住在 [`Scope`](crate::eval::Scope) 里。
+
+use std::collections::BTreeSet;
+
+use crate::eval::Scope;
+use crate::selector::Selector;
+
+/// 机群里的一台。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    pub name: String,
+    /// 它属于哪些组(inventory 的 groups 推导而来)。
+    pub roles: Vec<String>,
+}
+
+impl Member {
+    pub fn new(name: impl Into<String>, roles: &[&str]) -> Self {
+        Member {
+            name: name.into(),
+            roles: roles.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+    pub fn in_role(&self, role: &str) -> bool {
+        self.roles.iter().any(|r| r == role)
+    }
+}
+
+/// 一次部署面向的全部目标。**顺序即 inventory 声明序** ——
+/// `first()` 的语义全靠它稳定:同一份 inventory 每次跑都选中同一台。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Fleet {
+    pub members: Vec<Member>,
+    /// inventory **声明过**的组名 —— 与"有成员的组"不是一回事。
+    ///
+    /// 单节点拓扑里 `worker: { hosts: [] }` 是合法且常见的:组存在,只是空的。
+    /// 不单独记下来的话,它与拼错的组名无从分辨,合法拓扑会被当成错误拒绝。
+    pub declared_roles: BTreeSet<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SelectError {
+    /// blueprint 要求的组在 inventory 里不存在。
+    ///
+    /// 这必须是**错误而非静默跳过**:否则一个拼错的组名会让整段资源悄悄不执行,
+    /// 而 plan 看起来一切正常 —— 那是最难查的一类故障。
+    UnknownRole { role: String, known: Vec<String> },
+    /// `first()` / `rest()` 里嵌了 `where`。
+    Nested(String),
+    Eval(String),
+}
+
+impl std::fmt::Display for SelectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SelectError::UnknownRole { role, known } => {
+                write!(f, "selector 引用了组 `{role}`,但目标里没有这个组")?;
+                if known.is_empty() {
+                    write!(f, "(当前目标未定义任何组 —— 需要 `-i inventory.yaml`)")
+                } else {
+                    write!(f, "(已知的组:{})", known.join(", "))
+                }
+            }
+            SelectError::Nested(s) => write!(
+                f,
+                "`{s}`:first()/rest() 需要跨主机的稳定序,而 `where` 条件依赖\
+                 单机事实(连上才知道),无法在机群层判定 —— 把 `where` 移到最外层"
+            ),
+            SelectError::Eval(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for SelectError {}
+
+impl Fleet {
+    /// 组集合从成员推导 —— 适合测试与没有显式 inventory 的场景。
+    pub fn new(members: Vec<Member>) -> Self {
+        let declared_roles = members.iter().flat_map(|m| m.roles.iter().cloned()).collect();
+        Fleet { members, declared_roles }
+    }
+
+    /// 带上 inventory **显式声明**的组(含空组)。
+    pub fn with_declared_roles(mut self, roles: impl IntoIterator<Item = String>) -> Self {
+        self.declared_roles.extend(roles);
+        self
+    }
+
+    /// 单机场景(没有 inventory):一台无组成员。
+    pub fn single(name: impl Into<String>) -> Self {
+        Fleet::new(vec![Member::new(name, &[])])
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Member> {
+        self.members.iter().find(|m| m.name == name)
+    }
+
+    fn known_roles(&self) -> Vec<String> {
+        self.declared_roles.iter().cloned().collect()
+    }
+
+    /// 这台机器是否被 `sel` 选中。
+    ///
+    /// `scope` 提供 `where` 子句所需的单机事实;`first`/`rest` 只看静态成员信息。
+    pub fn matches(&self, sel: &Selector, host: &str, scope: &Scope) -> Result<bool, SelectError> {
+        match sel {
+            Selector::All => Ok(true),
+            Selector::Host(h) => Ok(h == host),
+            Selector::Role(r) => {
+                self.assert_known_role(r)?;
+                Ok(self.get(host).is_some_and(|m| m.in_role(r)))
+            }
+            Selector::First(inner) => {
+                let picked = self.static_select(inner)?;
+                Ok(picked.first().is_some_and(|m| m.name == host))
+            }
+            Selector::Rest(inner) => {
+                let picked = self.static_select(inner)?;
+                Ok(picked.iter().skip(1).any(|m| m.name == host))
+            }
+            Selector::Where(inner, cond) => {
+                if !self.matches(inner, host, scope)? {
+                    return Ok(false);
+                }
+                scope.eval_bool(cond).map_err(SelectError::Eval)
+            }
+        }
+    }
+
+    /// 仅按**静态**信息(组 / 名字)取子集,保持机群顺序。
+    /// 供 `first()`/`rest()` 使用 —— 它们必须在不连机器的前提下也说得清选中谁。
+    pub fn static_select(&self, sel: &Selector) -> Result<Vec<&Member>, SelectError> {
+        match sel {
+            Selector::All => Ok(self.members.iter().collect()),
+            Selector::Host(h) => Ok(self.members.iter().filter(|m| &m.name == h).collect()),
+            Selector::Role(r) => {
+                self.assert_known_role(r)?;
+                Ok(self.members.iter().filter(|m| m.in_role(r)).collect())
+            }
+            Selector::First(inner) => Ok(self.static_select(inner)?.into_iter().take(1).collect()),
+            Selector::Rest(inner) => Ok(self.static_select(inner)?.into_iter().skip(1).collect()),
+            Selector::Where(_, _) => Err(SelectError::Nested(sel.to_string())),
+        }
+    }
+
+    fn assert_known_role(&self, role: &str) -> Result<(), SelectError> {
+        // 判据是"**声明过**吗",不是"有成员吗" —— 空组是合法拓扑,不是笔误。
+        if self.declared_roles.contains(role) {
+            return Ok(());
+        }
+        Err(SelectError::UnknownRole {
+            role: role.to_string(),
+            known: self.known_roles(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eval::Yaml;
+    use std::collections::BTreeMap;
+
+    fn fleet() -> Fleet {
+        // 顺序即 inventory 声明序 —— first() 的全部依据。
+        Fleet::new(vec![
+            Member::new("n11", &["controlplane", "k8s_cluster"]),
+            Member::new("n12", &["controlplane", "k8s_cluster"]),
+            Member::new("n13", &["controlplane", "k8s_cluster"]),
+            Member::new("w01", &["worker", "k8s_cluster"]),
+        ])
+    }
+
+    fn sel(s: &str) -> Selector {
+        Selector::parse(s).unwrap()
+    }
+
+    fn scope_with_arch(arch: &str) -> Scope {
+        let mut substrate = BTreeMap::new();
+        substrate.insert("arch".to_string(), Yaml::from(arch));
+        Scope { substrate, ..Default::default() }
+    }
+
+    fn hits(f: &Fleet, s: &str) -> Vec<String> {
+        f.members
+            .iter()
+            .filter(|m| f.matches(&sel(s), &m.name, &Scope::default()).unwrap())
+            .map(|m| m.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn all_selects_everyone() {
+        assert_eq!(hits(&fleet(), "all").len(), 4);
+    }
+
+    #[test]
+    fn role_selects_only_group_members() {
+        // 这就是那个真 bug 的反面:此前 `on: role.worker` 会在**四台**上都跑。
+        assert_eq!(hits(&fleet(), "role.worker"), vec!["w01"]);
+        assert_eq!(hits(&fleet(), "role.controlplane"), vec!["n11", "n12", "n13"]);
+    }
+
+    #[test]
+    fn host_selects_exactly_one() {
+        assert_eq!(hits(&fleet(), "host.n12"), vec!["n12"]);
+    }
+
+    #[test]
+    fn first_and_rest_partition_a_group_in_declaration_order() {
+        // HA 场景的核心:首台 init,其余 join。旧模型只能"全组跑 + check 守卫跳过首台"。
+        assert_eq!(hits(&fleet(), "first(role.controlplane)"), vec!["n11"]);
+        assert_eq!(hits(&fleet(), "rest(role.controlplane)"), vec!["n12", "n13"]);
+    }
+
+    #[test]
+    fn first_and_rest_are_complementary_and_exhaustive() {
+        let f = fleet();
+        let a = hits(&f, "first(role.controlplane)");
+        let b = hits(&f, "rest(role.controlplane)");
+        let mut all: Vec<String> = a.iter().chain(b.iter()).cloned().collect();
+        all.sort();
+        assert_eq!(all, vec!["n11", "n12", "n13"], "不重不漏");
+    }
+
+    #[test]
+    fn first_of_a_single_member_group_leaves_rest_empty() {
+        // 单 master:first 选中它,rest 为空 —— join 步骤自然不执行。
+        assert_eq!(hits(&fleet(), "first(role.worker)"), vec!["w01"]);
+        assert!(hits(&fleet(), "rest(role.worker)").is_empty());
+    }
+
+    #[test]
+    fn where_filters_on_per_host_facts() {
+        let f = fleet();
+        let s = sel("role.controlplane where substrate.arch == 'arm64'");
+        assert!(f.matches(&s, "n11", &scope_with_arch("arm64")).unwrap());
+        assert!(!f.matches(&s, "n11", &scope_with_arch("amd64")).unwrap());
+        // 组不匹配时短路,不必求值
+        assert!(!f.matches(&s, "w01", &scope_with_arch("arm64")).unwrap());
+    }
+
+    #[test]
+    fn a_declared_but_empty_group_selects_nobody_without_erroring() {
+        // 单节点拓扑:inventory 写了 `worker: { hosts: [] }`。
+        // 组存在、只是空的 —— 这是合法配置,不该被当成拼错的组名拒绝。
+        let f = Fleet::new(vec![Member::new("n1", &["controlplane"])])
+            .with_declared_roles(["worker".to_string()]);
+        assert!(!f.matches(&sel("role.worker"), "n1", &Scope::default()).unwrap());
+        assert!(f.static_select(&sel("role.worker")).unwrap().is_empty());
+        // 而首台仍然选得中
+        assert!(f
+            .matches(&sel("first(role.controlplane)"), "n1", &Scope::default())
+            .unwrap());
+    }
+
+    #[test]
+    fn an_unknown_group_is_an_error_not_a_silent_skip() {
+        // 拼错组名会让整段资源悄悄不执行,而 plan 看起来一切正常 ——
+        // 那是最难查的一类故障,必须当场报错。
+        let err = fleet()
+            .matches(&sel("role.controlplna"), "n11", &Scope::default())
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("controlplna"), "{msg}");
+        assert!(msg.contains("controlplane"), "要列出已知的组:{msg}");
+    }
+
+    #[test]
+    fn a_lone_localhost_says_it_has_no_groups_at_all() {
+        let f = Fleet::single("localhost");
+        assert!(f.matches(&sel("all"), "localhost", &Scope::default()).unwrap());
+        let msg = f
+            .matches(&sel("role.controlplane"), "localhost", &Scope::default())
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("需要 `-i inventory.yaml`"), "要给出下一步:{msg}");
+    }
+
+    #[test]
+    fn where_nested_inside_first_is_refused_with_a_reason() {
+        // first() 要在不连机器的前提下就说得清选中谁;where 依赖单机事实,做不到。
+        let err = fleet()
+            .matches(
+                &sel("first(role.controlplane where substrate.arch == 'amd64')"),
+                "n11",
+                &Scope::default(),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("移到最外层"), "{err}");
+    }
+
+    #[test]
+    fn static_select_preserves_fleet_order() {
+        let f = fleet();
+        let picked = f.static_select(&sel("role.k8s_cluster")).unwrap();
+        let names: Vec<&str> = picked.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["n11", "n12", "n13", "w01"]);
+    }
+
+    #[test]
+    fn a_host_not_in_the_fleet_matches_nothing_positional() {
+        let f = fleet();
+        assert!(!f.matches(&sel("role.worker"), "ghost", &Scope::default()).unwrap());
+        assert!(!f
+            .matches(&sel("first(role.controlplane)"), "ghost", &Scope::default())
+            .unwrap());
+    }
+}

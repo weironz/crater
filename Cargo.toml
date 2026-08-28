@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/crater-core", "crates/crater-cli"]
+members = ["crates/crater-core", "crates/crater-cli", "crates/crater-ir"]
 
 # Dev-build speed (D-079): cut debug-info volume (codegen + linker handle far less
 # data) while keeping backtraces; deps get no debug info at all — we never step

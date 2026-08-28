@@ -1,0 +1,88 @@
+# 试金石 ②(docs/research/ir-example-k8s.md)节选:考 Selector(first/rest)、
+# 跨主机 fact(exports)、自定义类型(cluster_member:状态在资源,舞在 procedure)。
+name: k8s-ha
+version: 1.36.1
+
+params:
+  version:     { type: version, default: "1.36.1", stage: build }
+  vip:         { type: ip, default: "192.168.73.14" }
+  cp_endpoint: { default: "192.168.73.14:8443" }
+  subnet:      { type: cidr, default: "192.168.73.0/24" }
+  pod_cidr:    { type: cidr, default: "10.244.0.0/16" }
+  image_repo:  { default: "registry.aliyuncs.com/google_containers" }
+
+requires:
+  os: [{ distro: ubuntu, versions: ["24.04"] }]
+  arch: [amd64]
+
+materials:
+  - name: kubeadm
+    file: "https://dl.k8s.io/release/v${params.version}/bin/linux/amd64/kubeadm"
+  - name: kubelet
+    file: "https://dl.k8s.io/release/v${params.version}/bin/linux/amd64/kubelet"
+  - name: kubectl
+    file: "https://dl.k8s.io/release/v${params.version}/bin/linux/amd64/kubectl"
+  - name: cfg-keepalived
+    file: files/keepalived.conf.j2
+  - name: img-apiserver
+    image: "${params.image_repo}/kube-apiserver:v${params.version}"
+
+types:
+  # 引擎不懂 kubeadm(D-017);五动词由探针 + procedure 补齐 = L2 数据模块层。
+  - name: cluster_member
+    args:
+      role: { type: { enum: [control-plane, worker] } }
+    observe:
+      cmd: "test -f /etc/kubernetes/kubelet.conf && echo joined || echo absent"
+      parse: { joined: joined }
+    apply: bootstrap
+    destroy: reset
+
+resources:
+  - hostname: "${substrate.name}"
+  - swap: { state: disabled, persist: true }
+  - kernel_modules: { load: [overlay, br_netfilter], persist: true }
+  - copy: { material: "${item}", dest: "/usr/local/bin/${item}", mode: "0755" }
+    each: [kubeadm, kubelet, kubectl]
+  - image_present: { materials: [img-apiserver], namespace: k8s.io }
+  - template: { material: cfg-keepalived, dest: /etc/keepalived/keepalived.conf }
+    on: role.controlplane
+  - service: { name: keepalived, state: started, enabled: true }
+    on: role.controlplane
+  - cluster_member: { role: control-plane }
+    on: role.controlplane
+  - cluster_member: { role: worker }
+    on: role.worker
+
+procedures:
+  bootstrap:
+    steps:
+      - wait: { port: 8443, host: "${params.vip}", timeout: 30 }
+        on: role.controlplane
+      - shell:
+          cmd: "kubeadm init --control-plane-endpoint ${params.cp_endpoint} --upload-certs --pod-network-cidr=${params.pod_cidr} --kubernetes-version v${params.version}"
+          check: "test -f /etc/kubernetes/admin.conf"
+        on: first(role.controlplane)
+        exports:
+          join: "kubeadm token create --print-join-command"
+          certkey: "kubeadm init phase upload-certs --upload-certs | tail -1"
+      - shell:
+          cmd: "${facts.join} --control-plane --certificate-key ${facts.certkey}"
+          check: "test -f /etc/kubernetes/kubelet.conf"
+        on: rest(role.controlplane)
+        strategy: { throttle: 1 }
+      - shell:
+          cmd: "${facts.join}"
+          check: "test -f /etc/kubernetes/kubelet.conf"
+        on: role.worker
+
+  reset:
+    steps:
+      - shell: { cmd: "kubeadm reset -f || true", check: "! test -f /etc/kubernetes/kubelet.conf" }
+      - shell:
+          cmd: "crictl rm -f $(crictl ps -aq) 2>/dev/null; pkill -9 containerd-shim; true"
+          check: "! pgrep containerd-shim"
+
+health:
+  - cmd: { run: "kubectl get nodes -o wide", env: { KUBECONFIG: /etc/kubernetes/admin.conf } }
+    on: first(role.controlplane)

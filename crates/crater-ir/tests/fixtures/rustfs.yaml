@@ -1,0 +1,59 @@
+# 试金石 ①(docs/research/ir-example-rustfs.md):S3 兼容对象存储,二进制 + systemd。
+# 对照物 library/rustfs/rustfs.yaml 143 行 —— 这里没有 id/needs/phase/notify/teardown。
+name: rustfs
+version: 1.0.0-beta.7
+description: S3 兼容对象存储(单盘/多盘/多机三形态)
+
+params:
+  version:    { type: version, default: "1.0.0-beta.7", stage: build, desc: RustFS release tag }
+  volumes:    { default: "/data/rustfs0", desc: RUSTFS_VOLUMES 表达式 }
+  data_dirs:  { type: [string], default: ["/data/rustfs0"], desc: 本机数据目录 }
+  port:       { type: port, default: 9000 }
+  access_key: { default: crater-admin }
+  secret_key: { default: crater-changeme, secret: true }
+  bypass_disk_check: { type: bool, default: false }
+
+materials:
+  - name: rustfs-bin
+    file: "https://github.com/rustfs/rustfs/releases/download/${params.version}/rustfs-linux-x86_64-musl-v${params.version}.zip"
+    unzip: rustfs
+    when: substrate.arch == 'amd64'
+  - name: rustfs-bin
+    file: "https://github.com/rustfs/rustfs/releases/download/${params.version}/rustfs-linux-aarch64-musl-v${params.version}.zip"
+    unzip: rustfs
+    when: substrate.arch == 'arm64'
+
+preflight:
+  - assert: "port_owner(9000) in ['', 'rustfs.service']"
+    msg: 9000 被非 rustfs 进程占用
+  - assert: "port_owner(9001) in ['', 'rustfs.service']"
+    msg: 9001 被非 rustfs 进程占用
+
+resources:
+  - file: { path: "${item}", state: directory, mode: "0750" }
+    each: params.data_dirs   # 表达式,与 when: 同语法
+  - file: { path: /var/logs/rustfs, state: directory, mode: "0750" }
+  - copy: { material: rustfs-bin, dest: /usr/local/bin/rustfs, mode: "0755" }
+  - copy:
+      dest: /etc/default/rustfs
+      mode: "0600"
+      content: |
+        RUSTFS_ACCESS_KEY=${params.access_key}
+        RUSTFS_SECRET_KEY=${params.secret_key}
+        RUSTFS_VOLUMES="${params.volumes}"
+        RUSTFS_ADDRESS=":${params.port}"
+        RUSTFS_UNSAFE_BYPASS_DISK_CHECK=${params.bypass_disk_check}
+  - systemd_unit:
+      name: rustfs
+      description: RustFS S3-compatible object storage (crater)
+      after: [network-online.target]
+      environment_file: /etc/default/rustfs
+      exec_start: /usr/local/bin/rustfs $RUSTFS_VOLUMES
+      restart: on-failure
+      limits: { NOFILE: 1048576 }
+  - service: { name: rustfs, state: started, enabled: true }
+
+health:
+  - service_active: rustfs
+  - http: { url: "http://localhost:${params.port}/health", status: 200 }
+    timeout: 30s
