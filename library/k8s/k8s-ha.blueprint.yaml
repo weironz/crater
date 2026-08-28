@@ -46,20 +46,32 @@ params:
 
 materials:
   # —— 二进制 ——
+  # 摘要取自各上游官方 checksum 文件,与上面的 *_ver 一一对应 ——
+  # 改版本必须同时改摘要,否则落地即失败(这正是内容寻址该有的样子)。
+  # 有了它,plan 期就能内容寻址比对,verify 不再只能报"说不清"。
   - name: containerd
     file: "https://github.com/containerd/containerd/releases/download/v${params.containerd_ver}/containerd-${params.containerd_ver}-linux-${substrate.arch}.tar.gz"
+    sha256: "628448bd973610c656c1cbea8e88b32fafd85b23cc1aa4a3372eb7198478c054"
   - name: runc
     file: "https://github.com/opencontainers/runc/releases/download/v${params.runc_ver}/runc.${substrate.arch}"
+    sha256: "ac8a90f9e225bb9322189937b230cdc5478d5753f0e31e1bda98a5cf06bd9539"
   - name: cni-plugins
     file: "https://github.com/containernetworking/plugins/releases/download/v${params.cni_ver}/cni-plugins-linux-${substrate.arch}-v${params.cni_ver}.tgz"
+    sha256: "b98f74a0f8522f0a83867178729c1aa70f2158f90c45a2ca8fa791db1c76b303"
   - name: crictl
     file: "https://github.com/kubernetes-sigs/cri-tools/releases/download/v${params.crictl_ver}/crictl-v${params.crictl_ver}-linux-${substrate.arch}.tar.gz"
+    sha256: "83855e114566a8a8c44c548d515670f51de3a5e1da8b2effb59870e2f10c25a3"
   - name: kubeadm
     file: "https://dl.k8s.io/release/v${params.version}/bin/linux/${substrate.arch}/kubeadm"
+    sha256: "f35980333a4dae753807345ae359eca03f48f9945855e6a6a6708fe8b3b24038"
   - name: kubelet
     file: "https://dl.k8s.io/release/v${params.version}/bin/linux/${substrate.arch}/kubelet"
+    sha256: "7efa1780c73d9fb3a464002864e582eb2d15aa691e475eaae323093d08feae14"
   - name: kubectl
     file: "https://dl.k8s.io/release/v${params.version}/bin/linux/${substrate.arch}/kubectl"
+    sha256: "629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7"
+  # flannel 上游未发布 checksum 文件 —— 无摘要可钉,于是它在 plan 期
+  # 无法内容寻址比对(verify 会如实报"说不清")。不编一个假的。
   - name: flannel-manifest
     file: "https://github.com/flannel-io/flannel/releases/download/v${params.flannel_ver}/kube-flannel.yml"
 

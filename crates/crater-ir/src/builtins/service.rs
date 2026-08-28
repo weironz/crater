@@ -258,6 +258,18 @@ impl ResourceType for SystemdUnit {
         if code != 0 {
             return Ok(Observed::absent());
         }
+        // unit 内容来自物料时,直接做内容寻址比对:目标上实际内容的摘要 vs
+        // 物料的摘要。此前这里只能报"说不清",而那正是 verify 唯一给不出
+        // 绿灯的原因 —— 能算出来的东西不该被当成算不出来。
+        if let Some(name) = arg_str_opt(args, "from_material") {
+            let actual = crate::builtins::copy::sha256_hex(&out);
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("sha256".to_string(), actual);
+            if let Some(want) = ctx.material_digest(name)? {
+                fields.insert("want_sha256".to_string(), want);
+            }
+            return Ok(Observed { present: true, fields });
+        }
         // 只解析我们会写的那几项 —— 别人手改的其它字段不该被我们判成"漂移"。
         let mut fields = std::collections::BTreeMap::new();
         for line in out.lines() {
@@ -274,13 +286,26 @@ impl ResourceType for SystemdUnit {
 
     fn diff(&self, input: &DiffInput) -> Change {
         if arg_str_opt(input.args, "from_material").is_some() {
-            // 内容在物料里,plan 期读不到 —— 如实说明,不猜。
-            return if !input.observed.present {
-                Change::Create(vec![FieldDiff::set("unit", "(来自物料)")])
-            } else if input.upstream_changed {
-                Change::Update(vec![FieldDiff::set("unit", "(物料已变)")])
-            } else {
-                Change::Unknown("`from_material` 的内容需在执行期才能与现实比对".into())
+            if !input.observed.present {
+                return Change::Create(vec![FieldDiff::set("unit", "(来自物料)")]);
+            }
+            return match input.observed.get("want_sha256") {
+                // 拿得到物料摘要就正经比对内容 —— 不再是一句"说不清"。
+                Some(want) if input.observed.get("sha256") == Some(want) => Change::Ok,
+                Some(want) => Change::Update(vec![FieldDiff::change(
+                    "unit",
+                    &input.observed.get("sha256").unwrap_or("?")[..12.min(
+                        input.observed.get("sha256").unwrap_or("?").len(),
+                    )],
+                    &want[..12.min(want.len())],
+                )]),
+                // 远端物料且未声明 sha256 —— 此刻确实算不出来,如实说。
+                None if input.upstream_changed => {
+                    Change::Update(vec![FieldDiff::set("unit", "(物料已变)")])
+                }
+                None => Change::Unknown(
+                    "物料未声明 `sha256:` 且内容在远端 —— 无法在 plan 期比对".into(),
+                ),
             };
         }
         let desired = rendered_fields(input.args);
@@ -486,6 +511,75 @@ mod unit_tests {
         let obs = SystemdUnit.observe(&ctx, &args()).unwrap();
         assert_eq!(obs.get("execstart"), Some("/usr/local/bin/rustfs $VOL"));
         assert!(obs.fields.keys().all(|k| k != "memorymax"), "{:?}", obs.fields);
+    }
+
+    #[test]
+    fn a_unit_from_a_material_is_compared_by_content_not_declared_unknown() {
+        // 这曾是 verify 唯一给不出绿灯的原因:能算出来的东西被当成算不出来。
+        let body = "[Unit]\nDescription=demo\n";
+        let mut a = ResolvedArgs::new();
+        a.insert("name".into(), Yaml::from("demo"));
+        a.insert("from_material".into(), Yaml::from("unit-demo"));
+
+        let same = Observed {
+            present: true,
+            fields: [
+                ("sha256".to_string(), crate::builtins::copy::sha256_hex(body)),
+                ("want_sha256".to_string(), crate::builtins::copy::sha256_hex(body)),
+            ]
+            .into(),
+        };
+        assert_eq!(
+            SystemdUnit.diff(&DiffInput { args: &a, observed: &same, upstream_changed: false }),
+            Change::Ok,
+            "内容一致就该是 ✓,不是 ?"
+        );
+
+        let drifted = Observed {
+            present: true,
+            fields: [
+                ("sha256".to_string(), crate::builtins::copy::sha256_hex("changed by hand")),
+                ("want_sha256".to_string(), crate::builtins::copy::sha256_hex(body)),
+            ]
+            .into(),
+        };
+        let c = SystemdUnit.diff(&DiffInput {
+            args: &a,
+            observed: &drifted,
+            upstream_changed: false,
+        });
+        assert!(matches!(c, Change::Update(_)), "{c:?}");
+    }
+
+    #[test]
+    fn a_remote_material_without_a_declared_digest_still_says_it_cannot_tell() {
+        // 诚实的边界:算不出来的时候不许假装算得出来。
+        let mut a = ResolvedArgs::new();
+        a.insert("name".into(), Yaml::from("demo"));
+        a.insert("from_material".into(), Yaml::from("unit-demo"));
+        let obs = Observed {
+            present: true,
+            fields: [("sha256".to_string(), "abc".to_string())].into(),
+        };
+        assert!(matches!(
+            SystemdUnit.diff(&DiffInput { args: &a, observed: &obs, upstream_changed: false }),
+            Change::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn observing_a_material_backed_unit_hashes_what_is_actually_there() {
+        let body = "[Unit]\nDescription=demo\n";
+        let ctx = FakeCtx::new().on("cat", 0, body);
+        let mut a = ResolvedArgs::new();
+        a.insert("name".into(), Yaml::from("demo"));
+        a.insert("from_material".into(), Yaml::from("unit-demo"));
+        let obs = SystemdUnit.observe(&ctx, &a).unwrap();
+        assert_eq!(
+            obs.get("sha256"),
+            Some(crate::builtins::copy::sha256_hex(body).as_str())
+        );
+        assert!(ctx.writes().is_empty());
     }
 
     #[test]

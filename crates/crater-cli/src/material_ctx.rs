@@ -143,6 +143,32 @@ impl Ctx for MaterialCtx<'_> {
         self.inner.write_file(path, content)
     }
 
+    /// 三种情形,按可信度排序:
+    /// 1. blueprint 声明了 `sha256:` → 直接用(内容寻址的权威答案);
+    /// 2. 本地文件 / 已备好的 blob → 控制端读出来现算;
+    /// 3. 远端 URL 且没声明摘要 → **算不出来**,如实返回 None。
+    ///
+    /// 第 3 种不是失败:它让 plan 诚实地报"说不清",而不是猜一个。
+    fn material_digest(&self, name: &str) -> Result<Option<String>> {
+        let plan = materials::resolve(self.bp, name, &self.scope)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if let Some(declared) = &plan.sha256 {
+            return Ok(Some(declared.clone()));
+        }
+        let path = match self.blobs.get(name) {
+            Some(blob) => blob.clone(),
+            None if !is_remote(&plan.source) => self.base_dir.join(&plan.source),
+            None => return Ok(None),
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            return Ok(None);
+        };
+        // 只对文本算 —— 二进制走 OCI 闭包时会带自己的 digest。
+        Ok(String::from_utf8(bytes)
+            .ok()
+            .map(|text| crater_ir::builtins::copy::sha256_hex(&text)))
+    }
+
     fn place_material(&self, name: &str, dest: &str) -> Result<()> {
         let plan = materials::resolve(self.bp, name, &self.scope).map_err(|e| anyhow::anyhow!("{e}"))?;
         if plan.kind != MaterialKind::File {
@@ -205,6 +231,9 @@ resources:
             }
             fn place_material(&self, n: &str, d: &str) -> Result<()> {
                 self.0.place_material(n, d)
+            }
+            fn material_digest(&self, n: &str) -> Result<Option<String>> {
+                self.0.material_digest(n)
             }
         }
         MaterialCtx::new(Box::new(Borrowed(inner)), bp, scope("amd64"), blobs, PathBuf::from("."))
@@ -329,6 +358,52 @@ resources:
         let err = ctx.place_material("unit", "/tmp/x").unwrap_err().to_string();
         assert!(err.contains("ghost.service"), "{err}");
         assert!(err.contains("相对 blueprint 目录"), "要说清怎么解析的:{err}");
+    }
+
+    #[test]
+    fn a_declared_digest_is_the_authoritative_answer() {
+        let bp = blueprint_from_str(
+            "name: t\nmaterials:\n  - { name: bin, file: \"https://ex.com/x\", sha256: deadbeef }\n",
+        )
+        .unwrap();
+        let inner = FakeCtx::new();
+        assert_eq!(
+            wrap(&inner, &bp, BlobMap::new()).material_digest("bin").unwrap(),
+            Some("deadbeef".to_string())
+        );
+    }
+
+    #[test]
+    fn a_local_file_digest_is_computed_on_control() {
+        let bp = blueprint_from_str(
+            "name: t\nmaterials:\n  - { name: unit, file: files/demo.service }\n",
+        )
+        .unwrap();
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("files")).unwrap();
+        std::fs::write(d.path().join("files/demo.service"), "BODY").unwrap();
+        let ctx = MaterialCtx::new(
+            Box::new(FakeCtx::new()),
+            &bp,
+            scope("amd64"),
+            BlobMap::new(),
+            d.path().to_path_buf(),
+        );
+        assert_eq!(
+            ctx.material_digest("unit").unwrap(),
+            Some(crater_ir::builtins::copy::sha256_hex("BODY"))
+        );
+    }
+
+    #[test]
+    fn a_remote_material_without_a_digest_admits_it_cannot_tell() {
+        // 诚实的边界:算不出来时返回 None,让 plan 报"说不清",不猜。
+        let bp = blueprint_from_str(
+            "name: t\nmaterials:\n  - { name: bin, file: \"https://ex.com/x\" }\n",
+        )
+        .unwrap();
+        let inner = FakeCtx::new();
+        assert_eq!(wrap(&inner, &bp, BlobMap::new()).material_digest("bin").unwrap(), None);
     }
 
     #[test]

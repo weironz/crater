@@ -167,8 +167,28 @@ fn unit(r: &ResourceDecl, scope: &Scope, id: &str) -> Result<Unit> {
     })
 }
 
-/// **零写入**地问出"会发生什么"。
+/// 求计划的**语境** —— 同一份 observe,两种读法。
+///
+/// 这个区分是真机跑出来的:一处 unit 被手改,verify 却把后面 6 个物料型资源
+/// 全染成漂移,归因被淹没。原因是 `upstream_changed` 这条保守规则 ——
+/// 它服务于"宁可多重启一次,不要漏重启",那是**收敛**的取舍;
+/// 而审计要回答的是"**哪里**漂了",传播只会制造假阳性。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Intent {
+    /// 为了收敛:上游变更向下传播,该重启的一定重启。
+    #[default]
+    Converge,
+    /// 为了审计(verify / drift):只报**自己**确实不符的项,不做因果传播。
+    Audit,
+}
+
+/// **零写入**地问出"会发生什么"(收敛语境)。
 pub fn plan(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<Plan> {
+    plan_with(bp, scope, ctx, Intent::Converge)
+}
+
+/// 同上,但可指定语境。
+pub fn plan_with(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx, intent: Intent) -> Result<Plan> {
     let units = expand(bp, scope)?;
     let mut items = Vec::new();
     // 保守的上游传播规则(rustfs 裁定 B):**本轮任一在先的资源会变**,
@@ -180,7 +200,7 @@ pub fn plan(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<Plan> {
         // L2:blueprint 自定义类型 —— 现实靠作者的探针读,动作是一支舞。
         if let Some(def) = bp.custom_type(&u.ty) {
             let (observed, change) = plan_custom(def, ctx, scope, &u.args)?;
-            if !change.is_noop() {
+            if intent == Intent::Converge && !change.is_noop() {
                 upstream_changed = true;
             }
             items.push(PlanItem { id: u.id, ty: u.ty, args: u.args, observed, change });
@@ -202,7 +222,8 @@ pub fn plan(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<Plan> {
             observed: &observed,
             upstream_changed,
         });
-        if !change.is_noop() && !matches!(change, Change::Unknown(_)) {
+        // 审计语境下不传播:一处漂移不该把后面所有资源染红。
+        if intent == Intent::Converge && !change.is_noop() && !matches!(change, Change::Unknown(_)) {
             upstream_changed = true;
         }
         items.push(PlanItem { id: u.id, ty: u.ty, args: u.args, observed, change });

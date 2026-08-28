@@ -304,3 +304,36 @@ fn very_long_paths_are_elided_in_the_middle() {
     assert!(label.starts_with("file /very/long"), "{label}");
     assert!(label.ends_with("final-name.conf"), "尾部必须保留:{label}");
 }
+
+#[test]
+fn audit_does_not_let_one_drift_stain_everything_downstream() {
+    // 真机跑出来的问题:一处 unit 被手改,verify 把后面 6 个物料型资源全染红,
+    // 归因被淹没。收敛要传播(宁可多重启),审计不能传播(要指出**哪里**漂了)。
+    use crater_ir::plan::{plan_with, Intent};
+
+    let b = bp();
+    // 配置内容不符(真漂移),其余一切正常。
+    let sep = "\u{1}";
+    let ctx = FakeCtx::new()
+        .on("stat -c '%F", 0, &format!("directory{sep}750{sep}root{sep}root"))
+        .on("sha256sum", 0, "0000000000000000000000000000000000000000000000000000000000000000\n600\n")
+        .on("systemctl is-active", 0, &format!("active{sep}enabled{sep}demo.service enabled"));
+
+    let converge = plan_with(&b, &scope_from_defaults(&b), &ctx, Intent::Converge).unwrap();
+    let audit = plan_with(&b, &scope_from_defaults(&b), &ctx, Intent::Audit).unwrap();
+
+    // 收敛:配置变了 → 服务也要重启(两项)
+    assert_eq!(converge.changing().count(), 2, "{:?}", converge.summary());
+    // 审计:只有配置那一项真的不符,服务本身是好的
+    assert_eq!(audit.changing().count(), 1, "{:?}", audit.summary());
+    assert_eq!(audit.changing().next().unwrap().ty, "copy");
+}
+
+#[test]
+fn audit_still_reports_genuinely_drifted_resources() {
+    // 反向保险:别为了消除假阳性把真漂移也一并压掉。
+    use crater_ir::plan::{plan_with, Intent};
+    let b = bp();
+    let audit = plan_with(&b, &scope_from_defaults(&b), &blank_host(), Intent::Audit).unwrap();
+    assert_eq!(audit.changing().count(), 4, "空机器上四项都该报");
+}

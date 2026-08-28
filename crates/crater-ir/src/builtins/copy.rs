@@ -27,10 +27,18 @@ impl ResourceType for Copy {
             return Ok(Observed::absent());
         }
         let mut lines = out.lines();
-        Ok(Observed::present([
+        let mut obs = Observed::present([
             ("sha256", lines.next().unwrap_or_default().trim().to_string()),
             ("mode", lines.next().unwrap_or_default().trim().to_string()),
-        ]))
+        ]);
+        // 内容来自物料时,把**期望摘要**一并取来 —— 它是控制端事实,
+        // 没有它 diff 只能报"说不清",verify 就永远给不出绿灯。
+        if let Some(name) = arg_str_opt(args, "material") {
+            if let Some(want) = ctx.material_digest(name)? {
+                obs.fields.insert("want_sha256".into(), want);
+            }
+        }
+        Ok(obs)
     }
 
     fn diff(&self, input: &DiffInput) -> Change {
@@ -56,13 +64,28 @@ impl ResourceType for Copy {
                     ));
                 }
             }
-            // src / material 的内容在控制端,plan 期不做二次读取:声明有变时由
-            // 执行层的内容寻址兜底。这里诚实地说"内容无法在 plan 期比对"。
-            None => {
-                if input.upstream_changed {
-                    fields.push(FieldDiff::change("content", "(上游已变)", source_label(input.args)));
+            // 来自物料:能拿到期望摘要就正经比对(内容寻址),拿不到才退回
+            // "上游变没变"这个粗判据。
+            None => match obs.get("want_sha256") {
+                Some(want) => {
+                    if obs.get("sha256") != Some(want) {
+                        fields.push(FieldDiff::change(
+                            "content",
+                            short(obs.get("sha256").unwrap_or("?")),
+                            short(want),
+                        ));
+                    }
                 }
-            }
+                None => {
+                    if input.upstream_changed {
+                        fields.push(FieldDiff::change(
+                            "content",
+                            "(上游已变)",
+                            source_label(input.args),
+                        ));
+                    }
+                }
+            },
         }
         if let (Some(want), Some(have)) = (arg_str_opt(input.args, "mode"), obs.get("mode")) {
             if want.trim_start_matches('0') != have.trim_start_matches('0') {
@@ -118,7 +141,7 @@ fn short(sha: &str) -> String {
 }
 
 /// 纯 Rust sha256(不引依赖:本 crate 只做前端 + 契约,保持依赖面最小)。
-fn sha256_hex(data: &str) -> String {
+pub fn sha256_hex(data: &str) -> String {
     let mut h: [u32; 8] = [
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
         0x5be0cd19,

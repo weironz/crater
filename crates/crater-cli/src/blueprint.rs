@@ -149,7 +149,13 @@ async fn run_on_targets(
         // 再包上物料解析能力 —— 传输层不该知道"物料"是什么。
         let ctx = MaterialCtx::new(transport, &bp, scope.clone(), BlobMap::new(), base_dir(path));
 
-        let plan = plan::plan(&bp, &scope, &ctx)
+        // 审计语境不传播上游变更 —— verify 要回答"哪里漂了",不是"该重启什么"。
+        let intent = if mode == Mode::Verify {
+            plan::Intent::Audit
+        } else {
+            plan::Intent::Converge
+        };
+        let plan = plan::plan_with(&bp, &scope, &ctx, intent)
             .with_context(|| format!("{}:对 {} 求计划", host_label(host), path.display()))?;
 
         // 记录 id 用**机群名**(inventory 的 name),不用展示标签:

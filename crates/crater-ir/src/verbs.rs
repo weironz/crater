@@ -134,6 +134,16 @@ pub trait Ctx {
     fn write_file(&self, path: &str, content: &str) -> anyhow::Result<()>;
     /// 把一份物料落到目标路径(在线取 URL / 离线推 blob,由执行层决定)。
     fn place_material(&self, name: &str, dest: &str) -> anyhow::Result<()>;
+
+    /// 这份物料的内容摘要(sha256 hex),**控制端**就能回答时才有值。
+    ///
+    /// 有它,`copy`/`systemd_unit` 这类"内容来自物料"的资源才能在 plan 期
+    /// 与目标实际内容比对,而不是只能报 `?`(那会让 verify 永远给不出绿灯)。
+    /// 返回 `None` = 这份物料的内容此刻算不出来(远端 URL 且未声明 sha256),
+    /// 调用方应如实报"说不清",不要猜。
+    fn material_digest(&self, _name: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// 资源类型的契约。
