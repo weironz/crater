@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 crater-core = { path = "../crater-core" }
+crater-ir = { path = "../crater-ir" }
 anyhow.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
@@ -20,4 +21,5 @@ futures = "0.3"
 axum = "0.8"             # crater ui: pure-Rust web (hyper/tower/tokio, no C)
 
 [dev-dependencies]
+tempfile = "3"
 async-trait.workspace = true   # FakeExec in agent.rs tests (D-095)

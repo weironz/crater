@@ -43,6 +43,19 @@ impl TargetOpts {
     }
 
     /// Resolve to a concrete host list: inventory > `--host` > localhost.
+    /// inventory **显式声明**的组名(含空组)。
+    ///
+    /// 空组是合法拓扑(单节点的 `worker: { hosts: [] }`),必须与"拼错的组名"
+    /// 分得开 —— 后者要报错,前者只是选不中任何人。
+    pub(crate) fn declared_groups(&self) -> Vec<String> {
+        let Some(path) = self.inventory.as_deref() else {
+            return Vec::new();
+        };
+        crater_core::spec::CraterSpec::from_yaml_file(path)
+            .map(|spec| spec.inventory.groups.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn hosts(&self) -> Result<Vec<crater_core::spec::Host>> {
         target_hosts(
             self.inventory.as_deref(),

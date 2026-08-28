@@ -17,9 +17,12 @@
 
 mod agent;
 mod apply;
+mod blueprint;
 mod build;
 mod deployments;
 mod images;
+mod material_ctx;
+mod lint;
 mod target;
 mod ui;
 
@@ -188,6 +191,51 @@ enum Cmd {
         /// Emit a starter inventory.yaml (required groups + apply-stage params).
         #[arg(long)]
         gen_inventory: bool,
+    },
+    /// Lint blueprints — zero-connection static checks (D-107). Catches the whole
+    /// class of errors Ansible only surfaces after connecting and reaching that line:
+    /// misspelled module/argument/param names (with suggestions), out-of-scope CEL
+    /// variables, undeclared materials, unbalanced cross-host facts.
+    Lint {
+        /// Files or directories to scan (recursively). Default: current directory.
+        #[arg(default_value = ".")]
+        paths: Vec<PathBuf>,
+        /// Treat warnings as failures too (for CI).
+        #[arg(long)]
+        strict: bool,
+        /// Machine-readable output for CI / editor integration.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a named procedure from a blueprint — the "dance" a blueprint declares
+    /// (bootstrap a cluster, roll an upgrade). Unlike `apply`, which converges
+    /// resources host-by-host, a procedure is fleet-level: its steps span hosts
+    /// and pass facts between them.
+    Procedure {
+        /// Procedure name (see `crater inspect`).
+        name: String,
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        #[command(flatten)]
+        target: TargetOpts,
+        /// Procedure params + deploy-stage overrides: `--set to=1.37.0`.
+        #[arg(long = "set", value_name = "KEY=VAL")]
+        set: Vec<String>,
+    },
+    /// Verify a deployed blueprint — read-only drift check against the recorded
+    /// state. Answers "is reality still what we deployed?", which `plan` cannot:
+    /// without a record, "never deployed" and "drifted" look identical.
+    Verify {
+        /// Blueprint file (new IR pipeline).
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        /// Or positionally.
+        source: Option<String>,
+        #[command(flatten)]
+        target: TargetOpts,
+        /// Deploy-stage param overrides (must match what was applied).
+        #[arg(long = "set", value_name = "KEY=VAL")]
+        set: Vec<String>,
     },
     /// AI copilot: natural language -> a validated task yaml.
     /// Configure via CRATER_AI_ENDPOINT / CRATER_AI_KEY / CRATER_AI_MODEL.
@@ -407,6 +455,13 @@ fn log_level() -> tracing::Level {
     }
 }
 
+/// 命令行给的 source 是不是**新 IR blueprint 文件**。是则走五动词管线,
+/// 否则(旧 task / 镜像 ref / .oci / 命名 task)交回原管线 —— 两条管线并存到迁移完成。
+fn blueprint_source(file: &Option<PathBuf>, source: &Option<String>) -> Option<PathBuf> {
+    let candidate = file.clone().or_else(|| source.as_ref().map(PathBuf::from))?;
+    (candidate.is_file() && blueprint::is_blueprint_file(&candidate)).then_some(candidate)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // ANSI only on a real terminal — keeps redirected/piped output and the
@@ -431,6 +486,14 @@ async fn main() -> Result<()> {
             offline,
             set,
         } => {
+            // 新 IR blueprint 先分流(同 plan);其余走原管线。
+            let probe = arg2.clone().or_else(|| arg1.clone());
+            if let Some(p) = blueprint_source(&file, &probe) {
+                if dry_run {
+                    return blueprint::plan_blueprint(&p, &target, &set).await;
+                }
+                return blueprint::apply_blueprint(&p, &target, &set).await;
+            }
             // Two positional forms: `apply <source>` or `apply <name> <source>`.
             let (name, source) = match (arg1, arg2) {
                 (Some(a), Some(b)) => (Some(a), Some(b)),
@@ -440,7 +503,14 @@ async fn main() -> Result<()> {
             apply::apply_source(name, source, file, target, dry_run, shell, false, offline, &set, false).await
         }
         Cmd::Plan { source, file, target, offline, set } => {
-            apply::apply_source(None, source, file, target, false, false, false, offline, &set, true).await
+            // 按文件格式分流:新 IR blueprint 走五动词管线,旧 task 走原管线。
+            match blueprint_source(&file, &source) {
+                Some(p) => blueprint::plan_blueprint(&p, &target, &set).await,
+                None => {
+                    apply::apply_source(None, source, file, target, false, false, false, offline, &set, true)
+                        .await
+                }
+            }
         }
         Cmd::Delete {
             source,
@@ -502,6 +572,17 @@ async fn main() -> Result<()> {
         },
         Cmd::Create { what } => match what {
             CreateWhat::Inventory { path, force } => target::create_inventory(&path, force),
+        },
+        Cmd::Lint { paths, strict, json } => lint::run(&paths, strict, json),
+        Cmd::Procedure { name, file, target, set } => match blueprint_source(&file, &None) {
+            Some(p) => blueprint::run_procedure(&p, &name, &target, &set).await,
+            None => anyhow::bail!("`crater procedure` 需要 `-f <blueprint.yaml>`"),
+        },
+        Cmd::Verify { file, source, target, set } => match blueprint_source(&file, &source) {
+            Some(p) => blueprint::verify_blueprint(&p, &target, &set).await,
+            None => anyhow::bail!(
+                "`crater verify` 目前只支持新 IR blueprint;旧 task 的漂移检测用 `crater task list --verify`"
+            ),
         },
         Cmd::Ai { request, output } => ai_generate(&request.join(" "), output).await,
         Cmd::Doctor {
