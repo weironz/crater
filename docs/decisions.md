@@ -1671,3 +1671,18 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **实施影响**:parse 层重写(语法换血),IR 零改动 —— 「IR 是契约、语法是前端」保险单
   的兑付。现行语法与新语法的并存/迁移策略待实施时定。
 - **关联**:D-106(IR 契约)、D-107(lint)、D-115(能力审计暴露的生态空洞)。
+
+
+### D-117 补:修订 A1(约定式分节)+ A2(Stack 层)
+
+- **触发**:用户裁定「kubespray 全写在一个 yaml 里根本不可能」。
+- **A1(v1)**:蓝图 = 根文件 + 显式 `parts:` 外置顶层节;文件名约定钉死
+  (`<stem>.<节名>.yaml`)、零参数零条件、合并后与单文件逐字节等价、诊断跨文件定位、
+  `fmt --join/--split` 双向机械转换。与被拒的 include 的本质区别:无自由路径、
+  无嵌套、无条件 —— 拒绝的是三级跳读,不是多文件。
+- **A2(v1.1 方向)**:`<name>.stack.yaml` 有序 `uses:` 组合多蓝图(承接旧 project/
+  D-083 与 Stack 名词):条目级 params 并入"默认值层"(运行期优先级仍 5 层)、
+  组名重映射、跨蓝图 export 不可见(自包含边界)、栈 bake 为闭包并集制品(承 D-101)。
+- **kubespray 映射**:一个 stack × 6 个中等蓝图(os-baseline/containerd/etcd/
+  k8s-core/cni/addons),而非巨文件 + 50 个 part。A1 管蓝图内篇幅,A2 管蓝图间组合,
+  任何一把包办全部就退化回 include 树。

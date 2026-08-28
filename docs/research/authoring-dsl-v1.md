@@ -885,7 +885,7 @@ warning[W421]: secret 参数写入 mode "0644" 的文件 —— 建议 mode: "06
 2. **command 型 fact 的结构化拆解**:三评委认可"join 拆成 endpoint/token/ca_hash 三元组"是比 `from_fact` 更彻底的形态,但无正则时对 kubeadm 单行输出拆不开。是否为 v1.x 增加封闭的 argv-token 拆分器(把 command 型 fact 解析为 token 列表供结构化重组)?
 3. **serial > 1 的批语义**:批内并行、批间串行时,`do` 闭环的失败语义(fail-fast 中断整批,还是完成本批再停)与传导的交互尚未钉死。
 4. **L2 apply 的目标收窄**:纯 creates/observe 幂等在大机群下意味着全舞重放(虽然每步都快速跳过);是否需要引擎级"只对未收敛主机裁剪 selector"的优化语义,以及它是否应当对作者可见。
-5. **跨蓝图复用与模块化**:include 被拒后,组织级复用只剩 L2 类型;蓝图之间的依赖、版本与分发机制(蓝图仓库)整体留给 v2,目前无草案。
+5. ~~跨蓝图复用与模块化~~ **已裁定**,见 §8 修订 A1/A2;仍开放的残余:跨蓝图 export 可见性、蓝图仓库分发(v2)。
 
 ---
 
@@ -904,3 +904,97 @@ plan 会高亮它。也就是说:野路子没有被禁止,只是**不再是被�
 `on:` 换 selector 新文法 + `cast`;`shell` 类型删除、`cmd`(argv 结构)接任;
 materials 换 `source.by` 开关表;新增 `crater`/`blueprint` 顶层键、lock 文件、
 `fmt`/`types`/`explain`/`schema` 命令。IR(五动词/舞/物料/机群)零改动。
+
+
+---
+
+## 8. 修订(定稿后由用户裁定,2026-08-28)
+
+> 触发:用户审阅时问「一个 yaml 写到底吗?yaml 引用 yaml 有设计吗?」并裁定
+> 「kubespray 全写在一个 yaml 里根本不可能」。两条修订均不动 §6 对 include 的
+> 拒绝理由 —— 拒绝的是**参数化、条件化、任意位置**的文本包含(Ansible 三级跳读),
+> 不是拒绝多文件本身。
+
+### A1 · 约定式分节(v1 即生效)
+
+蓝图在逻辑上是**一个目录**:根文件 + 可外置的顶层节。外置必须在根文件显式声明,
+文件名由约定钉死 —— 读者永远不需要猜"还有哪些文件参与"。
+
+```yaml
+# k8s.blueprint.yaml(根文件)
+crater: 1
+blueprint: k8s-cluster
+parts: [procedures, types]        # 这两节住在同目录约定文件里
+params: …
+resources: …
+```
+
+```
+k8s.blueprint.yaml            # 根:除外置节以外的一切
+k8s.procedures.yaml           # 顶层就是 procedures 节的内容
+k8s.types.yaml
+files/…
+```
+
+| 字段 | 出现位置 | 类型 | 必选 | 默认 | 说明 |
+|---|---|---|---|---|---|
+| `parts` | 顶层(仅根文件) | list[enum] | 否 | `[]` | 可外置节:`resources / procedures / types / materials / health / preflight`;每节对应同目录 `<stem>.<节名>.yaml` |
+
+五条纪律(全部 lint 强制):
+1. **只能外置整个顶层节**,part 文件顶层就是该节内容,不得再含 `parts`(无嵌套);
+2. **文件名无自由度**:`<根文件 stem>.<节名>.yaml`,不接受任意路径 —— 这是与 include 的本质区别;
+3. 同一节**内联与外置二选一**,双定义 → error[E121];`parts` 声明了但文件不存在 → E120;
+   同目录存在形如约定名的文件但未声明 → E122(防"幽灵文件静默不生效");
+4. **零参数、零条件**:part 文件无条件整体生效,合并后与单文件**逐字节等价**;
+5. 工具视角是一个文档:诊断跨文件定位(`k8s.procedures.yaml:12`),
+   `crater fmt --join` / `--split procedures` 双向机械转换,任何时刻可无损合回单文件。
+
+### A2 · Stack 层:蓝图的组合(v1.1,方向已定)
+
+「先装 containerd,再建 k8s,再上存储」是蓝图之间的**编排**,不是一个巨型蓝图。
+承接旧 project(D-083)与 product-design.md 的 Stack 名词。
+
+```yaml
+# platform.stack.yaml
+crater: 1
+stack: platform
+uses:
+  - blueprint: containerd            # 名(库内解析)/ 路径 / OCI ref
+  - blueprint: k8s-cluster
+    params: { ha: true }             # 作者侧覆盖:效力=更强的默认值
+    groups: { controlplane: k8s_masters }   # 蓝图组名 → inventory 组名重映射
+  - blueprint: rustfs
+    groups: { storage: k8s_workers }
+```
+
+| 字段 | 出现位置 | 类型 | 必选 | 默认 | 说明 |
+|---|---|---|---|---|---|
+| `crater` | 顶层 | int | 是 | — | 同蓝图 |
+| `stack` | 顶层 | string | 是 | — | 栈名,制品标识 |
+| `uses` | 顶层 | list | 是 | — | **有序**条目:apply 自上而下,destroy 逆序 |
+| `uses[].blueprint` | 条目 | string | 是 | — | 蓝图引用 |
+| `uses[].params` | 条目 | map | 否 | `{}` | 覆盖该蓝图 params 默认;**属作者侧**,与蓝图 default 合并为"默认值层",仍可被 inventory 组/主机与 CLI 覆盖 —— 运行期优先级保持 5 层不变 |
+| `uses[].groups` | 条目 | map | 否 | `{}` | 组名重映射(蓝图 fleet 组名 → inventory 组名);未映射的组按同名匹配 |
+
+边界与语义:
+- 每蓝图自校验自己的 fleet 契约;任一失败,整栈不开始;
+- **跨蓝图 export 不可见**(v1.1 边界):蓝图自包含,栈只管顺序 —— 需要传值就升参数;
+- 离线:栈 bake 为一个制品 = 各蓝图闭包的并集(内容寻址去重,承接 D-101 的闭包分发);
+- verify/destroy 按条目逐个执行,报告分蓝图分节。
+
+### kubespray 的映射(检验修订够不够用)
+
+kubespray ≈ 一个 stack × 若干中等蓝图,而不是巨文件 + 50 个 part:
+
+```
+kubespray.stack.yaml
+├─ os-baseline.blueprint.yaml      (~80 行:swap/内核/sysctl/包)
+├─ containerd.blueprint.yaml       (~120 行)
+├─ etcd.blueprint.yaml             (~150 行:独立 etcd 拓扑时)
+├─ k8s-core.blueprint.yaml         (~300 行,procedures 外置成 part)
+├─ cni-flannel.blueprint.yaml      (~80 行;calico 等各自成蓝图,栈里二选一)
+└─ addons.blueprint.yaml           (~100 行)
+```
+
+**A1 管单蓝图内的篇幅,A2 管蓝图之间的组合** —— 两把刀分别对准两个问题,
+互不越界;任何一把试图包办全部,就会退化回 include 树。
