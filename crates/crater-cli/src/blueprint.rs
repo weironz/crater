@@ -28,18 +28,33 @@ use crate::target::{connect_executor, TargetOpts};
 /// WASM 插件 / 协议桥),其中 WASM 侧天然是同步的;让整条 trait 染上 async 会
 /// 把 `crater-ir` 拖进 tokio 依赖,而这个 crate 刻意保持最小依赖面。
 ///
-/// 桥接只此一处:`block_in_place` 把当前 worker 线程让出去,再在其上 `block_on`
-/// 那次 SSH 往返。**要求多线程 runtime**(crater-cli 的 `#[tokio::main]` 即是);
-/// 单线程 runtime 上 `block_in_place` 会 panic,所以这个类型不对外导出。
+/// 桥接只此一处,但要认两种线程:
+/// - **runtime worker 线程**(逐台 plan/apply 的主路径):`block_in_place` 先把
+///   线程让出去再阻塞,免得占着 worker 饿死调度器。要求多线程 runtime
+///   (crater-cli 的 `#[tokio::main]` 即是)。
+/// - **并发调度派生的普通线程**(`--parallel N` 时 `run_capped` 的作用域线程):
+///   它们不在 runtime 上下文里,`block_in_place` 会直接 panic —— 那里必须用
+///   构造时捕获的 Handle 直接 `block_on`。
+///
+/// 分派靠 `Handle::try_current()`:它成功当且仅当当前线程处在 runtime 上下文中。
 struct RemoteCtx {
     exec: Box<dyn Executor>,
+    /// 构造时(主线程上)捕获,供派生线程回到 runtime 上执行 SSH 往返。
+    rt: tokio::runtime::Handle,
 }
 
 impl RemoteCtx {
+    fn bridge<T>(&self, fut: impl std::future::Future<Output = T>) -> T {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| self.rt.block_on(fut))
+        } else {
+            // 非 runtime 线程:直接阻塞它就好,没有 worker 可饿死。
+            self.rt.block_on(fut)
+        }
+    }
+
     fn exec_sync(&self, cmd: &str) -> Result<(i32, String)> {
-        let out = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.exec.run(cmd))
-        })?;
+        let out = self.bridge(self.exec.run(cmd))?;
         let mut text = out.stdout;
         if !out.stderr.is_empty() {
             text.push_str(&out.stderr);
@@ -56,10 +71,7 @@ impl Ctx for RemoteCtx {
         self.exec_sync(cmd)
     }
     fn write_file(&self, path: &str, content: &str) -> anyhow::Result<()> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(self.exec.write_file(path, content.as_bytes()))
-        })
+        self.bridge(self.exec.write_file(path, content.as_bytes()))
     }
     fn place_material(&self, name: &str, dest: &str) -> anyhow::Result<()> {
         // 物料解析由 `MaterialCtx` 包在外层完成;裸的传输层不该知道物料是什么。
@@ -221,7 +233,7 @@ async fn run_on_targets(
     }
     // 逐台收敛之后再跳机群级的舞(顺序不能反:舞往往依赖资源已就位)。
     if converge && !dances.is_empty() && failures == 0 {
-        let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path)).await?;
+        let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel).await?;
         for name in &dances {
             println!("── procedure {name} ──");
             match procedure::run(&bp, name, &targets, &BTreeMap::new()) {
@@ -253,7 +265,7 @@ async fn build_transport(host: &Host) -> Result<Box<dyn Ctx>> {
     let exec = connect_executor(host, true)
         .await
         .with_context(|| format!("连接 {}", host_label(host)))?;
-    Ok(Box::new(RemoteCtx { exec }))
+    Ok(Box::new(RemoteCtx { exec, rt: tokio::runtime::Handle::current() }))
 }
 
 /// 报出这台机器实际会用到的闭包 —— air-gap 场景下这就是"要带走什么"的清单。
@@ -293,6 +305,8 @@ struct FleetTargets<'a> {
     fleet: Fleet,
     ctxs: BTreeMap<String, MaterialCtx<'a>>,
     scopes: BTreeMap<String, plan::Scope>,
+    /// 机群级并发上限(`--parallel`)。步骤的 `throttle` 只能往下压。
+    parallel: usize,
 }
 
 impl Targets for FleetTargets<'_> {
@@ -311,6 +325,9 @@ impl Targets for FleetTargets<'_> {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("没有 `{member}` 的求值上下文"))
     }
+    fn parallelism(&self) -> usize {
+        self.parallel
+    }
 }
 
 /// 把整个机群连起来 —— 舞开始之后才发现某台连不上,是最糟的失败时机。
@@ -320,6 +337,7 @@ async fn connect_fleet<'a>(
     fleet: &Fleet,
     overrides: &[(String, Yaml)],
     base: &Path,
+    parallel: usize,
 ) -> Result<FleetTargets<'a>> {
     let mut transports = Vec::new();
     for host in hosts {
@@ -342,7 +360,7 @@ async fn connect_fleet<'a>(
         );
         scopes.insert(name, scope);
     }
-    Ok(FleetTargets { fleet: fleet.clone(), ctxs, scopes })
+    Ok(FleetTargets { fleet: fleet.clone(), ctxs, scopes, parallel: parallel.max(1) })
 }
 
 fn print_proc_report(report: &procedure::ProcReport) {
@@ -392,7 +410,7 @@ pub async fn run_procedure(
     let hosts = target.hosts()?;
     let fleet = build_fleet(&hosts, target.declared_groups());
     enforce_contract(&bp, &fleet)?;
-    let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path)).await?;
+    let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel).await?;
 
     println!("procedure {proc_name} —— {} 台目标\n", targets.fleet.members.len());
     // `--set` 既是 deploy 期参数覆盖,也是过程参数(`--set to=1.37.0`)。
@@ -625,7 +643,7 @@ mod remote_ctx_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sync_ctx_bridges_onto_the_async_executor() {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let ctx = RemoteCtx { exec: Box::new(MockExec { seen: seen.clone() }) };
+        let ctx = RemoteCtx { exec: Box::new(MockExec { seen: seen.clone() }), rt: tokio::runtime::Handle::current() };
 
         let (code, out) = ctx.probe("stat -c '%a' /etc").unwrap();
         assert_eq!(code, 0);
@@ -635,6 +653,30 @@ mod remote_ctx_tests {
         let calls = seen.lock().unwrap().clone();
         assert_eq!(calls.len(), 2, "{calls:?}");
         assert!(calls[1].contains("base64 -d"), "写文件走分块 base64:{}", calls[1]);
+    }
+
+    /// 并发调度会从**普通 std 线程**调用这座桥。
+    ///
+    /// 这不是理论风险:`block_in_place` 在非 runtime 线程上直接 panic,
+    /// 于是 `--parallel N` 会在第一条 SSH 上炸掉。这条测试就是那个分支的守门人。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_bridge_survives_being_called_from_a_plain_thread() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let ctx = RemoteCtx {
+            exec: Box::new(MockExec { seen: seen.clone() }),
+            rt: tokio::runtime::Handle::current(),
+        };
+        // 与 run_capped 派生的线程同类:不在 runtime 上下文里。
+        std::thread::scope(|s| {
+            for i in 0..4 {
+                let ctx = &ctx;
+                s.spawn(move || {
+                    let (code, _) = ctx.probe(&format!("echo {i}")).unwrap();
+                    assert_eq!(code, 0);
+                });
+            }
+        });
+        assert_eq!(seen.lock().unwrap().len(), 4);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -649,7 +691,7 @@ mod remote_ctx_tests {
                 "noisy"
             }
         }
-        let ctx = RemoteCtx { exec: Box::new(Noisy) };
+        let ctx = RemoteCtx { exec: Box::new(Noisy), rt: tokio::runtime::Handle::current() };
         let (code, text) = ctx.run("whatever").unwrap();
         assert_eq!(code, 7);
         // 失败诊断全靠 stderr —— 丢了它,run_ok 的报错就成了空壳。
@@ -660,7 +702,7 @@ mod remote_ctx_tests {
     async fn the_bare_transport_refuses_to_resolve_materials() {
         // 分层纪律:传输层只管"把命令送到目标",不知道"物料"是什么。
         // 物料解析由 MaterialCtx 包在外层 —— 裸传输层被直接调用即是内部错误。
-        let ctx = RemoteCtx { exec: Box::new(MockExec { seen: Default::default() }) };
+        let ctx = RemoteCtx { exec: Box::new(MockExec { seen: Default::default() }), rt: tokio::runtime::Handle::current() };
         let err = ctx
             .place_material("rustfs-bin", "/usr/local/bin/rustfs")
             .unwrap_err()

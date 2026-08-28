@@ -21,8 +21,17 @@ use crate::verbs::{Change, Ctx, DiffInput, Observed, Outcome};
 ///
 /// 之所以不是"一个 Ctx",是因为 procedure 会在**多台机器之间**走:
 /// 首台 init、其余 join,还要把 token 从前者带给后者。
-pub trait Targets {
+pub trait Targets: Sync {
     fn fleet(&self) -> &Fleet;
+    /// 机群级并发上限:一步之内最多同时动几台。
+    ///
+    /// 默认 **1(串行)**。并发要显式开(`--parallel N`),因为把默认值调高
+    /// 等于替所有既有蓝图改变了执行语义 —— 一支原本逐台跑因而天然安全的舞,
+    /// 会在升级 crater 之后突然并发起来。步骤上的 `throttle` 只能**往下压**,
+    /// 压不过这个上限。
+    fn parallelism(&self) -> usize {
+        1
+    }
     /// 取某个成员的执行上下文。
     fn ctx(&self, member: &str) -> Result<&dyn Ctx>;
     /// 该成员的求值作用域(已含它自己的 `substrate.*` 事实)。
@@ -154,71 +163,148 @@ fn run_step(
     let rt = crate::builtins::get(&step.ty)
         .ok_or_else(|| anyhow::anyhow!(where_(&format!("类型 `{}` 没有实现", step.ty))))?;
 
-    // `throttle` 的语义是"同时最多几台"。当前执行是**串行**的,所以任何 throttle
-    // 都天然被满足(护 etcd 那种"必须逐台"的约束不会被违反);它真正开始起作用
-    // 要等并发调度落地(P1)。
-    for member in &members {
-        let base = step_scope(targets, member, proc, args, report)?;
+    // 一步之内多台机器互不相干,可以并发;**步骤之间**永远严格按序。
+    // `throttle` 只往下压:护 etcd 那种"必须逐台 join"的约束,无论机群并发
+    // 开多大都不会被违反。
+    let limit = step
+        .strategy
+        .throttle
+        .unwrap_or(usize::MAX)
+        .min(targets.parallelism())
+        .clamp(1, members.len().max(1));
 
-        if let Some(w) = &step.when {
-            if !base.eval_bool(w).map_err(|e| anyhow::anyhow!(where_(&e)))? {
-                continue;
+    // 每台的产物先各自装袋,最后**按成员顺序**合并 —— 并发不该让输出变得
+    // 不可复现,否则 diff 两次运行的报告就没有意义了。
+    let facts_snapshot = report.facts.clone();
+    let bags = run_capped(limit, members.len(), |i| {
+        run_member(proc, step, rt, targets, args, &members[i], &facts_snapshot)
+    });
+
+    let mut first_err = None;
+    for (member, bag) in members.iter().zip(bags) {
+        match bag {
+            Ok(bag) => {
+                report.steps.extend(bag.steps);
+                report.facts.extend(bag.facts);
             }
-        }
-
-        let items: Vec<Option<Yaml>> = match &step.each {
-            None => vec![None],
-            Some(each) => base
-                .expand_each(each)
-                .map_err(|e| anyhow::anyhow!(where_(&e)))?
-                .into_iter()
-                .map(Some)
-                .collect(),
-        };
-
-        for item in items {
-            let scope = match item {
-                Some(v) => base.with_item(v),
-                None => base.clone(),
-            };
-            let resolved = scope
-                .resolve_args(&step.args)
-                .map_err(|e| anyhow::anyhow!(where_(&e)))?;
-            let ctx = targets.ctx(member)?;
-
-            // 与资源同一套五动词:先 observe 再 diff —— 有 `check:` 的步骤因此天然幂等,
-            // 重跑一支舞不会把已经做过的事再做一遍。
-            let observed = rt
-                .observe(ctx, &resolved)
-                .map_err(|e| anyhow::anyhow!(where_(&e.to_string())))?;
-            let change = rt.diff(&DiffInput {
-                args: &resolved,
-                observed: &observed,
-                upstream_changed: false,
-            });
-
-            let outcome = match &change {
-                Change::Ok => Outcome::Ok,
-                _ => attempt(rt, ctx, &resolved, &change, step)
-                    .map_err(|e| anyhow::anyhow!(where_(&format!("在 {member} 上:{e}"))))?,
-            };
-            report.steps.push((step.id.clone(), member.clone(), outcome));
-        }
-
-        // 导出 fact:在**产出它的那一步之后、那台机器上**取值。
-        for (fact, cmd) in &step.exports {
-            let ctx = targets.ctx(member)?;
-            let (code, out) = ctx.probe(cmd)?;
-            if code != 0 {
-                bail!(where_(&format!(
-                    "导出 fact `{fact}` 失败(exit {code}):{cmd}\n{}",
-                    out.trim()
-                )));
+            // 并发时可能多台同时失败;报**成员顺序里的第一条**,
+            // 而不是"最先炸的那条"—— 后者取决于线程调度,不可复现。
+            Err(e) if first_err.is_none() => {
+                first_err = Some(anyhow::anyhow!(where_(&format!("在 {member} 上:{e}"))))
             }
-            report.facts.insert(fact.clone(), out.trim().to_string());
+            Err(_) => {}
         }
     }
-    Ok(())
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// 一台机器在这一步里的全部产物。
+#[derive(Default)]
+struct MemberBag {
+    steps: Vec<(String, String, Outcome)>,
+    facts: BTreeMap<String, String>,
+}
+
+/// 一步在**一台**机器上的执行。无共享可变状态 —— 这是它能并发的全部理由。
+#[allow(clippy::too_many_arguments)]
+fn run_member(
+    proc: &Procedure,
+    step: &Step,
+    rt: &dyn crate::verbs::ResourceType,
+    targets: &dyn Targets,
+    args: &BTreeMap<String, Yaml>,
+    member: &str,
+    facts: &BTreeMap<String, String>,
+) -> Result<MemberBag> {
+    let mut bag = MemberBag::default();
+    let base = member_scope(targets, member, proc, args, facts)?;
+
+    if let Some(w) = &step.when {
+        if !base.eval_bool(w).map_err(|e| anyhow::anyhow!("{e}"))? {
+            return Ok(bag);
+        }
+    }
+
+    let items: Vec<Option<Yaml>> = match &step.each {
+        None => vec![None],
+        Some(each) => base
+            .expand_each(each)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .into_iter()
+            .map(Some)
+            .collect(),
+    };
+
+    for item in items {
+        let scope = match item {
+            Some(v) => base.with_item(v),
+            None => base.clone(),
+        };
+        let resolved = scope.resolve_args(&step.args).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let ctx = targets.ctx(member)?;
+
+        // 与资源同一套五动词:先 observe 再 diff —— 有 `check:` 的步骤因此天然幂等,
+        // 重跑一支舞不会把已经做过的事再做一遍。
+        let observed = rt.observe(ctx, &resolved)?;
+        let change = rt.diff(&DiffInput {
+            args: &resolved,
+            observed: &observed,
+            upstream_changed: false,
+        });
+
+        let outcome = match &change {
+            Change::Ok => Outcome::Ok,
+            _ => attempt(rt, ctx, &resolved, &change, step)?,
+        };
+        bag.steps.push((step.id.clone(), member.to_string(), outcome));
+    }
+
+    // 导出 fact:在**产出它的那一步之后、那台机器上**取值。
+    // 上面已确保导出步骤只选中一台,所以这里不存在多台争写同一个 fact。
+    for (fact, cmd) in &step.exports {
+        let ctx = targets.ctx(member)?;
+        let (code, out) = ctx.probe(cmd)?;
+        if code != 0 {
+            bail!("导出 fact `{fact}` 失败(exit {code}):{cmd}\n{}", out.trim());
+        }
+        bag.facts.insert(fact.clone(), out.trim().to_string());
+    }
+    Ok(bag)
+}
+
+/// 把 `n` 个互不相干的任务跑掉,**同时最多 `limit` 个**。
+///
+/// 返回值按下标对齐输入,与并发度无关 —— 并发不该让报告变得不可复现。
+/// `limit <= 1` 时退化成完全串行的原路径,一个线程也不派生。
+fn run_capped<T: Send>(limit: usize, n: usize, job: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    if limit <= 1 || n <= 1 {
+        return (0..n).map(job).collect();
+    }
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    let next = AtomicUsize::new(0);
+    let slots: Vec<Mutex<Option<T>>> = (0..n).map(|_| Mutex::new(None)).collect();
+    // 作用域线程:借用 `job` 与 `targets` 无需 'static,也就不必把整条
+    // 执行路径搬进 Arc。线程数按 limit 定,任务用原子游标自取。
+    std::thread::scope(|s| {
+        for _ in 0..limit.min(n) {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::SeqCst);
+                if i >= n {
+                    break;
+                }
+                *slots[i].lock().unwrap() = Some(job(i));
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|m| m.into_inner().unwrap().expect("每个槽位都被填过"))
+        .collect()
 }
 
 /// 一步在某台机器上的求值作用域:该台事实 ⊕ 过程参数 ⊕ 已导出的 fact。
@@ -228,6 +314,18 @@ fn step_scope(
     proc: &Procedure,
     args: &BTreeMap<String, Yaml>,
     report: &ProcReport,
+) -> Result<Scope> {
+    member_scope(targets, member, proc, args, &report.facts)
+}
+
+/// 同上,但只吃一份 fact 快照 —— 并发执行时各线程共享**只读**的快照,
+/// 而不是借着整个 report(那会把可变状态带进线程)。
+fn member_scope(
+    targets: &dyn Targets,
+    member: &str,
+    proc: &Procedure,
+    args: &BTreeMap<String, Yaml>,
+    facts: &BTreeMap<String, String>,
 ) -> Result<Scope> {
     let mut scope = targets.scope(member)?;
     // 过程参数以 params.* 出现,默认值兜底。
@@ -239,8 +337,7 @@ fn step_scope(
     for (k, v) in args {
         scope.params.insert(k.clone(), v.clone());
     }
-    scope.facts = report
-        .facts
+    scope.facts = facts
         .iter()
         .map(|(k, v)| (k.clone(), Yaml::String(v.clone())))
         .collect();
@@ -305,20 +402,21 @@ pub fn observe_custom(def: &crate::ir::TypeDef, ctx: &dyn Ctx, scope: &Scope) ->
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ctx::FakeCtx;
     use crate::fleet::Member;
     use crate::parse::blueprint_from_str;
 
     /// 一个机群的假目标:每台一份 FakeCtx,可分别设定应答。
-    struct FakeTargets {
+    pub(crate) struct FakeTargets {
         fleet: Fleet,
         ctxs: BTreeMap<String, FakeCtx>,
+        parallel: usize,
     }
 
     impl FakeTargets {
-        fn new(members: Vec<(&str, Vec<&str>)>) -> Self {
+        pub(crate) fn new(members: Vec<(&str, Vec<&str>)>) -> Self {
             let fleet = Fleet::new(
                 members.iter().map(|(n, roles)| Member::new(*n, roles)).collect(),
             );
@@ -326,7 +424,11 @@ mod tests {
                 .iter()
                 .map(|(n, _)| (n.to_string(), FakeCtx::new().on("", 0, "")))
                 .collect();
-            FakeTargets { fleet, ctxs }
+            FakeTargets { fleet, ctxs, parallel: 1 }
+        }
+        pub(crate) fn parallel(mut self, n: usize) -> Self {
+            self.parallel = n;
+            self
         }
         fn with_ctx(mut self, member: &str, ctx: FakeCtx) -> Self {
             self.ctxs.insert(member.to_string(), ctx);
@@ -340,6 +442,9 @@ mod tests {
     impl Targets for FakeTargets {
         fn fleet(&self) -> &Fleet {
             &self.fleet
+        }
+        fn parallelism(&self) -> usize {
+            self.parallel
         }
         fn ctx(&self, member: &str) -> Result<&dyn Ctx> {
             self.ctxs
@@ -357,7 +462,7 @@ mod tests {
     }
 
     /// k8s-ha 试金石的骨架:首台 init 并导出 token,其余逐台 join。
-    const K8S: &str = r#"
+    pub(crate) const K8S: &str = r#"
 name: k8s
 types:
   - name: cluster_member
@@ -672,5 +777,158 @@ procedures:
         let ctx = FakeCtx::new().on("test -f", 0, "joined\n");
         observe_custom(def, &ctx, &Scope::default()).unwrap();
         assert!(ctx.writes().is_empty(), "{:?}", ctx.writes());
+    }
+}
+
+#[cfg(test)]
+mod fleet_concurrency_tests {
+    use super::tests::*;
+    use super::*;
+    use crate::parse::blueprint_from_str;
+
+    /// 三 master 五 worker —— 足够让并发与串行的差别显现。
+    fn big_fleet(parallel: usize) -> FakeTargets {
+        let mut members: Vec<(&str, Vec<&str>)> =
+            vec![("cp1", vec!["controlplane"]), ("cp2", vec!["controlplane"]), ("cp3", vec!["controlplane"])];
+        for w in ["w1", "w2", "w3", "w4", "w5"] {
+            members.push((w, vec!["worker"]));
+        }
+        FakeTargets::new(members).parallel(parallel)
+    }
+
+    fn report_of(parallel: usize) -> ProcReport {
+        let bp = blueprint_from_str(K8S).unwrap();
+        run(&bp, "bootstrap", &big_fleet(parallel), &BTreeMap::new()).unwrap()
+    }
+
+    #[test]
+    fn a_parallel_run_produces_a_byte_identical_report() {
+        // 并发是**性能**优化,不是语义变更。报告一字不差,才敢让人打开它。
+        let serial = report_of(1);
+        let wide = report_of(8);
+        assert_eq!(serial.steps, wide.steps);
+        assert_eq!(serial.facts, wide.facts);
+        assert_eq!(serial.skipped, wide.skipped);
+    }
+
+    #[test]
+    fn every_host_still_gets_its_step() {
+        let r = report_of(8);
+        // 1 台 init + 2 台 join-cp + 5 台 join-worker
+        assert_eq!(r.steps.len(), 8, "{:?}", r.steps);
+        // 假目标的 check 一律成功 ⇒ 每步都已达标。并发不该动摇这个幂等结论。
+        assert_eq!(r.summary(), "changed=0 ok=8");
+    }
+
+    #[test]
+    fn a_throttled_step_stays_throttled_no_matter_how_wide_the_fleet_runs() {
+        // `throttle: 1` 护的是 etcd 的仲裁 —— `--parallel 8` 不能把它冲掉。
+        // 这是 throttle 从"被串行平凡满足"变成"真正起作用"的那条线。
+        let bp = blueprint_from_str(K8S).unwrap();
+        let join_cp = bp.procedures["bootstrap"].steps[1].clone();
+        assert_eq!(join_cp.strategy.throttle, Some(1));
+        let targets = big_fleet(8);
+        let limit = join_cp
+            .strategy
+            .throttle
+            .unwrap_or(usize::MAX)
+            .min(targets.parallelism());
+        assert_eq!(limit, 1, "机群并发把步骤的 throttle 冲掉了");
+    }
+
+    #[test]
+    fn the_fleet_wide_cap_bounds_an_unthrottled_step() {
+        let bp = blueprint_from_str(K8S).unwrap();
+        let join_worker = bp.procedures["bootstrap"].steps[2].clone();
+        assert_eq!(join_worker.strategy.throttle, None, "worker 那步没写 throttle");
+        let limit = join_worker
+            .strategy
+            .throttle
+            .unwrap_or(usize::MAX)
+            .min(big_fleet(3).parallelism());
+        assert_eq!(limit, 3, "没写 throttle 的步骤应当受机群上限约束");
+    }
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// 记录"同时在跑的任务数"的峰值 —— 限流唯一有意义的验证方式。
+    #[derive(Default)]
+    struct Watermark {
+        live: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    impl Watermark {
+        fn enter(&self) {
+            let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            // 让并发真有机会重叠;没有它,再快的任务也可能一个接一个跑完。
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        fn leave(&self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn peak_with(limit: usize, n: usize) -> usize {
+        let w = Watermark::default();
+        run_capped(limit, n, |_| {
+            w.enter();
+            w.leave();
+        });
+        w.peak.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn a_limit_of_one_never_runs_two_at_once() {
+        // 这是 `throttle: 1` 的全部意义:护住 etcd 那种"必须逐台"的约束。
+        assert_eq!(peak_with(1, 8), 1);
+    }
+
+    #[test]
+    fn a_higher_limit_actually_overlaps() {
+        // 反向保险:限流不能是"写了个数字但其实还是串行"。
+        assert!(peak_with(4, 8) > 1, "并发上限调高却没有任何重叠");
+    }
+
+    #[test]
+    fn the_cap_is_never_exceeded() {
+        for limit in [2usize, 3, 5] {
+            assert!(peak_with(limit, 20) <= limit, "limit={limit} 被突破");
+        }
+    }
+
+    #[test]
+    fn results_line_up_with_inputs_regardless_of_concurrency() {
+        // 并发不该让报告变得不可复现 —— 否则 diff 两次运行的输出就没有意义。
+        for limit in [1usize, 3, 16] {
+            let out = run_capped(limit, 32, |i| i * i);
+            assert_eq!(out, (0..32).map(|i| i * i).collect::<Vec<_>>(), "limit={limit}");
+        }
+    }
+
+    #[test]
+    fn no_thread_is_spawned_when_running_serially() {
+        // limit<=1 走完全串行的原路径:既省开销,也让"默认行为一字未变"这件事
+        // 不依赖任何调度器的善意。
+        let main = std::thread::current().id();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        run_capped(1, 4, move |_| s.lock().unwrap().push(std::thread::current().id()));
+        assert!(seen.lock().unwrap().iter().all(|t| *t == main), "串行路径派生了线程");
+    }
+
+    #[test]
+    fn every_task_runs_exactly_once() {
+        let hits: Vec<AtomicUsize> = (0..25).map(|_| AtomicUsize::new(0)).collect();
+        run_capped(6, 25, |i| {
+            hits[i].fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(hits.iter().all(|h| h.load(Ordering::SeqCst) == 1));
     }
 }

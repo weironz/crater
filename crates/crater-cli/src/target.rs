@@ -33,6 +33,10 @@ pub(crate) struct TargetOpts {
     pub(crate) key: Option<PathBuf>,
     #[arg(long, default_value_t = 22)]
     pub(crate) port: u16,
+    /// Fleet-wide concurrency: at most N hosts move at once within one step.
+    /// Default 1 (serial). A step's own `throttle` can only cap *below* this.
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    pub(crate) parallel: usize,
 }
 
 impl TargetOpts {

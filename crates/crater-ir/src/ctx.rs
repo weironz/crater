@@ -4,7 +4,7 @@
 //! 这样五动词与 plan 推导可以在**零网络**下被完整测试,这正是"observe 必须只读"
 //! 这条纪律能被机器验证的前提。
 
-use std::cell::RefCell;
+use std::sync::Mutex;
 use std::collections::BTreeMap;
 use std::process::Command;
 
@@ -49,8 +49,9 @@ impl Ctx for LocalCtx {
 /// 是本设计的核心卖点,不能只靠代码评审来守。
 pub struct FakeCtx {
     responses: Vec<(String, (i32, String))>,
-    log: RefCell<Vec<Call>>,
-    files: RefCell<BTreeMap<String, String>>,
+    // Mutex 而不是 RefCell:`Ctx` 要求 Send + Sync(并发调度会跨线程借它)。
+    log: Mutex<Vec<Call>>,
+    files: Mutex<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,8 +79,8 @@ impl FakeCtx {
     pub fn new() -> Self {
         FakeCtx {
             responses: Vec::new(),
-            log: RefCell::new(Vec::new()),
-            files: RefCell::new(BTreeMap::new()),
+            log: Mutex::new(Vec::new()),
+            files: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -90,16 +91,16 @@ impl FakeCtx {
     }
 
     pub fn calls(&self) -> Vec<Call> {
-        self.log.borrow().clone()
+        self.log.lock().unwrap().clone()
     }
     pub fn writes(&self) -> Vec<Call> {
-        self.log.borrow().iter().filter(|c| c.is_write()).cloned().collect()
+        self.log.lock().unwrap().iter().filter(|c| c.is_write()).cloned().collect()
     }
     pub fn written_file(&self, path: &str) -> Option<String> {
-        self.files.borrow().get(path).cloned()
+        self.files.lock().unwrap().get(path).cloned()
     }
     pub fn reset_log(&self) {
-        self.log.borrow_mut().clear();
+        self.log.lock().unwrap().clear();
     }
 
     fn answer(&self, cmd: &str) -> (i32, String) {
@@ -121,20 +122,20 @@ impl Default for FakeCtx {
 
 impl Ctx for FakeCtx {
     fn probe(&self, cmd: &str) -> anyhow::Result<(i32, String)> {
-        self.log.borrow_mut().push(Call::Probe(cmd.to_string()));
+        self.log.lock().unwrap().push(Call::Probe(cmd.to_string()));
         Ok(self.answer(cmd))
     }
     fn run(&self, cmd: &str) -> anyhow::Result<(i32, String)> {
-        self.log.borrow_mut().push(Call::Run(cmd.to_string()));
+        self.log.lock().unwrap().push(Call::Run(cmd.to_string()));
         Ok(self.answer(cmd))
     }
     fn write_file(&self, path: &str, content: &str) -> anyhow::Result<()> {
-        self.log.borrow_mut().push(Call::Write(path.to_string()));
-        self.files.borrow_mut().insert(path.to_string(), content.to_string());
+        self.log.lock().unwrap().push(Call::Write(path.to_string()));
+        self.files.lock().unwrap().insert(path.to_string(), content.to_string());
         Ok(())
     }
     fn place_material(&self, name: &str, dest: &str) -> anyhow::Result<()> {
-        self.log.borrow_mut().push(Call::Place(name.to_string(), dest.to_string()));
+        self.log.lock().unwrap().push(Call::Place(name.to_string(), dest.to_string()));
         Ok(())
     }
 }

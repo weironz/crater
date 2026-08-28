@@ -454,7 +454,7 @@ mod template_tests {
     use crater_ir::ctx::FakeCtx;
     use crater_ir::eval::{ResolvedArgs, Yaml};
     use crater_ir::parse::blueprint_from_str;
-    use crater_ir::verbs::{Change, DiffInput, ResourceType};
+    use crater_ir::verbs::{Change, DiffInput};
 
     const BP: &str = r#"
 name: t

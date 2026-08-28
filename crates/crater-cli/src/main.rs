@@ -764,7 +764,7 @@ async fn component_shortcut(args: Vec<String>) -> Result<()> {
         i += 1;
     }
     let name = name.ok_or_else(|| anyhow!("missing task name"))?;
-    let target = TargetOpts { inventory, host, user, password, key, port };
+    let target = TargetOpts { inventory, host, user, password, key, port, parallel: 1 };
     apply::apply_source(None, Some(name), None, target, dry_run, shell, false, false, &[], false).await
 }
 
