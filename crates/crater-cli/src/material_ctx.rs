@@ -169,6 +169,26 @@ impl Ctx for MaterialCtx<'_> {
             .map(|text| crater_ir::builtins::copy::sha256_hex(&text)))
     }
 
+    /// 读物料原文,用当前 scope 渲染 → 最终字节。
+    ///
+    /// 只对**控制端能读到字节**的物料成立(本地文件 / 已备好的 blob)。
+    /// 远端 URL 且没有闭包时返回 None:那份模板此刻不在手上,如实说不清。
+    fn render_material(&self, name: &str) -> Result<Option<String>> {
+        let plan = materials::resolve(self.bp, name, &self.scope)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let path = match self.blobs.get(name) {
+            Some(blob) => blob.clone(),
+            None if !is_remote(&plan.source) => self.base_dir.join(&plan.source),
+            None => return Ok(None),
+        };
+        let raw = std::fs::read_to_string(&path).with_context(|| {
+            format!("模板物料 `{name}`:读不到 {}(相对 blueprint 目录解析)", path.display())
+        })?;
+        crater_ir::template::render(&raw, &self.scope)
+            .map(Some)
+            .with_context(|| format!("物料 `{name}`"))
+    }
+
     fn place_material(&self, name: &str, dest: &str) -> Result<()> {
         let plan = materials::resolve(self.bp, name, &self.scope).map_err(|e| anyhow::anyhow!("{e}"))?;
         if plan.kind != MaterialKind::File {
@@ -424,5 +444,129 @@ resources:
             .unwrap_err()
             .to_string();
         assert!(err.contains("先 build 出闭包"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+    use crater_ir::builtins::copy::sha256_hex;
+    use crater_ir::ctx::FakeCtx;
+    use crater_ir::eval::{ResolvedArgs, Yaml};
+    use crater_ir::parse::blueprint_from_str;
+    use crater_ir::verbs::{Change, DiffInput, ResourceType};
+
+    const BP: &str = r#"
+name: t
+materials:
+  - name: conf
+    file: "app.conf.j2"
+resources:
+  - template: { material: conf, dest: /etc/app.conf }
+"#;
+
+    fn fixture(body: &str) -> (tempfile::TempDir, Blueprint) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("app.conf.j2"), body).unwrap();
+        (dir, blueprint_from_str(BP).unwrap())
+    }
+
+    fn scope() -> Scope {
+        let mut s = Scope::default();
+        s.params.insert("port".into(), Yaml::from(9000));
+        s
+    }
+
+    fn args() -> ResolvedArgs {
+        let mut a = ResolvedArgs::new();
+        a.insert("material".into(), Yaml::from("conf"));
+        a.insert("dest".into(), Yaml::from("/etc/app.conf"));
+        a
+    }
+
+    struct Wrap<'a>(&'a FakeCtx);
+    impl Ctx for Wrap<'_> {
+        fn probe(&self, c: &str) -> Result<(i32, String)> { self.0.probe(c) }
+        fn run(&self, c: &str) -> Result<(i32, String)> { self.0.run(c) }
+        fn write_file(&self, p: &str, c: &str) -> Result<()> { self.0.write_file(p, c) }
+        fn place_material(&self, n: &str, d: &str) -> Result<()> { self.0.place_material(n, d) }
+    }
+
+    fn ctx<'a>(inner: &'a FakeCtx, bp: &'a Blueprint, dir: &tempfile::TempDir) -> MaterialCtx<'a> {
+        MaterialCtx::new(Box::new(Wrap(inner)), bp, scope(), BlobMap::new(), dir.path().to_path_buf())
+    }
+
+    #[test]
+    fn a_template_is_rendered_on_the_control_side() {
+        let (dir, bp) = fixture("listen {{ params.port }}\n");
+        let fake = FakeCtx::new();
+        let c = ctx(&fake, &bp, &dir);
+        assert_eq!(c.render_material("conf").unwrap().unwrap(), "listen 9000\n");
+    }
+
+    #[test]
+    fn a_matching_target_is_a_noop_not_an_unknown() {
+        // 这是接渲染的**全部理由**:此前 template 的 diff 永远是 `?`,
+        // verify 因此永远给不出绿灯,漂移检测也永远有一条噪声。
+        let (dir, bp) = fixture("listen {{ params.port }}\n");
+        let want = sha256_hex("listen 9000\n");
+        let fake = FakeCtx::new()
+            .on("test -f '/etc/app.conf'", 0, &format!("{want}\n644\n"));
+        let c = ctx(&fake, &bp, &dir);
+
+        let obs = crater_ir::builtins::get("template").unwrap().observe(&c, &args()).unwrap();
+        let change = crater_ir::builtins::get("template").unwrap().diff(&DiffInput {
+            args: &args(),
+            observed: &obs,
+            upstream_changed: false,
+        });
+        assert_eq!(change, Change::Ok, "渲染结果与现实一致时应为 noop");
+    }
+
+    #[test]
+    fn a_drifted_target_is_reported_as_an_update_with_both_digests() {
+        let (dir, bp) = fixture("listen {{ params.port }}\n");
+        let fake = FakeCtx::new()
+            .on("test -f '/etc/app.conf'", 0, &format!("{}\n644\n", sha256_hex("listen 1\n")));
+        let c = ctx(&fake, &bp, &dir);
+        let obs = crater_ir::builtins::get("template").unwrap().observe(&c, &args()).unwrap();
+        let change = crater_ir::builtins::get("template").unwrap().diff(&DiffInput {
+            args: &args(),
+            observed: &obs,
+            upstream_changed: false,
+        });
+        assert!(matches!(change, Change::Update(_)), "{change:?}");
+    }
+
+    #[test]
+    fn observing_a_template_writes_nothing_to_the_target() {
+        // observe 的只读纪律:渲染发生在控制端,不该向目标发出任何写命令。
+        let (dir, bp) = fixture("listen {{ params.port }}\n");
+        let fake = FakeCtx::new()
+            .on("test -f '/etc/app.conf'", 0, &format!("{}\n644\n", sha256_hex("x")));
+        let c = ctx(&fake, &bp, &dir);
+        crater_ir::builtins::get("template").unwrap().observe(&c, &args()).unwrap();
+        assert!(fake.calls().iter().all(|call| !call.is_write()), "{:?}", fake.calls());
+    }
+
+    #[test]
+    fn apply_writes_the_rendered_bytes_not_the_raw_template() {
+        let (dir, bp) = fixture("listen {{ params.port }}\n");
+        let fake = FakeCtx::new();
+        let c = ctx(&fake, &bp, &dir);
+        crater_ir::builtins::get("template")
+            .unwrap()
+            .apply(&c, &args(), &Change::Create(vec![]))
+            .unwrap();
+        assert_eq!(fake.written_file("/etc/app.conf").unwrap(), "listen 9000\n");
+    }
+
+    #[test]
+    fn a_broken_template_names_the_material() {
+        let (dir, bp) = fixture("{{ params.nope }}");
+        let fake = FakeCtx::new();
+        let c = ctx(&fake, &bp, &dir);
+        let err = c.render_material("conf").unwrap_err().to_string();
+        assert!(err.contains("conf"), "{err}");
     }
 }

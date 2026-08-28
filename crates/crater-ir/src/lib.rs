@@ -23,6 +23,7 @@ pub mod procedure;
 pub mod schema;
 pub mod selector;
 pub mod state;
+pub mod template;
 pub mod types;
 pub mod verbs;
 

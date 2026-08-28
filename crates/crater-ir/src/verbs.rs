@@ -144,6 +144,16 @@ pub trait Ctx {
     fn material_digest(&self, _name: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
+
+    /// 在**控制端**渲染这份物料(模板)→ 最终字节。
+    ///
+    /// 目标机零依赖是硬约束,所以渲染只能发生在这一侧。渲染完成后 `template`
+    /// 与 `copy` 再无区别:同样按内容寻址判幂等,plan 期也就说得出确定结论
+    /// 而不是 `?`。返回 `None` = 这个上下文渲染不了(如 `LocalCtx`),
+    /// 调用方应如实报"说不清"。
+    fn render_material(&self, _name: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// 资源类型的契约。

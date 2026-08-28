@@ -12,6 +12,7 @@ serde_json = "1"
 anyhow = { workspace = true }
 thiserror = "2"
 cel = "0.14"
+minijinja = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

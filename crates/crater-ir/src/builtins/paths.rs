@@ -12,6 +12,9 @@ use crate::verbs::*;
 ///
 /// 与 `copy` 的差别只在**内容从哪来**:模板的字节在控制端渲染(带 inventory 上下文),
 /// 落地后同样按内容寻址判幂等。
+///
+/// 关键在于**渲染发生在 observe 期间**:渲染结果的摘要是控制端事实,
+/// 把它取到手,`diff` 就能正经比对而不是报 `?` —— 否则 verify 永远给不出绿灯。
 pub struct Template;
 
 impl ResourceType for Template {
@@ -20,23 +23,46 @@ impl ResourceType for Template {
     }
 
     fn observe(&self, ctx: &dyn Ctx, args: &ResolvedArgs) -> Result<Observed> {
-        crate::builtins::copy::Copy.observe(ctx, &dest_as_copy(args)?)
+        let mut obs = crate::builtins::copy::Copy.observe(ctx, &dest_as_copy(args)?)?;
+        // 现在就渲染 —— 渲染是纯函数且只在控制端,observe 的"只读"纪律不受影响。
+        if obs.present {
+            if let Some(name) = arg_str_opt(args, "material") {
+                if let Some(text) = ctx.render_material(name)? {
+                    obs.fields
+                        .insert("want_sha256".into(), crate::builtins::copy::sha256_hex(&text));
+                }
+            }
+        }
+        Ok(obs)
     }
 
     fn diff(&self, input: &DiffInput) -> Change {
-        // 渲染结果在执行层才产生,plan 期只能靠"上游是否变了"判断。
-        // 说不清就说不清,不假装 —— 这正是 Unknown 存在的意义。
         if !input.observed.present {
             return Change::Create(vec![FieldDiff::set("content", "(模板渲染)")]);
         }
-        if input.upstream_changed {
-            Change::Update(vec![FieldDiff::change("content", "(已存在)", "(重新渲染)")])
-        } else {
-            Change::Unknown("模板渲染结果需在执行期才能与现实比对".into())
+        // 拿到渲染摘要就正经比对(与 copy 同一条内容寻址路径);
+        // 拿不到才退回粗判据 —— 说不清就说不清,不假装。
+        match input.observed.get("want_sha256") {
+            Some(_) => crate::builtins::copy::Copy.diff(input),
+            None if input.upstream_changed => {
+                Change::Update(vec![FieldDiff::change("content", "(已存在)", "(重新渲染)")])
+            }
+            None => Change::Unknown("此上下文渲染不了模板,无法与现实比对".into()),
         }
     }
 
     fn apply(&self, ctx: &dyn Ctx, args: &ResolvedArgs, change: &Change) -> Result<Outcome> {
+        // 渲染得出来就写渲染结果;渲染不了(如 LocalCtx)才退回原样落地。
+        if let Some(name) = arg_str_opt(args, "material") {
+            if let Some(text) = ctx.render_material(name)? {
+                let dest = arg_str(args, "dest")?;
+                ctx.write_file(dest, &text)?;
+                if let Some(mode) = arg_str_opt(args, "mode") {
+                    run_ok(ctx, &format!("chmod {} {}", mode, sh(dest)))?;
+                }
+                return Ok(Outcome::Changed);
+            }
+        }
         crate::builtins::copy::Copy.apply(ctx, &material_as_copy(args)?, change)
     }
 
