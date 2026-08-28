@@ -1,0 +1,309 @@
+# Kubernetes HA —— 新 IR blueprint(D-106 起的形态)。
+#
+# 对照物:同目录 `k8s-ha.yaml`(旧 task 模型,519 行)。这份迁移的意义不只是"更短",
+# 而是把三类东西**分开**:
+#   资源      = 期望态(基线 / 运行时 / 二进制 / LB),可 observe、可 diff、可退役
+#   procedure = 过程知识(kubeadm 那支舞),被调用而非被编写
+#   types     = 把舞封装进名词(`cluster_member`),操作者永远不写 init/join
+#
+# 拓扑由 inventory 的组决定,与旧版一致:
+#   单节点     : 1 台 controlplane
+#   1 主 N 从   : 1 台 controlplane + N 台 worker
+#   HA 多主多从 : M 台 controlplane + N 台 worker
+# `first(role.controlplane)` 即 init 节点 —— 不再需要"全组跑 + check 守卫跳过首台"。
+name: k8s-ha
+version: "1.36.1"
+description: "HA Kubernetes(单节点 / 1主N从 / 多主多从),二进制 + kubeadm"
+
+requires:
+  os: [{ distro: ubuntu, versions: ["24.04"] }]
+  arch: [amd64]
+
+params:
+  # 拓扑开关。单节点 / 1主N从 不需要 VIP 前置 —— keepalived+haproxy 只在多 master
+  # 时才有意义,单 master 上装一套反而多一层会坏的东西。
+  ha:              { type: bool, default: false, desc: "多 master:装 keepalived+haproxy 并经 VIP 接入" }
+  # 预载镜像是**离线**才需要的:在线部署时 kubeadm 自己会拉。
+  # 打开它要求 OCI 闭包就位(尚未接入新管线,见 D-115)。
+  preload_images:  { type: bool, default: false, desc: "离线:把镜像预先导入目标运行时" }
+  version:         { type: version, default: "1.36.1", stage: build }
+  vip:             { type: ip,   default: "192.168.73.14", desc: "控制面 VIP(仅 ha=true 时使用)" }
+  # 留空 = 不传 --control-plane-endpoint(单节点的正确做法:kubeadm 用本机地址)。
+  cp_endpoint:     { default: "", desc: "kubeadm --control-plane-endpoint;ha=true 时应为 VIP:8443" }
+  subnet:          { type: cidr, default: "192.168.73.0/24", desc: "VIP 所在子网(keepalived 选网卡)" }
+  pod_cidr:        { type: cidr, default: "10.244.0.0/16" }
+  image_repo:      { default: "registry.aliyuncs.com/google_containers" }
+  apiserver_port:  { type: port, default: 6443, desc: "haproxy 后端各 master 的 apiserver 口" }
+  containerd_ver:  { default: "2.3.1",  stage: build }
+  runc_ver:        { default: "1.4.2",  stage: build }
+  cni_ver:         { default: "1.9.1",  stage: build }
+  crictl_ver:      { default: "1.36.0", stage: build }
+  coredns_ver:     { default: "1.14.2", stage: build }
+  etcd_ver:        { default: "3.6.8-0", stage: build }
+  pause_ver:       { default: "3.10.2", stage: build }
+  flannel_ver:     { default: "0.28.4", stage: build }
+  flannel_cni_ver: { default: "1.9.1-flannel1", stage: build }
+
+materials:
+  # —— 二进制 ——
+  - name: containerd
+    file: "https://github.com/containerd/containerd/releases/download/v${params.containerd_ver}/containerd-${params.containerd_ver}-linux-${substrate.arch}.tar.gz"
+  - name: runc
+    file: "https://github.com/opencontainers/runc/releases/download/v${params.runc_ver}/runc.${substrate.arch}"
+  - name: cni-plugins
+    file: "https://github.com/containernetworking/plugins/releases/download/v${params.cni_ver}/cni-plugins-linux-${substrate.arch}-v${params.cni_ver}.tgz"
+  - name: crictl
+    file: "https://github.com/kubernetes-sigs/cri-tools/releases/download/v${params.crictl_ver}/crictl-v${params.crictl_ver}-linux-${substrate.arch}.tar.gz"
+  - name: kubeadm
+    file: "https://dl.k8s.io/release/v${params.version}/bin/linux/${substrate.arch}/kubeadm"
+  - name: kubelet
+    file: "https://dl.k8s.io/release/v${params.version}/bin/linux/${substrate.arch}/kubelet"
+  - name: kubectl
+    file: "https://dl.k8s.io/release/v${params.version}/bin/linux/${substrate.arch}/kubectl"
+  - name: flannel-manifest
+    file: "https://github.com/flannel-io/flannel/releases/download/v${params.flannel_ver}/kube-flannel.yml"
+
+  # —— 人工维护的配置与 unit(沿用旧库 files/)——
+  - { name: cfg-crictl,      file: files/crictl.yaml }
+  - { name: cfg-containerd,  file: files/containerd-config.toml }
+  - { name: unit-containerd, file: files/containerd.service }
+  - { name: unit-kubelet,    file: files/kubelet.service }
+  - { name: dropin-kubeadm,  file: files/10-kubeadm.conf }
+  - { name: cfg-keepalived,  file: templates/keepalived.conf.j2 }
+  - { name: cfg-haproxy,     file: templates/haproxy.cfg.j2 }
+
+  # —— 镜像(全节点导入到 k8s.io)——
+  - { name: img-apiserver,   image: "${params.image_repo}/kube-apiserver:v${params.version}" }
+  - { name: img-cm,          image: "${params.image_repo}/kube-controller-manager:v${params.version}" }
+  - { name: img-scheduler,   image: "${params.image_repo}/kube-scheduler:v${params.version}" }
+  - { name: img-proxy,       image: "${params.image_repo}/kube-proxy:v${params.version}" }
+  - { name: img-coredns,     image: "${params.image_repo}/coredns:v${params.coredns_ver}" }
+  - { name: img-pause,       image: "${params.image_repo}/pause:${params.pause_ver}" }
+  - { name: img-etcd,        image: "${params.image_repo}/etcd:${params.etcd_ver}" }
+  - { name: img-flannel,     image: "ghcr.io/flannel-io/flannel:v${params.flannel_ver}" }
+  - { name: img-flannel-cni, image: "ghcr.io/flannel-io/flannel-cni-plugin:v${params.flannel_cni_ver}" }
+
+resources:
+  # ========== 主机基线 ==========
+  # kubeadm 用 OS hostname 作 node 名,所以主机名是**期望态**而不是一条命令。
+  - hostname: "${substrate.name}"
+  # 旧版是 `swapoff -a` + sed /etc/fstab 两步两个 check;类型化后连"重启后 swap
+  # 自己回来"这个经典陷阱都在 plan 里看得见。
+  - swap: { state: disabled, persist: true }
+  - kernel_modules: { load: [overlay, br_netfilter], persist: true }
+  - sysctl:
+      set:
+        net.bridge.bridge-nf-call-iptables: 1
+        net.bridge.bridge-nf-call-ip6tables: 1
+        net.ipv4.ip_forward: 1
+  - package:
+      packages:
+        debian: [conntrack, socat, ipset, ethtool, ebtables]
+
+  # ========== containerd 运行时 ==========
+  - unarchive: { material: containerd, to: /usr/local, creates: /usr/local/bin/containerd }
+  - copy:      { material: runc, dest: /usr/local/sbin/runc, mode: "0755" }
+  - unarchive: { material: cni-plugins, to: /opt/cni/bin, creates: /opt/cni/bin/bridge }
+  # CNI 配置目录必须先于 containerd 启动存在,否则它的 fsnotify watch 建不起来,
+  # flannel 后写的配置不被加载、节点卡 NotReady(旧库 D-076 的根因)。
+  - file:      { path: /etc/cni/net.d, state: directory }
+  - unarchive: { material: crictl, to: /usr/local/bin, creates: /usr/local/bin/crictl }
+  - copy:      { material: cfg-crictl, dest: /etc/crictl.yaml }
+  - copy:      { material: cfg-containerd, dest: /etc/containerd/config.toml }
+  - systemd_unit: { name: containerd, from_material: unit-containerd }
+  # 上面任一项变了,这条自然要求重启 —— 旧版靠 `notify: [restart_containerd]` 手写。
+  - service:   { name: containerd, state: started, enabled: true }
+
+  # ========== kube 二进制 ==========
+  - copy: { material: "${item}", dest: "/usr/local/bin/${item}", mode: "0755" }
+    each: ["kubeadm", "kubelet", "kubectl"]
+  - systemd_unit:
+      name: kubelet
+      from_material: unit-kubelet
+      dropins: [dropin-kubeadm]
+  - service: { name: kubelet, state: started, enabled: true }
+
+  # flannel 清单要先落到目标机,bootstrap 那支舞才 apply 得了它。
+  - copy: { material: flannel-manifest, dest: /etc/kubernetes/kube-flannel.yml }
+    on: first(role.controlplane)
+
+  - image_present:
+      materials: [img-apiserver, img-cm, img-scheduler, img-proxy, img-coredns,
+                  img-pause, img-etcd, img-flannel, img-flannel-cni]
+      namespace: k8s.io
+    when: params.preload_images
+
+  # ========== 控制面 LB(VIP 前置 apiserver)==========
+  - package:
+      packages:
+        debian: [keepalived, haproxy]
+    on: role.controlplane
+    when: params.ha
+  - template: { material: cfg-haproxy, dest: /etc/haproxy/haproxy.cfg }
+    on: role.controlplane
+    when: params.ha
+  - template: { material: cfg-keepalived, dest: /etc/keepalived/keepalived.conf }
+    on: role.controlplane
+    when: params.ha
+  # 包安装时 haproxy 已带默认配置起来了,必须重启才加载我们写的 :8443 —— 上游
+  # 配置变更会经指纹传播到这里,不必手写 notify。
+  - service: { name: haproxy,    state: started, enabled: true }
+    on: role.controlplane
+    when: params.ha
+  - service: { name: keepalived, state: started, enabled: true }
+    on: role.controlplane
+    when: params.ha
+
+  # ========== 集群成员资格:状态在这里,舞在 procedure 里 ==========
+  - cluster_member: { role: control-plane }
+    on: role.controlplane
+  - cluster_member: { role: worker }
+    on: role.worker
+
+types:
+  # L2 数据模块层:引擎不必懂 kubeadm(D-017)。现实由只读探针读出,
+  # 弥合动作是一支舞 —— 操作者面对的是"这台应当是集群成员"这个名词。
+  - name: cluster_member
+    args:
+      role: { type: { enum: [control-plane, worker] } }
+    observe:
+      cmd: "test -f /etc/kubernetes/kubelet.conf && echo joined || echo absent"
+      parse: { joined: joined }
+    apply: bootstrap
+    destroy: reset
+    upgrade: upgrade
+
+procedures:
+  # ---- 建集群:首台 init → 传 token/certkey → 其余逐台 join ----
+  bootstrap:
+    steps:
+      # haproxy 恒监听 8443,所以 TCP 通 = VIP 在位 + haproxy 在跑。
+      # 这堵住了"init 撞上 VIP 尚未漂移"的窗口。单节点没有 VIP,自然也不必等。
+      - wait: { port: 8443, host: "${params.vip}", timeout: 30 }
+        on: role.controlplane
+        when: params.ha
+
+      - shell:
+          # 单节点不传 --control-plane-endpoint;多 master 才需要它指向 VIP。
+          # `--upload-certs` 同理:只有要让别人 join control-plane 时才有意义。
+          cmd: >-
+            kubeadm init
+            ${params.cp_endpoint == "" ? "" : "--control-plane-endpoint " + params.cp_endpoint}
+            ${params.ha ? "--upload-certs" : ""}
+            --pod-network-cidr=${params.pod_cidr} --image-repository ${params.image_repo}
+            --kubernetes-version v${params.version}
+            --cri-socket=unix:///run/containerd/containerd.sock
+          check: "test -f /etc/kubernetes/admin.conf"
+        on: first(role.controlplane)
+        exports:
+          join:    "kubeadm token create --print-join-command"
+          certkey: "kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1"
+
+      - shell:
+          cmd: "mkdir -p /root/.kube && cp -f /etc/kubernetes/admin.conf /root/.kube/config"
+          check: "test -f /root/.kube/config"
+        on: first(role.controlplane)
+
+      - shell:
+          cmd: "kubectl apply -f /etc/kubernetes/kube-flannel.yml"
+          check: "kubectl -n kube-flannel get ds/kube-flannel-ds"
+          env: { KUBECONFIG: /etc/kubernetes/admin.conf }
+        on: first(role.controlplane)
+
+      # 其余 control-plane 逐台 join —— etcd learner 必须一个一个同步。
+      # 旧版只能"全组跑 + check 守卫跳过首台",一行代码配三行注释。
+      - shell:
+          cmd: >-
+            ${facts.join} --control-plane --certificate-key ${facts.certkey}
+            --cri-socket=unix:///run/containerd/containerd.sock
+          check: "test -f /etc/kubernetes/kubelet.conf"
+        on: rest(role.controlplane)
+        strategy: { throttle: 1 }
+
+      - shell:
+          cmd: "mkdir -p /root/.kube && cp -f /etc/kubernetes/admin.conf /root/.kube/config"
+          check: "test -f /root/.kube/config"
+        on: rest(role.controlplane)
+
+      # worker 可并行 join
+      - shell:
+          cmd: "${facts.join} --cri-socket=unix:///run/containerd/containerd.sock"
+          check: "test -f /etc/kubernetes/kubelet.conf"
+        on: role.worker
+
+      # 单节点必须去污点,否则工作负载没地方调度;多节点去掉也无妨(worker 在)。
+      - shell:
+          cmd: "kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true"
+          check: "false"
+          env: { KUBECONFIG: /etc/kubernetes/admin.conf }
+        on: first(role.controlplane)
+
+  # ---- 退役:其余资源的 destroy 是推论,这里只留真正的过程知识 ----
+  reset:
+    steps:
+      - shell:
+          cmd: "kubeadm reset -f --cri-socket=unix:///run/containerd/containerd.sock || true"
+          check: "! test -f /etc/kubernetes/kubelet.conf"
+        on: all
+      # kubeadm reset 与 stop containerd 都不会杀 shim 托管的容器(shim 保活),
+      # 残留 apiserver/etcd 占着端口 → 下次 join 撞 "Port 6443 in use"。
+      # 这类坑正是专家知识,值得封装进 blueprint 而不是让每个用户各踩一遍。
+      - shell:
+          cmd: >-
+            crictl --runtime-endpoint unix:///run/containerd/containerd.sock rm -f
+            $(crictl --runtime-endpoint unix:///run/containerd/containerd.sock ps -aq 2>/dev/null) 2>/dev/null;
+            pkill -9 containerd-shim 2>/dev/null; true
+          check: "! pgrep containerd-shim"
+        on: all
+      - shell:
+          cmd: "rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd /root/.kube"
+          check: "! test -d /var/lib/etcd"
+        on: all
+
+  # ---- 滚动升级:旧版是另一个 role 文件,这里内置于 blueprint ----
+  # `crater procedure upgrade -f k8s-ha.blueprint.yaml --set to=1.37.0`
+  upgrade:
+    params:
+      to: { type: version, required: true }
+    steps:
+      - copy: { material: kubeadm, dest: /usr/local/bin/kubeadm, mode: "0755" }
+        on: all
+      - shell:
+          cmd: "kubectl drain ${substrate.name} --ignore-daemonsets --delete-emptydir-data --timeout=300s || true"
+          check: "false"
+          env: { KUBECONFIG: /etc/kubernetes/admin.conf }
+        on: role.controlplane
+        strategy: { throttle: 1 }
+      - shell:
+          cmd: "kubeadm upgrade apply -y v${params.to}"
+          check: "kubeadm version -o short | grep -q v${params.to}"
+        on: first(role.controlplane)
+      - shell:
+          cmd: "kubeadm upgrade node"
+          check: "kubeadm version -o short | grep -q v${params.to}"
+        on: rest(role.controlplane)
+        strategy: { throttle: 1 }
+      - shell:
+          cmd: "kubeadm upgrade node"
+          check: "kubeadm version -o short | grep -q v${params.to}"
+        on: role.worker
+        strategy: { throttle: 1 }
+      - copy: { material: "${item}", dest: "/usr/local/bin/${item}", mode: "0755" }
+        each: ["kubelet", "kubectl"]
+        on: all
+      - service: { name: kubelet, state: restarted }
+        on: all
+        strategy: { throttle: 1 }
+      - shell:
+          cmd: "kubectl uncordon ${substrate.name} || true"
+          check: "false"
+          env: { KUBECONFIG: /etc/kubernetes/admin.conf }
+        on: role.controlplane
+
+health:
+  - service_active: kubelet
+  - service_active: containerd
+  - cmd:
+      run: "kubectl get nodes -o wide"
+      env: { KUBECONFIG: /etc/kubernetes/admin.conf }
+    on: first(role.controlplane)

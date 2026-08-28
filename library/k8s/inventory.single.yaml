@@ -1,0 +1,18 @@
+# 单节点 k8s:一台机器既是 control-plane 也承载工作负载。
+#
+#   crater plan  -f library/k8s/k8s-ha.blueprint.yaml -i library/k8s/inventory.single.yaml
+#   crater apply -f library/k8s/k8s-ha.blueprint.yaml -i library/k8s/inventory.single.yaml
+#
+# 拓扑差异**只在这个文件里**:blueprint 一字不改。
+# `first(role.controlplane)` 选中这台跑 init;`rest(...)` 与 `role.worker` 为空,
+# 那些步骤会被跳过并在输出里留痕。
+# 默认 ha=false → 不装 keepalived/haproxy,kubeadm 不传 --control-plane-endpoint。
+inventory:
+  hosts:
+    - name: n1
+      address: 192.168.1.10      # ← 改成你的机器
+      user: root
+      password: "changeme"       # 或 key: ~/.ssh/id_ed25519
+  groups:
+    controlplane: { hosts: [n1] }
+    worker: { hosts: [] }

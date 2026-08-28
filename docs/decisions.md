@@ -1323,3 +1323,309 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   `upgrade.kubelet/kubectl` 前缀物料并正确解析);docker 真机 apply 幂等 changed=0。
   k8s-ha/offline 全链路未真机重验(73.13 关机/离线构建重),dry-run 还揪出 k8s-offline
   一处 `needs: [kubeadm]` 旧 id 引用,已改 `kube_bins`。
+
+## 2026-08-28 · D-106:方向重整——「环境的包管理器 + 对账引擎」(白纸推导定案)
+
+- **决策**:项目方向按 [research/product-design.md](research/product-design.md)(产品白纸设计)
+  + [research/next-gen.md](research/next-gen.md)(调研/技术选型/架构)定案。一句话:crater 不是
+  「更好的 Ansible」,而是**环境的包管理器 + 对账引擎**——Helm 的作者/操作者分离 ×
+  Nix 的密封闭包 × Terraform 的 plan × K8s 的对账循环,合并作用到 OS/裸机层,
+  单二进制,AI(MCP)可全程操作。
+- **核心裁定**:
+  - 对象模型 = 七名词:Substrate / Resource / Blueprint / Stack / Environment / Deployment / Run;
+    模块契约 = 五动词:observe / diff / apply / destroy / upgrade(observe 强制,plan/drift 是推论)。
+  - 状态与过渡分离:资源声明期望态;procedure(升级 dance 等)内置于 Blueprint,被调用不被编写。
+  - 作者/操作者分离:操作者体验(install/values/plan/approve)是产品的脸;
+    ansible 形状 DSL(模块名即 key、隐式顺序、CEL `when:`)**降位为作者层前端**;IR 才是契约。
+  - 表达式层锁 CEL(非图灵完备,承接并升级 D-036);`${}` 插值与 `when:` 同一求值器。
+  - 交付单元 = 密封 OCI 闭包(离线是副产品,密封是本体);闭包靠「声明为本 + 渲染发现 +
+    record 采集 + 运行时收口」收敛(Zarf 参照系,见 next-gen §5.1)。
+  - 存储 = Store trait + sqlx 双后端:SQLite 默认,Postgres 一等公民(HA 多实例:
+    SKIP LOCKED 队列 / advisory lock 选主 / LISTEN+NOTIFY,不引 Redis/etcd)。
+  - 插件四层:Rust 内建(~70,五动词全实现)→ YAML 数据模块 → WASM(Extism)→
+    协议桥(TF provider gRPC / ansible 模块垫片);不做 ansible 语法级运行时兼容,做 `import` 转换器。
+- **资产处置**:engine/executor(自举 agent)/store/bundle(OCI)保留;task/component/project
+  parse 层重写;现行 task DSL(`action:` 标签 + id/needs 显式 DAG + when_* 枚举字段)废止方向。
+- **实施顺序**:P0 前置 = 先冻结七名词 + 五动词 IR(schema + 示例),再动 DSL——名词错了后面全错。
+- **关联**:承接 D-017(引擎零产品知识)、D-036(YAML 纯数据→升级为 CEL)、D-046(单 task
+  模型→拆回作者/操作者两层)、D-083(project→Stack)、D-102(requires→参数契约的一部分)。
+
+## 2026-08-28 · D-107:P0 落地 —— `crater-ir` crate(IR 前端 + 五动词契约)
+
+- **交付**:新增 `crates/crater-ir`(D-106 的 IR 冻结版实现),**不动**现有 crater-core/cli,
+  两者并存直到新管线接上。53 个测试全绿,clippy 零警告。
+- **模块**:
+  - `expr.rs` —— CEL 表达式层。`when:` 与 `${}` 插值**同一个求值器**;编译期抽取
+    根变量与函数名供 lint。选 `cel` 0.14(非 `cel-interpreter` 0.10:后者语法错误
+    会在 antlr 里 `unreachable!` panic,做不了 linter)。
+  - `selector.rs` —— `all | role.X | host.X | first(sel) | rest(sel) | sel where <cel>`。
+    `first/rest` 取代 `run_once` 与"全组跑+check 守卫跳过首台"的诡计(D-106 裁定 A)。
+  - `schema.rs` —— params 契约:`type`(含 ip/cidr/port/version/list/enum 语义类型)
+    + `secret` + `stage: build|deploy`(`stage: apply` 显式报错并指路)。
+  - `ir.rs` —— 七名词类型。**刻意不存在**:handler/notify、run_once、phase、teardown、
+    offline 开关 —— 每个"没有"都是一次裁定,写在文件头注释里。
+  - `verbs.rs` —— 五动词 trait。`observe` 强制 ⇒ plan/drift/destroy 是推论而非功能。
+  - `types.rs` —— L1 内建类型目录(24 个),按**类型化层次**拟而非照抄 ansible 模块表:
+    `systemd_unit`/`swap`/`kernel_modules`/`sysctl`/`hostname`/`image_present` 全是
+    两块试金石里"仪式型 shell + 手写 check"升上来的。
+  - `parse.rs` —— YAML 前端。规则:**若干步骤关键字 + 恰好一个模块 key**;未知字段
+    带拼写建议直接报错。
+  - `lint.rs` —— 零连接静态诊断。
+- **诊断能力**(每条都是 ansible 里要连机器跑到才炸的错,`tests/diagnostics.rs` 22 例):
+  模块名/参数名/参数引用拼写(带建议)、作用域外根变量、`item` 无 `each`、未声明物料、
+  必填缺失与 one_of 互斥、default 不符声明类型(IP/CIDR 格式)、**探针函数封闭白名单**
+  (拒 `exec()` 之类,守住非图灵完备)、fact 产销平衡、自定义类型指向不存在的 procedure、
+  同名物料无 `when:` 区分。裸 shell 无 `check:` 只报 warn 并计入"模型化欠债"——接住不羞辱。
+- **试金石回归**(`tests/touchstones.rs`):两块 blueprint 解析 + lint 零 error,并断言
+  压缩比 ≥2×(实测 rustfs 143→57、k8s-ha 519→84)。IR 一旦退化立刻红。
+- **构建注记**:仓库 `.cargo/config.toml` 钉了 mold;本机无 mold 时用 `RUSTFLAGS=""` 覆盖。
+- **关联**:D-106(方向与裁定)、D-017(引擎零产品知识 —— `types:` 让 kubeadm 这类知识
+  留在 blueprint)、D-036(YAML 纯数据 → CEL 升级版)。
+
+### D-107 补:`crater lint` —— 静态检查的用户可见兑现
+
+- **命令**:`crater lint [PATHS...] [--strict] [--json]`(默认扫当前目录)。零连接、
+  毫秒级、退出码 1 表示有 error。这是新 DSL 第一个能给别人看的东西。
+- **行号定位**(`loc.rs`):`serde_yaml` 的 Value 不带 span,而"报错必须指到行"是 lint
+  好不好用的分水岭。用一趟轻量缩进扫描重建"某 section 的第 N 个列表项在第几行",
+  唯一陷阱是**块标量**(`content: |` 里的 `- xxx` 是内容不是列表项),已单测覆盖。
+  诊断输出 `file.yaml:13  error  …  (resources.servce)` —— 终端可点击。
+- **目录扫描的宽容度**(实测踩到才补的):仓库里绝大多数 YAML 不是 blueprint
+  (inventory / CI 配置 / k8s manifest)。规则:**点名的文件一律解析并报错;目录扫描
+  发现的文件,不含 blueprint 特征段(resources/procedures/types/materials/preflight/
+  health)则静默跳过**。否则 `crater lint .` 全是噪音。
+- **旧格式识别**:顶层有 `actions:`/`plays:` → 报"旧版 task 格式,跳过"并计入汇总,
+  不报错 —— 那是**迁移待办**,不是写错了。全仓库实测:24 个 YAML,22 个旧 task 跳过,
+  2 个新 blueprint 通过,0 error。
+- **warn 不阻断**,`--strict` 才阻断(CI 用)。裸 shell 无 `check:` 属此类。
+- **测试**:`crates/crater-cli/tests/lint_cli.rs` 10 例覆盖命令行契约(退出码 / strict /
+  目录宽容度 / 旧格式 / JSON / 缺路径)。其中 `whole_repo_scan_is_clean` 是长期护栏:
+  仓库里任何新 blueprint 有 error 就红。合计 68 测试全绿,clippy 零警告。
+
+## 2026-08-28 · D-108:五动词 L1 骨架 —— plan / converge / destroy 成为推论
+
+- **交付**:`crater-ir` 补齐 `eval` / `ctx` / `builtins`(file、copy、service)/ `plan`,
+  并把 `crater plan -f <blueprint>` 接到新管线(按文件格式分流,旧 task 仍走原管线)。
+  142 测试全绿(crater-ir 114 + crater-cli 28),新代码 clippy 零警告。
+- **核心兑现**:`plan` / `converge` / `destroy` **不是三个功能,是同一个 `observe` 的三个
+  推论**。旧模型里 actions / teardown / plan 探针分头维护还会不同步;现在它们共用一份
+  observe,不可能不一致。
+  - `plan` = ∀resource: observe + diff,零写入;
+  - `converge` = plan 之后对非 noop 项 apply;
+  - `destroy` = **逆序**调 destroy(所以 IR 里没有 `teardown:` 段)。
+- **求值层**(`eval.rs`)一条影响手感的规则:**整串恰好是一个表达式时保留原生类型**
+  (`port: "${params.port}"` → 整数 9000),混着字面量才拼字符串。旧模型全是字符串替换,
+  于是 `timeout: "{{n}}"` 一路以字符串流到执行层。`--set port=9443` 同样按 YAML 解析,
+  得到整数而非字符串。
+- **"observe 只读"被机器验证**:`FakeCtx` 记录每一条调用并区分探针/写入,
+  测试直接断言 `plan` 期间 `writes()` 为空。这条纪律是 plan 可信度的全部押注,
+  不能只靠代码评审守;CLI 侧再用真实文件系统复验一次(plan 跑完目录仍不存在)。
+- **handler 删除的兑现点**在 `service.diff`:`DiffInput.upstream_changed` 为真且
+  `state: started` ⇒ 判定重启。v0 用保守规则(**本轮任一在先的资源会变**即传播),
+  方向是宁可多重启一次而非漏重启;精确到字段的传播留 P1。反向保险也有测试:
+  上游没变时不得产生"天天重启"。
+- **求值撞出的 schema 修正**:`each:` 字符串此前按模板解析,导致
+  `each: params.dirs` 与 `each: "${params.dirs}"` 是两种写法。收敛为
+  **字符串 = CEL 表达式(与 `when:` 一致,不写 `${}`),列表 = 字面量**,新增 `Each` 类型。
+- **测试逼出的真 bug**:`File::destroy` 不看 `observed`,对**不存在**的路径也发 `rm -rf`
+  (退役一台从没装过的机器会刷屏甚至报错)。已修,并留下钉死它的测试。
+- **诚实的边界**:blueprint 自定义类型(L2)的执行器未落地,plan 里显示 `?` 并计入
+  **模型化欠债**计数,绝不假装成功;`crater plan` 目前只支持本机目标(SSH `Ctx` 在 P1)。
+- **关联**:D-106(五动词契约)、D-107(IR 前端 + lint)、D-092(指纹幂等 → 升为引擎通用机制)。
+
+## 2026-08-28 · D-109:新管线接通真机 —— SSH `Ctx` + `crater apply`
+
+- **交付**:`crater apply -f <blueprint> [--host H] [-i inv]` 走五动词管线并真正落地;
+  `--dry-run` 等价于 plan。按**文件格式**分流(`blueprint_source()`):新 IR blueprint
+  进新管线,旧 task / 镜像 ref / `.oci` / 命名 task 仍走原管线,两条并存到迁移完成。
+  151 测试全绿,新代码 clippy 零警告。
+- **同步 `Ctx` × 异步 `Executor` 的桥**(`RemoteCtx`):`Ctx` **保持同步**是刻意的 ——
+  它是四层实现的共同契约(Rust 内建 / blueprint types / WASM / 协议桥),WASM 侧天然
+  同步;让整条 trait 染上 async 会把 `crater-ir` 拖进 tokio 依赖,而这个 crate 刻意保持
+  最小依赖面。桥接**只此一处**:`block_in_place` 让出 worker 线程再 `block_on` 那次 SSH
+  往返。代价是**要求多线程 runtime**(`#[tokio::main]` 默认即是),已用
+  `#[tokio::test(flavor = "multi_thread")]` 把这个前提钉成测试。
+- **stderr 不许丢**:桥接把 stderr 折进输出 —— 丢了它,`run_ok` 的报错就成了空壳。
+  有专门测试守。
+- **诚实失败优于假成功**:物料(`material:`)的闭包解析尚未接入新管线,
+  `place_material` 直接报错而**不是**悄悄写个空文件让 apply "成功";
+  CLI 侧有测试断言失败后不留半成品。
+- **本机端到端实测**:apply → `changed=2 ok=0`,磁盘上目录/文件/权限(0750、0600)
+  逐项复核通过;立刻重跑 → `+0 ~0 -0 ✓2 无需变更`;只弄脏内容后重跑 → `~1 ✓1`,
+  只修漂移那一项。这三步在 `tests/apply_cli.rs` 里固化。
+- **未验证的部分(不含糊)**:**真实 SSH 目标尚未跑通** —— 本机 sshd 在跑,但密钥认证
+  未配置,且不应擅自改用户的 `authorized_keys`。桥接机制已用 mock Executor 在多线程
+  runtime 下验证,SSH 本身待用户在真机复验。多台目标当前**串行**,并发调度留 P1。
+- **关联**:D-108(五动词 L1)、D-007(agentless)、D-019(自举 agent —— 新管线接 agent
+  执行器同样只需再实现一个 `Ctx`)。
+
+## 2026-08-28 · D-110:物料闭包接入新管线(+ 目标侧事实)
+
+- **交付**:`copy: {material: …}` 真能用了。`facts.rs`(目标侧事实)+ `materials.rs`
+  (变体解析)+ `material_ctx.rs`(取用)三件套。
+- **裁定 C 第一次被真正需要**:多架构变体(`when: substrate.arch == 'arm64'`)必须由
+  **目标机**判定,于是 `substrate.*` 从设计条目变成必需品。三条纪律:**封闭白名单**
+  (7 项:arch/kernel/hostname/distro/version/family/init,不做 ansible 式全量 setup)、
+  **惰性 + 缓存**(一次连接内每项最多一次往返)、**只读**(走 `probe`,与 plan 同源)。
+  `uname -m` 的方言归一到 OCI 平台名(`x86_64`→`amd64`),作者不必记别名。
+- **取用两条路,由制品类型决定,无 `--offline` 开关**(承接旧约):有本地 blob → 控制端
+  推;没有 → **目标机自己拉**(curl → wget,agentless:控制端不当几十 MB 二进制的中转)。
+- **不覆盖即拒绝**:只打了 amd64/arm64 却部署到 riscv → 响亮失败并报出"这台机器长什么样"
+  (`arch=… distro=… version=…`),**拒绝装半套**。变体条件重叠也拒绝,不搞"先匹配先赢"。
+- **摘要校验后置删除**:声明了 sha256 却对不上 → 删掉落地文件再报错。内容寻址是离线可信
+  的根,留个未经校验的文件比没有更危险。
+- **闭包清单可见**:plan 时打印这台机器实际会用到的物料 —— air-gap 场景下这就是
+  "要带走什么"的答案(`closure()` = f(values × 目标事实))。
+- **实测**:本机 plan 按真实架构选出 amd64 变体 → apply 下载 9.9MB yq → chmod 0755 →
+  可执行 → 重跑幂等。测试用 `file://` URL 走同一条路径,不依赖外网。
+- **未接入**:`unzip:` 物料(需控制端解包,D-103)与 `image_present`(需 OCI 闭包)
+  一律**响亮报错**,不悄悄成功。
+
+## 2026-08-28 · D-111:内建类型补齐(3 → 21)
+
+- **交付**:`paths.rs`(template/lineinfile/unarchive)、`host.rs`(hostname/swap/
+  kernel_modules/sysctl/user/group)、`pkg.rs`(package/image_present/shell/wait +
+  4 个健康探针)、`service.rs` 增 `systemd_unit`。登记 24 个,实现 21 个。
+- **差距必须可见**:`builtins::pending()` 列出"已登记但没实现"的类型,并有测试断言
+  剩余欠债只能是 `container`/`mount`/`cron`(需额外基建)。实现了却没登记 → lint 会把
+  合法写法报成"未知类型";登记了却没实现 → 用户 apply 时才撞上。两个方向都由测试守。
+- **类型化的收益是可举证的**,不是审美:
+  - `systemd_unit` 能说出"**只有 ExecStart 变了**",而 `copy` 一坨 INI 文本只能整文件 hash;
+    且只比对我们写的那几项 —— 目标机上别人手加的 `MemoryMax=` 不算漂移。
+  - `swap` 把"只 `swapoff -a` 不改 fstab、重启后 swap 自己回来"这个经典陷阱变成
+    **plan 里看得见的一项**。
+  - `sysctl` 逐键报 `net.ipv4.ip_forward=0→1`,而不是"跑一遍 `sysctl --system`"。
+- **退役时的越权红线**(逐个想清楚,不是默认 `rm -rf`):`unarchive` 只删 `creates:` 指的
+  产物(`to:` 常是 /usr/local,整个删会连累别人);`kernel_modules` 只撤持久化**不 rmmod**;
+  `lineinfile` 只删那一行**不删文件**;`swap`/`hostname` 退役时**什么都不做**(原来什么样
+  我们并不知道);`image_present` 不删镜像;`shell` 返回 `Warn`(没有逆操作)。
+- **只读者不谎报 changed**:`wait` 成功返回 `Ok` 而非 `Changed` —— 它没改变任何东西。
+
+## 2026-08-28 · D-112:state 记录 + drift —— 对账循环闭合
+
+- **交付**:`state.rs`(记录 / `Store` trait / `FileStore` / 漂移判定)+ `crater verify`。
+- **为什么必须有记录**:没有它,**"从没部署过"与"部署了但漂了"在 plan 里长得一模一样**
+  (都是一堆 `+`)。verify 只能靠猜,于是要么天天误报、要么不敢报。有记录后三态分明:
+  `NeverDeployed`(不报警)/ `InSync` / `Drifted`,退出码据此分流,可直接进 CI 与定时任务。
+- **新增声明 ≠ 漂移**:blueprint 长出新资源时标为"新声明"而非"漂移" —— 归因不同,
+  处置也不同。
+- **说不清就不给绿灯**:有 `Unknown` 项时判定为 `Indeterminate` 并非零退出。宣称
+  "一切正常"而其实有项无法核对,是**假的安心**,比报警更危险。
+- **记的是现实,不是意图**:收敛后**重新 observe 一次**再落记录;首次部署时间不被重复
+  apply 刷新。收敛后若仍有未达期望项,明确提示而不是静默成功。
+- **存储选型的偏离与理由**:D-106 §7.1 定的是 sqlx 双后端。这里先落 `Store` **trait** +
+  零依赖 `FileStore`(一条记录一个 YAML 文件,可读、可 diff、可进 git)。理由:记录量级是
+  "部署过几个 blueprint",不是事件流;而 sqlx 是 async,塞进刻意保持最小依赖面的
+  `crater-ir` 会与 D-109 的同步 `Ctx` 决定冲突。**SQLite/Postgres 实现属于 server 形态
+  (P2),届时只需再实现这个 trait,上层不动**。原子写(临时文件 + rename)、单条损坏不
+  影响 `list` 都已就位。
+- **实测**:未部署 → 不报警(exit 0);apply → 记账;verify → in-sync;`chmod 777` 后
+  verify → `漂移 file  mode: 777 → 0750`(exit 1)。7 个 CLI 测试固化,每个用独立 HOME。
+- **关联**:D-106(§7.1 存储)、D-108(plan 是推论)、D-051/D-055(旧管线的漂移检测)。
+
+## 2026-08-28 · D-113:修 `on:` selector 静默失效 + 机群视角(fleet)
+
+- **背景是个真 bug**:`on:` 能解析、能 lint、有测试,但 `plan.rs::expand()` 只处理
+  `when`/`each`,**从未应用过 `on:`** —— 写 `on: role.controlplane` 的资源会在**每一台**
+  机器上跑。声明了却静默不生效,比不支持更危险。
+- **根因是架构**:引擎逐台独立 plan,每台互不知情,于是"我属于哪些组""谁是首台"
+  都无从判定。修法是引入 `crates/crater-ir/src/fleet.rs`:**静态成员信息**
+  (名字 + 组,从 inventory 就能得到,不必连机器)进 `Scope`,与"连上才知道"的
+  `substrate.*` 单机事实分层。
+- **三者正交且顺序不能换**:`on:` 决定"这台要不要参与"(机群层)→ `when:` 决定
+  "参与了要不要做"(单机条件)→ `each:` 决定"做几遍"。
+- **未知组是错误,不是静默跳过**:拼错组名会让整段资源悄悄不执行、而 plan 看起来
+  一切正常 —— 那是最难查的一类故障。现在当场报错并列出已知的组;单机无 inventory 时
+  直接指出 `需要 -i inventory.yaml`。
+- **`first()`/`rest()` 只吃静态信息**:它们需要跨主机的稳定序(**顺序 = inventory 声明序**),
+  而 `where` 依赖单机事实,在机群层无法判定 → 嵌在 `first()` 里的 `where` 被拒绝并
+  提示"移到最外层"。
+- **顺带揪出的第二个 bug**:`host_label()` 对所有本地目标一律返回"本机",而部署记录 id
+  正是由它生成 —— 三台机群会**共用一条记录、互相覆盖**。改为记录用 inventory 的
+  `name`(地址变了仍是同一个成员),展示标签也逐台可区分。
+- **顺带补的可用性**:plan 每行原本是 `+ file` / `+ file1`,看不出改的是哪个文件。
+  现加 `PlanItem::label()` 取该类型的"主键"参数(path/dest/name/…);超长路径**居中**
+  省略 —— 辨识度在两端,掐头去尾会让两个不同深路径看起来一样。
+- **验证**:3 节点机群(n11/n12 = controlplane,w01 = worker)实测 n11 得 all+cp+init、
+  n12 得 all+cp+join、w01 得 all+wk;三条独立记录。`selector_cli.rs` 6 例固化,
+  其中 `selectors_actually_gate_execution_not_just_the_plan` 守住"plan 说不做、
+  apply 就真的不能做"—— 否则 plan 的可信度是假的。合计 252 测试全绿。
+- **关联**:D-106(裁定 A:Selector 升为一等语法)、D-108(plan 推导)、D-112(部署记录)。
+  这一步也是 procedure 执行器的前置:`exports` 跨主机传 fact、`throttle` 逐台、
+  `run_once` 全都依赖机群视角。
+
+## 2026-08-28 · D-114:procedure 执行器 —— 「状态/过程分离」兑现
+
+- **交付**:`procedure.rs`(`Targets` trait + `run()` + `observe_custom()`)、
+  `crater procedure <name> -f bp.yaml`、自定义类型(L2)在 plan/apply 里真正生效。
+  275 测试全绿,新代码 clippy 零警告。**D-106 最后一个未兑现的核心主张至此落地。**
+- **procedure 是机群级的,这是它与 plan 的根本区别**:一支舞的步骤分布在不同主机上,
+  还要把 fact 从一台传到另一台,所以它不能塞进"逐台独立跑"的循环。为此引入
+  [`Targets`] —— 能拿到**任意成员**的 ctx 与 scope,而不是"一个 Ctx"。
+- **自定义类型的弥合动作被推迟到机群层**:逐台 converge 只把"需要跳哪支舞"记进
+  `RunReport.procedures_needed`,调用方收齐**去重**后在机群层跑一次。
+  在循环里跑会把同一支舞跳 N 遍 —— `a_custom_type_triggers_its_dance_from_apply_exactly_once`
+  就是钉这个的。顺序也不能反:先逐台收敛资源,再跳舞(舞往往依赖资源已就位)。
+- **舞天然幂等**:步骤走的是**与资源同一套** observe→diff,有 `check:` 的步骤重跑即
+  `ok`。实测第一次 `changed=3`,第二次 `changed=0 ok=3`。
+- **fact 只能有一个来源**:导出 fact 的步骤若选中多台,同名 fact 会被各写一份、
+  消费方拿到哪份取决于执行顺序 —— **拒绝**,并提示用 `first(...)` 收敛到一台。
+  不做"最后一个赢"。
+- **空选择与拼错组名的取舍**(与资源刻意不同):资源引用不存在的组是**错误**
+  (某台会因此缺状态,属静默少装);而一支舞覆盖多种拓扑是常态 —— 单 master 时
+  `rest(controlplane)` 与 `role.worker` 本就该为空,不该让整支舞失败。代价是拼错的
+  组名不再致命,所以它必须**响亮留痕**:`skipped` 里带上"已知的组有哪些"的线索。
+- **诚实的边界**:`throttle` 的语义是"同时最多几台",当前执行**串行**,因此任何
+  throttle 都天然被满足(护 etcd 那类"必须逐台"的约束不会被违反),但它真正开始
+  起作用要等并发调度(P1)。`ignore_errors` 继续执行但**必须留痕**,不静默吞掉。
+- **L2 数据模块层正式可用**:用户写的是名词(`cluster_member: {role: control-plane}`),
+  现实由作者声明的只读探针读出(`observe.cmd` + `parse` 标记映射),舞封装在类型里。
+  **引擎依旧不懂 kubeadm**(D-017 守住)。plan 里它不再是 `?`,而是
+  `+ cluster_member  via: procedure bootstrap`,也不再计入模型化欠债。
+- **实测**:3 节点机群跑 `bootstrap` —— n11 产出 token 并 `exports`,n12(rest)与
+  w01(worker)都拿到**真实值**写入各自文件;`crater apply` 里自定义类型自动触发该舞
+  且只触发一次;重跑全幂等。`procedure_cli.rs` 7 例 + `procedure.rs` 14 例固化。
+- **关联**:D-106(裁定 B/D:exports 就近声明、`types:` 进 schema)、D-113(机群视角,
+  本功能的前置)、D-017(引擎零产品知识)。至此 k8s-ha 试金石从"纸上能表达"
+  变成"真能部署"。
+
+## 2026-08-28 · D-115:k8s-ha 迁移到新 DSL —— 一次能力审计
+
+- **交付**:`library/k8s/k8s-ha.blueprint.yaml`(290 行)。对照物:旧 task 模型
+  `k8s-ha.yaml` 519 行 **+** 独立的 `roles/kube-upgrade/role.yaml` 58 行 = 577 行,
+  **压缩 50%,且升级 role 被吸收进 blueprint 的 `procedures.upgrade`**。
+  lint 零 error;3 节点机群 plan 通过;闭包 24/24 项全部解析。旧文件保留作参照,
+  两条管线按文件格式并存。
+- **迁移的真正意义是审计,不是变短**。它一次性揪出**四个"声明了却不生效"的 bug** ——
+  与 D-113 的 `on:` 同一类,即静默失效,比不支持更危险:
+  1. **procedure 局部 params 不进 lint 作用域** → 每个带参数的 procedure(如
+     `upgrade` 的 `to:`)都被误报"引用了未声明的参数"。修:lint 时把
+     `bp.params ∪ proc.params` 并入作用域。
+  2. **`env:` 从未生效** → `KUBECONFIG=…` 被静默丢弃,blueprint 里每个 kubectl
+     都会失败。修:`with_env()` 给命令加前缀,且 **`check:` 与 `cmd:` 共用同一套 env**
+     (否则探针"看不到集群",永远判定"没做过")。
+  3. **`sysctl` 把 stderr 当成当前值** → 键不存在时(br_netfilter 未加载),错误文本
+     被塞进 diff 并按空格切碎,刷出十几行乱码。修:探针失败即 `(未设置)`,
+     多项用不可见分隔符拼接而非空格。
+  4. **闭包漏掉 `each` 展开的物料** → `material: "${item}"` 配 `each: [kubeadm,
+     kubelet, kubectl]` 静态看是模板,实则引用三项。**air-gap 场景下这是致命的:
+     少打三个二进制,现场装不上**。修:`referenced_names()` 覆盖 each 字面列表、
+     `dropins[]`、以及 **procedure 步骤**里的物料引用。
+- **新增能力**:`substrate.name` / `substrate.roles`(机群身份进 CEL)。
+  `substrate.name` 是 **inventory 里的名字**,与 `substrate.hostname`(探针读回的
+  当前 OS 主机名)**刻意分开** —— kubeadm 拿前者当节点名,而后者往往还没设成期望值。
+  `Scope::identify()` 保证它与 `scope.host` 同源。
+- **迁移中发现的 blueprint 自身缺陷**:flannel 清单只在 procedure 里被 `kubectl apply`,
+  却没有任何资源把它落到目标机。补一条 `copy` 资源 —— 这正是"闭包清单可见"
+  能帮上忙的地方。
+- **仍缺的能力(kubespray 规模之前必须补齐)**:
+  - `image_present` 无 OCI 闭包 → plan 显示 `?`(诚实,但离线镜像导入还不能用);
+  - `template` 只落原文,**minijinja 渲染未接** → haproxy 的 `{% for %}` backend 列表、
+    keepalived 的 VIP 都还没真渲染;
+  - keepalived 的网卡名需要 `substrate.iface_in(subnet)` 这类探针函数(白名单里还没有);
+  - `package` 的 `material:`(os_package 离线闭包)未接;
+  - `crater delete` 尚未接新管线 → `types.destroy` 声明了但无处调用。
+- **对 kubespray 重写的判断**:执行模型(资源/舞分离、机群 selector、跨主机 fact、
+  L2 类型)已经扛得住 k8s-ha 这种复杂度;**卡点全在物料与模板两处**,而非编排。
+  下一步的优先级应由此决定。
+- **关联**:D-113(同类静默失效 bug)、D-114(procedure 执行器)、D-110(物料闭包)。
