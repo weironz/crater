@@ -161,6 +161,48 @@ fn module_args(ty: &str, raw: &Y) -> Result<Args> {
     }
 }
 
+/// 解析 `cmd.flags:` —— 有序条目,条件是条目的属性。
+///
+/// `name` **禁止插值**:这是 lint 能静态枚举命令全部展开形态的前提。
+/// 一旦允许 `name: "--${params.x}"`,展开集合就依赖运行期取值,plan 也就说不清
+/// "哪些 flag 可能出现"。
+pub fn parse_flags(v: &Y) -> Result<Vec<Flag>> {
+    let Y::Sequence(items) = v else {
+        return Err(Error::parse("`flags:` 应是列表"));
+    };
+    let mut out = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let m = item
+            .as_mapping()
+            .ok_or_else(|| Error::parse(format!("flags[{i}]:应是 map")))?;
+        known_keys(m, &["name", "value", "when"], &format!("flags[{i}]"))?;
+        let name = get_str(m, "name")
+            .ok_or_else(|| Error::parse(format!("flags[{i}]:缺少 `name:`")))?;
+        if name.contains("${") {
+            return Err(Error::parse(format!(
+                "flags[{i}] `name: {name}`:flag 名禁止插值 —— \
+                 否则 lint 无法静态枚举命令的全部展开形态,plan 也说不清哪些 flag 会出现。\
+                 要按条件决定是否出现,请用 `when:`"
+            )));
+        }
+        out.push(Flag {
+            name,
+            value: match m.get(Y::from("value")) {
+                Some(val) => Some(value_from_yaml(val)?),
+                None => None,
+            },
+            when: match m.get(Y::from("when")) {
+                Some(w) => Some(
+                    CelExpr::compile(&scalar_to_string(w))
+                        .map_err(|e| Error::parse(format!("flags[{i}] `when:` {e}")))?,
+                ),
+                None => None,
+            },
+        });
+    }
+    Ok(out)
+}
+
 /// YAML 值 → IR 值:字符串扫描 `${}` 编译成模板,容器递归。
 pub fn value_from_yaml(v: &Y) -> Result<Value> {
     Ok(match v {

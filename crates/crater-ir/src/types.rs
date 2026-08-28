@@ -61,7 +61,10 @@ pub static BUILTINS: &[BuiltinType] = &[
     t!("http", one_of: [], req: ["url"], opt: ["status", "method", "insecure"], free: Some("url")),
     t!("port_open", one_of: [], req: ["port"], opt: ["host"], free: Some("port")),
     t!("service_active", one_of: [], req: ["name"], opt: [], free: Some("name")),
-    t!("cmd", one_of: [], req: ["run"], opt: ["expect", "env"], free: Some("run")),
+    // `cmd` 是**结构化命令**(D-117 §3.4):argv 固定头 + flags 有序条目,
+    // 条件是**条目的属性**而非字符串里的三元。argv 直达 execve、不过 shell,
+    // 注入与引号事故一并根治。`run:`(自由字符串)保留给只读探针位。
+    t!("cmd", one_of: ["argv", "run"], req: [], opt: ["flags", "creates", "env", "expect", "chdir"], free: Some("run")),
 
     // —— 过程性原语(procedure 内为主)——
     t!("shell", one_of: [], req: ["cmd"], opt: ["check", "env", "chdir", "creates"], free: Some("cmd")),

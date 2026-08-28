@@ -36,6 +36,30 @@ impl Value {
 
 pub type Args = BTreeMap<String, Value>;
 
+/// 一个命令行 flag 条目(D-117 §3.4)。
+///
+/// 「条件拼 flag」是最高频的把逻辑塞进字符串的诱因。解药不是换表达式语言,
+/// 而是让**条件成为条目的属性**:
+///
+/// ```yaml
+/// flags:
+///   - name: --control-plane-endpoint
+///     value: "${params.cp_endpoint}"
+///     when: has(params.cp_endpoint)
+///   - name: --upload-certs          # 无 value = 布尔 flag
+///     when: params.ha
+/// ```
+///
+/// `name` **禁止插值**(lint 强制)—— 于是 lint 能静态枚举出这条命令的全部展开形态,
+/// plan 能逐条解释"哪个 flag 因为什么没出现"。
+#[derive(Debug, Clone)]
+pub struct Flag {
+    pub name: String,
+    /// 无值 = 布尔 flag(`--upload-certs`)。
+    pub value: Option<Value>,
+    pub when: Option<CelExpr>,
+}
+
 /// `each:` 的两种合法写法 —— **求值时发现的**歧义,收敛成一条规则:
 /// 字符串 = CEL 表达式(与 `when:` 一致,不写 `${}`),列表 = 字面量。
 /// 若字符串仍按模板解析,`each: params.dirs` 与 `each: "${params.dirs}"` 会是两种写法。

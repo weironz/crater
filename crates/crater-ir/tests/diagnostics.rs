@@ -244,3 +244,59 @@ fn cel_syntax_error_points_at_the_column() {
     );
     assert!(e.contains('^'), "CEL 错误应带位置标记:{e}");
 }
+
+// ---------------------------------------------------------------- E310:值位置只许名词
+
+#[test]
+fn the_exact_mistake_we_made_is_now_caught() {
+    // D-115 的 blueprint 里真实出现过这一行 —— 逻辑进了字符串,
+    // 而这正是整套设计声称要消灭的东西。现在它过不了 lint。
+    lint_err(
+        &format!(
+            "{HEAD}resources:\n  - shell: {{ cmd: \"kubeadm init ${{params.port > 0 ? 'a' : 'b'}}\", check: t }}\n"
+        ),
+        &["E310", "条件属于 `when:`", "flags"],
+    );
+}
+
+#[test]
+fn every_flavour_of_smuggled_logic_is_refused_with_a_targeted_hint() {
+    // 报错要给**针对性**改写方向 —— 泛泛一句"请用结构化写法"帮不上忙。
+    let cases = [
+        ("\"${params.port == 9000}\"", "比较与布尔运算属于 `when:`"),
+        ("\"${size(params.port)}\"", "函数调用属于 `when:`"),
+        ("\"${params.port[0]}\"", "要遍历列表请用 `each:`"),
+    ];
+    for (expr, hint) in cases {
+        lint_err(
+            &format!("{HEAD}resources:\n  - file: {{ path: {expr}, state: directory }}\n"),
+            &["E310", hint],
+        );
+    }
+}
+
+#[test]
+fn plain_references_and_mixed_literals_stay_legal() {
+    // 限权只针对运算,不针对插值本身 —— 常规写法一个都不能误伤。
+    let bp = parse::blueprint_from_str(&format!(
+        "{HEAD}resources:\n  - file: {{ path: \"/data/${{params.port}}\", state: directory }}\n  \
+         - file: {{ path: \"${{item}}\", state: directory }}\n    each: [\"/a\", \"/b\"]\n"
+    ))
+    .unwrap();
+    assert!(
+        lint::errors(&lint::lint(&bp)).is_empty(),
+        "{:#?}",
+        lint::lint(&bp)
+    );
+}
+
+#[test]
+fn conditions_keep_full_cel_expressiveness() {
+    // A4 的另一半:`when:` 位置一切照旧 —— 这正是留用 CEL 而非自造语言的意义。
+    let bp = parse::blueprint_from_str(&format!(
+        "{HEAD}resources:\n  - file: {{ path: /x, state: directory }}\n    \
+         when: \"params.port > 1024 && has(params.port)\"\n"
+    ))
+    .unwrap();
+    assert!(lint::errors(&lint::lint(&bp)).is_empty(), "{:#?}", lint::lint(&bp));
+}

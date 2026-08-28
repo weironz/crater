@@ -42,6 +42,37 @@ impl CelExpr {
     pub fn funcs(&self) -> &BTreeSet<String> {
         &self.funcs
     }
+
+    /// 这段表达式是不是一个**纯引用**(标识符 + 点路径),没有任何运算。
+    ///
+    /// 这是 D-117/A4 的核心限权:`when:` 可以写完整 CEL,但 `${}` **插值位置只许名词**。
+    /// 病灶从来不是"CEL 能写三元",而是我们允许完整 CEL 出现在值位置 ——
+    /// 条件属于 `when:`,值位置只该有名词。这是**位置**问题,不是**语言**问题,
+    /// 所以修法是一条 lint 规则,而不是换掉整门语言(见 authoring-dsl-v1.md §A4)。
+    ///
+    /// 判据基于**源码形状**而非 CEL AST:纯引用的字符序列只能由标识符字符与点构成。
+    /// 这样连 `params.a+params.b`、`params.a[0]`、`f(x)`、`?:`、字面量、字符串拼接
+    /// 全部一次拦下,且不依赖 cel crate 是否暴露 AST。
+    pub fn is_pure_ref(&self) -> bool {
+        let src = self.src.trim();
+        if src.is_empty() || src.starts_with('.') || src.ends_with('.') || src.contains("..") {
+            return false;
+        }
+        src.split('.').all(is_ident)
+    }
+}
+
+/// 合法标识符:字母或下划线开头,其后字母/数字/下划线。
+///
+/// 刻意**不允许连字符** —— CEL 里 `a-b` 是减法,允许它会让"纯引用"与"算术"
+/// 在源码形状上无法区分,限权就失守了。物料名等需要连字符的地方走引用位而非表达式。
+fn is_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// 一个字符串字面量里的插值片段序列:`"http://${params.vip}:8443"`。
@@ -151,6 +182,54 @@ mod tests {
         assert!(e.funcs().contains("port_owner"), "funcs={:?}", e.funcs());
         let plain = CelExpr::compile("params.a + params.b").unwrap();
         assert!(plain.funcs().is_empty(), "运算符不该算探针函数: {:?}", plain.funcs());
+    }
+
+    #[test]
+    fn pure_reference_accepts_only_nouns() {
+        // 值位置只许名词 —— 这是 A4 限权的执行者。
+        for ok in ["params.port", "item", "facts.arch", "self.role", "exports.join_command"] {
+            assert!(CelExpr::compile(ok).unwrap().is_pure_ref(), "{ok} 该被接受");
+        }
+    }
+
+    #[test]
+    fn pure_reference_rejects_every_way_of_smuggling_logic() {
+        // 这些正是我们真正写出过、或作者被逼急了会写的形态。
+        let smuggles = [
+            r#"params.ha ? "--upload-certs" : """#, // 三元 —— D-115 里真实出现过
+            "params.a + params.b",                  // 拼接/算术
+            "params.port + 1",
+            "has(params.x)",                        // 函数(它属于 when,不属于值位)
+            "size(params.dirs)",
+            "params.dirs[0]",                       // 下标
+            "params.a == params.b",                 // 比较
+            "'literal'",                            // 字面量
+            "params.a || params.b",
+            "!params.ha",
+        ];
+        for bad in smuggles {
+            let e = CelExpr::compile(bad).expect("语法本身合法");
+            assert!(!e.is_pure_ref(), "`{bad}` 不该被当作纯引用");
+        }
+    }
+
+    #[test]
+    fn pure_reference_rejects_malformed_paths() {
+        for bad in ["params.", ".params", "params..port", "params.9lives", ""] {
+            // 有些连 CEL 都编译不过;编译得过的必须被形状检查拦下。
+            if let Ok(e) = CelExpr::compile(bad) {
+                assert!(!e.is_pure_ref(), "`{bad}` 不该被当作纯引用");
+            }
+        }
+    }
+
+    #[test]
+    fn a_condition_keeps_full_cel_expressiveness() {
+        // 限权只针对插值位;`when:` 位置一切照旧 —— 这正是留用 CEL 的意义。
+        let cond = CelExpr::compile("has(params.cp_endpoint) && params.ha || size(params.dirs) > 0")
+            .unwrap();
+        assert!(!cond.is_pure_ref(), "它当然不是纯引用 —— 但在 when: 里完全合法");
+        assert!(cond.roots().contains("params"));
     }
 
     #[test]

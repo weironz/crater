@@ -124,9 +124,45 @@ impl Scope {
     }
 
     pub fn resolve_args(&self, args: &Args) -> Result<ResolvedArgs, String> {
-        args.iter()
-            .map(|(k, v)| self.resolve(v).map(|r| (k.clone(), r)).map_err(|e| format!("`{k}`:{e}")))
-            .collect()
+        let mut out = ResolvedArgs::new();
+        for (k, v) in args {
+            // `flags:` 的条目带 `when:` —— 在这里筛掉,渲染层只管拼接。
+            // 条件为假的 flag **根本不出现**,不留空串占位:作者因此没有
+            // 写 `${cond ? "--x" : ""}` 的动机(D-117 §3.4)。
+            if k == "flags" {
+                out.insert(k.clone(), self.resolve_flags(v)?);
+                continue;
+            }
+            let r = self.resolve(v).map_err(|e| format!("`{k}`:{e}"))?;
+            out.insert(k.clone(), r);
+        }
+        Ok(out)
+    }
+
+    /// 求值 flags 列表:逐条判 `when`,留下的再求 value。
+    fn resolve_flags(&self, v: &Value) -> Result<Yaml, String> {
+        let Value::List(items) = v else {
+            return self.resolve(v).map_err(|e| format!("`flags`:{e}"));
+        };
+        let mut kept = Vec::new();
+        for item in items {
+            let Value::Map(m) = item else {
+                return Err("`flags` 的每一条应是 map".into());
+            };
+            if let Some(Value::Tmpl(_) | Value::Lit(_)) = m.get("when") {
+                // when 在解析期已编译成 CelExpr 并存进 Flag;走到这里说明是
+                // 未经 parse_flags 的原始形态(如测试直接构造),按字面处理。
+            }
+            let mut out = serde_yaml::Mapping::new();
+            for (k, val) in m {
+                if k == "when" {
+                    continue;
+                }
+                out.insert(Yaml::String(k.clone()), self.resolve(val)?);
+            }
+            kept.push(Yaml::Mapping(out));
+        }
+        Ok(Yaml::Sequence(kept))
     }
 
     /// `each:` 的展开:表达式求值后必须是列表;字面列表逐项求值。

@@ -60,6 +60,43 @@ const PROBE_FUNCS: &[&str] = &[
     "size",
 ];
 
+/// **E310:值位置只许名词**(D-117/A4)。
+///
+/// `when:` 可以写完整 CEL;但 `${}` 插值里出现三元/算术/函数/下标/字面量,
+/// 就是把逻辑塞进了字符串 —— 这正是我们自己在 k8s blueprint 里犯过的错:
+/// `cmd: kubeadm init ${params.ha ? "--upload-certs" : ""}`。
+///
+/// 报错不止说"不许",还给出结构化改写方向 —— 否则作者只会换个花样绕过去。
+fn check_pure_ref(
+    e: &CelExpr,
+    at: &str,
+    line: Option<usize>,
+    push: &mut impl FnMut(Severity, String, Option<usize>, String),
+) {
+    if e.is_pure_ref() {
+        return;
+    }
+    let src = e.src();
+    // 按形态给针对性的改写建议 —— 泛泛的"请用结构化写法"帮不上忙。
+    let hint = if src.contains('?') && src.contains(':') {
+        "条件属于 `when:`,不属于值。命令行 flag 用 `flags: [{name: --x, when: <条件>}]`"
+    } else if src.contains("==") || src.contains("!=") || src.contains("&&") || src.contains("||") {
+        "比较与布尔运算属于 `when:`,值位置只放引用"
+    } else if src.contains('(') {
+        "函数调用属于 `when:`(如 `has(params.x)`);值位置只放引用"
+    } else if src.contains('[') {
+        "下标不可用;要遍历列表请用 `each:`"
+    } else {
+        "值位置只允许纯引用(`${params.x}` / `${item}`),不允许任何运算"
+    };
+    push(
+        Severity::Error,
+        at.into(),
+        line,
+        format!("E310 `${{{src}}}`:值位置只许名词 —— {hint}"),
+    );
+}
+
 fn check_funcs(
     e: &CelExpr,
     at: &str,
@@ -409,6 +446,7 @@ fn check_param_refs(
             for p in t.parts() {
                 if let crate::expr::Part::Expr(e) = p {
                     check_param_names(e.src(), at, line, params, push);
+                    check_pure_ref(e, at, line, push);
                 }
             }
         }

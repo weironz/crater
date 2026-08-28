@@ -329,9 +329,41 @@ probe_type!(ServiceActive, "service_active", |a| {
     format!("systemctl is-active --quiet {}", sh(arg_str_opt(a, "name").unwrap_or_default()))
 });
 
-probe_type!(CmdProbe, "cmd", |a| {
-    arg_str_opt(a, "run").unwrap_or_default().to_string()
-});
+probe_type!(CmdProbe, "cmd", |a| { render_cmd(a) });
+
+/// 把 `cmd` 渲染成一条可执行命令行。
+///
+/// 两种形态:
+/// - `run: "自由字符串"` —— 只读探针位的便利写法(过 shell,可用管道);
+/// - `argv: [...]` + `flags: [...]` —— **动作位的正规写法**:每个 token 独立引用,
+///   直达 execve 语义,注入与引号事故根治;条件是 flag 条目的属性(见 ir::Flag)。
+///
+/// 关键:`flags` 里 `when` 为假的条目**根本不出现在命令行上** —— 作者不必写
+/// `${cond ? "--x" : ""}` 这种空串占位,也就没有把逻辑塞进字符串的动机。
+/// 条件求值发生在**解析后、渲染前**,由调用方在 resolve_args 阶段完成;
+/// 到这里时 args 里的 flags 已是**筛选过**的最终列表。
+pub(crate) fn render_cmd(a: &ResolvedArgs) -> String {
+    if let Some(run) = arg_str_opt(a, "run") {
+        return run.to_string();
+    }
+    let mut parts: Vec<String> = match a.get("argv") {
+        Some(Yaml::Sequence(items)) => items.iter().map(|v| sh(&crate::eval::scalar_to_string(v))).collect(),
+        _ => Vec::new(),
+    };
+    // flags 已在求值期按 when 筛选;这里只负责拼接与转义。
+    if let Some(Yaml::Sequence(flags)) = a.get("flags") {
+        for f in flags {
+            let Some(m) = f.as_mapping() else { continue };
+            if let Some(name) = m.get(Yaml::from("name")).and_then(Yaml::as_str) {
+                parts.push(sh(name));
+            }
+            if let Some(v) = m.get(Yaml::from("value")) {
+                parts.push(sh(&crate::eval::scalar_to_string(v)));
+            }
+        }
+    }
+    parts.join(" ")
+}
 
 #[cfg(test)]
 mod tests {
@@ -473,6 +505,47 @@ mod tests {
         let obs = Http.observe(&ctx, &a).unwrap();
         assert_eq!(diff(&Http, &a, &obs), Change::Ok);
         assert!(ctx.calls()[0].text().contains("'200'"), "{:?}", ctx.calls());
+    }
+
+    #[test]
+    fn structured_cmd_renders_argv_and_flags_with_each_token_quoted() {
+        // 每个 token 独立转义 —— 带空格的值不会把命令拆散,注入无从下手。
+        let a: ResolvedArgs = serde_yaml::from_str(
+            "argv: [kubeadm, init]\nflags:\n  - {name: --pod-network-cidr, value: 10.244.0.0/16}\n  - {name: --upload-certs}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            render_cmd(&a),
+            "'kubeadm' 'init' '--pod-network-cidr' '10.244.0.0/16' '--upload-certs'"
+        );
+    }
+
+    #[test]
+    fn a_flag_filtered_out_upstream_simply_is_not_there() {
+        // 这是"没有地方写三元"的另一半:条件为假的 flag **根本不出现**,
+        // 作者不需要用空字符串占位,也就没有把逻辑塞进字符串的动机。
+        let a: ResolvedArgs =
+            serde_yaml::from_str("argv: [kubeadm, init]\nflags: [{name: --pod-network-cidr, value: x}]\n")
+                .unwrap();
+        let rendered = render_cmd(&a);
+        assert!(!rendered.contains("upload-certs"), "{rendered}");
+        assert!(!rendered.contains("''"), "不该留下空串占位:{rendered}");
+    }
+
+    #[test]
+    fn a_value_with_spaces_survives_as_one_token() {
+        let a: ResolvedArgs =
+            serde_yaml::from_str("argv: [echo]\nflags: [{name: --msg, value: \"hello world\"}]\n")
+                .unwrap();
+        assert_eq!(render_cmd(&a), "'echo' '--msg' 'hello world'");
+    }
+
+    #[test]
+    fn the_free_form_run_shorthand_still_works_for_probes() {
+        // 只读探针位仍可写自由字符串(要管道):限权针对的是**值里的逻辑**,
+        // 不是禁止一切 shell。
+        let a: ResolvedArgs = serde_yaml::from_str("run: \"kubectl get nodes | wc -l\"\n").unwrap();
+        assert_eq!(render_cmd(&a), "kubectl get nodes | wc -l");
     }
 
     #[test]

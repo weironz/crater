@@ -195,17 +195,26 @@ procedures:
         on: role.controlplane
         when: params.ha
 
-      - shell:
-          # 单节点不传 --control-plane-endpoint;多 master 才需要它指向 VIP。
-          # `--upload-certs` 同理:只有要让别人 join control-plane 时才有意义。
-          cmd: >-
-            kubeadm init
-            ${params.cp_endpoint == "" ? "" : "--control-plane-endpoint " + params.cp_endpoint}
-            ${params.ha ? "--upload-certs" : ""}
-            --pod-network-cidr=${params.pod_cidr} --image-repository ${params.image_repo}
-            --kubernetes-version v${params.version}
-            --cri-socket=unix:///run/containerd/containerd.sock
-          check: "test -f /etc/kubernetes/admin.conf"
+      # 条件 flag 的正规写法(D-117 §3.4):条件是**条目的属性**,不是字符串里的三元。
+      # 单节点不传 --control-plane-endpoint;`--upload-certs` 只在多 master 时有意义。
+      # flags[].name 禁插值 ⇒ lint 能静态枚举这条命令的全部 4 种展开形态。
+      - cmd:
+          argv: [kubeadm, init]
+          creates: /etc/kubernetes/admin.conf
+          flags:
+            - name: --control-plane-endpoint
+              value: "${params.cp_endpoint}"
+              when: "params.cp_endpoint != ''"
+            - name: --upload-certs
+              when: params.ha
+            - name: --pod-network-cidr
+              value: "${params.pod_cidr}"
+            - name: --image-repository
+              value: "${params.image_repo}"
+            - name: --kubernetes-version
+              value: "v${params.version}"
+            - name: --cri-socket
+              value: "unix:///run/containerd/containerd.sock"
         on: first(role.controlplane)
         exports:
           join:    "kubeadm token create --print-join-command"
