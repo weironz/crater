@@ -181,12 +181,16 @@ fn parse_structure(text: &str) -> Result<Blueprint> {
         &[
             "name", "version", "description", "params", "requires", "materials",
             "preflight", "types", "resources", "procedures", "health", "parts",
+            "fleet", "cast",
         ],
         "blueprint",
     )?;
 
     let name = get_str(m, "name").ok_or_else(|| Error::parse("blueprint 缺少 `name:`"))?;
     let params = parse_params(m.get(Y::from("params")))?;
+    let fleet = parse_fleet(m.get(Y::from("fleet")))?;
+    // cast 必须先解析:后面所有 selector 都可能引用它。
+    let cast = parse_cast(m.get(Y::from("cast")), &fleet)?;
 
     Ok(Blueprint {
         name,
@@ -195,11 +199,13 @@ fn parse_structure(text: &str) -> Result<Blueprint> {
         params,
         requires: parse_requires(m.get(Y::from("requires")))?,
         materials: parse_materials(m.get(Y::from("materials")))?,
-        preflight: parse_preflight(m.get(Y::from("preflight")))?,
+        preflight: parse_preflight(m.get(Y::from("preflight")), &cast)?,
         types: parse_types(m.get(Y::from("types")))?,
-        resources: parse_resources(m.get(Y::from("resources")))?,
-        procedures: parse_procedures(m.get(Y::from("procedures")))?,
-        health: parse_health(m.get(Y::from("health")))?,
+        resources: parse_resources(m.get(Y::from("resources")), &cast)?,
+        procedures: parse_procedures(m.get(Y::from("procedures")), &cast)?,
+        health: parse_health(m.get(Y::from("health")), &cast)?,
+        fleet,
+        cast,
     })
 }
 
@@ -287,6 +293,87 @@ fn module_args(ty: &str, raw: &Y) -> Result<Args> {
     }
 }
 
+/// 选角表:名字 → selector 串。
+pub type Cast = BTreeMap<String, Selector>;
+
+/// 解析 selector 字符串,先查选角表。
+///
+/// 展开发生在**解析期**:`target: seed` 直接变成 `first(role.controlplane)`,
+/// 运行期零成本;拼错的角色名当场报错并给建议,而不是等到求值时说"没有这个组"。
+fn resolve_selector(src: &str, cast: &Cast) -> Result<Selector> {
+    if let Some(sel) = cast.get(src.trim()) {
+        return Ok(sel.clone());
+    }
+    Selector::parse(src).map_err(|e| {
+        // 看起来像个光秃秃的名字 → 多半是想引用选角表却拼错了。
+        let hint = if !src.contains('.') && !src.contains('(') && !cast.is_empty() {
+            closest(src.trim(), &cast.keys().map(String::as_str).collect::<Vec<_>>())
+                .map(|c| format!(",是不是想写 cast 里的 `{c}`?"))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Error::parse(format!("`target:` {e}{hint}"))
+    })
+}
+
+fn parse_cast(v: Option<&Y>, fleet: &FleetContract) -> Result<Cast> {
+    let m = match v {
+        None | Some(Y::Null) => return Ok(Cast::new()),
+        Some(Y::Mapping(m)) => m,
+        Some(_) => return Err(Error::parse("`cast:` 应是 map(角色名 → selector)")),
+    };
+    let mut out = Cast::new();
+    for (k, val) in m {
+        let name = scalar_to_string(k);
+        let src = scalar_to_string(val);
+        // 选角表自己不能套选角表 —— 一层间接已经够,两层就开始要跳读了。
+        let sel = Selector::parse(&src)
+            .map_err(|e| Error::parse(format!("cast `{name}`:{e}")))?;
+        // 引用了 fleet 没声明的组 → 当场报错。这是契约存在的意义。
+        if !fleet.groups.is_empty() {
+            for role in sel.roles() {
+                if !fleet.groups.contains_key(role) {
+                    let hint = closest(role, &fleet.groups.keys().map(String::as_str).collect::<Vec<_>>())
+                        .map(|c| format!(",是不是 `{c}`?"))
+                        .unwrap_or_default();
+                    return Err(Error::parse(format!(
+                        "cast `{name}` 引用了组 `{role}`,但 `fleet.groups` 没声明它{hint}"
+                    )));
+                }
+            }
+        }
+        out.insert(name, sel);
+    }
+    Ok(out)
+}
+
+fn parse_fleet(v: Option<&Y>) -> Result<FleetContract> {
+    let m = match v {
+        None | Some(Y::Null) => return Ok(FleetContract::default()),
+        Some(Y::Mapping(m)) => m,
+        Some(_) => return Err(Error::parse("`fleet:` 应是 map")),
+    };
+    known_keys(m, &["groups"], "fleet")?;
+    let mut groups = BTreeMap::new();
+    if let Some(Y::Mapping(gm)) = m.get(Y::from("groups")) {
+        for (k, val) in gm {
+            let name = scalar_to_string(k);
+            let body = val
+                .as_mapping()
+                .ok_or_else(|| Error::parse(format!("fleet.groups.{name}:应是 map")))?;
+            known_keys(body, &["min"], &format!("fleet.groups.{name}"))?;
+            groups.insert(
+                name,
+                GroupContract {
+                    min: body.get(Y::from("min")).and_then(|v| v.as_u64()).unwrap_or(1) as usize,
+                },
+            );
+        }
+    }
+    Ok(FleetContract { groups })
+}
+
 /// 解析 `cmd.flags:` —— 有序条目,条件是条目的属性。
 ///
 /// `name` **禁止插值**:这是 lint 能静态枚举命令全部展开形态的前提。
@@ -364,12 +451,11 @@ struct Common {
     deps: Vec<String>,
 }
 
-fn parse_common(kw: &BTreeMap<String, &Y>) -> Result<Common> {
+fn parse_common(kw: &BTreeMap<String, &Y>, cast: &Cast) -> Result<Common> {
     let id = kw.get("id").map(|v| scalar_to_string(v));
     let name = kw.get("name").map(|v| scalar_to_string(v));
     let on = match kw.get("target") {
-        Some(v) => Selector::parse(&scalar_to_string(v))
-            .map_err(|e| Error::parse(format!("`target:` {e}")))?,
+        Some(v) => resolve_selector(&scalar_to_string(v), cast)?,
         None => Selector::All,
     };
     let when = match kw.get("when") {
@@ -397,7 +483,7 @@ fn parse_common(kw: &BTreeMap<String, &Y>) -> Result<Common> {
     Ok(Common { id, name, on, when, each, deps })
 }
 
-fn parse_resources(v: Option<&Y>) -> Result<Vec<ResourceDecl>> {
+fn parse_resources(v: Option<&Y>, cast: &Cast) -> Result<Vec<ResourceDecl>> {
     let seq = match v {
         None | Some(Y::Null) => return Ok(vec![]),
         Some(Y::Sequence(s)) => s,
@@ -410,7 +496,7 @@ fn parse_resources(v: Option<&Y>) -> Result<Vec<ResourceDecl>> {
             .as_mapping()
             .ok_or_else(|| Error::parse(format!("resources[{i}]:应是 map")))?;
         let (ty, args, kw) = split_entry(m, RESOURCE_KEYWORDS, &format!("resources[{i}]"))?;
-        let c = parse_common(&kw)?;
+        let c = parse_common(&kw, cast)?;
         let n = counters.entry(ty.clone()).or_insert(0);
         let auto = if *n == 0 { ty.clone() } else { format!("{ty}{n}") };
         *n += 1;
@@ -429,7 +515,7 @@ fn parse_resources(v: Option<&Y>) -> Result<Vec<ResourceDecl>> {
     Ok(out)
 }
 
-fn parse_procedures(v: Option<&Y>) -> Result<BTreeMap<String, Procedure>> {
+fn parse_procedures(v: Option<&Y>, cast: &Cast) -> Result<BTreeMap<String, Procedure>> {
     let m = match v {
         None | Some(Y::Null) => return Ok(BTreeMap::new()),
         Some(Y::Mapping(m)) => m,
@@ -443,13 +529,13 @@ fn parse_procedures(v: Option<&Y>) -> Result<BTreeMap<String, Procedure>> {
             .ok_or_else(|| Error::parse(format!("procedure `{name}`:应是 map")))?;
         known_keys(body, &["params", "steps", "description"], &format!("procedure `{name}`"))?;
         let params = parse_params(body.get(Y::from("params")))?;
-        let steps = parse_steps(body.get(Y::from("steps")), &name)?;
+        let steps = parse_steps(body.get(Y::from("steps")), &name, cast)?;
         out.insert(name.clone(), Procedure { name, params, steps });
     }
     Ok(out)
 }
 
-fn parse_steps(v: Option<&Y>, proc_name: &str) -> Result<Vec<Step>> {
+fn parse_steps(v: Option<&Y>, proc_name: &str, cast: &Cast) -> Result<Vec<Step>> {
     let seq = match v {
         None | Some(Y::Null) => return Ok(vec![]),
         Some(Y::Sequence(s)) => s,
@@ -460,7 +546,7 @@ fn parse_steps(v: Option<&Y>, proc_name: &str) -> Result<Vec<Step>> {
         let what = format!("procedure `{proc_name}` steps[{i}]");
         let m = item.as_mapping().ok_or_else(|| Error::parse(format!("{what}:应是 map")))?;
         let (ty, args, kw) = split_entry(m, STEP_KEYWORDS, &what)?;
-        let c = parse_common(&kw)?;
+        let c = parse_common(&kw, cast)?;
         let exports = match kw.get("exports") {
             Some(Y::Mapping(em)) => em
                 .iter()
@@ -645,7 +731,7 @@ fn parse_materials(v: Option<&Y>) -> Result<Vec<Material>> {
     Ok(out)
 }
 
-fn parse_preflight(v: Option<&Y>) -> Result<Vec<Assertion>> {
+fn parse_preflight(v: Option<&Y>, cast: &Cast) -> Result<Vec<Assertion>> {
     let seq = match v {
         None | Some(Y::Null) => return Ok(vec![]),
         Some(Y::Sequence(s)) => s,
@@ -662,8 +748,7 @@ fn parse_preflight(v: Option<&Y>) -> Result<Vec<Assertion>> {
                 .map_err(|e| Error::parse(format!("preflight[{i}] `assert:` {e}")))?,
             msg: get_str(m, "msg"),
             on: match get_str(m, "target") {
-                Some(s) => Selector::parse(&s)
-                    .map_err(|e| Error::parse(format!("preflight[{i}] `target:` {e}")))?,
+                Some(s) => resolve_selector(&s, cast)?,
                 None => Selector::All,
             },
             line: Some(i),
@@ -672,7 +757,7 @@ fn parse_preflight(v: Option<&Y>) -> Result<Vec<Assertion>> {
     Ok(out)
 }
 
-fn parse_health(v: Option<&Y>) -> Result<Vec<HealthProbe>> {
+fn parse_health(v: Option<&Y>, cast: &Cast) -> Result<Vec<HealthProbe>> {
     let seq = match v {
         None | Some(Y::Null) => return Ok(vec![]),
         Some(Y::Sequence(s)) => s,
@@ -686,8 +771,7 @@ fn parse_health(v: Option<&Y>) -> Result<Vec<HealthProbe>> {
             ty,
             args,
             on: match kw.get("target") {
-                Some(v) => Selector::parse(&scalar_to_string(v))
-                    .map_err(|e| Error::parse(format!("health[{i}] `target:` {e}")))?,
+                Some(v) => resolve_selector(&scalar_to_string(v), cast)?,
                 None => Selector::All,
             },
             timeout: kw.get("timeout").map(|v| scalar_to_string(v)),
@@ -794,5 +878,65 @@ pub fn scalar_to_string(v: &Y) -> String {
         Y::Bool(b) => b.to_string(),
         Y::Null => String::new(),
         other => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod cast_fleet_tests {
+    use super::*;
+
+    fn bp(y: &str) -> Result<Blueprint> {
+        blueprint_from_str(y)
+    }
+
+    const HEAD: &str = "name: t\nfleet:\n  groups:\n    controlplane: {min: 1}\n    worker: {min: 0}\ncast:\n  seed: first(role.controlplane)\n  rest_cp: rest(role.controlplane)\n";
+
+    #[test]
+    fn a_cast_name_expands_to_its_selector_at_parse_time() {
+        let b = bp(&format!("{HEAD}resources:\n  - service: {{name: kubelet, state: running}}\n    target: seed\n")).unwrap();
+        // 展开发生在解析期:运行期看到的就是完整 selector,零间接。
+        match &b.resources[0].on {
+            Selector::First(inner) => assert!(matches!(**inner, Selector::Role(ref r) if r == "controlplane")),
+            other => panic!("未展开:{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_misspelled_cast_name_is_caught_with_a_suggestion() {
+        // 光秃秃的名字既不是 role.x 也不是 host.x —— 只可能是想引用选角表。
+        let err = bp(&format!("{HEAD}resources:\n  - service: {{name: k, state: running}}\n    target: sed\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("seed"), "{err}");
+    }
+
+    #[test]
+    fn cast_may_not_reference_a_group_the_contract_never_declared() {
+        // 契约一旦存在就是权威:选角表引用组外角色 = 契约和用法对不上,当场停。
+        let err = bp("name: t\nfleet:\n  groups:\n    controlplane: {min: 1}\ncast:\n  seed: first(role.controlplan)\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("controlplane"), "{err}");
+    }
+
+    #[test]
+    fn without_a_contract_cast_is_unconstrained() {
+        // 没写 fleet: 的蓝图不该因为引入 cast 而突然被要求写 fleet:。
+        let b = bp("name: t\ncast:\n  seed: first(role.anything)\n").unwrap();
+        assert_eq!(b.cast.len(), 1);
+    }
+
+    #[test]
+    fn a_group_contract_defaults_to_requiring_one_machine() {
+        // `min` 省略时是 1,不是 0 —— 声明一个组却允许它为空是反直觉的。
+        let b = bp("name: t\nfleet:\n  groups:\n    controlplane: {}\n").unwrap();
+        assert_eq!(b.fleet.groups["controlplane"].min, 1);
+    }
+
+    #[test]
+    fn cast_may_not_chain_into_another_cast_entry() {
+        // 一层间接够用;两层就要跳读了。这条限制是刻意的。
+        let err = bp("name: t\ncast:\n  a: role.x\n  b: first(a)\n").unwrap_err().to_string();
+        assert!(!err.is_empty());
     }
 }

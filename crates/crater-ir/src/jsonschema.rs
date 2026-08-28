@@ -21,7 +21,7 @@ use crate::types::{self, BuiltinType, Field, Kind, Ty};
 /// 生成 schema。`bp` 为 `None` 时生成通用 schema(只含内建类型)。
 pub fn generate(bp: Option<&Blueprint>) -> Value {
     let mut defs = Map::new();
-    defs.insert("selector".into(), selector_def());
+    defs.insert("selector".into(), selector_def(bp));
     defs.insert("condition".into(), condition_def());
     defs.insert("material_ref".into(), material_ref_def(bp));
     defs.insert("mode".into(), mode_def());
@@ -80,6 +80,24 @@ fn top_level_properties() -> Value {
                          } },
         "health":      { "type": "array",  "description": "只读健康探针:verify 与漂移检测的依据",
                          "items": { "$ref": "#/$defs/probe" } },
+        "fleet":       { "type": "object", "description": "机群契约:蓝图要求哪些组、最少几台。plan 之前校验",
+                         "additionalProperties": false,
+                         "properties": {
+                             "groups": {
+                                 "type": "object",
+                                 "description": "组名 → 约束",
+                                 "additionalProperties": {
+                                     "type": "object",
+                                     "additionalProperties": false,
+                                     "properties": {
+                                         "min": { "type": "integer", "minimum": 0,
+                                                  "description": "最少几台(缺省 1;写 0 表示允许为空组)" }
+                                     }
+                                 }
+                             }
+                         } },
+        "cast":        { "type": "object", "description": "选角表:给 selector 起名字,单点定义、全篇 `target:` 引用",
+                         "additionalProperties": { "$ref": "#/$defs/selector" } },
     })
 }
 
@@ -231,12 +249,25 @@ fn describe(t: &BuiltinType) -> String {
 
 // ---------------------------------------------------------------- 共用 $defs
 
-fn selector_def() -> Value {
-    json!({
-        "type": "string",
-        "description": "定址:all | role.<组> | host.<名> | first(<sel>) | rest(<sel>) | <sel> where <CEL>",
-        "examples": ["all", "role.controlplane", "first(role.controlplane)", "rest(role.controlplane)"],
-    })
+/// 自特化:把**本蓝图选角表里的名字**排进例子,编辑器里 `target:` 就能补出 `seed`。
+fn selector_def(bp: Option<&Blueprint>) -> Value {
+    let cast: Vec<&str> = bp
+        .map(|b| b.cast.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let mut examples: Vec<String> = cast.iter().map(|s| s.to_string()).collect();
+    examples.extend(
+        ["all", "role.controlplane", "first(role.controlplane)", "rest(role.controlplane)"]
+            .map(String::from),
+    );
+    let desc = if cast.is_empty() {
+        "定址:all | role.<组> | host.<名> | first(<sel>) | rest(<sel>) | <sel> where <CEL>".to_string()
+    } else {
+        format!(
+            "定址:all | role.<组> | host.<名> | first(<sel>) | rest(<sel>) | <sel> where <CEL>\n             本蓝图的选角表:{}",
+            cast.join(" | ")
+        )
+    };
+    json!({ "type": "string", "description": desc, "examples": examples })
 }
 
 fn condition_def() -> Value {

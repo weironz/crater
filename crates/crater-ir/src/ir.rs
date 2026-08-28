@@ -203,11 +203,32 @@ pub struct OsRequire {
     pub versions: Vec<String>,
 }
 
+/// 机群契约:蓝图声明"我需要哪些组、最少几台"。
+///
+/// 有了它,"inventory 少了个组"或"HA 蓝图只给了一台 master"能在**连机器之前**
+/// 就被拦下,而不是等 selector 求值时才逐条报错 —— 后者既晚又零散。
+#[derive(Debug, Clone, Default)]
+pub struct FleetContract {
+    pub groups: BTreeMap<String, GroupContract>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GroupContract {
+    /// 最少几台。`0` 表示**允许为空**(单节点拓扑里的 worker 组),
+    /// 与"没声明这个组"是两回事。
+    pub min: usize,
+}
+
 /// **Blueprint** —— 一个子系统的完整知识:期望态 + 舞 + 闭包 + 契约 + 健康定义。
 /// 可密封成内容寻址的 OCI 制品(digest 即身份);凭据永不进入(那是 Environment 的事)。
 #[derive(Debug, Clone)]
 pub struct Blueprint {
     pub name: String,
+    /// 机群契约(可选):plan 之前校验 inventory 是否满足。
+    pub fleet: FleetContract,
+    /// 选角表:给 selector 起名字,单点定义、全篇引用。
+    /// 解析期已展开进各处 selector,这里保留原表供 `inspect` 与报错使用。
+    pub cast: BTreeMap<String, Selector>,
     pub version: Option<String>,
     pub description: Option<String>,
     pub params: Params,

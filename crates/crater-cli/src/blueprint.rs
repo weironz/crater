@@ -127,6 +127,7 @@ async fn run_on_targets(
     let hosts = target.hosts()?;
 
     let fleet = build_fleet(&hosts, target.declared_groups());
+    enforce_contract(&bp, &fleet)?;
 
     let mut failures = 0usize;
     // 自定义类型(L2)的弥合是机群级的舞:逐台 converge 只记下"需要跳哪支",
@@ -390,6 +391,7 @@ pub async fn run_procedure(
     let overrides = parse_sets(sets)?;
     let hosts = target.hosts()?;
     let fleet = build_fleet(&hosts, target.declared_groups());
+    enforce_contract(&bp, &fleet)?;
     let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path)).await?;
 
     println!("procedure {proc_name} —— {} 台目标\n", targets.fleet.members.len());
@@ -456,6 +458,20 @@ fn base_dir(path: &Path) -> PathBuf {
 
 /// 机群视角:`on:` / `first()` / `rest()` 的判定依据。
 /// **顺序即 inventory 声明序**,所以 `first()` 每次跑都选中同一台。
+/// 机群契约在**一切之前**校验:没连机器、没跑 preflight、更没改任何东西。
+///
+/// 报全部不满足项而不是第一条 —— 修 inventory 的人应当一趟改完。
+fn enforce_contract(bp: &crater_ir::ir::Blueprint, fleet: &Fleet) -> Result<()> {
+    if let Err(errs) = fleet.check_contract(&bp.fleet) {
+        let body = errs.iter().map(|e| format!("  · {e}")).collect::<Vec<_>>().join("\n");
+        anyhow::bail!(
+            "inventory 不满足蓝图 `{}` 的机群契约:\n{body}\n\n(契约写在蓝图的 `fleet.groups:`)",
+            bp.name
+        );
+    }
+    Ok(())
+}
+
 fn build_fleet(hosts: &[Host], declared: impl IntoIterator<Item = String>) -> Fleet {
     Fleet::new(
         hosts

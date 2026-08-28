@@ -1027,3 +1027,53 @@ kubespray.stack.yaml
 原始诉求是"要有个**规范**",初稿给成了"**执法**"。规范可以说"一百行通常值得外置",
 执法不该在它 109 行时报警 —— 尤其当那 109 行本身没问题。
 
+
+---
+
+### A4 · `cast` 选角表(v1 已实现)
+
+蓝图里 `first(role.controlplane)` 在 k8s-ha 里出现了 **7 次**。这不是啰嗦的问题 ——
+是**定址逻辑没有单一定义处**:哪天引导节点的选法变了(比如改成 `role.controlplane where facts.etcd`),
+要在七个地方同时改对。
+
+```yaml
+cast:
+  seed:      first(role.controlplane)   # 引导节点:kubeadm init 在这里跑
+  followers: rest(role.controlplane)    # 其余控制面:join --control-plane
+  masters:   role.controlplane
+  workers:   role.worker
+```
+
+此后 `target: seed` 处处可用。三个刻意的设计:
+
+1. **解析期展开,不是运行期查表。** `target: seed` 在解析完成时已经是
+   `First(Role("controlplane"))`,运行期零间接、plan 输出照旧显示完整 selector
+   ——「seed 是谁」在计划里应当是**看得见的**,不该逼人回去翻 `cast:`。
+2. **不许套娃。** `cast` 条目自身不能引用另一条 `cast`。一层间接是命名,
+   两层就开始要跳读了。
+3. **拼错有人管。** `target: sed` 既不像 `role.x` 也不像 `host.x`,只可能是想引用选角表
+   —— 报错直接给最近的候选:``是不是想写 cast 里的 `seed`?``
+
+### A5 · `fleet.groups` 机群契约(v1 已实现)
+
+没有契约时,"给 HA 蓝图配了一台 master"这种错**要跑到一半才暴露** ——
+`first(role.controlplane)` 正常选中那台、init 跑完、装了 CNI,直到
+`rest(role.controlplane)` 选出空集才发现不对。那时候机器已经被改过了。
+
+```yaml
+fleet:
+  groups:
+    controlplane: {min: 1}
+    worker:       {min: 0}   # 0 = 允许为空组,与"没声明这个组"是两回事
+```
+
+校验发生在**连任何机器之前**:没 SSH、没 preflight、更没改动。规则:
+
+- `min` 省略时是 **1**,不是 0 —— 声明一个组却允许它空着是反直觉的。
+- `min: 0` 是单节点拓扑的正当写法:`worker: {hosts: []}` 组存在但没成员,是**合法拓扑**而非打错字。
+- inventory 里有蓝图没声明的组**不算错**:同一批机器常同时承载多个蓝图。
+- **一次报全部**不满足项。修 inventory 的人应当一趟改完,而不是修一条重跑一次再看下一条。
+- 契约一旦存在就是权威:`cast` 引用了 `fleet.groups` 没声明的组,**解析期**就报错并给拼写建议。
+
+两者合起来,`crater schema -f <蓝图>` 生成的 JSON Schema 会把本蓝图的选角名
+排进 `target:` 的补全候选 —— 可发现性三件套(字段卡 / Schema / 报错)在这里合上了闭环。

@@ -10,6 +10,7 @@
 use std::collections::BTreeSet;
 
 use crate::eval::Scope;
+use crate::ir::FleetContract;
 use crate::selector::Selector;
 
 /// 机群里的一台。
@@ -95,6 +96,35 @@ impl Fleet {
     /// 单机场景(没有 inventory):一台无组成员。
     pub fn single(name: impl Into<String>) -> Self {
         Fleet::new(vec![Member::new(name, &[])])
+    }
+
+    /// 用蓝图的机群契约校验这批机器 —— **在连任何机器之前**。
+    ///
+    /// 没有它的时候,"HA 蓝图配了一台 master"这种错要等到 `first(role.controlplane)`
+    /// 之后某一步失败才暴露,那时候前面的步骤已经改过机器了。契约把这一类错误
+    /// 从"跑到一半炸"提前成"根本不开跑"。
+    ///
+    /// 一次报全部问题,不是遇到第一个就返回 —— 修 inventory 的人应当一趟改完。
+    pub fn check_contract(&self, contract: &FleetContract) -> Result<(), Vec<String>> {
+        let mut errs = Vec::new();
+        for (name, gc) in &contract.groups {
+            let have = self.members.iter().filter(|m| m.in_role(name)).count();
+            if !self.declared_roles.contains(name) && gc.min > 0 {
+                errs.push(format!("inventory 缺少组 `{name}`(蓝图要求至少 {} 台)", gc.min));
+            } else if have < gc.min {
+                errs.push(format!(
+                    "组 `{name}` 只有 {have} 台,蓝图要求至少 {} 台",
+                    gc.min
+                ));
+            }
+        }
+        // 反向:inventory 里有蓝图没声明的组,只是提示不到位,不算错 ——
+        // 同一批机器常同时承载多个蓝图,多出来的角色是常态。
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(errs)
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<&Member> {
@@ -311,5 +341,68 @@ mod tests {
         assert!(!f
             .matches(&sel("first(role.controlplane)"), "ghost", &Scope::default())
             .unwrap());
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+    use crate::ir::GroupContract;
+
+    fn contract(pairs: &[(&str, usize)]) -> FleetContract {
+        FleetContract {
+            groups: pairs.iter().map(|(n, m)| (n.to_string(), GroupContract { min: *m })).collect(),
+        }
+    }
+
+    #[test]
+    fn a_fleet_that_meets_the_contract_passes() {
+        let f = Fleet::new(vec![
+            Member::new("cp1", &["controlplane"]),
+            Member::new("w1", &["worker"]),
+        ]);
+        assert!(f.check_contract(&contract(&[("controlplane", 1), ("worker", 1)])).is_ok());
+    }
+
+    #[test]
+    fn an_ha_blueprint_rejects_a_single_master_before_touching_anything() {
+        // 这正是契约存在的理由:不满足在 plan 之前就说清,而不是跑到 rest() 那步才炸。
+        let f = Fleet::new(vec![Member::new("cp1", &["controlplane"])]);
+        let errs = f.check_contract(&contract(&[("controlplane", 3)])).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("只有 1 台") && errs[0].contains("至少 3 台"), "{errs:?}");
+    }
+
+    #[test]
+    fn a_min_of_zero_permits_an_empty_but_declared_group() {
+        // 单节点拓扑:worker 组存在但没成员,是合法拓扑而不是打错字。
+        let f = Fleet::new(vec![Member::new("cp1", &["controlplane"])])
+            .with_declared_roles(["worker".to_string()]);
+        assert!(f.check_contract(&contract(&[("controlplane", 1), ("worker", 0)])).is_ok());
+    }
+
+    #[test]
+    fn a_missing_group_is_reported_as_missing_not_as_undersized() {
+        // "缺少组"和"组太小"是两种不同的修法:一个改 inventory 结构,一个加机器。
+        let f = Fleet::new(vec![Member::new("cp1", &["controlplane"])]);
+        let errs = f.check_contract(&contract(&[("controlplane", 1), ("etcd", 3)])).unwrap_err();
+        assert!(errs[0].contains("缺少组 `etcd`"), "{errs:?}");
+    }
+
+    #[test]
+    fn every_unmet_requirement_is_reported_in_one_pass() {
+        // 修 inventory 的人应当一趟改完,而不是修一条重跑一次再看下一条。
+        let f = Fleet::new(vec![Member::new("cp1", &["controlplane"])]);
+        let errs = f
+            .check_contract(&contract(&[("controlplane", 3), ("etcd", 3), ("worker", 2)]))
+            .unwrap_err();
+        assert_eq!(errs.len(), 3, "{errs:?}");
+    }
+
+    #[test]
+    fn extra_roles_in_the_inventory_are_not_an_error() {
+        // 同一批机器常同时承载多个蓝图,多出来的角色是常态而非错误。
+        let f = Fleet::new(vec![Member::new("cp1", &["controlplane", "monitoring", "ingress"])]);
+        assert!(f.check_contract(&contract(&[("controlplane", 1)])).is_ok());
     }
 }
