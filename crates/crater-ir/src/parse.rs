@@ -816,7 +816,7 @@ fn parse_requires(v: Option<&Y>) -> Result<Requires> {
 // ---------------------------------------------------------------- 小工具
 
 /// 未知 key 直接报错并给拼写建议 —— 静态可分析的用户体验落点。
-fn known_keys(m: &serde_yaml::Mapping, allowed: &[&str], what: &str) -> Result<()> {
+pub(crate) fn known_keys(m: &serde_yaml::Mapping, allowed: &[&str], what: &str) -> Result<()> {
     let allow: BTreeSet<&str> = allowed.iter().copied().collect();
     for k in m.keys() {
         // `on` 在 **YAML 1.1** 里是布尔 true。crater 用 1.2 解析没问题,但 PyYAML、

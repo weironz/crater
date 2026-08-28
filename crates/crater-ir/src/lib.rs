@@ -22,6 +22,7 @@ pub mod plan;
 pub mod procedure;
 pub mod schema;
 pub mod selector;
+pub mod stack;
 pub mod state;
 pub mod template;
 pub mod types;

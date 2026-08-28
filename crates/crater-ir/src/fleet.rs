@@ -7,7 +7,7 @@
 //! 这里只放**静态成员信息**(名字 + 组),它从 inventory 就能得到,不必连机器。
 //! 与之相对,`substrate.*` 是连上之后才知道的单机事实,住在 [`Scope`](crate::eval::Scope) 里。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::eval::Scope;
 use crate::ir::FleetContract;
@@ -96,6 +96,47 @@ impl Fleet {
     /// 单机场景(没有 inventory):一台无组成员。
     pub fn single(name: impl Into<String>) -> Self {
         Fleet::new(vec![Member::new(name, &[])])
+    }
+
+    /// 按栈的组名映射(**蓝图组名 → inventory 组名**)重投影这个机群。
+    ///
+    /// 蓝图写 `target: role.controlplane`,而 inventory 的组叫 `k8s_masters` ——
+    /// 栈负责把两个词接上,蓝图本身一字不改。这是蓝图能被复用的前提:
+    /// 一份蓝图不该因为别人的 inventory 用了别的组名就要改。
+    ///
+    /// 语义:**被显式映射的蓝图组名不再同名直通**。若 `controlplane → k8s_masters`,
+    /// 那么这份蓝图眼里的 `controlplane` 就**只有** `k8s_masters` 的成员 ——
+    /// 哪怕 inventory 里恰好也有个叫 `controlplane` 的组。显式优先于巧合。
+    pub fn remap(&self, map: &BTreeMap<String, String>) -> Fleet {
+        if map.is_empty() {
+            return self.clone();
+        }
+        let project = |roles: &[String]| -> Vec<String> {
+            let mut out: Vec<String> = roles
+                .iter()
+                .filter(|r| !map.contains_key(*r))
+                .cloned()
+                .collect();
+            for (bp_group, inv_group) in map {
+                if roles.iter().any(|r| r == inv_group) {
+                    out.push(bp_group.clone());
+                }
+            }
+            out.sort();
+            out.dedup();
+            out
+        };
+        let members: Vec<Member> = self
+            .members
+            .iter()
+            .map(|m| Member { name: m.name.clone(), roles: project(&m.roles) })
+            .collect();
+        // 声明过的组同样要投影:空的 `worker: []` 组经映射后仍须是"声明过但为空",
+        // 否则单节点拓扑会在栈里退化成"这个组不存在"。
+        let declared: Vec<String> = self.declared_roles.iter().cloned().collect();
+        let mut fleet = Fleet::new(members);
+        fleet.declared_roles.extend(project(&declared));
+        fleet
     }
 
     /// 用蓝图的机群契约校验这批机器 —— **在连任何机器之前**。
@@ -404,5 +445,87 @@ mod contract_tests {
         // 同一批机器常同时承载多个蓝图,多出来的角色是常态而非错误。
         let f = Fleet::new(vec![Member::new("cp1", &["controlplane", "monitoring", "ingress"])]);
         assert!(f.check_contract(&contract(&[("controlplane", 1)])).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod remap_tests {
+    use super::*;
+
+    fn fleet() -> Fleet {
+        Fleet::new(vec![
+            Member::new("m1", &["k8s_masters"]),
+            Member::new("m2", &["k8s_masters"]),
+            Member::new("w1", &["k8s_workers", "storage_nodes"]),
+        ])
+    }
+
+    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+    }
+
+    #[test]
+    fn a_blueprint_sees_its_own_group_names() {
+        // 蓝图写 role.controlplane,inventory 叫 k8s_masters —— 栈把两个词接上,
+        // 蓝图本身一字不改。这是蓝图能被复用的前提。
+        let f = fleet().remap(&map(&[("controlplane", "k8s_masters"), ("worker", "k8s_workers")]));
+        let cp = f.static_select(&Selector::Role("controlplane".into())).unwrap();
+        assert_eq!(cp.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), vec!["m1", "m2"]);
+        let w = f.static_select(&Selector::Role("worker".into())).unwrap();
+        assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn unmapped_groups_still_match_by_name() {
+        // 大多数组名本来就对得上,不该逼人把它们全列一遍。
+        let f = fleet().remap(&map(&[("controlplane", "k8s_masters")]));
+        let s = f.static_select(&Selector::Role("storage_nodes".into())).unwrap();
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn an_explicit_mapping_beats_a_coincidental_same_name_group() {
+        // inventory 里恰好也有个 controlplane 组,但栈说"controlplane 指的是
+        // k8s_masters"—— 显式优先于巧合,否则两处会悄悄合并成一个组。
+        let f = Fleet::new(vec![
+            Member::new("real", &["k8s_masters"]),
+            Member::new("decoy", &["controlplane"]),
+        ])
+        .remap(&map(&[("controlplane", "k8s_masters")]));
+        let cp = f.static_select(&Selector::Role("controlplane".into())).unwrap();
+        assert_eq!(cp.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), vec!["real"]);
+    }
+
+    #[test]
+    fn an_empty_map_changes_nothing() {
+        let f = fleet();
+        let r = f.remap(&BTreeMap::new());
+        assert_eq!(r.members.len(), f.members.len());
+        assert_eq!(r.declared_roles, f.declared_roles);
+    }
+
+    #[test]
+    fn a_declared_but_empty_group_survives_remapping() {
+        // 单节点拓扑的 `worker: []`:经映射后仍须是"声明过但为空",
+        // 否则栈里会退化成"这个组不存在",契约随之误报。
+        let f = Fleet::new(vec![Member::new("m1", &["k8s_masters"])])
+            .with_declared_roles(["k8s_workers".to_string()])
+            .remap(&map(&[("controlplane", "k8s_masters"), ("worker", "k8s_workers")]));
+        assert!(f.declared_roles.contains("worker"), "{:?}", f.declared_roles);
+        assert!(f.static_select(&Selector::Role("worker".into())).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_remapped_fleet_still_satisfies_its_contract() {
+        // 端到端:重映射之后契约用的是**蓝图的**组名。
+        use crate::ir::{FleetContract, GroupContract};
+        let f = fleet().remap(&map(&[("controlplane", "k8s_masters"), ("worker", "k8s_workers")]));
+        let contract = FleetContract {
+            groups: [("controlplane", 2usize), ("worker", 1)]
+                .iter()
+                .map(|(n, m)| (n.to_string(), GroupContract { min: *m }))
+                .collect(),
+        };
+        assert!(f.check_contract(&contract).is_ok());
     }
 }

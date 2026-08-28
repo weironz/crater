@@ -105,12 +105,53 @@ pub fn is_blueprint_file(path: &Path) -> bool {
 
 /// `crater plan -f blueprint.yaml [--host H] [--set k=v]` —— **零写入**预演。
 pub async fn plan_blueprint(path: &Path, target: &TargetOpts, sets: &[String]) -> Result<()> {
-    run_on_targets(path, target, sets, Mode::Plan).await
+    run_on_targets(path, target, sets, Mode::Plan, &Lens::default()).await
+}
+
+/// 栈透镜:栈加在一份蓝图上的两样东西 —— 组名重映射与作者侧参数。
+///
+/// 之所以是"透镜"而不是"改写蓝图":蓝图一字不改,只是**被这样看**。
+/// 同一份蓝图在另一个栈里换一副透镜就换了组名,这正是它可复用的原因。
+#[derive(Default, Clone)]
+pub struct Lens {
+    /// 蓝图组名 → inventory 组名。
+    pub groups: std::collections::BTreeMap<String, String>,
+    /// 作者侧参数:效力是**更强的默认值**,排在 CLI `--set` 之前,因而可被盖过。
+    pub params: Vec<(String, Yaml)>,
 }
 
 /// `crater apply -f blueprint.yaml [--host H] [--set k=v]` —— 先预演再收敛,并记账。
 pub async fn apply_blueprint(path: &Path, target: &TargetOpts, sets: &[String]) -> Result<()> {
-    run_on_targets(path, target, sets, Mode::Apply).await
+    run_on_targets(path, target, sets, Mode::Apply, &Lens::default()).await
+}
+
+/// 栈驱动的入口:同一条执行路径,只是多戴一副透镜。
+pub(crate) async fn run_lensed(
+    path: &Path,
+    target: &TargetOpts,
+    sets: &[String],
+    mode: StackMode,
+    lens: &Lens,
+) -> Result<()> {
+    run_on_targets(path, target, sets, mode.into(), lens).await
+}
+
+/// 对外暴露的模式(栈模块用),与内部 `Mode` 一一对应。
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum StackMode {
+    Plan,
+    Apply,
+    Verify,
+}
+
+impl From<StackMode> for Mode {
+    fn from(m: StackMode) -> Mode {
+        match m {
+            StackMode::Plan => Mode::Plan,
+            StackMode::Apply => Mode::Apply,
+            StackMode::Verify => Mode::Verify,
+        }
+    }
 }
 
 /// `crater verify -f blueprint.yaml [--host H]` —— **只读**核对:现实还符合期望吗?
@@ -118,7 +159,7 @@ pub async fn apply_blueprint(path: &Path, target: &TargetOpts, sets: &[String]) 
 /// 与 plan 的差别只在解读:plan 回答"要做什么",verify 回答"部署过的东西还对不对"。
 /// 两者共用同一个 observe —— 所以不可能出现"plan 说要改、verify 说没事"。
 pub async fn verify_blueprint(path: &Path, target: &TargetOpts, sets: &[String]) -> Result<()> {
-    run_on_targets(path, target, sets, Mode::Verify).await
+    run_on_targets(path, target, sets, Mode::Verify, &Lens::default()).await
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -135,14 +176,20 @@ async fn run_on_targets(
     target: &TargetOpts,
     sets: &[String],
     mode: Mode,
+    lens: &Lens,
 ) -> Result<()> {
     let converge = mode == Mode::Apply;
     let store = FileStore::default_location();
     let bp = load(path)?;
-    let overrides = parse_sets(sets)?;
+    // 栈参数在前、CLI `--set` 在后 —— 后者赢。运行期的优先级层数因此没变,
+    // 栈只是往"默认值"那一层里加了一笔。
+    let mut overrides = lens.params.clone();
+    overrides.extend(parse_sets(sets)?);
     let hosts = target.hosts()?;
 
-    let fleet = build_fleet(&hosts, target.declared_groups());
+    // 组名重映射:蓝图写 `role.controlplane`,inventory 叫 `k8s_masters`,
+    // 栈把两个词接上 —— 蓝图本身一字不改。
+    let fleet = build_fleet(&hosts, target.declared_groups()).remap(&lens.groups);
     enforce_contract(&bp, &fleet)?;
     // 闭包在**连机器之前**装载并校验:字节坏了要在这里知道,不是推到一半。
     // `_closure_dir` 必须活到本函数结束 —— blob 就在那个临时目录里。

@@ -26,6 +26,7 @@ mod images;
 mod material_ctx;
 mod lint;
 mod schema_cmd;
+mod stack_cmd;
 mod target;
 mod types_cmd;
 mod ui;
@@ -39,6 +40,7 @@ use tracing::info;
 use target::TargetOpts;
 
 use crater_core::executor::{Executor, SshExecutor};
+use crate::blueprint::StackMode;
 use crater_core::store::ImageStore;
 
 #[derive(Parser)]
@@ -518,6 +520,12 @@ fn blueprint_source(file: &Option<PathBuf>, source: &Option<String>) -> Option<P
     (candidate.is_file() && blueprint::is_blueprint_file(&candidate)).then_some(candidate)
 }
 
+/// 同上,但认的是**栈**。栈与蓝图靠形状分辨(`stack:` + `uses:`),不靠文件名。
+fn stack_source(file: &Option<PathBuf>, source: &Option<String>) -> Option<PathBuf> {
+    let candidate = file.clone().or_else(|| source.as_ref().map(PathBuf::from))?;
+    (candidate.is_file() && stack_cmd::is_stack_file(&candidate)).then_some(candidate)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // ANSI only on a real terminal — keeps redirected/piped output and the
@@ -544,6 +552,10 @@ async fn main() -> Result<()> {
         } => {
             // 新 IR blueprint 先分流(同 plan);其余走原管线。
             let probe = arg2.clone().or_else(|| arg1.clone());
+            if let Some(p) = stack_source(&file, &probe) {
+                let m = if dry_run { StackMode::Plan } else { StackMode::Apply };
+                return stack_cmd::run(&p, &target, &set, m).await;
+            }
             if let Some(p) = blueprint_source(&file, &probe) {
                 if dry_run {
                     return blueprint::plan_blueprint(&p, &target, &set).await;
@@ -559,7 +571,10 @@ async fn main() -> Result<()> {
             apply::apply_source(name, source, file, target, dry_run, shell, false, offline, &set, false).await
         }
         Cmd::Plan { source, file, target, offline, set } => {
-            // 按文件格式分流:新 IR blueprint 走五动词管线,旧 task 走原管线。
+            // 按文件格式分流:栈 → 逐蓝图;新 IR blueprint → 五动词管线;旧 task → 原管线。
+            if let Some(p) = stack_source(&file, &source) {
+                return stack_cmd::run(&p, &target, &set, StackMode::Plan).await;
+            }
             match blueprint_source(&file, &source) {
                 Some(p) => blueprint::plan_blueprint(&p, &target, &set).await,
                 None => {
@@ -651,12 +666,18 @@ async fn main() -> Result<()> {
             Some(p) => blueprint::run_procedure(&p, &name, &target, &set).await,
             None => anyhow::bail!("`crater procedure` 需要 `-f <blueprint.yaml>`"),
         },
-        Cmd::Verify { file, source, target, set } => match blueprint_source(&file, &source) {
-            Some(p) => blueprint::verify_blueprint(&p, &target, &set).await,
-            None => anyhow::bail!(
-                "`crater verify` 目前只支持新 IR blueprint;旧 task 的漂移检测用 `crater task list --verify`"
-            ),
-        },
+        Cmd::Verify { file, source, target, set } => {
+            if let Some(p) = stack_source(&file, &source) {
+                return stack_cmd::run(&p, &target, &set, StackMode::Verify).await;
+            }
+            match blueprint_source(&file, &source) {
+                Some(p) => blueprint::verify_blueprint(&p, &target, &set).await,
+                None => anyhow::bail!(
+                    "`crater verify` 目前只支持新 IR blueprint 与 stack;\
+                     旧 task 的漂移检测用 `crater task list --verify`"
+                ),
+            }
+        }
         Cmd::Ai { request, output } => ai_generate(&request.join(" "), output).await,
         Cmd::Doctor {
             file,

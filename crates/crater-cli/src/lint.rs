@@ -25,6 +25,8 @@ enum Outcome {
     /// 压根不是 blueprint(inventory / CI 配置 / k8s manifest…)。
     /// 只在**目录扫描**时静默跳过;命令行点名的文件一律照常解析并报错。
     NotABlueprint,
+    /// 一份栈:(栈名, 蓝图数)。栈的检查是"接线对不对",不是蓝图内部。
+    Stack(String, usize),
 }
 
 struct Parsed {
@@ -133,6 +135,13 @@ fn check_one(path: PathBuf, explicit: bool) -> FileReport {
     if is_legacy_task(&text) {
         return FileReport { path, outcome: Outcome::LegacyTask };
     }
+    // 栈:检查引用解析得开、参数名与组名对得上那份蓝图。
+    if crate::stack_cmd::is_stack_file(&path) {
+        return match crate::stack_cmd::lint(&path) {
+            Ok(st) => FileReport { path, outcome: Outcome::Stack(st.name, st.uses.len()) },
+            Err(e) => FileReport { path, outcome: Outcome::ParseFailed(e.to_string()) },
+        };
+    }
     if !explicit && !looks_like_blueprint(&text) {
         return FileReport { path, outcome: Outcome::NotABlueprint };
     }
@@ -178,6 +187,9 @@ fn print_human(reports: &[FileReport]) {
                 println!("{file}: 旧版 task 格式,跳过(新 DSL 见 docs/research/ir-draft.md)");
             }
             Outcome::NotABlueprint => {}
+            Outcome::Stack(name, n) => {
+                println!("{file}: ✓ 栈 {name} ({n} 份蓝图,引用与接线已核对)");
+            }
             Outcome::ParseFailed(msg) => {
                 println!("{file}: 解析失败");
                 for line in msg.lines() {
@@ -236,6 +248,10 @@ fn print_json(reports: &[FileReport]) {
             Outcome::NotABlueprint => {
                 println!("  {{\"file\":\"{file}\",\"status\":\"skipped\"}}{comma}")
             }
+            Outcome::Stack(name, n) => println!(
+                "  {{\"file\":\"{file}\",\"status\":\"ok\",\"kind\":\"stack\",\"name\":\"{}\",\"uses\":{n}}}{comma}",
+                esc(name)
+            ),
             Outcome::ParseFailed(msg) => println!(
                 "  {{\"file\":\"{file}\",\"status\":\"parse_error\",\"message\":\"{}\"}}{comma}",
                 esc(msg)
@@ -281,6 +297,7 @@ fn tally(reports: &[FileReport]) -> (usize, usize, usize, usize) {
     for r in reports {
         match &r.outcome {
             Outcome::NotABlueprint => skipped += 1,
+            Outcome::Stack(..) => {}
             Outcome::LegacyTask => legacy += 1,
             Outcome::ParseFailed(_) => errors += 1,
             Outcome::Parsed(p) => {
