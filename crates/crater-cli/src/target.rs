@@ -33,6 +33,11 @@ pub(crate) struct TargetOpts {
     pub(crate) key: Option<PathBuf>,
     #[arg(long, default_value_t = 22)]
     pub(crate) port: u16,
+    /// Offline closure (`crater build -f <blueprint> -o closure.tar`): materials
+    /// are pushed from these pre-fetched bytes instead of being downloaded by
+    /// the target. Required for air-gapped fleets. Blueprint pipeline only.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) closure: Option<PathBuf>,
     /// Fleet-wide concurrency: at most N hosts move at once within one step.
     /// Default 1 (serial). A step's own `throttle` can only cap *below* this.
     #[arg(long, default_value_t = 1, value_name = "N")]

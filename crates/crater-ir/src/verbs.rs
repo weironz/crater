@@ -133,8 +133,20 @@ pub trait Ctx: Send + Sync {
     fn probe(&self, cmd: &str) -> anyhow::Result<(i32, String)>;
     /// 在目标上执行写命令 → (退出码, stdout+stderr)。
     fn run(&self, cmd: &str) -> anyhow::Result<(i32, String)>;
-    /// 写一份文件内容到目标路径。
+    /// 写一份**文本**文件内容到目标路径。
     fn write_file(&self, path: &str, content: &str) -> anyhow::Result<()>;
+
+    /// 写**任意字节**到目标路径。
+    ///
+    /// 离线闭包运的是 containerd/kubeadm 这类二进制,不是配置文本 —— 只有
+    /// 文本通道等于闭包白建。默认实现要求内容恰好是 UTF-8(测试上下文够用),
+    /// 真实传输层必须覆盖它。
+    fn write_bytes(&self, path: &str, content: &[u8]) -> anyhow::Result<()> {
+        let text = std::str::from_utf8(content).map_err(|_| {
+            anyhow::anyhow!("此上下文只有文本通道,写不了二进制({path},{} 字节)", content.len())
+        })?;
+        self.write_file(path, text)
+    }
     /// 把一份物料落到目标路径(在线取 URL / 离线推 blob,由执行层决定)。
     fn place_material(&self, name: &str, dest: &str) -> anyhow::Result<()>;
 

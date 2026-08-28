@@ -121,6 +121,79 @@ pub fn closure(bp: &Blueprint, scope: &Scope) -> Vec<Result<MaterialPlan, Resolv
         .collect()
 }
 
+/// **烘焙闭包**:blueprint 引用到的物料的**全部变体**。
+///
+/// 与 [`closure`] 的分歧只在"变体怎么选":
+/// - `closure` 在**部署期**按目标事实选一个 —— 那时机器就在眼前;
+/// - `bake` 在**构建期**把每个变体都带上 —— 那时还不知道要装到哪台。
+///
+/// 多带几个架构的字节,换的是"现场绝不会装不上"。air-gap 场景里这个交换永远
+/// 划算:少带一个变体的代价是**已经断网的现场装不上**,那时补救成本无限大。
+///
+/// `profile` 给了目标画像(`--for arch=amd64`)时,`when:` 会被求值以缩小范围;
+/// 没给就一个不筛。
+pub fn bake(bp: &Blueprint, scope: &Scope, filter_by_when: bool) -> Vec<BakeItem> {
+    let mut out = Vec::new();
+    for name in referenced_names(bp) {
+        let variants: Vec<&Material> = bp.materials.iter().filter(|m| m.name == name).collect();
+        if variants.is_empty() {
+            out.push(BakeItem {
+                name: name.clone(),
+                plan: Err(ResolveError::Undeclared(name)),
+                when: None,
+            });
+            continue;
+        }
+        for m in variants {
+            if filter_by_when {
+                if let Some(cond) = &m.when {
+                    match scope.eval_bool(cond) {
+                        Ok(false) => continue,
+                        Ok(true) => {}
+                        // 画像里没有这条件用到的事实 —— 宁可带上,不可漏。
+                        Err(_) => {}
+                    }
+                }
+            }
+            let plan = scope
+                .resolve(&m.source)
+                .map(|v| crate::eval::scalar_to_string(&v))
+                .map(|source| MaterialPlan {
+                    name: m.name.clone(),
+                    kind: m.kind,
+                    source,
+                    sha256: m.sha256.clone(),
+                    unzip: m.unzip.clone(),
+                })
+                .map_err(ResolveError::Eval);
+            out.push(BakeItem {
+                name: m.name.clone(),
+                plan,
+                when: m.when.as_ref().map(|c| c.src().to_string()),
+            });
+        }
+    }
+    out
+}
+
+/// 烘焙清单里的一条。`when` 保留下来是为了报错时说清"是哪个变体"。
+#[derive(Debug)]
+pub struct BakeItem {
+    pub name: String,
+    pub plan: Result<MaterialPlan, ResolveError>,
+    pub when: Option<String>,
+}
+
+impl BakeItem {
+    /// 人读的标识:`containerd` 或 `containerd (when: substrate.arch == 'arm64')`。
+    pub fn label(&self) -> String {
+        match &self.when {
+            Some(w) => format!("{} (when: {w})", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
 /// 整份 blueprint 里按名字引用到的物料(保持声明顺序、去重)。
 ///
 /// 这个清单就是 air-gap 要带走的东西,**漏一项就是现场装不上**。所以扫描要覆盖:

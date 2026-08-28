@@ -17,7 +17,11 @@ use crater_ir::materials::{self, MaterialPlan};
 use crater_ir::verbs::{sh, Ctx};
 use crater_ir::Blueprint;
 
-/// 本地已备好的物料字节(离线闭包)。键 = 物料名。
+/// 本地已备好的物料字节(离线闭包)。**键 = 渲染后的源 URL**,不是物料名。
+///
+/// 同名物料按 `when:` 分成多个变体,各有各的 URL(多架构是最常见的场景)。
+/// 按名字索引会让一台 arm64 机器静默拿到 amd64 的字节 —— 静默,是因为
+/// 名字对上了、摘要也对上了(那是**另一个变体的**摘要)。
 pub type BlobMap = BTreeMap<String, PathBuf>;
 
 /// source 是远端 URL 还是随 blueprint 走的本地路径。
@@ -97,18 +101,15 @@ impl<'a> MaterialCtx<'a> {
     }
 
     /// 离线:控制端把已备好的字节推过去。
+    ///
+    /// 走**字节**通道 —— 闭包里躺的是 containerd/kubeadm 这类二进制,
+    /// 用文本通道推等于闭包白建。
     fn push_blob(&self, plan: &MaterialPlan, path: &PathBuf, dest: &str) -> Result<()> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("读物料 `{}` 的本地 blob {}", plan.name, path.display()))?;
-        // 通过 Ctx 的文本通道推送(内部走分块 base64,二进制安全)。
-        let encoded = String::from_utf8_lossy(&bytes).into_owned();
-        if encoded.as_bytes() != bytes {
-            bail!(
-                "物料 `{}` 是二进制,当前 Ctx 只有文本通道 —— 二进制推送随 OCI 闭包一同落地",
-                plan.name
-            );
-        }
-        self.inner.write_file(dest, &encoded)
+        self.inner
+            .write_bytes(dest, &bytes)
+            .with_context(|| format!("推送物料 `{}` 到 {dest}", plan.name))
     }
 
     /// 落地后校验声明的摘要。对不上就删掉半成品 —— 留着比没有更危险。
@@ -142,6 +143,9 @@ impl Ctx for MaterialCtx<'_> {
     fn write_file(&self, path: &str, content: &str) -> Result<()> {
         self.inner.write_file(path, content)
     }
+    fn write_bytes(&self, path: &str, content: &[u8]) -> Result<()> {
+        self.inner.write_bytes(path, content)
+    }
 
     /// 三种情形,按可信度排序:
     /// 1. blueprint 声明了 `sha256:` → 直接用(内容寻址的权威答案);
@@ -155,7 +159,7 @@ impl Ctx for MaterialCtx<'_> {
         if let Some(declared) = &plan.sha256 {
             return Ok(Some(declared.clone()));
         }
-        let path = match self.blobs.get(name) {
+        let path = match self.blobs.get(&plan.source) {
             Some(blob) => blob.clone(),
             None if !is_remote(&plan.source) => self.base_dir.join(&plan.source),
             None => return Ok(None),
@@ -176,7 +180,7 @@ impl Ctx for MaterialCtx<'_> {
     fn render_material(&self, name: &str) -> Result<Option<String>> {
         let plan = materials::resolve(self.bp, name, &self.scope)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let path = match self.blobs.get(name) {
+        let path = match self.blobs.get(&plan.source) {
             Some(blob) => blob.clone(),
             None if !is_remote(&plan.source) => self.base_dir.join(&plan.source),
             None => return Ok(None),
@@ -197,7 +201,7 @@ impl Ctx for MaterialCtx<'_> {
                 plan.kind
             );
         }
-        match self.blobs.get(name) {
+        match self.blobs.get(&plan.source) {
             Some(path) => self.push_blob(&plan, path, dest)?,
             // 没有 scheme 的 source 是**随 blueprint 走的本地文件**,不是 URL ——
             // 让目标机去 `curl 'files/x.service'` 必然失败。
@@ -248,6 +252,9 @@ resources:
             }
             fn write_file(&self, p: &str, c: &str) -> Result<()> {
                 self.0.write_file(p, c)
+            }
+            fn write_bytes(&self, p: &str, c: &[u8]) -> Result<()> {
+                self.0.write_bytes(p, c)
             }
             fn place_material(&self, n: &str, d: &str) -> Result<()> {
                 self.0.place_material(n, d)
@@ -308,7 +315,8 @@ resources:
         let blob = d.path().join("app.conf");
         std::fs::write(&blob, "abc").unwrap();
         let mut blobs = BlobMap::new();
-        blobs.insert("cfg".into(), blob);
+        // 键是**源 URL**,不是物料名 —— 多架构变体同名不同源,按名字索引会取错。
+        blobs.insert("https://ex.com/app.conf".into(), blob);
 
         let inner = FakeCtx::new()
             .on("sha256sum", 0, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n");
@@ -568,5 +576,116 @@ resources:
         let c = ctx(&fake, &bp, &dir);
         let err = c.render_material("conf").unwrap_err().to_string();
         assert!(err.contains("conf"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod closure_tests {
+    use super::*;
+    use crater_ir::ctx::FakeCtx;
+    use crater_ir::eval::Yaml;
+    use crater_ir::parse::blueprint_from_str;
+
+    const BP: &str = r#"
+name: t
+materials:
+  - name: tool
+    file: "https://ex.com/tool-amd64"
+    when: "substrate.arch == 'amd64'"
+  - name: tool
+    file: "https://ex.com/tool-arm64"
+    when: "substrate.arch == 'arm64'"
+resources:
+  - copy: { material: tool, dest: /usr/bin/tool }
+"#;
+
+    struct Wrap<'a>(&'a FakeCtx);
+    impl Ctx for Wrap<'_> {
+        fn probe(&self, c: &str) -> Result<(i32, String)> { self.0.probe(c) }
+        fn run(&self, c: &str) -> Result<(i32, String)> { self.0.run(c) }
+        fn write_file(&self, p: &str, c: &str) -> Result<()> { self.0.write_file(p, c) }
+        fn write_bytes(&self, p: &str, c: &[u8]) -> Result<()> { self.0.write_bytes(p, c) }
+        fn place_material(&self, n: &str, d: &str) -> Result<()> { self.0.place_material(n, d) }
+    }
+
+    fn scope_for(arch: &str) -> Scope {
+        let mut substrate = BTreeMap::new();
+        substrate.insert("arch".to_string(), Yaml::from(arch));
+        Scope { substrate, ..Default::default() }
+    }
+
+    /// 一个装好两个架构 blob 的假闭包。内容刻意可读,好断言"拿到的是哪一份"。
+    fn closure(dir: &std::path::Path) -> BlobMap {
+        std::fs::write(dir.join("amd64"), b"i-am-amd64").unwrap();
+        std::fs::write(dir.join("arm64"), b"i-am-arm64").unwrap();
+        BlobMap::from([
+            ("https://ex.com/tool-amd64".to_string(), dir.join("amd64")),
+            ("https://ex.com/tool-arm64".to_string(), dir.join("arm64")),
+        ])
+    }
+
+    #[test]
+    fn each_arch_gets_its_own_bytes_out_of_one_closure() {
+        // 一个闭包同时服务两种架构 —— 这是"按源 URL 索引"要保住的东西。
+        // 按物料名索引的话,两台机器会拿到同一份字节,而且**静默**。
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = closure(dir.path());
+        let bp = blueprint_from_str(BP).unwrap();
+
+        for arch in ["amd64", "arm64"] {
+            let fake = FakeCtx::new().on("", 0, "");
+            let c = MaterialCtx::new(
+                Box::new(Wrap(&fake)),
+                &bp,
+                scope_for(arch),
+                blobs.clone(),
+                PathBuf::from("."),
+            );
+            c.place_material("tool", "/usr/bin/tool").unwrap();
+            let written = fake.written_file("/usr/bin/tool").unwrap();
+            assert_eq!(written, format!("i-am-{arch}"), "拿到了另一个架构的字节");
+        }
+    }
+
+    #[test]
+    fn a_binary_material_goes_through_the_byte_channel_not_the_text_one() {
+        // 闭包运的是 containerd/kubeadm 这类二进制。只有文本通道等于闭包白建 ——
+        // 早先这里会直接报"当前 Ctx 只有文本通道"。
+        let dir = tempfile::tempdir().unwrap();
+        // 真二进制:0xFF 是任何 UTF-8 序列里都不合法的字节。
+        std::fs::write(dir.path().join("bin"), [0x7Fu8, b'E', b'L', b'F', 0xFF, 0x00]).unwrap();
+        let blobs =
+            BlobMap::from([("https://ex.com/tool-amd64".to_string(), dir.path().join("bin"))]);
+        let bp = blueprint_from_str(BP).unwrap();
+        let fake = FakeCtx::new().on("", 0, "");
+        let c = MaterialCtx::new(
+            Box::new(Wrap(&fake)),
+            &bp,
+            scope_for("amd64"),
+            blobs,
+            PathBuf::from("."),
+        );
+        c.place_material("tool", "/usr/bin/tool").expect("二进制物料必须能推过去");
+        assert!(fake.written_file("/usr/bin/tool").unwrap().contains("binary 6 bytes"));
+    }
+
+    #[test]
+    fn without_a_closure_the_target_fetches_it_itself() {
+        // 没有闭包 = 有网场景:控制端只编排,目标机自己拉。
+        let bp = blueprint_from_str(BP).unwrap();
+        let fake = FakeCtx::new().on("", 0, "");
+        let c = MaterialCtx::new(
+            Box::new(Wrap(&fake)),
+            &bp,
+            scope_for("amd64"),
+            BlobMap::new(),
+            PathBuf::from("."),
+        );
+        c.place_material("tool", "/usr/bin/tool").unwrap();
+        let cmds: Vec<String> = fake.calls().iter().map(|x| x.text().to_string()).collect();
+        assert!(
+            cmds.iter().any(|x| x.contains("curl") && x.contains("tool-amd64")),
+            "{cmds:?}"
+        );
     }
 }

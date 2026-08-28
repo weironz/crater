@@ -32,6 +32,9 @@ impl Ctx for LocalCtx {
         Self::exec(cmd)
     }
     fn write_file(&self, path: &str, content: &str) -> anyhow::Result<()> {
+        self.write_bytes(path, content.as_bytes())
+    }
+    fn write_bytes(&self, path: &str, content: &[u8]) -> anyhow::Result<()> {
         if let Some(parent) = std::path::Path::new(path).parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -132,6 +135,20 @@ impl Ctx for FakeCtx {
     fn write_file(&self, path: &str, content: &str) -> anyhow::Result<()> {
         self.log.lock().unwrap().push(Call::Write(path.to_string()));
         self.files.lock().unwrap().insert(path.to_string(), content.to_string());
+        Ok(())
+    }
+    /// 假目标记住二进制的**长度**而不是内容 —— 测试要断言的是"推过去了多少",
+    /// 不是把字节再抄一遍。
+    fn write_bytes(&self, path: &str, content: &[u8]) -> anyhow::Result<()> {
+        self.log.lock().unwrap().push(Call::Write(path.to_string()));
+        match std::str::from_utf8(content) {
+            Ok(text) => self.files.lock().unwrap().insert(path.into(), text.to_string()),
+            Err(_) => self
+                .files
+                .lock()
+                .unwrap()
+                .insert(path.into(), format!("<binary {} bytes>", content.len())),
+        };
         Ok(())
     }
     fn place_material(&self, name: &str, dest: &str) -> anyhow::Result<()> {

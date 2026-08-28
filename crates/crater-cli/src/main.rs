@@ -19,6 +19,7 @@ mod agent;
 mod apply;
 mod blueprint;
 mod build;
+mod closure;
 mod deployments;
 mod fmt_cmd;
 mod images;
@@ -153,9 +154,19 @@ enum Cmd {
     /// Build a task into a B 类 OCI artifact in the local store (like
     /// `docker build`). Export to a file with `crater save`.
     Build {
-        /// Task file to build (its `materials` are fetched and packed).
+        /// Task file to build (its `materials` are fetched and packed), or a
+        /// blueprint — a blueprint builds an **offline closure** to `--output`.
         #[arg(short, long)]
         file: PathBuf,
+        /// Blueprint pipeline: write the offline closure here (e.g. `k8s.closure.tar`).
+        /// Deploy it with `crater apply -f <blueprint> --closure <file>`.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Blueprint pipeline: bake only the variants matching this target
+        /// profile, e.g. `--for arch=amd64 --for distro=ubuntu`. Omit to bake
+        /// **every** declared variant (safest for air-gap).
+        #[arg(long = "for", value_name = "KEY=VAL")]
+        profile: Vec<String>,
         /// Reference (tag) for the artifact, e.g. `192.168.1.5:5000/yq:1.0`.
         /// Defaults to `crater/<name>:<version>`.
         #[arg(short = 't', long)]
@@ -571,7 +582,19 @@ async fn main() -> Result<()> {
             TaskCmd::History { limit } => deployments::task_history(limit).await,
         },
         Cmd::Ui { bind, port, token } => ui::serve(&bind, port, token).await,
-        Cmd::Build { file, tag, arch, no_cache, set } => {
+        Cmd::Build { file, output, profile, tag, arch, no_cache, set } => {
+            // 与 apply/plan 同一条按文件格式分派的路子:蓝图烤闭包,task 进 store。
+            if blueprint::is_blueprint_file(&file) {
+                let out = output.unwrap_or_else(|| {
+                    let stem = file.file_stem().unwrap_or_default().to_string_lossy();
+                    // `k8s-ha.blueprint.yaml` → `k8s-ha.closure.tar`
+                    PathBuf::from(format!("{}.closure.tar", stem.trim_end_matches(".blueprint")))
+                });
+                return closure::build(&file, &out, &profile).await;
+            }
+            if output.is_some() || !profile.is_empty() {
+                anyhow::bail!("`--output` / `--for` 只用于蓝图闭包;task 构建请用 `-t/--tag`");
+            }
             build::build_to_store(&file, tag, &arch, &set, no_cache).await
         }
         Cmd::Inspect { source, gen_inventory } => build::inspect_source(&source, gen_inventory).await,
@@ -764,7 +787,7 @@ async fn component_shortcut(args: Vec<String>) -> Result<()> {
         i += 1;
     }
     let name = name.ok_or_else(|| anyhow!("missing task name"))?;
-    let target = TargetOpts { inventory, host, user, password, key, port, parallel: 1 };
+    let target = TargetOpts { inventory, host, user, password, key, port, parallel: 1, closure: None };
     apply::apply_source(None, Some(name), None, target, dry_run, shell, false, false, &[], false).await
 }
 

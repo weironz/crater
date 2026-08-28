@@ -20,7 +20,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 futures = "0.3"
 axum = "0.8"             # crater ui: pure-Rust web (hyper/tower/tokio, no C)
+tempfile = "3"           # 离线闭包解包(不只是测试用)
 
 [dev-dependencies]
-tempfile = "3"
 async-trait.workspace = true   # FakeExec in agent.rs tests (D-095)

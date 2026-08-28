@@ -73,6 +73,10 @@ impl Ctx for RemoteCtx {
     fn write_file(&self, path: &str, content: &str) -> anyhow::Result<()> {
         self.bridge(self.exec.write_file(path, content.as_bytes()))
     }
+    fn write_bytes(&self, path: &str, content: &[u8]) -> anyhow::Result<()> {
+        // Executor 侧本就走分块 base64,二进制安全 —— 这里只是把它接出来。
+        self.bridge(self.exec.write_file(path, content))
+    }
     fn place_material(&self, name: &str, dest: &str) -> anyhow::Result<()> {
         // 物料解析由 `MaterialCtx` 包在外层完成;裸的传输层不该知道物料是什么。
         anyhow::bail!("物料 `{name}` → {dest}:未经 MaterialCtx 包装(内部错误)")
@@ -140,6 +144,9 @@ async fn run_on_targets(
 
     let fleet = build_fleet(&hosts, target.declared_groups());
     enforce_contract(&bp, &fleet)?;
+    // 闭包在**连机器之前**装载并校验:字节坏了要在这里知道,不是推到一半。
+    // `_closure_dir` 必须活到本函数结束 —— blob 就在那个临时目录里。
+    let (_closure_dir, blobs) = open_closure(target)?;
 
     let mut failures = 0usize;
     // 自定义类型(L2)的弥合是机群级的舞:逐台 converge 只记下"需要跳哪支",
@@ -160,7 +167,7 @@ async fn run_on_targets(
         scope.identify(&fleet_name(host), &host.roles);
 
         // 再包上物料解析能力 —— 传输层不该知道"物料"是什么。
-        let ctx = MaterialCtx::new(transport, &bp, scope.clone(), BlobMap::new(), base_dir(path));
+        let ctx = MaterialCtx::new(transport, &bp, scope.clone(), blobs.clone(), base_dir(path));
 
         // 审计语境不传播上游变更 —— verify 要回答"哪里漂了",不是"该重启什么"。
         let intent = if mode == Mode::Verify {
@@ -233,7 +240,7 @@ async fn run_on_targets(
     }
     // 逐台收敛之后再跳机群级的舞(顺序不能反:舞往往依赖资源已就位)。
     if converge && !dances.is_empty() && failures == 0 {
-        let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel).await?;
+        let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs).await?;
         for name in &dances {
             println!("── procedure {name} ──");
             match procedure::run(&bp, name, &targets, &BTreeMap::new()) {
@@ -338,6 +345,7 @@ async fn connect_fleet<'a>(
     overrides: &[(String, Yaml)],
     base: &Path,
     parallel: usize,
+    blobs: &BlobMap,
 ) -> Result<FleetTargets<'a>> {
     let mut transports = Vec::new();
     for host in hosts {
@@ -356,7 +364,7 @@ async fn connect_fleet<'a>(
         scope.identify(&name, &host.roles);
         ctxs.insert(
             name.clone(),
-            MaterialCtx::new(transport, bp, scope.clone(), BlobMap::new(), base.to_path_buf()),
+            MaterialCtx::new(transport, bp, scope.clone(), blobs.clone(), base.to_path_buf()),
         );
         scopes.insert(name, scope);
     }
@@ -410,7 +418,8 @@ pub async fn run_procedure(
     let hosts = target.hosts()?;
     let fleet = build_fleet(&hosts, target.declared_groups());
     enforce_contract(&bp, &fleet)?;
-    let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel).await?;
+    let (_closure_dir, blobs) = open_closure(target)?;
+    let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs).await?;
 
     println!("procedure {proc_name} —— {} 台目标\n", targets.fleet.members.len());
     // `--set` 既是 deploy 期参数覆盖,也是过程参数(`--set to=1.37.0`)。
@@ -476,6 +485,19 @@ fn base_dir(path: &Path) -> PathBuf {
 
 /// 机群视角:`on:` / `first()` / `rest()` 的判定依据。
 /// **顺序即 inventory 声明序**,所以 `first()` 每次跑都选中同一台。
+/// 装载 `--closure`(没给就是空表 → 目标机自己联网取)。
+///
+/// 返回的 `TempDir` 必须被调用方**持有到部署结束** —— blob 就在里面,
+/// 提前 drop 会让所有物料在推送时凭空消失。
+fn open_closure(target: &TargetOpts) -> Result<(Option<tempfile::TempDir>, BlobMap)> {
+    let Some(path) = &target.closure else {
+        return Ok((None, BlobMap::new()));
+    };
+    let (dir, map) = crate::closure::load(path)?;
+    println!("离线闭包 {} —— {} 份物料已备好\n", path.display(), map.len());
+    Ok((Some(dir), map))
+}
+
 /// 机群契约在**一切之前**校验:没连机器、没跑 preflight、更没改任何东西。
 ///
 /// 报全部不满足项而不是第一条 —— 修 inventory 的人应当一趟改完。
