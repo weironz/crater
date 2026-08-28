@@ -285,46 +285,42 @@ fn lint_type_and_args(
         );
         return;
     };
-    for req in b.required {
-        if !args.contains_key(*req) {
+    for req in b.required() {
+        if !args.contains_key(req) {
             push(Severity::Error, at.into(), line, format!("缺少必填参数 `{req}`"));
         }
     }
-    if !b.one_of.is_empty() {
-        let hits: Vec<&&str> = b.one_of.iter().filter(|k| args.contains_key(**k)).collect();
+    // 互斥组逐组判定 —— 一个类型可以有多组(如 cmd 的"形态"组)。
+    for (group, members) in b.one_of_groups() {
+        let hits: Vec<&str> = members.iter().copied().filter(|k| args.contains_key(*k)).collect();
         match hits.len() {
             1 => {}
             0 => push(
                 Severity::Error,
                 at.into(),
                 line,
-                format!("需要其中之一:{}", b.one_of.join(" / ")),
+                format!("`{group}` 需要其中之一:{}", members.join(" / ")),
             ),
             _ => push(
                 Severity::Error,
                 at.into(),
                 line,
-                format!(
-                    "`{}` 互斥,只能给一个",
-                    hits.iter().map(|s| **s).collect::<Vec<_>>().join("` 与 `")
-                ),
+                format!("`{}` 互斥,只能给一个", hits.join("` 与 `")),
             ),
         }
     }
-    let allowed: BTreeSet<&str> = b
-        .required
-        .iter()
-        .chain(b.optional.iter())
-        .chain(b.one_of.iter())
-        .copied()
-        .collect();
+    let allowed: BTreeSet<&str> = b.field_names().into_iter().collect();
     for k in args.keys() {
         if !allowed.contains(k.as_str()) {
+            // 拼写建议来自同一张注册表 —— 报错与 `crater types` 永不打架。
+            let hint = crate::types::suggest_field(ty, k)
+                .map(|s| format!(",是不是想写 `{s}`?"))
+                .unwrap_or_default();
             push(
                 Severity::Error,
                 at.into(),
                 line,
-                format!("`{ty}` 没有参数 `{k}`(可用:{})", {
+                format!("`{ty}` 没有参数 `{k}`{hint}(可用:{})", {
                     let mut v: Vec<&str> = allowed.iter().copied().collect();
                     v.sort_unstable();
                     v.join(", ")

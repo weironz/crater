@@ -24,6 +24,7 @@ mod images;
 mod material_ctx;
 mod lint;
 mod target;
+mod types_cmd;
 mod ui;
 
 use std::path::{Path, PathBuf};
@@ -191,6 +192,17 @@ enum Cmd {
         /// Emit a starter inventory.yaml (required groups + apply-stage params).
         #[arg(long)]
         gen_inventory: bool,
+    },
+    /// Show the built-in resource types and their fields — the answer to
+    /// "what fields does `systemd_unit` take, and which are required?".
+    /// Renders the same registry lint errors and the JSON Schema are generated
+    /// from, so the three can never contradict each other.
+    Types {
+        /// A type name for the full field card; omit to list everything.
+        name: Option<String>,
+        /// Machine-readable output (for editors / schema generation).
+        #[arg(long)]
+        json: bool,
     },
     /// Lint blueprints — zero-connection static checks (D-107). Catches the whole
     /// class of errors Ansible only surfaces after connecting and reaching that line:
@@ -573,6 +585,7 @@ async fn main() -> Result<()> {
         Cmd::Create { what } => match what {
             CreateWhat::Inventory { path, force } => target::create_inventory(&path, force),
         },
+        Cmd::Types { name, json } => types_cmd::run(name.as_deref(), json),
         Cmd::Lint { paths, strict, json } => lint::run(&paths, strict, json),
         Cmd::Procedure { name, file, target, set } => match blueprint_source(&file, &None) {
             Some(p) => blueprint::run_procedure(&p, &name, &target, &set).await,

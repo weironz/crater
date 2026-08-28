@@ -1,0 +1,245 @@
+//! `crater types` —— 字段卡。
+//!
+//! 这条命令存在的理由很具体:在它之前,作者想知道 `systemd_unit` 支持哪些参数,
+//! **只能读 Rust 源码**。lint 会在撞墙时告诉你墙在哪(`没有参数 stat,是不是想写 state`),
+//! 但那是事后补救,不是让人一开始就看见路。
+//!
+//! 渲染源是 [`crater_ir::types::BUILTINS`] —— 与 lint 报错、JSON Schema 同一张表,
+//! 所以三者**永不互相矛盾**。
+
+use anyhow::{bail, Result};
+use crater_ir::types::{self, BuiltinType, Kind, Req};
+
+/// `crater types [<类型>] [--json]`
+pub fn run(name: Option<&str>, json: bool) -> Result<()> {
+    match name {
+        None if json => print_index_json(),
+        None => print_index(),
+        Some(n) if json => print_card_json(n)?,
+        Some(n) => print_card(n)?,
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- 列表
+
+fn print_index() {
+    for kind in [Kind::Resource, Kind::Procedural, Kind::Probe] {
+        let group: Vec<&BuiltinType> = types::BUILTINS.iter().filter(|t| t.kind == kind).collect();
+        if group.is_empty() {
+            continue;
+        }
+        println!("{}:", kind.label());
+        let width = group.iter().map(|t| t.name.len()).max().unwrap_or(0);
+        for t in group {
+            // 未实现的类型显式标注 —— 让人 apply 时才撞上是最坏的发现方式。
+            let gap = if crater_ir::builtins::get(t.name).is_none() {
+                "  [未实现]"
+            } else {
+                ""
+            };
+            println!("  {:<width$}  {}{gap}", t.name, t.doc, width = width);
+        }
+        println!();
+    }
+    println!("查看某个类型的字段:crater types <类型>");
+}
+
+fn print_index_json() {
+    let items: Vec<String> = types::BUILTINS
+        .iter()
+        .map(|t| {
+            format!(
+                r#"{{"name":"{}","kind":"{}","doc":"{}","implemented":{}}}"#,
+                t.name,
+                kind_key(t.kind),
+                esc(t.doc),
+                crater_ir::builtins::get(t.name).is_some()
+            )
+        })
+        .collect();
+    println!("[{}]", items.join(","));
+}
+
+// ---------------------------------------------------------------- 字段卡
+
+fn print_card(name: &str) -> Result<()> {
+    let t = lookup(name)?;
+
+    println!("{} — {}", t.name, t.doc);
+    println!("归类: {}", t.kind.label());
+    if crater_ir::builtins::get(t.name).is_none() {
+        println!("状态: **尚未实现**(lint 认得这种写法,但 apply 会失败)");
+    }
+    println!();
+
+    println!("字段:");
+    let width = t.fields.iter().map(|f| f.name.len()).max().unwrap_or(0);
+    for f in t.fields {
+        println!(
+            "  {:<width$}  {:<8}  {:<4}  {}",
+            f.name,
+            f.ty.label(),
+            req_label(f.req),
+            f.doc,
+            width = width
+        );
+        if !f.values.is_empty() {
+            println!(
+                "  {:<width$}  {:<8}  {:<4}  取值: {}",
+                "",
+                "",
+                "",
+                f.values.join(" | "),
+                width = width
+            );
+        }
+    }
+
+    // 互斥组单独说 —— 光看每行的"择一"看不出是和谁互斥。
+    for (group, members) in t.one_of_groups() {
+        println!("\n互斥组 `{group}`: {} —— 恰择其一", members.join(" / "));
+    }
+
+    if let Some(ff) = t.freeform {
+        println!(
+            "\n短写法: `- {}: <{}>` 等价于 `- {}: {{ {}: <…> }}`",
+            t.name, ff, t.name, ff
+        );
+    }
+    if let Some(note) = t.note {
+        println!("\n说明:");
+        for line in note.split('\n') {
+            println!("  {}", line.trim());
+        }
+    }
+
+    println!("\n元字段(所有条目通用): name / on / when / each / deps");
+    if !t.see_also.is_empty() {
+        println!(
+            "另见: {}",
+            t.see_also
+                .iter()
+                .map(|s| format!("crater types {s}"))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        );
+    }
+    Ok(())
+}
+
+fn print_card_json(name: &str) -> Result<()> {
+    let t = lookup(name)?;
+    let fields: Vec<String> = t
+        .fields
+        .iter()
+        .map(|f| {
+            format!(
+                r#"{{"name":"{}","type":"{}","required":"{}","values":[{}],"doc":"{}"}}"#,
+                f.name,
+                f.ty.label(),
+                req_key(f.req),
+                f.values
+                    .iter()
+                    .map(|v| format!("\"{}\"", esc(v)))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                esc(f.doc)
+            )
+        })
+        .collect();
+    println!(
+        r#"{{"name":"{}","kind":"{}","doc":"{}","implemented":{},"freeform":{},"fields":[{}]}}"#,
+        t.name,
+        kind_key(t.kind),
+        esc(t.doc),
+        crater_ir::builtins::get(t.name).is_some(),
+        t.freeform
+            .map(|f| format!("\"{f}\""))
+            .unwrap_or_else(|| "null".into()),
+        fields.join(",")
+    );
+    Ok(())
+}
+
+/// 查不到时给拼写建议 —— 与 lint 用同一份纠错逻辑。
+fn lookup(name: &str) -> Result<&'static BuiltinType> {
+    if let Some(t) = types::builtin(name) {
+        return Ok(t);
+    }
+    match types::suggest(name) {
+        Some(s) => bail!("没有类型 `{name}`,是不是想写 `{s}`?(`crater types` 看全部)"),
+        None => bail!("没有类型 `{name}`。`crater types` 列出全部内建类型"),
+    }
+}
+
+fn req_label(r: Req) -> &'static str {
+    match r {
+        Req::Required => "必选",
+        Req::Optional => "可选",
+        Req::OneOf(_) => "择一",
+    }
+}
+
+fn req_key(r: Req) -> &'static str {
+    match r {
+        Req::Required => "required",
+        Req::Optional => "optional",
+        Req::OneOf(g) => g,
+    }
+}
+
+fn kind_key(k: Kind) -> &'static str {
+    match k {
+        Kind::Resource => "resource",
+        Kind::Probe => "probe",
+        Kind::Procedural => "procedural",
+    }
+}
+
+fn esc(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_catalog_entry_renders_without_panicking() {
+        // 字段卡是给人看的第一入口 —— 任何一条渲染不出来都是硬伤。
+        for t in types::BUILTINS {
+            print_card(t.name).unwrap();
+            print_card_json(t.name).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_unknown_type_gets_a_spelling_hint() {
+        let err = lookup("servce").unwrap_err().to_string();
+        assert!(err.contains("是不是想写 `service`"), "{err}");
+        // 完全不像的名字不硬猜,但要告诉人去哪儿看
+        let err = lookup("完全不存在的东西").unwrap_err().to_string();
+        assert!(err.contains("crater types"), "{err}");
+    }
+
+    #[test]
+    fn the_card_states_necessity_for_every_field() {
+        // "哪些必选哪些可选"正是用户提出的原始诉求。
+        for t in types::BUILTINS {
+            for f in t.fields {
+                assert!(!req_label(f.req).is_empty(), "{}.{} 缺必选性", t.name, f.name);
+            }
+        }
+    }
+
+    #[test]
+    fn unimplemented_types_are_flagged_not_hidden() {
+        // 登记了却没实现的类型必须在卡上写明 —— 让人 apply 时才撞上是最坏的发现方式。
+        let pending = crater_ir::builtins::pending();
+        assert!(!pending.is_empty(), "若全部实现了,本测试应改为断言无 pending");
+        for name in pending {
+            assert!(types::builtin(name).is_some(), "{name} 应在目录里");
+        }
+    }
+}
