@@ -235,11 +235,14 @@ mod tests {
 
     #[test]
     fn unimplemented_types_are_flagged_not_hidden() {
-        // 登记了却没实现的类型必须在卡上写明 —— 让人 apply 时才撞上是最坏的发现方式。
+        // 登记表如今已全部有实现,所以字段卡上不该出现任何"尚未实现"。
+        // 这条断言是防倒退的:再登记新类型而不实现,它立刻变红 ——
+        // 让人 apply 时才撞上是最坏的发现方式。
         let pending = crater_ir::builtins::pending();
-        assert!(!pending.is_empty(), "若全部实现了,本测试应改为断言无 pending");
-        for name in pending {
-            assert!(types::builtin(name).is_some(), "{name} 应在目录里");
+        assert!(pending.is_empty(), "有登记未实现的类型:{pending:?}");
+        // 机制本身仍须完好:真出现 pending 时,卡上必须写明。
+        for t in types::BUILTINS {
+            assert!(crater_ir::builtins::get(t.name).is_some(), "{} 没有实现", t.name);
         }
     }
 }

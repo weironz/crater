@@ -250,11 +250,13 @@ resources:
 
 #[test]
 fn a_type_without_an_implementation_is_marked_unknown_not_faked() {
-    // L2 自定义类型的执行器还没落地 —— plan 必须诚实说"说不清",
+    // 一个既非内建、又没在 `types:` 里声明的类型:plan 必须诚实说"说不清",
     // 而不是假装成功。这些项计入"模型化欠债"。
-    // `container` 已登记但尚无五动词实现 —— plan 必须诚实说"说不清",
-    // 而不是假装成功。这些项计入"模型化欠债"。
-    let b = parse::blueprint_from_str("name: t\nresources:\n  - container: { name: web }\n").unwrap();
+    //
+    // 内建登记表如今已全部有实现(见 builtins::pending 的断言),所以这条
+    // 通路只能用一个引擎不认得的名字来走 —— lint 会拦下它,但 plan 本身
+    // 必须在被绕过 lint 时依然诚实。
+    let b = parse::blueprint_from_str("name: t\nresources:\n  - not_a_real_type: { name: web }\n").unwrap();
     let p = plan(&b, &scope_from_defaults(&b), &blank_host()).unwrap();
     assert_eq!(p.debt(), 1);
     assert_eq!(p.summary(), "+0 ~0 -0 ✓0 ?1");

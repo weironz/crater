@@ -9,6 +9,7 @@ pub mod file;
 pub mod host;
 pub mod paths;
 pub mod pkg;
+pub mod runtime;
 pub mod service;
 
 use crate::verbs::ResourceType;
@@ -34,6 +35,10 @@ pub fn get(name: &str) -> Option<&'static dyn ResourceType> {
         // 包与容器
         "package" => Some(&pkg::Package),
         "image_present" => Some(&pkg::ImagePresent),
+        "container" => Some(&runtime::Container),
+        // 主机层设施
+        "mount" => Some(&runtime::Mount),
+        "cron" => Some(&runtime::Cron),
         // 过程性原语
         "shell" => Some(&pkg::Shell),
         "wait" => Some(&pkg::Wait),
@@ -86,11 +91,9 @@ mod tests {
             implemented().len() + pending.len(),
             crate::types::BUILTINS.len()
         );
-        // 剩下的欠债只该是需要额外基础设施的那些。
-        assert!(
-            pending.iter().all(|n| ["container", "mount", "cron"].contains(n)),
-            "出现了预期外的未实现类型:{pending:?}"
-        );
+        // 登记表已全部有实现。这条断言是防倒退的:再登记新类型而不实现,
+        // 它会立刻变红,逼人要么补实现、要么明确把它列进欠债。
+        assert!(pending.is_empty(), "有登记未实现的类型:{pending:?}");
     }
 
     #[test]
