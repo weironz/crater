@@ -13,6 +13,7 @@ pub mod facts;
 pub mod fleet;
 pub mod expr;
 pub mod ir;
+pub mod jsonschema;
 pub mod lint;
 pub mod materials;
 pub mod loc;

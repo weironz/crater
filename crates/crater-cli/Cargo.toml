@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 crater-core = { path = "../crater-core" }
 crater-ir = { path = "../crater-ir" }
+serde_json = "1"
 anyhow.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true

@@ -23,6 +23,7 @@ mod deployments;
 mod images;
 mod material_ctx;
 mod lint;
+mod schema_cmd;
 mod target;
 mod types_cmd;
 mod ui;
@@ -192,6 +193,20 @@ enum Cmd {
         /// Emit a starter inventory.yaml (required groups + apply-stage params).
         #[arg(long)]
         gen_inventory: bool,
+    },
+    /// Generate a JSON Schema for blueprints — editor completion, hover docs and
+    /// inline validation. Pass `-f` to self-specialise it to one blueprint
+    /// (its own material names and custom types become completions).
+    Schema {
+        /// Blueprint to self-specialise against.
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        /// Output path (default `.crater/schema.json`).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Print to stdout instead of writing a file.
+        #[arg(long = "stdout")]
+        to_stdout: bool,
     },
     /// Show the built-in resource types and their fields — the answer to
     /// "what fields does `systemd_unit` take, and which are required?".
@@ -586,6 +601,9 @@ async fn main() -> Result<()> {
             CreateWhat::Inventory { path, force } => target::create_inventory(&path, force),
         },
         Cmd::Types { name, json } => types_cmd::run(name.as_deref(), json),
+        Cmd::Schema { file, output, to_stdout } => {
+            schema_cmd::run(file.as_deref(), output.as_deref(), to_stdout)
+        }
         Cmd::Lint { paths, strict, json } => lint::run(&paths, strict, json),
         Cmd::Procedure { name, file, target, set } => match blueprint_source(&file, &None) {
             Some(p) => blueprint::run_procedure(&p, &name, &target, &set).await,

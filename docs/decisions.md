@@ -1712,3 +1712,19 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **承认的净损失**:微文法本可做更强静态类型检查(== 两侧类型、枚举穷尽),
   且 `x is set` 比 `has(params.x)` 更接近自然语言。换回零自造语言维护成本、
   CEL 公开规范与生态、k8s 用户既有认知。记录在此以便将来重新评估。
+
+### D-117 补:A5 —— `on:` 键名的 YAML 1.1 风险(schema 实测发现)
+
+- **发现**:实现 `crater schema` 后用真实校验器(PyYAML + jsonschema)跑真实 blueprint,
+  29 条错误里 26 条是 `{True: ...}` —— 键 `on` 在 **YAML 1.1** 里是布尔 true。
+  crater 用 serde_yaml(1.2)解析无误,但 PyYAML / 许多 CI / 部分编辑器仍是 1.1,
+  会把元字段 `on:` 读成 `true:`。属**生态兼容风险**而非解析 bug,
+  且这个坑由我们的作者承担(他会看到"我的 YAML 明明对,为什么 CI 说键是 true")。
+- **三条路,待裁定**:保持 `on:`(语义贴切、与 GitHub Actions 同名,但踩坑)/
+  改 `hosts:`(无风险,但与 Ansible 同名而语义更强 —— 正是哲学第 9 条禁止的"假同源词")/
+  改 `target:`(无风险、无假同源,但要全面改名)。倾向 `target:`;涉及规范、blueprint、
+  schema、lint 多处,**应一次改完**,故留待用户裁定。
+- **同时修掉两个 schema 真 bug**(同样由实测暴露,单测覆盖):
+  material 位不接受插值(`each:` 展开时写插值是正当写法)、
+  `cmd` 未出现在探针位(它是双位置类型,`health:` 段就用它)。
+  修后真实 blueprint 校验 **0 错误**;注入两处错误(类型名拼错、mode 未加引号)准确抓到 2 条。
