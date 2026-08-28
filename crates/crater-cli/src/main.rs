@@ -20,6 +20,7 @@ mod apply;
 mod blueprint;
 mod build;
 mod deployments;
+mod fmt_cmd;
 mod images;
 mod material_ctx;
 mod lint;
@@ -193,6 +194,19 @@ enum Cmd {
         /// Emit a starter inventory.yaml (required groups + apply-stage params).
         #[arg(long)]
         gen_inventory: bool,
+    },
+    /// Move a whole top-level section out to its own file (or bring it back).
+    /// Mechanical and reversible — the merged result is equivalent to writing
+    /// everything in one file, which is what separates this from `include`.
+    Fmt {
+        /// The blueprint's root file.
+        file: PathBuf,
+        /// Section to externalise into `<stem>.<section>.yaml`.
+        #[arg(long)]
+        split: Option<String>,
+        /// Merge every externalised section back into the root file.
+        #[arg(long)]
+        join: bool,
     },
     /// Generate a JSON Schema for blueprints — editor completion, hover docs and
     /// inline validation. Pass `-f` to self-specialise it to one blueprint
@@ -604,6 +618,7 @@ async fn main() -> Result<()> {
         Cmd::Create { what } => match what {
             CreateWhat::Inventory { path, force } => target::create_inventory(&path, force),
         },
+        Cmd::Fmt { file, split, join } => fmt_cmd::run(&file, split.as_deref(), join),
         Cmd::Types { name, json } => types_cmd::run(name.as_deref(), json),
         Cmd::Schema { file, output, to_stdout } => {
             schema_cmd::run(file.as_deref(), output.as_deref(), to_stdout)
