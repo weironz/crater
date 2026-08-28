@@ -1686,3 +1686,9 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **kubespray 映射**:一个 stack × 6 个中等蓝图(os-baseline/containerd/etcd/
   k8s-core/cni/addons),而非巨文件 + 50 个 part。A1 管蓝图内篇幅,A2 管蓝图间组合,
   任何一把包办全部就退化回 include 树。
+
+- **A3(v1,lint 强制)**:篇幅规范 —— 单节 > 80 内容行 → W430 建议 parts 外置;
+  根文件 > 200 且未分节 → W431;蓝图合并 > 400 → W432 建议拆蓝图 + stack
+  (职责问题非篇幅问题)。依据:80≈两屏一次读完、200≈90 秒理解上限、
+  400≈职责边界气味(kubespray 六蓝图逐个 <400 反向校验)。警告不可文件内豁免,
+  团队调整走 lint 配置 —— 豁免必须在 review 可见。
