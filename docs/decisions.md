@@ -1629,3 +1629,45 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   L2 类型)已经扛得住 k8s-ha 这种复杂度;**卡点全在物料与模板两处**,而非编排。
   下一步的优先级应由此决定。
 - **关联**:D-113(同类静默失效 bug)、D-114(procedure 执行器)、D-110(物料闭包)。
+
+
+## 2026-08-28 · D-116:区分收敛/审计语境 + 物料内容寻址(补记)
+
+- 详见 commit c322b3c。要点:`plan::Intent{Converge,Audit}` —— `upstream_changed`
+  只在收敛语境传播(宁可多重启),审计语境只报自己不符的项(要指出**哪里**漂了);
+  `Ctx::material_digest` 三级答案(声明 sha256 > 控制端现算 > 如实 None);
+  k8s-ha 七个远端二进制钉官方摘要。真机:手改 unit 后 verify 从 7 项假阳性 → 1 项真漂移。
+
+## 2026-08-28 · D-117:作者层 DSL v1 规范定稿(设计面板产出)
+
+- **背景**:用户质疑「这套 YAML 人来写、来读的难易与可读性」——命中要害:语法不难但
+  生态是空的(inspect 不认 blueprint、模块文档全是旧的、想查参数只能读 Rust 源码),
+  且我自己在 blueprint 里写出了 `${params.ha ? "--upload-certs" : ""}` —— 逻辑进字符串,
+  正是本设计声称要消灭的东西。
+- **方法**:9-agent 设计面板 —— 5 个互相隔离的白纸设计(Fable 5;ansible-empathy /
+  reader-first / toolability-first / minimal-core / wildcard 五种哲学)→ 3 评委横向对比
+  (可用性走查 / 语言严谨性敌意审查 / 3am 事故演练+工具链上限)→ 综合终稿。
+  语义模型(IR)冻结,只设计语法。
+- **裁定**:骨架 = toolability-first(评委 2:1;E 字符串逻辑杜绝与 F 工具化上限是本引擎
+  存在性前提;加糖易拆骨难),融合各方案单点最优 22 条;评委全部致命伤逐条处置。
+  规范全文:[research/authoring-dsl-v1.md](research/authoring-dsl-v1.md)。
+- **核心设计**(相对现行语法的变化):
+  - 条件从 CEL 换成**子句微文法**(`params.ha` / `x is set` / `==` / `in`,仅 `and`;
+    or 只以结构化 `any:` 出现);插值 `${}` 只许名词、必须在双引号内、严格解析无静默透传;
+  - **条件拼 flag 的结构化终稿**:`cmd: {argv: [...], flags: [{name, value?, when?}]}`,
+    `flags[].name` 禁插值 ⇒ lint 可静态枚举命令全部展开;想写三元的人没有地方写;
+  - 自由字符串 shell **从文法中删除**(逃生舱降为 `argv: [bash, -c, "…"]` 显式形态,
+    plan 高亮)——与 product-design.md 逃生舱原则的张力见规范「审校记 R1」;
+  - `cast` 选角表(`seed: controlplane.first`)、materials `source.by` 开关表变体、
+    无 default 即 required、`crater: 1` 版本键、`crater lock` lockfile;
+  - **可发现性三件套同源一份类型注册表**:`crater types <类型>` 字段卡(必选/可选/默认/
+    传导语义)、自特化 JSON Schema(枚举你自己的物料名/角色名)、四要素报错
+    (位置/判决/最近似修复/下一步命令,心智模型纠正优先于拼写);
+  - **plan 的两条规范义务**:解释缺席(每个被条件裁掉的 flag/资源为什么没出现)、
+    标注传导(`↳ 传导重启: service caddy`)。
+- **被拒绝的路**(16 条,全部记录在规范 §6):shell 字符串、双轨引用记号、主语入键、
+  正则 capture、虚无律、算术运算符、模板条件/循环、YAML anchor…… 拒绝理由与采纳的
+  设计同等重要。
+- **实施影响**:parse 层重写(语法换血),IR 零改动 —— 「IR 是契约、语法是前端」保险单
+  的兑付。现行语法与新语法的并存/迁移策略待实施时定。
+- **关联**:D-106(IR 契约)、D-107(lint)、D-115(能力审计暴露的生态空洞)。
