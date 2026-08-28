@@ -131,7 +131,7 @@ fn meta_fields() -> Vec<(String, Value)> {
     vec![
         ("name".into(), json!({ "type": "string", "description": "人类标签(纯注释,不参与语义)" })),
         ("id".into(), json!({ "type": "string", "description": "显式 id;不写则按类型自动编号" })),
-        ("on".into(), json!({ "$ref": "#/$defs/selector" })),
+        ("target".into(), json!({ "$ref": "#/$defs/selector" })),
         ("when".into(), json!({ "$ref": "#/$defs/condition" })),
         ("each".into(), json!({ "$ref": "#/$defs/meta_each" })),
         ("deps".into(), json!({ "type": "array", "items": { "type": "string" },
@@ -356,7 +356,7 @@ mod tests {
             .expect("service 分支");
         assert_eq!(branch["additionalProperties"], json!(false), "未知字段要就地飘红");
         let props = branch["properties"].as_object().unwrap();
-        assert!(props.contains_key("service") && props.contains_key("on") && props.contains_key("when"));
+        assert!(props.contains_key("service") && props.contains_key("target") && props.contains_key("when"));
     }
 
     #[test]

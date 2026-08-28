@@ -137,7 +137,7 @@ resources:
 
   # flannel 清单要先落到目标机,bootstrap 那支舞才 apply 得了它。
   - copy: { material: flannel-manifest, dest: /etc/kubernetes/kube-flannel.yml }
-    on: first(role.controlplane)
+    target: first(role.controlplane)
 
   - image_present:
       materials: [img-apiserver, img-cm, img-scheduler, img-proxy, img-coredns,
@@ -149,28 +149,28 @@ resources:
   - package:
       packages:
         debian: [keepalived, haproxy]
-    on: role.controlplane
+    target: role.controlplane
     when: params.ha
   - template: { material: cfg-haproxy, dest: /etc/haproxy/haproxy.cfg }
-    on: role.controlplane
+    target: role.controlplane
     when: params.ha
   - template: { material: cfg-keepalived, dest: /etc/keepalived/keepalived.conf }
-    on: role.controlplane
+    target: role.controlplane
     when: params.ha
   # 包安装时 haproxy 已带默认配置起来了,必须重启才加载我们写的 :8443 —— 上游
   # 配置变更会经指纹传播到这里,不必手写 notify。
   - service: { name: haproxy,    state: started, enabled: true }
-    on: role.controlplane
+    target: role.controlplane
     when: params.ha
   - service: { name: keepalived, state: started, enabled: true }
-    on: role.controlplane
+    target: role.controlplane
     when: params.ha
 
   # ========== 集群成员资格:状态在这里,舞在 procedure 里 ==========
   - cluster_member: { role: control-plane }
-    on: role.controlplane
+    target: role.controlplane
   - cluster_member: { role: worker }
-    on: role.worker
+    target: role.worker
 
 types:
   # L2 数据模块层:引擎不必懂 kubeadm(D-017)。现实由只读探针读出,
@@ -192,7 +192,7 @@ procedures:
       # haproxy 恒监听 8443,所以 TCP 通 = VIP 在位 + haproxy 在跑。
       # 这堵住了"init 撞上 VIP 尚未漂移"的窗口。单节点没有 VIP,自然也不必等。
       - wait: { port: 8443, host: "${params.vip}", timeout: 30 }
-        on: role.controlplane
+        target: role.controlplane
         when: params.ha
 
       # 条件 flag 的正规写法(D-117 §3.4):条件是**条目的属性**,不是字符串里的三元。
@@ -215,7 +215,7 @@ procedures:
               value: "v${params.version}"
             - name: --cri-socket
               value: "unix:///run/containerd/containerd.sock"
-        on: first(role.controlplane)
+        target: first(role.controlplane)
         exports:
           join:    "kubeadm token create --print-join-command"
           certkey: "kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1"
@@ -223,13 +223,13 @@ procedures:
       - shell:
           cmd: "mkdir -p /root/.kube && cp -f /etc/kubernetes/admin.conf /root/.kube/config"
           check: "test -f /root/.kube/config"
-        on: first(role.controlplane)
+        target: first(role.controlplane)
 
       - shell:
           cmd: "kubectl apply -f /etc/kubernetes/kube-flannel.yml"
           check: "kubectl -n kube-flannel get ds/kube-flannel-ds"
           env: { KUBECONFIG: /etc/kubernetes/admin.conf }
-        on: first(role.controlplane)
+        target: first(role.controlplane)
 
       # 其余 control-plane 逐台 join —— etcd learner 必须一个一个同步。
       # 旧版只能"全组跑 + check 守卫跳过首台",一行代码配三行注释。
@@ -238,26 +238,26 @@ procedures:
             ${facts.join} --control-plane --certificate-key ${facts.certkey}
             --cri-socket=unix:///run/containerd/containerd.sock
           check: "test -f /etc/kubernetes/kubelet.conf"
-        on: rest(role.controlplane)
+        target: rest(role.controlplane)
         strategy: { throttle: 1 }
 
       - shell:
           cmd: "mkdir -p /root/.kube && cp -f /etc/kubernetes/admin.conf /root/.kube/config"
           check: "test -f /root/.kube/config"
-        on: rest(role.controlplane)
+        target: rest(role.controlplane)
 
       # worker 可并行 join
       - shell:
           cmd: "${facts.join} --cri-socket=unix:///run/containerd/containerd.sock"
           check: "test -f /etc/kubernetes/kubelet.conf"
-        on: role.worker
+        target: role.worker
 
       # 单节点必须去污点,否则工作负载没地方调度;多节点去掉也无妨(worker 在)。
       - shell:
           cmd: "kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true"
           check: "false"
           env: { KUBECONFIG: /etc/kubernetes/admin.conf }
-        on: first(role.controlplane)
+        target: first(role.controlplane)
 
   # ---- 退役:其余资源的 destroy 是推论,这里只留真正的过程知识 ----
   reset:
@@ -265,7 +265,7 @@ procedures:
       - shell:
           cmd: "kubeadm reset -f --cri-socket=unix:///run/containerd/containerd.sock || true"
           check: "! test -f /etc/kubernetes/kubelet.conf"
-        on: all
+        target: all
       # kubeadm reset 与 stop containerd 都不会杀 shim 托管的容器(shim 保活),
       # 残留 apiserver/etcd 占着端口 → 下次 join 撞 "Port 6443 in use"。
       # 这类坑正是专家知识,值得封装进 blueprint 而不是让每个用户各踩一遍。
@@ -275,11 +275,11 @@ procedures:
             $(crictl --runtime-endpoint unix:///run/containerd/containerd.sock ps -aq 2>/dev/null) 2>/dev/null;
             pkill -9 containerd-shim 2>/dev/null; true
           check: "! pgrep containerd-shim"
-        on: all
+        target: all
       - shell:
           cmd: "rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd /root/.kube"
           check: "! test -d /var/lib/etcd"
-        on: all
+        target: all
 
   # ---- 滚动升级:旧版是另一个 role 文件,这里内置于 blueprint ----
   # `crater procedure upgrade -f k8s-ha.blueprint.yaml --set to=1.37.0`
@@ -288,38 +288,38 @@ procedures:
       to: { type: version, required: true }
     steps:
       - copy: { material: kubeadm, dest: /usr/local/bin/kubeadm, mode: "0755" }
-        on: all
+        target: all
       - shell:
           cmd: "kubectl drain ${substrate.name} --ignore-daemonsets --delete-emptydir-data --timeout=300s || true"
           check: "false"
           env: { KUBECONFIG: /etc/kubernetes/admin.conf }
-        on: role.controlplane
+        target: role.controlplane
         strategy: { throttle: 1 }
       - shell:
           cmd: "kubeadm upgrade apply -y v${params.to}"
           check: "kubeadm version -o short | grep -q v${params.to}"
-        on: first(role.controlplane)
+        target: first(role.controlplane)
       - shell:
           cmd: "kubeadm upgrade node"
           check: "kubeadm version -o short | grep -q v${params.to}"
-        on: rest(role.controlplane)
+        target: rest(role.controlplane)
         strategy: { throttle: 1 }
       - shell:
           cmd: "kubeadm upgrade node"
           check: "kubeadm version -o short | grep -q v${params.to}"
-        on: role.worker
+        target: role.worker
         strategy: { throttle: 1 }
       - copy: { material: "${item}", dest: "/usr/local/bin/${item}", mode: "0755" }
         each: ["kubelet", "kubectl"]
-        on: all
+        target: all
       - service: { name: kubelet, state: restarted }
-        on: all
+        target: all
         strategy: { throttle: 1 }
       - shell:
           cmd: "kubectl uncordon ${substrate.name} || true"
           check: "false"
           env: { KUBECONFIG: /etc/kubernetes/admin.conf }
-        on: role.controlplane
+        target: role.controlplane
 
 health:
   - service_active: kubelet
@@ -327,4 +327,4 @@ health:
   - cmd:
       run: "kubectl get nodes -o wide"
       env: { KUBECONFIG: /etc/kubernetes/admin.conf }
-    on: first(role.controlplane)
+    target: first(role.controlplane)

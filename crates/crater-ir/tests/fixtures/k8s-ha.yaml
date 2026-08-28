@@ -46,35 +46,35 @@ resources:
     each: [kubeadm, kubelet, kubectl]
   - image_present: { materials: [img-apiserver], namespace: k8s.io }
   - template: { material: cfg-keepalived, dest: /etc/keepalived/keepalived.conf }
-    on: role.controlplane
+    target: role.controlplane
   - service: { name: keepalived, state: started, enabled: true }
-    on: role.controlplane
+    target: role.controlplane
   - cluster_member: { role: control-plane }
-    on: role.controlplane
+    target: role.controlplane
   - cluster_member: { role: worker }
-    on: role.worker
+    target: role.worker
 
 procedures:
   bootstrap:
     steps:
       - wait: { port: 8443, host: "${params.vip}", timeout: 30 }
-        on: role.controlplane
+        target: role.controlplane
       - shell:
           cmd: "kubeadm init --control-plane-endpoint ${params.cp_endpoint} --upload-certs --pod-network-cidr=${params.pod_cidr} --kubernetes-version v${params.version}"
           check: "test -f /etc/kubernetes/admin.conf"
-        on: first(role.controlplane)
+        target: first(role.controlplane)
         exports:
           join: "kubeadm token create --print-join-command"
           certkey: "kubeadm init phase upload-certs --upload-certs | tail -1"
       - shell:
           cmd: "${facts.join} --control-plane --certificate-key ${facts.certkey}"
           check: "test -f /etc/kubernetes/kubelet.conf"
-        on: rest(role.controlplane)
+        target: rest(role.controlplane)
         strategy: { throttle: 1 }
       - shell:
           cmd: "${facts.join}"
           check: "test -f /etc/kubernetes/kubelet.conf"
-        on: role.worker
+        target: role.worker
 
   reset:
     steps:
@@ -85,4 +85,4 @@ procedures:
 
 health:
   - cmd: { run: "kubectl get nodes -o wide", env: { KUBECONFIG: /etc/kubernetes/admin.conf } }
-    on: first(role.controlplane)
+    target: first(role.controlplane)

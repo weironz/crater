@@ -370,18 +370,18 @@ procedures:
       - shell:
           cmd: "kubeadm init"
           check: "test -f /etc/kubernetes/admin.conf"
-        on: first(role.controlplane)
+        target: first(role.controlplane)
         exports:
           join: "kubeadm token create --print-join-command"
       - shell:
           cmd: "${facts.join} --control-plane"
           check: "test -f /etc/kubernetes/kubelet.conf"
-        on: rest(role.controlplane)
+        target: rest(role.controlplane)
         strategy: { throttle: 1 }
       - shell:
           cmd: "${facts.join}"
           check: "test -f /etc/kubernetes/kubelet.conf"
-        on: role.worker
+        target: role.worker
 resources:
   - cluster_member: { role: control-plane }
 "#;
@@ -503,7 +503,7 @@ procedures:
   boot:
     steps:
       - shell: { cmd: "true", check: "false" }
-        on: role.controlplane
+        target: role.controlplane
         exports: { token: "echo x" }
 "#,
         )
@@ -528,7 +528,7 @@ procedures:
       to: { type: version }
     steps:
       - shell: { cmd: "kubeadm upgrade apply v${params.to}", check: "false" }
-        on: all
+        target: all
 "#,
         )
         .unwrap();
@@ -558,7 +558,7 @@ procedures:
   boot:
     steps:
       - shell: { cmd: "${facts.ghost} now", check: "false" }
-        on: all
+        target: all
 "#,
         )
         .unwrap();
@@ -576,10 +576,10 @@ procedures:
   boot:
     steps:
       - shell: { cmd: "false", check: "false" }
-        on: all
+        target: all
         strategy: { ignore_errors: true }
       - shell: { cmd: "echo after", check: "false" }
-        on: all
+        target: all
 "#,
         )
         .unwrap();
@@ -603,9 +603,9 @@ procedures:
   boot:
     steps:
       - shell: { cmd: "false", check: "false" }
-        on: all
+        target: all
       - shell: { cmd: "echo after", check: "false" }
-        on: all
+        target: all
 "#,
         )
         .unwrap();

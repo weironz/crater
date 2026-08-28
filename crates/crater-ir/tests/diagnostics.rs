@@ -181,7 +181,7 @@ fn two_module_keys_in_one_entry_is_rejected() {
 #[test]
 fn entry_without_any_module_key_is_rejected() {
     parse_err(
-        &format!("{HEAD}resources:\n  - on: all\n"),
+        &format!("{HEAD}resources:\n  - target: all\n"),
         &["没有模块名"],
     );
 }
@@ -213,7 +213,7 @@ fn freeform_shorthand_only_where_declared() {
 #[test]
 fn bad_selector_is_rejected_at_parse_time() {
     parse_err(
-        &format!("{HEAD}resources:\n  - file: {{ path: /x, state: directory }}\n    on: controlplane\n"),
+        &format!("{HEAD}resources:\n  - file: {{ path: /x, state: directory }}\n    target: controlplane\n"),
         &["无法解析 selector", "role.X"],
     );
 }
@@ -299,4 +299,25 @@ fn conditions_keep_full_cel_expressiveness() {
     ))
     .unwrap();
     assert!(lint::errors(&lint::lint(&bp)).is_empty(), "{:#?}", lint::lint(&bp));
+}
+
+
+#[test]
+fn the_old_on_keyword_is_refused_with_the_reason() {
+    // 不静默接受 —— `on` 在 YAML 1.1 里是布尔,坑会落到作者头上且极难查
+    // ("我的 YAML 明明是对的,为什么 CI 说键是 true")。
+    let err = parse_err(
+        &format!("{HEAD}resources:\n  - file: {{ path: /x, state: directory }}\n    on: all\n"),
+        &["已改名为 `target:`", "YAML 1.1"],
+    );
+    assert!(err.contains("PyYAML") || err.contains("CI"), "要说清谁会踩到:{err}");
+}
+
+#[test]
+fn a_yaml_1_1_parser_writing_true_as_the_key_gets_the_same_lesson() {
+    // 有些工具会把 `on:` 直接写成布尔键再交给我们 —— 同样要教,而不是报"未知字段 true"。
+    parse_err(
+        &format!("{HEAD}resources:\n  - file: {{ path: /x, state: directory }}\n    true: all\n"),
+        &["已改名为 `target:`"],
+    );
 }

@@ -243,7 +243,7 @@ procedures:
   bootstrap:
     steps:
       - shell: { cmd: "kubeadm init", check: "test -f /etc/kubernetes/admin.conf" }
-        on: all
+        target: all
 resources:
   - cluster_member: { role: control-plane }
 "#;

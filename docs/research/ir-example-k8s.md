@@ -79,27 +79,27 @@ resources:
 
   # ---- 控制面 LB(VIP) ----
   - package:  { material: lb-pkgs }
-    on: role.controlplane                                  # ← Selector 取代 when_role
+    target: role.controlplane                                  # ← Selector 取代 when_role
   - template: { material: cfg-haproxy,   dest: /etc/haproxy/haproxy.cfg }
-    on: role.controlplane
+    target: role.controlplane
   - template: { material: cfg-keepalived, dest: /etc/keepalived/keepalived.conf }
-    on: role.controlplane
+    target: role.controlplane
     # 模板里直接写 ${substrate.iface_in(params.subnet)} —— 目标侧 fact,渲染时求值,
     # 取代现行"写 __IFACE__ 占位符 + 一步 sed 回填"(见 §3-C)
   - service: { name: haproxy,    state: started, enabled: true }
-    on: role.controlplane
+    target: role.controlplane
   - service: { name: keepalived, state: started, enabled: true }
-    on: role.controlplane
+    target: role.controlplane
 
   # ---- 集群成员资格:状态在这里,舞在 procedure 里 ----
   - cluster_member: { role: control-plane }
-    on: role.controlplane
+    target: role.controlplane
   - cluster_member: { role: worker }
-    on: role.worker
+    target: role.worker
 
 health:
   - cmd: "kubectl get nodes -o wide"
-    on: first(role.controlplane)                           # ← 取代 run_once
+    target: first(role.controlplane)                           # ← 取代 run_once
     env: { KUBECONFIG: /etc/kubernetes/admin.conf }
   - node_ready: "${substrate.name}"                        # 每台自查在册且 Ready
 ```
@@ -125,7 +125,7 @@ procedures:
     steps:
       # ① VIP 就绪才动 kubeadm(haproxy 恒听 8443 ⇒ TCP 通 = VIP 在位)
       - wait: { port: 8443, host: "${params.vip}", timeout: 30s }
-        on: role.controlplane
+        target: role.controlplane
 
       # ② 首台 control-plane:init + 发布两个 fact
       - shell: "kubeadm init --control-plane-endpoint ${params.cp_endpoint} --upload-certs
@@ -133,31 +133,31 @@ procedures:
                 --kubernetes-version v${params.version}
                 --cri-socket=unix:///run/containerd/containerd.sock"
         check: "test -f /etc/kubernetes/admin.conf"
-        on: first(role.controlplane)
+        target: first(role.controlplane)
         exports:                               # ← 取代顶层 register:,就近声明
           join:    "kubeadm token create --print-join-command"
           certkey: "kubeadm init phase upload-certs --upload-certs | tail -1"
 
       - shell: "kubectl apply -f /etc/kubernetes/kube-flannel.yml"     # CNI
         check: "kubectl -n kube-flannel get ds/kube-flannel-ds"
-        on: first(role.controlplane)
+        target: first(role.controlplane)
         env: { KUBECONFIG: /etc/kubernetes/admin.conf }
 
       # ③ 其余 control-plane:逐台 join(护 etcd);facts.* 未就绪时引擎自动阻塞
       - shell: "${facts.join} --control-plane --certificate-key ${facts.certkey}
                 --cri-socket=unix:///run/containerd/containerd.sock"
-        on: rest(role.controlplane)            # ← 取代「全组跑 + check 守卫跳过首台」
+        target: rest(role.controlplane)            # ← 取代「全组跑 + check 守卫跳过首台」
         strategy: { throttle: 1 }
 
       # ④ worker:并行 join
       - shell: "${facts.join} --cri-socket=unix:///run/containerd/containerd.sock"
-        on: role.worker
+        target: role.worker
 
       - shell: "mkdir -p /root/.kube && cp -f /etc/kubernetes/admin.conf /root/.kube/config"
         check: "test -f /root/.kube/config"
-        on: role.controlplane
+        target: role.controlplane
       - shell: "kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true"
-        on: first(role.controlplane)
+        target: first(role.controlplane)
         env: { KUBECONFIG: /etc/kubernetes/admin.conf }
 
   reset:                                       # destroy 的舞(其余资源的 destroy 是推论)
@@ -172,23 +172,23 @@ procedures:
     steps:
       - copy: { material: kubeadm@${params.to}, dest: /usr/local/bin/kubeadm, mode: "0755" }
       - shell: "kubectl drain ${substrate.name} --ignore-daemonsets --delete-emptydir-data --timeout=300s || true"
-        on: role.controlplane
+        target: role.controlplane
         strategy: { throttle: 1 }
       - shell: "kubeadm upgrade apply -y v${params.to}"
-        on: first(role.controlplane)
+        target: first(role.controlplane)
         check: "kubeadm version -o short | grep -q v${params.to}"
       - shell: "kubeadm upgrade node"
-        on: rest(role.controlplane)
+        target: rest(role.controlplane)
         strategy: { throttle: 1 }
       - shell: "kubeadm upgrade node"
-        on: role.worker
+        target: role.worker
         strategy: { throttle: 1 }
       - copy: { material: "${item}@${params.to}", dest: "/usr/local/bin/${item}", mode: "0755" }
         each: [kubelet, kubectl]
       - service: { name: kubelet, state: restarted }
         strategy: { throttle: 1 }
       - shell: "kubectl uncordon ${substrate.name} || true"
-        on: role.controlplane
+        target: role.controlplane
 ```
 
 **行数**:资源部分 ~60 行 + types/procedures ~70 行 ≈ **130 行 vs 519+60 行(-77%)**,

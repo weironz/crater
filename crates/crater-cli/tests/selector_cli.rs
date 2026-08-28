@@ -57,13 +57,13 @@ name: sel-demo
 resources:
   - file: {{ path: "{root}/all",  state: directory }}
   - file: {{ path: "{root}/cp",   state: directory }}
-    on: role.controlplane
+    target: role.controlplane
   - file: {{ path: "{root}/init", state: directory }}
-    on: first(role.controlplane)
+    target: first(role.controlplane)
   - file: {{ path: "{root}/join", state: directory }}
-    on: rest(role.controlplane)
+    target: rest(role.controlplane)
   - file: {{ path: "{root}/wk",   state: directory }}
-    on: role.worker
+    target: role.worker
 "#,
             root = root.display()
         ),
@@ -178,7 +178,7 @@ fn a_misspelled_group_fails_loudly_instead_of_silently_skipping() {
     std::fs::write(
         &p,
         format!(
-            "name: bad\nresources:\n  - file: {{ path: \"{}/x\", state: directory }}\n    on: role.controlplna\n",
+            "name: bad\nresources:\n  - file: {{ path: \"{}/x\", state: directory }}\n    target: role.controlplna\n",
             d.path().join("target").display()
         ),
     )
@@ -202,7 +202,7 @@ fn a_group_selector_without_an_inventory_points_at_the_fix() {
     std::fs::write(
         &p,
         format!(
-            "name: g\nresources:\n  - file: {{ path: \"{}/x\", state: directory }}\n    on: role.controlplane\n",
+            "name: g\nresources:\n  - file: {{ path: \"{}/x\", state: directory }}\n    target: role.controlplane\n",
             d.path().join("target").display()
         ),
     )
@@ -240,9 +240,9 @@ inventory:
 name: gate
 resources:
   - file: {{ path: "{root}/worker-only", state: directory }}
-    on: role.worker
+    target: role.worker
   - file: {{ path: "{root}/nobody", state: directory }}
-    on: host.n99
+    target: host.n99
 "#,
             root = root.display()
         ),

@@ -303,7 +303,7 @@ procedures:
   boot:
     steps:
       - copy: { material: manifest, dest: /etc/k.yml }
-        on: all
+        target: all
 "#,
         )
         .unwrap();

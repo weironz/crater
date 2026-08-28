@@ -21,10 +21,10 @@ use serde_yaml::Value as Y;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// 资源条目允许的步骤关键字(其余 key 视为模块名)。
-const RESOURCE_KEYWORDS: &[&str] = &["id", "name", "on", "when", "each", "deps"];
+const RESOURCE_KEYWORDS: &[&str] = &["id", "name", "target", "when", "each", "deps"];
 /// procedure 步骤额外允许的关键字。
 const STEP_KEYWORDS: &[&str] = &[
-    "id", "name", "on", "when", "each", "deps", "exports", "strategy",
+    "id", "name", "target", "when", "each", "deps", "exports", "strategy",
 ];
 
 pub fn blueprint_from_str(text: &str) -> Result<Blueprint> {
@@ -96,6 +96,13 @@ fn split_entry<'a>(
     let mut modules: Vec<(String, &Y)> = Vec::new();
 
     for (k, v) in m {
+        // 与 known_keys 同一条纪律:`on` 在 YAML 1.1 里是布尔,不能静默当成模块名。
+        if k.as_bool() == Some(true) || k.as_str() == Some("on") {
+            return Err(Error::parse(format!(
+                "{what}:`on:` 已改名为 `target:` —— `on` 在 YAML 1.1 里是布尔 `true`,\
+                 某些工具(PyYAML / 部分 CI 与编辑器)会把这个键读成 `true:`"
+            )));
+        }
         let key = k
             .as_str()
             .ok_or_else(|| Error::parse(format!("{what}:key 必须是字符串")))?;
@@ -241,9 +248,9 @@ struct Common {
 fn parse_common(kw: &BTreeMap<String, &Y>) -> Result<Common> {
     let id = kw.get("id").map(|v| scalar_to_string(v));
     let name = kw.get("name").map(|v| scalar_to_string(v));
-    let on = match kw.get("on") {
+    let on = match kw.get("target") {
         Some(v) => Selector::parse(&scalar_to_string(v))
-            .map_err(|e| Error::parse(format!("`on:` {e}")))?,
+            .map_err(|e| Error::parse(format!("`target:` {e}")))?,
         None => Selector::All,
     };
     let when = match kw.get("when") {
@@ -528,16 +535,16 @@ fn parse_preflight(v: Option<&Y>) -> Result<Vec<Assertion>> {
     let mut out = Vec::new();
     for (i, item) in seq.iter().enumerate() {
         let m = item.as_mapping().ok_or_else(|| Error::parse(format!("preflight[{i}]:应是 map")))?;
-        known_keys(m, &["assert", "msg", "on"], &format!("preflight[{i}]"))?;
+        known_keys(m, &["assert", "msg", "target"], &format!("preflight[{i}]"))?;
         let src = get_str(m, "assert")
             .ok_or_else(|| Error::parse(format!("preflight[{i}]:缺少 `assert:`")))?;
         out.push(Assertion {
             expr: CelExpr::compile(&src)
                 .map_err(|e| Error::parse(format!("preflight[{i}] `assert:` {e}")))?,
             msg: get_str(m, "msg"),
-            on: match get_str(m, "on") {
+            on: match get_str(m, "target") {
                 Some(s) => Selector::parse(&s)
-                    .map_err(|e| Error::parse(format!("preflight[{i}] `on:` {e}")))?,
+                    .map_err(|e| Error::parse(format!("preflight[{i}] `target:` {e}")))?,
                 None => Selector::All,
             },
             line: Some(i),
@@ -555,13 +562,13 @@ fn parse_health(v: Option<&Y>) -> Result<Vec<HealthProbe>> {
     let mut out = Vec::new();
     for (i, item) in seq.iter().enumerate() {
         let m = item.as_mapping().ok_or_else(|| Error::parse(format!("health[{i}]:应是 map")))?;
-        let (ty, args, kw) = split_entry(m, &["on", "timeout", "name"], &format!("health[{i}]"))?;
+        let (ty, args, kw) = split_entry(m, &["target", "timeout", "name"], &format!("health[{i}]"))?;
         out.push(HealthProbe {
             ty,
             args,
-            on: match kw.get("on") {
+            on: match kw.get("target") {
                 Some(v) => Selector::parse(&scalar_to_string(v))
-                    .map_err(|e| Error::parse(format!("health[{i}] `on:` {e}")))?,
+                    .map_err(|e| Error::parse(format!("health[{i}] `target:` {e}")))?,
                 None => Selector::All,
             },
             timeout: kw.get("timeout").map(|v| scalar_to_string(v)),
@@ -609,6 +616,16 @@ fn parse_requires(v: Option<&Y>) -> Result<Requires> {
 fn known_keys(m: &serde_yaml::Mapping, allowed: &[&str], what: &str) -> Result<()> {
     let allow: BTreeSet<&str> = allowed.iter().copied().collect();
     for k in m.keys() {
+        // `on` 在 **YAML 1.1** 里是布尔 true。crater 用 1.2 解析没问题,但 PyYAML、
+        // 许多 CI 与编辑器插件仍是 1.1,会把这个键读成 `true:` —— 坑由作者承担,
+        // 且极难查("我的 YAML 明明是对的")。所以不静默接受,而是教他改。
+        if k.as_bool() == Some(true) || k.as_str() == Some("on") {
+            return Err(Error::parse(format!(
+                "{what}:`on:` 已改名为 `target:` —— `on` 在 YAML 1.1 里是布尔 `true`,\
+                 某些工具(PyYAML / 部分 CI 与编辑器)会把这个键读成 `true:`。\
+                 crater 自己解析无误,但这个坑会落到你头上"
+            )));
+        }
         let key = k.as_str().unwrap_or_default();
         if !allow.contains(key) {
             let hint = closest(key, allowed)

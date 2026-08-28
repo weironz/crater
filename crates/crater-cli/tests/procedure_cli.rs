@@ -60,17 +60,17 @@ procedures:
       - shell:
           cmd: "mkdir -p {root} && echo THE-TOKEN > {root}/token"
           check: "test -f {root}/token"
-        on: first(role.controlplane)
+        target: first(role.controlplane)
         exports: {{ join: "cat {root}/token" }}
       - shell:
           cmd: "echo '${{facts.join}}' > {root}/cp-join"
           check: "test -f {root}/cp-join"
-        on: rest(role.controlplane)
+        target: rest(role.controlplane)
         strategy: {{ throttle: 1 }}
       - shell:
           cmd: "echo '${{facts.join}}' > {root}/worker-join"
           check: "test -f {root}/worker-join"
-        on: role.worker
+        target: role.worker
 resources:
   - file: {{ path: "{root}", state: directory }}
 "#,
@@ -216,7 +216,7 @@ procedures:
       - shell:
           cmd: "mkdir -p {root} && echo x >> {root}/ran && touch {root}/done"
           check: "test -f {root}/done"
-        on: first(role.controlplane)
+        target: first(role.controlplane)
 resources:
   - cluster_member: {{ role: control-plane }}
 "#,
@@ -265,7 +265,7 @@ procedures:
   bootstrap:
     steps:
       - shell: {{ cmd: "true", check: "test -f {root}/done" }}
-        on: all
+        target: all
 resources:
   - cluster_member: {{ role: control-plane }}
 "#,

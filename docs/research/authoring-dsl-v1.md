@@ -551,7 +551,7 @@ preflight:
         - spare_cps is empty
     reason: 多 control plane 必须开启 ha
   - port_free: { port: 6443, allow_owner: kube-apiserver }
-    on: controlplane
+    target: controlplane
 
 resources:
   # ---- 底座(缺省 on: all)----
@@ -570,22 +570,22 @@ resources:
 
   # ---- HA 前置(ha=false 时在 plan 中"省略",而非跑了跳过)----
   - package: { name: keepalived, state: present }
-    on: controlplane
+    target: controlplane
     when: params.ha
   - template: { dest: /etc/keepalived/keepalived.conf, source: ./files/keepalived.conf.tmpl }
-    on: controlplane
+    target: controlplane
     when: params.ha
   - service: { name: keepalived, state: running, enabled: true }
-    on: controlplane
+    target: controlplane
     when: params.ha
   - package: { name: haproxy, state: present }
-    on: controlplane
+    target: controlplane
     when: params.ha
   - template: { dest: /etc/haproxy/haproxy.cfg, source: ./files/haproxy.cfg.tmpl }
-    on: controlplane
+    target: controlplane
     when: params.ha
   - service: { name: haproxy, state: running, enabled: true }
-    on: controlplane
+    target: controlplane
     when: params.ha
 
   # ---- 名词:这台机器应是集群成员(L2)----
@@ -602,7 +602,7 @@ types:
 procedures:
   bootstrap:
     - step: init-first-cp
-      on: seed
+      target: seed
       cmd:
         argv: [kubeadm, init]
         creates: /etc/kubernetes/admin.conf          # 重跑 bootstrap 安全
@@ -618,7 +618,7 @@ procedures:
             when: params.ha
 
     - step: export-join-facts                        # 独立于 init:后加节点与首建同舞
-      on: seed
+      target: seed
       export:
         - fact: join_command
           type: command
@@ -632,7 +632,7 @@ procedures:
             take: last_line
 
     - step: join-spare-cps                           # 逐台,护 etcd;单节点时空集 no-op
-      on: spare_cps
+      target: spare_cps
       serial: 1
       retry: { attempts: 2, delay: 30s }
       cmd:
@@ -645,7 +645,7 @@ procedures:
             when: params.ha                          # 与导出条件兼容,E412 静态可证
 
     - step: join-workers                             # 并行;空组 no-op
-      on: workers
+      target: workers
       retry: { attempts: 3, delay: 20s }
       cmd:
         from_fact: join_command
@@ -653,11 +653,11 @@ procedures:
 
   upgrade:
     - step: stage-new-kubeadm
-      on: all
+      target: all
       copy: { material: kubeadm, dest: /usr/local/bin/kubeadm, mode: "0755" }
 
     - step: upgrade-seed                             # 每台一个完整闭环,窗口收敛到单台
-      on: seed
+      target: seed
       do:
         - cmd: { argv: [kubectl, drain, "${host.name}", --ignore-daemonsets, --delete-emptydir-data] }
         - cmd: { argv: [kubeadm, upgrade, apply, "v${params.k8s_version}", --yes] }
@@ -667,7 +667,7 @@ procedures:
         - cmd: { argv: [kubectl, uncordon, "${host.name}"] }
 
     - step: upgrade-rest                             # 其余 cp 先、worker 后,逐台闭环
-      on: [spare_cps, workers]
+      target: [spare_cps, workers]
       serial: 1
       retry: { attempts: 2, delay: 30s }
       do:
@@ -680,16 +680,16 @@ procedures:
 
   leave:
     - step: evict-node
-      on: all
+      target: all
       serial: 1
       cmd: { via: seed, argv: [kubectl, delete, node, "${host.name}", --ignore-not-found] }
     - step: reset-node
-      on: all
+      target: all
       cmd: { argv: [kubeadm, reset, --force] }
 
 health:
   - http: { url: "https://localhost:6443/livez", status: 200, insecure: true }
-    on: controlplane
+    target: controlplane
   - service_active: { name: kubelet }
 ```
 
@@ -1115,7 +1115,7 @@ YAML **1.2** 只认 `true/false`。crater 自己用 serde_yaml(1.2),**解析无�
 这不是我们的解析 bug,是**生态兼容风险**:一个只在别人工具里出现的坑,
 比自己解析错更难查(作者会看到"我的 YAML 明明是对的,为什么 CI 说键是 true")。
 
-三条路,尚未裁定:
+**裁定:采用 C —— 元字段改名 `target:`**(用户裁定)。三条路的权衡:
 
 | 方案 | 代价 | 收益 |
 |---|---|---|
@@ -1123,6 +1123,19 @@ YAML **1.2** 只认 `true/false`。crater 自己用 serde_yaml(1.2),**解析无�
 | **B. 改名 `hosts:`** | 与 Ansible play 的 `hosts:` 同名但语义更强(支持 first/rest)—— 面板明令禁止的"假同源词" | 无 1.1 风险 |
 | **C. 改名 `target:` / `where:`** | 全部文档与已有 blueprint 要改;新词无既有直觉 | 无 1.1 风险,无假同源 |
 
-倾向 **C(`target:`)**:`hosts:` 的假同源风险(看着像 Ansible、实则语义更强)恰是
-面板哲学第 9 条明令要避免的;而 `on:` 的坑虽然不在我们身上,却会由我们的作者承担。
-**留待用户裁定后统一改**(涉及规范、blueprint、schema、lint 多处,应一次改完)。
+选 C 的理由:`hosts:` 的假同源风险(看着像 Ansible、实则语义更强)恰是面板哲学第 9 条
+明令要避免的;而 `on:` 的坑虽然不在我们身上,却会由我们的作者承担 ——
+他会看到"我的 YAML 明明是对的,为什么 CI 说键是 `true`"。
+
+**旧关键字不静默接受,而是教学式拒绝**:
+
+```
+resources[0]:`on:` 已改名为 `target:` —— `on` 在 YAML 1.1 里是布尔 `true`,
+某些工具(PyYAML / 部分 CI 与编辑器)会把这个键读成 `true:`
+```
+
+连 YAML 1.1 解析器**已经**把键转成布尔 `true` 再交给我们的情况也一并拦下并给同样的
+解释(而不是报一句无从下手的"未知字段 true")。
+
+验证:改名后用 **PyYAML(YAML 1.1)+ jsonschema** 直接跑真实 k8s 蓝图 ——
+**0 条错误、零修正**(改名前是 26 条)。
