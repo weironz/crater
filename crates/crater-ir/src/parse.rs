@@ -18,6 +18,7 @@ use crate::schema::{ParamSpec, ParamType, Params, Stage};
 use crate::selector::Selector;
 use crate::{Error, Result};
 use serde_yaml::Value as Y;
+use std::path::{Path, PathBuf};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// 资源条目允许的步骤关键字(其余 key 视为模块名)。
@@ -31,6 +32,124 @@ pub fn blueprint_from_str(text: &str) -> Result<Blueprint> {
     let mut bp = parse_structure(text)?;
     assign_lines(&mut bp, &crate::loc::LineIndex::new(text));
     Ok(bp)
+}
+
+/// 可外置的顶层节(A1)。清单封闭 —— 能拆的就这几段,不接受任意划分。
+pub const SPLITTABLE: &[&str] = &[
+    "resources",
+    "procedures",
+    "types",
+    "materials",
+    "health",
+    "preflight",
+];
+
+/// 从文件加载,并按根文件的 `parts:` 声明合并同目录约定文件(A1)。
+///
+/// 与被拒绝的 `include` 的**本质区别**:文件名由约定钉死(`<stem>.<节名>.yaml`)、
+/// 无自由路径、无嵌套、无参数、无条件 —— 合并结果与把内容写在一个文件里**逐字节等价**。
+/// 拒绝的是 Ansible 那种"三级跳读",不是拒绝多文件。
+pub fn blueprint_from_path(path: &Path) -> Result<Blueprint> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| Error::parse(format!("读 {}:{e}", path.display())))?;
+    let merged = merge_parts(path, &text)?;
+    blueprint_from_str(&merged)
+}
+
+/// 蓝图文件的 stem:`k8s.blueprint.yaml` → `k8s`(去掉 `.blueprint` 与扩展名)。
+fn blueprint_stem(path: &Path) -> String {
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+    name.strip_suffix(".yaml")
+        .or_else(|| name.strip_suffix(".yml"))
+        .unwrap_or(name)
+        .strip_suffix(".blueprint")
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            name.strip_suffix(".yaml")
+                .or_else(|| name.strip_suffix(".yml"))
+                .unwrap_or(name)
+                .to_string()
+        })
+}
+
+/// 某个外置节的约定路径。**无自由度** —— 这是它与 include 的分界线。
+pub fn part_path(root: &Path, section: &str) -> PathBuf {
+    let dir = root.parent().unwrap_or(Path::new("."));
+    dir.join(format!("{}.{section}.yaml", blueprint_stem(root)))
+}
+
+/// 读根文件的 `parts:`,把外置节并回一个文档。
+fn merge_parts(path: &Path, text: &str) -> Result<String> {
+    let root: Y = serde_yaml::from_str(text)?;
+    let Some(m) = root.as_mapping() else {
+        return Ok(text.to_string());
+    };
+    let declared: Vec<String> = match m.get(Y::from("parts")) {
+        None | Some(Y::Null) => Vec::new(),
+        Some(Y::Sequence(items)) => items.iter().map(scalar_to_string).collect(),
+        Some(_) => return Err(Error::parse("`parts:` 应是列表")),
+    };
+
+    // 目录里存在约定名的文件却没声明 → 幽灵文件,静默不生效是最难查的一类问题。
+    if let Some(dir) = path.parent() {
+        for section in SPLITTABLE {
+            let candidate = part_path(path, section);
+            if candidate.exists() && !declared.iter().any(|d| d == section) {
+                return Err(Error::parse(format!(
+                    "E122 {} 存在,但根文件的 `parts:` 没声明 `{section}` —— \
+                     它不会生效。要么加进 parts,要么删掉它",
+                    candidate.strip_prefix(dir).unwrap_or(&candidate).display()
+                )));
+            }
+        }
+    }
+
+    if declared.is_empty() {
+        return Ok(text.to_string());
+    }
+
+    let mut out = root.clone();
+    let out_map = out.as_mapping_mut().expect("checked");
+    out_map.remove(Y::from("parts"));
+
+    for section in &declared {
+        if !SPLITTABLE.contains(&section.as_str()) {
+            let hint = closest(section, SPLITTABLE)
+                .map(|s| format!(",是不是想写 `{s}`?"))
+                .unwrap_or_default();
+            return Err(Error::parse(format!(
+                "`parts:` 不能外置 `{section}`{hint}(可外置:{})",
+                SPLITTABLE.join(", ")
+            )));
+        }
+        // 同一节内联与外置二选一 —— 双定义时谁赢都是猜,不如拒绝。
+        if m.contains_key(Y::from(section.as_str())) {
+            return Err(Error::parse(format!(
+                "E121 `{section}` 既写在根文件里,又声明为外置 part —— 二选一"
+            )));
+        }
+        let part = part_path(path, section);
+        let body = std::fs::read_to_string(&part).map_err(|_| {
+            Error::parse(format!(
+                "E120 `parts:` 声明了 `{section}`,但找不到 {} —— \
+                 part 文件名由约定钉死:`<根文件 stem>.<节名>.yaml`",
+                part.display()
+            ))
+        })?;
+        let value: Y = serde_yaml::from_str(&body)
+            .map_err(|e| Error::parse(format!("{}:{e}", part.display())))?;
+        // part 文件的顶层**就是**该节的内容;不得再套一层 parts(无嵌套)。
+        if let Some(pm) = value.as_mapping() {
+            if pm.contains_key(Y::from("parts")) {
+                return Err(Error::parse(format!(
+                    "{}:part 文件不得再含 `parts:` —— 外置只有一层",
+                    part.display()
+                )));
+            }
+        }
+        out_map.insert(Y::from(section.as_str()), value);
+    }
+    serde_yaml::to_string(&out).map_err(Into::into)
 }
 
 /// 把解析期记下的**序号**换成源码**行号**,让诊断可点击(`file.yaml:42`)。
@@ -61,7 +180,7 @@ fn parse_structure(text: &str) -> Result<Blueprint> {
         m,
         &[
             "name", "version", "description", "params", "requires", "materials",
-            "preflight", "types", "resources", "procedures", "health",
+            "preflight", "types", "resources", "procedures", "health", "parts",
         ],
         "blueprint",
     )?;

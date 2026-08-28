@@ -32,7 +32,58 @@ struct Parsed {
     diags: Vec<Diagnostic>,
 }
 
-pub fn run(paths: &[PathBuf], strict: bool, json: bool) -> Result<()> {
+/// 各顶层节的内容行数(非空非注释)。
+///
+/// 刻意是**信息而非判决**:行数不度量复杂度 —— 48 行的物料声明是纯数据,
+/// 读起来零成本;48 行的嵌套条件不是。按行数一刀切,等于对"数据多"和"逻辑绕"
+/// 给同样的判断,而在健康文件上叫唤的规则会让整个 lint 输出失去可信度。
+/// 所以这里只报数,并在可外置时**提一句**有这个选项,不计入 error/warn。
+fn section_sizes(text: &str) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // 顶层键(零缩进且以冒号结尾或后跟值)开启新的一节
+        if !line.starts_with(char::is_whitespace) && !line.starts_with('-') {
+            if let Some((key, _)) = trimmed.split_once(':') {
+                current = Some(key.to_string());
+                out.push((key.to_string(), 0));
+                continue;
+            }
+        }
+        if let Some(cur) = &current {
+            if let Some(entry) = out.iter_mut().rev().find(|(k, _)| k == cur) {
+                entry.1 += 1;
+            }
+        }
+    }
+    out.retain(|(_, n)| *n > 0);
+    out.sort_by(|a, b| b.1.cmp(&a.1));
+    out
+}
+
+fn print_stats(path: &Path, text: &str) {
+    let sizes = section_sizes(text);
+    let total: usize = text
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+        .count();
+    println!("{}: {total} 内容行", relative(path).display());
+    for (name, n) in &sizes {
+        // 只对**可外置**的节提一句 —— 这是选项,不是批评。
+        let hint = if crater_ir::parse::SPLITTABLE.contains(&name.as_str()) && *n >= 60 {
+            format!("   (可 crater fmt --split {name} 外置)")
+        } else {
+            String::new()
+        };
+        println!("  {name:<14} {n:>4}{hint}");
+    }
+}
+
+pub fn run(paths: &[PathBuf], strict: bool, json: bool, stats: bool) -> Result<()> {
     let files = collect(paths)?;
     if files.is_empty() {
         bail!("没有找到 .yaml/.yml 文件:{}", render_paths(paths));
@@ -47,6 +98,16 @@ pub fn run(paths: &[PathBuf], strict: bool, json: bool) -> Result<()> {
         print_json(&reports);
     } else {
         print_human(&reports);
+        if stats {
+            println!();
+            for r in &reports {
+                if matches!(r.outcome, Outcome::Parsed(_)) {
+                    if let Ok(text) = std::fs::read_to_string(&r.path) {
+                        print_stats(&r.path, &text);
+                    }
+                }
+            }
+        }
     }
 
     let (errors, warns, legacy, skipped) = tally(&reports);
@@ -75,7 +136,7 @@ fn check_one(path: PathBuf, explicit: bool) -> FileReport {
     if !explicit && !looks_like_blueprint(&text) {
         return FileReport { path, outcome: Outcome::NotABlueprint };
     }
-    match parse::blueprint_from_str(&text) {
+    match parse::blueprint_from_path(&path) {
         Ok(bp) => {
             let diags = lint::lint(&bp);
             FileReport { path, outcome: Outcome::Parsed(Box::new(Parsed { bp, diags })) }

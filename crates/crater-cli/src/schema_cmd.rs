@@ -12,10 +12,9 @@ use anyhow::{Context, Result};
 pub fn run(file: Option<&Path>, out: Option<&Path>, to_stdout: bool) -> Result<()> {
     // 给了蓝图就**自特化**:物料名、自定义类型进枚举,补全只提示你自己有的东西。
     let bp = match file {
-        Some(p) => {
-            let text = std::fs::read_to_string(p).with_context(|| format!("读 {}", p.display()))?;
-            Some(crater_ir::parse::blueprint_from_str(&text).map_err(|e| anyhow::anyhow!("{e}"))?)
-        }
+        Some(p) => Some(
+            crater_ir::parse::blueprint_from_path(p).map_err(|e| anyhow::anyhow!("{e}"))?,
+        ),
         None => None,
     };
     let schema = crater_ir::jsonschema::generate(bp.as_ref());

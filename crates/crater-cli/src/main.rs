@@ -233,6 +233,10 @@ enum Cmd {
         /// Machine-readable output for CI / editor integration.
         #[arg(long)]
         json: bool,
+        /// Report per-section line counts. Informational only — line count does
+        /// not measure complexity, so this never warns and never fails.
+        #[arg(long)]
+        stats: bool,
     },
     /// Run a named procedure from a blueprint — the "dance" a blueprint declares
     /// (bootstrap a cluster, roll an upgrade). Unlike `apply`, which converges
@@ -604,7 +608,7 @@ async fn main() -> Result<()> {
         Cmd::Schema { file, output, to_stdout } => {
             schema_cmd::run(file.as_deref(), output.as_deref(), to_stdout)
         }
-        Cmd::Lint { paths, strict, json } => lint::run(&paths, strict, json),
+        Cmd::Lint { paths, strict, json, stats } => lint::run(&paths, strict, json, stats),
         Cmd::Procedure { name, file, target, set } => match blueprint_source(&file, &None) {
             Some(p) => blueprint::run_procedure(&p, &name, &target, &set).await,
             None => anyhow::bail!("`crater procedure` 需要 `-f <blueprint.yaml>`"),

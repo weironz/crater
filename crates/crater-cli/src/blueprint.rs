@@ -486,9 +486,8 @@ fn host_label(h: &Host) -> String {
 }
 
 fn load(path: &Path) -> Result<Blueprint> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("读 {}", path.display()))?;
-    let bp = parse::blueprint_from_str(&text).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // path-aware:根文件声明的 `parts:` 在这里被并回来,对所有命令一视同仁。
+    let bp = parse::blueprint_from_path(path).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // plan 之前先 lint:静态就能发现的问题不该等到探测目标机才暴露。
     let diags = lint::lint(&bp);
