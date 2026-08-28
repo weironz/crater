@@ -59,7 +59,7 @@ D-030 的 fan-out + register/hostvars 之上,D-071 补齐了**按角色分流**,
   步骤级 `throttle` —— 它只串需要的那一步、前置仍并行。k8s-ha 已从 `serial_roles` 改用 `throttle`。
 - **`{{ inventory_hostname }}` / `{{ inventory_addr }}`**:目标机自身 inventory 名/地址。
 
-完整例子:[`tasks/k8s-ha.yaml`](../../tasks/k8s-ha.yaml)(全 material 离线、可 build OCI)。
+完整例子:[`library/k8s/k8s-ha.blueprint.yaml`](../../library/k8s/k8s-ha.blueprint.yaml)(新 IR blueprint;旧 task 版已删,见 git 历史)。
 
 ## 验证
 
