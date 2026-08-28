@@ -61,7 +61,7 @@ fn section_sizes(text: &str) -> Vec<(String, usize)> {
         }
     }
     out.retain(|(_, n)| *n > 0);
-    out.sort_by(|a, b| b.1.cmp(&a.1));
+    out.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     out
 }
 
