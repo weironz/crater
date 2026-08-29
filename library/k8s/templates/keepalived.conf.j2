@@ -5,7 +5,9 @@ vrrp_script chk_haproxy {
 }
 vrrp_instance VI_1 {
   state BACKUP
-  interface __IFACE__
+  # 网卡名不能写死:ens18 / enp0s3 / eth0 因虚拟化平台而异,
+  # 写错的话 VIP 绑不上去,而 keepalived 自己不会报错 —— 只是永远不接管。
+  interface {{ substrate.iface }}
   virtual_router_id 14
   priority 100
   advert_int 1
@@ -15,7 +17,7 @@ vrrp_instance VI_1 {
     auth_pass crater42
   }
   virtual_ipaddress {
-    {{ vip }}/24
+    {{ params.vip }}/24
   }
   track_script {
     chk_haproxy

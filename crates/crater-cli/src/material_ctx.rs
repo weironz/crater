@@ -180,17 +180,30 @@ impl Ctx for MaterialCtx<'_> {
     fn render_material(&self, name: &str) -> Result<Option<String>> {
         let plan = materials::resolve(self.bp, name, &self.scope)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let path = match self.blobs.get(&plan.source) {
-            Some(blob) => blob.clone(),
-            None if !is_remote(&plan.source) => self.base_dir.join(&plan.source),
+        // 字节从哪来,决定了报错该指向哪儿。闭包是**快照**:改了本地模板却没重烤,
+        // 渲染的仍是旧内容 —— 此时把错误指向磁盘上那个已经改好的文件,
+        // 会让人对着正确的代码查半天。所以来源必须写进报错。
+        let (path, origin) = match self.blobs.get(&plan.source) {
+            Some(blob) => (blob.clone(), format!("来自离线闭包(源 {})", plan.source)),
+            None if !is_remote(&plan.source) => {
+                let p = self.base_dir.join(&plan.source);
+                let d = format!("来自本地文件 {}", p.display());
+                (p, d)
+            }
             None => return Ok(None),
         };
-        let raw = std::fs::read_to_string(&path).with_context(|| {
-            format!("模板物料 `{name}`:读不到 {}(相对 blueprint 目录解析)", path.display())
-        })?;
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("模板物料 `{name}`:读不到 {}", path.display()))?;
         crater_ir::template::render(&raw, &self.scope)
             .map(Some)
-            .with_context(|| format!("物料 `{name}`"))
+            .with_context(|| {
+                let hint = if self.blobs.contains_key(&plan.source) {
+                    "\n提示:内容取自闭包快照,与本地文件可能已不同 —— 改过模板要重新 `crater build`"
+                } else {
+                    ""
+                };
+                format!("物料 `{name}`({origin}){hint}")
+            })
     }
 
     fn place_material(&self, name: &str, dest: &str) -> Result<()> {
@@ -570,12 +583,36 @@ resources:
     }
 
     #[test]
-    fn a_broken_template_names_the_material() {
+    fn a_broken_template_names_the_material_and_where_its_bytes_came_from() {
         let (dir, bp) = fixture("{{ params.nope }}");
         let fake = FakeCtx::new();
         let c = ctx(&fake, &bp, &dir);
-        let err = c.render_material("conf").unwrap_err().to_string();
+        let err = format!("{:#}", c.render_material("conf").unwrap_err());
         assert!(err.contains("conf"), "{err}");
+        assert!(err.contains("本地文件"), "要说清字节从哪来:{err}");
+    }
+
+    #[test]
+    fn a_stale_closure_says_so_instead_of_blaming_the_local_file() {
+        // 真机踩过的坑:改了模板没重烤闭包,渲染的仍是旧内容,而报错却指向
+        // 磁盘上那个**已经改好**的文件 —— 人会对着正确的代码查半天。
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("app.conf.j2"), "新版 {{ params.port }}").unwrap();
+        let stale = dir.path().join("stale-blob");
+        std::fs::write(&stale, "旧版 {{ groups.nope }}").unwrap();
+        let bp = blueprint_from_str(BP).unwrap();
+        let fake = FakeCtx::new();
+        let blobs = BlobMap::from([("app.conf.j2".to_string(), stale)]);
+        let c = MaterialCtx::new(
+            Box::new(Wrap(&fake)),
+            &bp,
+            scope(),
+            blobs,
+            dir.path().to_path_buf(),
+        );
+        let err = format!("{:#}", c.render_material("conf").unwrap_err());
+        assert!(err.contains("闭包"), "{err}");
+        assert!(err.contains("crater build"), "报错要给出下一步动作:{err}");
     }
 }
 

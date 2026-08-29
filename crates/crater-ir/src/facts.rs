@@ -49,6 +49,21 @@ const FACTS: &[FactSpec] = &[
         cmd: "if command -v systemctl >/dev/null 2>&1; then echo systemd; else echo none; fi",
         normalize: trim,
     },
+    // 这台机器在机群里的**主地址**:按默认路由选出的那个,而不是 `hostname -I`
+    // 的第一个 —— 后者在有 docker0/cni0 的机器上会给出网桥地址,拿它去配
+    // apiserver 后端会得到一个别人连不上的集群。
+    FactSpec {
+        name: "ip",
+        cmd: "ip -4 route get 1.1.1.1 2>/dev/null | grep -oE 'src [0-9.]+' | awk '{print $2}' | head -1",
+        normalize: |s| s.trim().to_string(),
+    },
+    // 默认路由所在网卡。keepalived 的 VIP 必须绑在它上面,写死 eth0 在
+    // ens18/enp0s3 这类命名下会直接失效。
+    FactSpec {
+        name: "iface",
+        cmd: "ip -4 route show default 2>/dev/null | grep -oE 'dev [^ ]+' | awk '{print $2}' | head -1",
+        normalize: |s| s.trim().to_string(),
+    },
 ];
 
 fn trim(s: &str) -> String {

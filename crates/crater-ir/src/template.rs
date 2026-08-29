@@ -35,7 +35,11 @@ pub fn render(text: &str, scope: &Scope) -> anyhow::Result<String> {
 /// 暴露给模板的变量面 —— **与 CEL 条件同一套名字**。
 ///
 /// 作者不该记两套:`when: params.ha` 和 `{{ params.ha }}` 指的是同一个东西。
-/// 唯一的差别是 `fleet`(机群视角)不进来:它是定址用的,渲染里没有意义。
+///
+/// `fleet` 也在里面。早期版本刻意把它排除在外,理由是"fleet 是定址用的,
+/// 渲染里没有意义" —— 那个判断是**错的**,而且是被真机打回来的:haproxy 的
+/// 后端列表、etcd 的 peer 列表、任何"这一台要知道其余台是谁"的配置,
+/// 恰恰只能从机群视角渲染。没有它,这类文件根本无法声明式地写出来。
 fn ctx(scope: &Scope) -> BTreeMap<&'static str, Yaml> {
     let mut m = BTreeMap::new();
     m.insert("params", map_to_yaml(&scope.params));
@@ -45,7 +49,45 @@ fn ctx(scope: &Scope) -> BTreeMap<&'static str, Yaml> {
     if let Some(item) = &scope.item {
         m.insert("item", item.clone());
     }
+    if let Some(fleet) = &scope.fleet {
+        m.insert("fleet", fleet_to_yaml(fleet));
+    }
     m
+}
+
+/// 机群按**组名**索引:`fleet.controlplane` 是一个有序成员列表,每项有
+/// `name` / `address` / `roles` / `vars`。
+///
+/// 按组索引而不是给一个扁平列表,是因为模板里真正要问的问题就是
+/// "controlplane 有哪几台" —— 让作者自己 filter 一遍既啰嗦又容易写错。
+/// 顺序取成员在 inventory 里的顺序:配置文件的行序应当可复现。
+fn fleet_to_yaml(fleet: &crate::fleet::Fleet) -> Yaml {
+    let mut by_group: BTreeMap<String, Vec<Yaml>> = BTreeMap::new();
+    for role in &fleet.declared_roles {
+        by_group.insert(role.clone(), Vec::new());
+    }
+    for m in &fleet.members {
+        let mut entry = serde_yaml::Mapping::new();
+        entry.insert(Yaml::from("name"), Yaml::String(m.name.clone()));
+        entry.insert(Yaml::from("address"), Yaml::String(m.address.clone()));
+        entry.insert(
+            Yaml::from("roles"),
+            Yaml::Sequence(m.roles.iter().map(|r| Yaml::String(r.clone())).collect()),
+        );
+        entry.insert(Yaml::from("vars"), map_to_yaml(
+            &m.vars.iter().map(|(k, v)| (k.clone(), Yaml::String(v.clone()))).collect(),
+        ));
+        let y = Yaml::Mapping(entry);
+        for role in &m.roles {
+            by_group.entry(role.clone()).or_default().push(y.clone());
+        }
+    }
+    Yaml::Mapping(
+        by_group
+            .into_iter()
+            .map(|(k, v)| (Yaml::String(k), Yaml::Sequence(v)))
+            .collect(),
+    )
 }
 
 fn map_to_yaml(m: &BTreeMap<String, Yaml>) -> Yaml {
@@ -129,5 +171,81 @@ mod tests {
         // 和经 `template` 会产出不同字节,内容寻址随之失真。
         let raw = "[Unit]\nDescription=x\n";
         assert_eq!(render(raw, &scope()).unwrap(), raw);
+    }
+}
+
+#[cfg(test)]
+mod fleet_ctx_tests {
+    use super::*;
+    use crate::fleet::{Fleet, Member};
+
+    fn scope_with_fleet() -> Scope {
+        let mut vars = BTreeMap::new();
+        vars.insert("ip".to_string(), "10.0.0.11".to_string());
+        let fleet = Fleet::new(vec![
+            Member::new("cp1", &["controlplane"]).with_vars(vars),
+            Member::new("cp2", &["controlplane"]).with_address("10.0.0.12"),
+            Member::new("w1", &["worker"]).with_address("10.0.0.21"),
+        ]);
+        let mut s = Scope { fleet: Some(fleet), ..Default::default() };
+        s.params.insert("port".into(), Yaml::from(6443));
+        s
+    }
+
+    #[test]
+    fn a_template_can_render_a_backend_list_from_the_fleet() {
+        // 这是把 fleet 放进渲染上下文的**全部理由**:haproxy 后端、etcd peer
+        // 列表这类配置,只能从机群视角写出来。早期版本把 fleet 排除在外,
+        // 于是这类文件根本无法声明式表达 —— 是真机部署把它打回来的。
+        let out = render(
+            "{% for n in fleet.controlplane %}server {{ n.name }} {{ n.address }}:{{ params.port }}\n{% endfor %}",
+            &scope_with_fleet(),
+        )
+        .unwrap();
+        assert_eq!(out, "server cp1 10.0.0.11:6443\nserver cp2 10.0.0.12:6443\n");
+    }
+
+    #[test]
+    fn host_vars_ip_overrides_the_connection_address() {
+        // 走跳板/隧道时,inventory 的 address 是**控制端视角**,对同伴毫无意义。
+        // 把 127.0.0.1 写进 apiserver 后端会得到一个谁都连不上的集群。
+        let mut vars = BTreeMap::new();
+        vars.insert("ip".to_string(), "192.168.73.11".to_string());
+        let m = Member::new("cp1", &["controlplane"])
+            .with_address("127.0.0.1")
+            .with_vars(vars);
+        assert_eq!(m.address, "192.168.73.11");
+    }
+
+    #[test]
+    fn groups_are_indexed_by_name_so_the_author_need_not_filter() {
+        let out = render("{{ fleet.worker | length }}/{{ fleet.controlplane | length }}", &scope_with_fleet()).unwrap();
+        assert_eq!(out, "1/2");
+    }
+
+    #[test]
+    fn member_order_follows_the_inventory_so_configs_are_reproducible() {
+        // 配置文件的行序必须可复现,否则每次 apply 都会"内容变了"。
+        let s = scope_with_fleet();
+        let t = "{% for n in fleet.controlplane %}{{ n.name }},{% endfor %}";
+        assert_eq!(render(t, &s).unwrap(), "cp1,cp2,");
+        assert_eq!(render(t, &s).unwrap(), render(t, &s).unwrap());
+    }
+
+    #[test]
+    fn a_scope_without_a_fleet_simply_has_no_fleet_variable() {
+        // 单机语境(如 crater plan --local)不该因为引入 fleet 而报错;
+        // 用到它的模板会在 strict 模式下明确失败,那正是想要的。
+        let err = render("{{ fleet.controlplane }}", &Scope::default()).unwrap_err().to_string();
+        assert!(err.contains("渲染失败"), "{err}");
+    }
+
+    #[test]
+    fn host_vars_are_reachable_for_anything_beyond_the_address() {
+        let mut vars = BTreeMap::new();
+        vars.insert("rack".to_string(), "r2".to_string());
+        let fleet = Fleet::new(vec![Member::new("n1", &["db"]).with_vars(vars)]);
+        let s = Scope { fleet: Some(fleet), ..Default::default() };
+        assert_eq!(render("{{ fleet.db[0].vars.rack }}", &s).unwrap(), "r2");
     }
 }

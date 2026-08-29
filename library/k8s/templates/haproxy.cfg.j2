@@ -1,3 +1,9 @@
+# 控制面前置 LB —— 后端列表由**机群视角**渲染出来。
+#
+# `fleet.controlplane` 是这份蓝图眼里的控制面成员(经栈的组名映射之后)。
+# 每项的 `address` 是"同伴怎么找到这台机器":默认是 inventory 的连接地址,
+# 走跳板/隧道时由 host vars 的 `ip` 覆盖 —— 控制端连 127.0.0.1:2211 这种
+# 地址写进后端会得到一个谁都连不上的集群。
 global
   log /dev/log local0
   maxconn 4000
@@ -13,6 +19,6 @@ frontend kube-apiserver
   default_backend kube-apiserver
 backend kube-apiserver
   balance roundrobin
-{% for node in groups.controlplane %}
-  server {{ node.name }} {{ node.ip }}:{{ apiserver_port }} check
+{% for node in fleet.controlplane %}
+  server {{ node.name }} {{ node.address }}:{{ params.apiserver_port }} check
 {% endfor %}

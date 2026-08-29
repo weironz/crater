@@ -19,13 +19,41 @@ pub struct Member {
     pub name: String,
     /// 它属于哪些组(inventory 的 groups 推导而来)。
     pub roles: Vec<String>,
+    /// **同伴怎么找到这台机器** —— 渲染机群级配置(haproxy 后端、etcd peer
+    /// 列表)时用的地址。
+    ///
+    /// 注意它与"控制端怎么连这台机器"可能不是一回事:走跳板或隧道时,
+    /// 控制端连的是 `127.0.0.1:2211`,而同伴之间要用 `192.168.73.11`。
+    /// 默认取 inventory 的 address(绝大多数部署里两者相同);不同时由
+    /// host vars 里的 `ip` 覆盖。
+    pub address: String,
+    /// inventory 里该主机的自定义变量,原样透出给模板。
+    pub vars: BTreeMap<String, String>,
 }
 
 impl Member {
+    /// 给这个成员补上地址与 host vars(链式,便于测试与 inventory 构造)。
+    pub fn with_address(mut self, addr: impl Into<String>) -> Self {
+        self.address = addr.into();
+        self
+    }
+    pub fn with_vars(mut self, vars: BTreeMap<String, String>) -> Self {
+        // `ip` 是"同伴地址"的显式覆盖 —— 隧道/跳板场景下 inventory 的 address
+        // 是控制端视角,对同伴毫无意义。
+        if let Some(ip) = vars.get("ip") {
+            self.address = ip.clone();
+        }
+        self.vars = vars;
+        self
+    }
+
     pub fn new(name: impl Into<String>, roles: &[&str]) -> Self {
+        let name = name.into();
         Member {
-            name: name.into(),
+            address: name.clone(),
+            name,
             roles: roles.iter().map(|s| s.to_string()).collect(),
+            vars: BTreeMap::new(),
         }
     }
     pub fn in_role(&self, role: &str) -> bool {
@@ -129,7 +157,12 @@ impl Fleet {
         let members: Vec<Member> = self
             .members
             .iter()
-            .map(|m| Member { name: m.name.clone(), roles: project(&m.roles) })
+            .map(|m| Member {
+                name: m.name.clone(),
+                roles: project(&m.roles),
+                address: m.address.clone(),
+                vars: m.vars.clone(),
+            })
             .collect();
         // 声明过的组同样要投影:空的 `worker: []` 组经映射后仍须是"声明过但为空",
         // 否则单节点拓扑会在栈里退化成"这个组不存在"。

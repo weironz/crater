@@ -680,7 +680,11 @@ fn build_fleet(hosts: &[Host], declared: impl IntoIterator<Item = String>) -> Fl
             .iter()
             .map(|h| {
                 let roles: Vec<&str> = h.roles.iter().map(String::as_str).collect();
+                // address 默认取 inventory 的连接地址;host vars 里的 `ip`
+                // 会覆盖它 —— 走跳板/隧道时,控制端连的地址对同伴毫无意义。
                 Member::new(fleet_name(h), &roles)
+                    .with_address(h.address.clone())
+                    .with_vars(h.vars.clone())
             })
             .collect(),
     )

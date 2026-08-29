@@ -48,7 +48,27 @@ impl ResourceType for Package {
         if pkgs.is_empty() {
             anyhow::bail!("package:没有适配本机 family 的包名");
         }
-        run_ok(ctx, &pkg_cmd(true, &pkgs))?;
+        // 索引比仓库旧时,apt 会去抓已被归档取代的 .deb 版本,得到 404 而不是
+        // "包不存在"。这类失败**刷新索引就能好**,而且极其常见(任何开机久了
+        // 或从旧快照恢复的机器都会碰上)。
+        //
+        // 刷新不做在前面:那会给每次 apply 都加上几十秒的固定成本,而绝大多数
+        // 运行里包本就装好、根本不会走到这里。失败后重试一次是更划算的交换。
+        let (code, out) = ctx.run(&pkg_cmd(true, &pkgs))?;
+        if code == 0 {
+            return Ok(Outcome::Changed);
+        }
+        run_ok(ctx, refresh_cmd())?;
+        let (code2, out2) = ctx.run(&pkg_cmd(true, &pkgs))?;
+        if code2 != 0 {
+            anyhow::bail!(
+                "装包失败(刷新索引后重试仍失败,exit {code2}):{}\n\
+                 首次失败输出:\n{}\n重试输出:\n{}",
+                pkgs.join(" "),
+                out.trim(),
+                out2.trim()
+            );
+        }
         Ok(Outcome::Changed)
     }
     fn destroy(&self, ctx: &dyn Ctx, args: &ResolvedArgs, obs: &Observed) -> Result<Outcome> {
@@ -65,6 +85,14 @@ impl ResourceType for Package {
 }
 
 /// 生成**目标机上**要跑的包管理命令。`install=true` 装,否则卸。
+/// 刷新包索引。`|| true` 收口:索引里有个别源不可达是常态,不该因此让
+/// 整条安装路径失败 —— 真正的判据是紧随其后的安装成不成功。
+fn refresh_cmd() -> &'static str {
+    "if command -v apt-get >/dev/null 2>&1; then apt-get update -qq || true; \
+     elif command -v dnf >/dev/null 2>&1; then dnf makecache -q || true; \
+     else yum makecache -q || true; fi"
+}
+
 fn pkg_cmd(install: bool, pkgs: &[String]) -> String {
     let list = pkgs.iter().map(|p| sh(p)).collect::<Vec<_>>().join(" ");
     let (apt_op, rpm_op) = if install {
