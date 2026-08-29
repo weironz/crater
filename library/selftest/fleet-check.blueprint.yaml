@@ -1,0 +1,75 @@
+# 机群机制验证 —— 把五条承重墙逐条钉在真机上。
+#
+# 这份蓝图不装任何东西,它只做一件事:**让每台机器把自己动手的时间区间写下来**。
+# 因为报告里看不出"限流有没有真限住、并发有没有真并起来" —— 报告只说做完了,
+# 不说什么时候做的。唯一能证伪的证据是时间戳,而且必须是**目标机自己**记的。
+#
+# 跑完之后带外(multipass exec)把 /opt/crater-check/* 拉回来比对:
+#   - cp2 与 cp3 的区间**必须不相交**  ← throttle: 1 真的限住了
+#   - w1  与 w2  的区间**必须相交**    ← --parallel 2 真的并起来了
+name: fleet-check
+version: "1"
+
+fleet:
+  groups:
+    controlplane: {min: 3}   # rest() 要有 2 台才谈得上限流
+    worker:       {min: 2}   # 并发要有 2 台才谈得上重叠
+
+cast:
+  seed:      first(role.controlplane)
+  followers: rest(role.controlplane)
+  masters:   role.controlplane
+  workers:   role.worker
+
+params:
+  hold: { type: int, default: 4, description: "每台动手时故意占住的秒数 —— 短了看不出重叠" }
+
+resources:
+  - file: { path: /opt/crater-check, state: directory, mode: "0755" }
+
+procedures:
+  check:
+    steps:
+      # ── 墙 1:first() 只落在一台 ────────────────────────────────
+      # 若 first 选中了不止一台,这一步会在多台留下 seed 标记,带外一看便知。
+      - shell:
+          cmd: >-
+            mkdir -p /opt/crater-check &&
+            echo "seed on $(hostname)" > /opt/crater-check/role.seed
+        target: seed
+        # ── 墙 2:exports —— fact 从 seed 出发,流向两类消费方 ────
+        # token 里带 hostname + 纳秒时刻,所以"消费方拿到的是不是同一份"
+        # 可以逐字节比对,而不是靠"看起来对"。
+        exports:
+          token: "echo tok-$(hostname)-$(date +%s%N)"
+
+      # ── 墙 3:throttle: 1 —— rest() 的两台必须严格逐台 ─────────
+      # 区间写法:动手前记 start,占住 hold 秒,再记 end。
+      # 两台的 [start,end] 若相交,说明限流没生效。
+      - shell:
+          cmd: >-
+            mkdir -p /opt/crater-check &&
+            date +%s.%N > /opt/crater-check/follower.start &&
+            echo "${facts.token}" > /opt/crater-check/token.seen &&
+            sleep ${params.hold} &&
+            date +%s.%N > /opt/crater-check/follower.end
+        target: followers
+        strategy: { throttle: 1 }
+
+      # ── 墙 4:不限流 —— worker 两台在 --parallel 2 下必须重叠 ──
+      # 与上一步唯一的差别就是没写 throttle。两步用同样的写法,
+      # 结论的差异才只能归因于限流本身。
+      - shell:
+          cmd: >-
+            mkdir -p /opt/crater-check &&
+            date +%s.%N > /opt/crater-check/worker.start &&
+            echo "${facts.token}" > /opt/crater-check/token.seen &&
+            sleep ${params.hold} &&
+            date +%s.%N > /opt/crater-check/worker.end
+        target: workers
+
+      # ── 墙 5:选择器的边界 —— masters 覆盖全部 3 台 ─────────────
+      # seed ∪ followers 应当恰好等于 masters,不多不少。
+      - shell:
+          cmd: "echo $(hostname) >> /opt/crater-check/role.master"
+        target: masters
