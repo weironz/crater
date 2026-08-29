@@ -261,7 +261,10 @@ const EDIT_HTML: &str = r##"<section class="panel">
       <textarea id="ed-ta" spellcheck="false" wrap="off"></textarea>
     </div>
   </div>
-  <div id="ed-diag" class="ed-diag"></div>
+  <div class="ed-below">
+    <div id="ed-diag" class="ed-diag"></div>
+    <div id="ed-card" class="ed-card"></div>
+  </div>
 </section>
 
 <style>
@@ -303,6 +306,25 @@ const EDIT_HTML: &str = r##"<section class="panel">
   .ed-wiz .types label{border:1px solid var(--border);border-radius:99px;padding:2px 9px;cursor:pointer;font-size:12px}
   .ed-wiz .types label:has(input:checked){background:var(--tint);border-color:var(--accent);color:var(--accent)}
   .ed-wiz .types input{display:none}
+  .ed-below{display:flex;gap:12px;align-items:flex-start}
+  .ed-below .ed-diag{flex:1}
+  .ed-card{flex:0 0 300px;border:1px solid var(--border);border-radius:10px;padding:10px 12px;
+    background:var(--surface-2);font-size:12.5px;margin-top:10px;display:none}
+  .ed-card.on{display:block}
+  .ed-card h4{margin:0 0 6px;font-size:13px}
+  .ed-card .req{color:var(--drift);font-size:11px;margin-left:6px}
+  .ed-card .doc{color:var(--muted);margin:4px 0 8px}
+  .ed-card .ty{font:11px ui-monospace,monospace;color:var(--faint)}
+  .ed-card .vals{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}
+  .ed-card .vals button{border:1px solid var(--border);background:var(--surface);color:var(--text);
+    border-radius:99px;padding:2px 10px;cursor:pointer;font-size:12px}
+  .ed-card .vals button:hover{border-color:var(--accent);color:var(--accent)}
+  .ed-card .setrow{display:flex;gap:6px;margin-top:8px}
+  .ed-card .setrow input{flex:1;background:var(--surface);color:var(--text);
+    border:1px solid var(--border);border-radius:8px;padding:4px 8px;font:inherit;font-size:12px}
+  .ed-card .flist{margin:4px 0 0;padding-left:16px;color:var(--muted)}
+  .ed-card .flist b{color:var(--text);font-weight:600}
+  .ed-card .err{color:var(--drift);margin-top:6px}
 </style>
 
 <script>
@@ -494,6 +516,61 @@ const EDIT_HTML: &str = r##"<section class="panel">
     ta.value = d.text; kindEl.textContent = d.kind; sync(); lint();
     status.textContent = '已载入';
   }
+
+  // ── 表单投影:光标字段卡(登记表 → 编辑现场)+ span 级定点补丁 ──
+  // 字段说明与可选值来自 /api/context(登记表同源);写回经 /api/patch
+  // (单行 scalar,保注释;锚点/flow 由服务端拒绝并降级只读)。
+  const card = document.getElementById('ed-card');
+  let ctxTimer = null, curLine = 0;
+  function cursorLine(){ return ta.value.slice(0, ta.selectionStart).split('\n').length; }
+  async function showCtx(){
+    if (!ta.value.trim() || (sel.selectedOptions[0]?.dataset.kind||'') === 'inventory'){ card.className='ed-card'; return; }
+    curLine = cursorLine();
+    const d = await (await fetch('/api/context',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text:ta.value, line:curLine})})).json();
+    const esc = x => String(x).replace(/</g,'&lt;');
+    if (d.context === 'field'){
+      const c = d.card;
+      let h = '<h4>'+esc(d.type)+' · '+esc(d.field)
+        + (c.required?'<span class="req">必填</span>':'')+'</h4>'
+        + '<div class="doc">'+esc(c.doc||'')+'</div>'
+        + '<div class="ty">'+esc(c.type||'')+(c.one_of?' · 互斥组 '+esc(c.one_of):'')+'</div>';
+      if ((c.values||[]).length){
+        h += '<div class="vals">'+c.values.map(v=>
+          '<button onclick="edSet('+JSON.stringify(String(v)).replace(/"/g,'&quot;')+')">'+esc(v)+'</button>').join('')+'</div>';
+      } else {
+        h += '<div class="setrow"><input id="ed-setv" placeholder="新值"><button class="btn" onclick="edSet(document.getElementById(\'ed-setv\').value)">应用</button></div>';
+      }
+      h += '<div id="ed-cardmsg" class="err"></div>';
+      card.innerHTML = h; card.className='ed-card on';
+    } else if (d.context === 'type'){
+      const c = d.card;
+      card.innerHTML = '<h4>'+esc(d.type)+'</h4><div class="doc">'+esc(c.doc||'')+'</div>'
+        + '<ul class="flist">'+(c.fields||[]).map(f=>
+            '<li><b>'+esc(f.name)+'</b>'+(f.required?'<span class="req">必填</span>':'')
+            +' — '+esc(f.doc||'')+'</li>').join('')+'</ul>';
+      card.className='ed-card on';
+    } else if (d.context === 'unknown_field'){
+      card.innerHTML = '<h4>'+esc(d.type)+' · '+esc(d.field)+'</h4><div class="err">登记表没有这个字段'
+        + (d.suggestion?',是不是 <b>'+esc(d.suggestion)+'</b>?':'')+'</div>';
+      card.className='ed-card on';
+    } else if (d.context === 'custom'){
+      card.innerHTML = '<h4>'+esc(d.type)+'</h4><div class="doc">'+esc(d.note)+'</div>';
+      card.className='ed-card on';
+    } else { card.className='ed-card'; }
+  }
+  window.edSet = async function(v){
+    const r = await fetch('/api/patch',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text:ta.value, line:curLine, value:String(v)})});
+    const d = await r.json();
+    if (d.error){ const m=document.getElementById('ed-cardmsg'); if(m) m.textContent=d.error; return; }
+    const pos = ta.selectionStart;
+    ta.value = d.text; ta.setSelectionRange(pos, pos); sync(); lint();
+    status.textContent = 'L'+curLine+' 已改(未保存)';
+  };
+  const ctxKick = () => { clearTimeout(ctxTimer); ctxTimer = setTimeout(showCtx, 300); };
+  ta.addEventListener('click', ctxKick);
+  ta.addEventListener('keyup', e => { if (!e.ctrlKey && !e.metaKey) ctxKick(); });
 
   sel.addEventListener('change', () => load(sel.value));
   ta.addEventListener('input', () => { sync(); clearTimeout(timer); timer = setTimeout(lint, 400); });

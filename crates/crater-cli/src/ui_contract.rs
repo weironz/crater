@@ -271,3 +271,204 @@ mod tests {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// 阶段⑤:表单投影 —— 光标字段卡 与 span 级定点补丁。
+//
+// 两条端点共守一个纪律:**行级文本启发式,不是 YAML 解析器**。
+// 解析器在文件坏一半时(编辑中的常态)什么都给不出;而"向上找资源头、
+// 认出 `key:` 前缀"这种启发式,恰恰在半成品文本上最有用 —— 坏输入降级
+// 成"不认识",永不报错(设计文档:坏输入降级)。
+
+/// 光标行属于哪个资源类型:向上找缩进更浅的 `- <type>:` 资源头。
+fn locate(lines: &[&str], cur: usize) -> Option<(String, Option<String>)> {
+    let line = lines.get(cur)?;
+    let indent = line.len() - line.trim_start().len();
+    // 光标行本身:`- type:`(资源头)或 `field:`(字段行)。
+    let head = |l: &str| -> Option<String> {
+        let t = l.trim_start();
+        let t = t.strip_prefix("- ")?;
+        let (name, _) = t.split_once(':')?;
+        (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'))
+            .then(|| name.to_string())
+    };
+    let field = |l: &str| -> Option<String> {
+        let t = l.trim_start().strip_prefix("- ").unwrap_or(l.trim_start());
+        let (name, _) = t.split_once(':')?;
+        (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'))
+            .then(|| name.to_string())
+    };
+    if let Some(ty) = head(line) {
+        return Some((ty, None));
+    }
+    let f = field(line)?;
+    // 向上扫:第一个缩进更浅的资源头就是所属类型;
+    // 扫到顶级键(缩进 0 的 `resources:` 等)截止 —— 不跨区乱认。
+    for i in (0..cur).rev() {
+        let l = lines[i];
+        if l.trim().is_empty() {
+            continue;
+        }
+        let ind = l.len() - l.trim_start().len();
+        if ind < indent {
+            if let Some(ty) = head(l) {
+                return Some((ty, Some(f)));
+            }
+            if ind == 0 {
+                return None;
+            }
+        }
+    }
+    None
+}
+
+#[derive(Deserialize)]
+pub struct CtxReq {
+    pub text: String,
+    /// 1 起数(与编辑器行号槽一致)。
+    pub line: usize,
+}
+
+/// `POST /api/context` —— 光标处的字段卡(登记表投影到编辑现场)。
+pub async fn context(Json(req): Json<CtxReq>) -> impl IntoResponse {
+    let lines: Vec<&str> = req.text.lines().collect();
+    let cur = req.line.saturating_sub(1);
+    let Some((ty, field)) = locate(&lines, cur) else {
+        return Json(json!({ "context": "none" }));
+    };
+    let Some(tj) = crater_ir::types::type_json(&ty) else {
+        return Json(json!({
+            "context": "custom",
+            "type": ty,
+            "note": "蓝图自定义类型(types: 段)—— 登记表不含它的字段卡",
+        }));
+    };
+    match field {
+        // 光标在资源头上:给类型卡(doc + 字段清单)。
+        None => Json(json!({ "context": "type", "type": ty, "card": tj })),
+        Some(f) => {
+            let card = tj["fields"]
+                .as_array()
+                .and_then(|fs| fs.iter().find(|x| x["name"] == f.as_str()).cloned());
+            match card {
+                Some(c) => Json(json!({ "context": "field", "type": ty, "field": f, "card": c })),
+                None => Json(json!({
+                    "context": "unknown_field", "type": ty, "field": f,
+                    "suggestion": crater_ir::types::suggest_field(&ty, &f),
+                })),
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PatchReq {
+    pub text: String,
+    pub line: usize,
+    pub value: String,
+}
+
+/// `POST /api/patch` —— 单行 scalar 的定点补丁。
+///
+/// 只动 `key: value` 的 value 一段,行尾注释原样保留 —— 注释是这类文件
+/// 一半的价值,表单化编辑绝不能吃掉它。碰到锚点/别名/flow 集合/块标量,
+/// 拒绝并降级只读:那些形态一改就牵连别处,表单投影不该假装看得懂。
+pub async fn patch(Json(req): Json<PatchReq>) -> axum::response::Response {
+    let lines: Vec<&str> = req.text.lines().collect();
+    let idx = req.line.saturating_sub(1);
+    let Some(&line) = lines.get(idx) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "行号越界" }))).into_response();
+    };
+    let Some(colon) = line.find(':') else {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "这一行不是 `key: value`" }))).into_response();
+    };
+    let (prefix, rest) = line.split_at(colon + 1);
+    let rest_trim = rest.trim_start();
+    // 降级只读的形态:锚点(&)/别名(*)/flow 集合({ [)/块标量(| >)/空值(嵌套父键)。
+    if rest_trim.is_empty()
+        || matches!(rest_trim.chars().next(), Some('&' | '*' | '{' | '[' | '|' | '>'))
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "这个值不是简单标量(锚点/flow/块标量/嵌套)—— 请直接改文本" })),
+        )
+            .into_response();
+    }
+    // 行尾注释:带引号的值先跳过引号段再找 `#`;裸值找第一个 ` #`。
+    let comment_at = if let Some(q) = rest_trim.chars().next().filter(|c| *c == '"' || *c == '\'') {
+        rest_trim[1..]
+            .find(q)
+            .and_then(|close| rest_trim[1 + close + 1..].find('#').map(|h| 1 + close + 1 + h))
+    } else {
+        rest_trim.find(" #").map(|i| i + 1)
+    };
+    let comment = comment_at
+        .map(|i| format!("   {}", rest_trim[i..].trim_end()))
+        .unwrap_or_default();
+    // 写回值:数字/布尔裸写;其余带引号 —— 引号永远合法,裸串则有一堆坑
+    // (yes/no/on/off/1.0e3……),契约生成物宁可稳不可省。
+    let v = req.value.trim();
+    // 歧义裸词(YAML 1.1 的坑)必须引号;安全裸词(纯字母数字与 _-./)
+    // 裸写 —— `state: started` 不该被写成 `state: "started"`。
+    let ambiguous = matches!(
+        v.to_ascii_lowercase().as_str(),
+        "yes" | "no" | "on" | "off" | "null" | "~" | ""
+    );
+    let bare_safe = !v.is_empty()
+        && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+        && !v.starts_with('-');
+    let rendered = if v.parse::<i64>().is_ok()
+        || v.parse::<f64>().is_ok()
+        || v == "true"
+        || v == "false"
+        || (bare_safe && !ambiguous)
+    {
+        v.to_string()
+    } else {
+        format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
+    };
+    let leading = &rest[..rest.len() - rest_trim.len()];
+    let new_line = format!("{prefix}{leading}{rendered}{comment}");
+    let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+    out[idx] = new_line;
+    // 尾换行保真:原文有就保留。
+    let mut text = out.join("\n");
+    if req.text.ends_with('\n') {
+        text.push('\n');
+    }
+    Json(json!({ "text": text, "line": req.line })).into_response()
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::locate;
+
+    const BP: &str = "name: demo\nversion: \"1\"\n\nresources:\n  - package:\n      packages:\n        debian: [nginx]\n  - service:\n      name: nginx   # 服务名\n      enabled: true\n";
+
+    #[test]
+    fn cursor_on_field_resolves_type_and_field() {
+        let lines: Vec<&str> = BP.lines().collect();
+        // L9 `name: nginx` 属于 service
+        assert_eq!(
+            locate(&lines, 8),
+            Some(("service".into(), Some("name".into())))
+        );
+        // L6 `packages:` 属于 package
+        assert_eq!(
+            locate(&lines, 5),
+            Some(("package".into(), Some("packages".into())))
+        );
+    }
+
+    #[test]
+    fn cursor_on_resource_head_gives_type_card() {
+        let lines: Vec<&str> = BP.lines().collect();
+        assert_eq!(locate(&lines, 4), Some(("package".into(), None)));
+    }
+
+    #[test]
+    fn toplevel_keys_resolve_to_nothing() {
+        let lines: Vec<&str> = BP.lines().collect();
+        assert_eq!(locate(&lines, 0), None, "顶级键不该冒充字段");
+    }
+}

@@ -114,7 +114,6 @@ pub async fn destroy(path: &Path, target: &TargetOpts, sets: &[String], yes: boo
         entries.iter().map(|(u, _)| u.label()).collect::<Vec<_>>().join(" → ")
     );
 
-    let mut verify_failures: Vec<String> = Vec::new();
     for (i, (u, bp_path)) in entries.iter().enumerate() {
         println!("══ [{}/{}] {} ══", i + 1, entries.len(), u.label());
         let lens = Lens {

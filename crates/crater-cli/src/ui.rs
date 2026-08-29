@@ -211,6 +211,8 @@ pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
         .route("/api/lint-project", post(crate::ui_app::lint_project))
         .route("/api/app/create", post(crate::ui_app::create_app))
         .route("/api/blueprint/skeleton", post(crate::ui_contract::blueprint_skeleton))
+        .route("/api/context", post(crate::ui_contract::context))
+        .route("/api/patch", post(crate::ui_contract::patch))
         .route("/api/file/trash", post(crate::ui_edit::file_trash))
         .route("/api/file/rename", post(crate::ui_edit::file_rename))
         .route("/view/overview", get(crate::ui_overview::view_overview))
