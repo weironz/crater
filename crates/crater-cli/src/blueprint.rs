@@ -570,7 +570,9 @@ fn print_proc_report(report: &procedure::ProcReport) {
     for (step, member, outcome) in &report.steps {
         use crater_ir::verbs::Outcome::*;
         let tag = match outcome {
-            Ok => "ok     ",
+            // 舞里的 `ok` 意思是"check 已满足,这一步没跑"。措辞要说清这件事:
+            // 一支升级的舞报出满屏 `ok`,操作者本该起疑而不是安心。
+            Ok => "已满足 ",
             Changed => "changed",
             Warn => "warn   ",
         };
@@ -586,7 +588,34 @@ fn print_proc_report(report: &procedure::ProcReport) {
             report.facts.keys().cloned().collect::<Vec<_>>().join(", ")
         );
     }
-    println!("执行:{}\n", report.summary());
+    println!("执行:{}", report.summary());
+
+    // 把"被 check 跳过"单独点名。
+    //
+    // 这条提示是被一次真实事故换来的:升级的三步 check 写成了"新版二进制在不在",
+    // 而前一步刚把二进制装上去 —— 三步全跳,报告一片 ok,集群一点没升。
+    // `ok` 混在正常输出里没人会多看一眼;单拎出来问一句"这些真的本就该跳过吗",
+    // 才有机会当场发现。
+    let skipped: Vec<String> = {
+        use crater_ir::verbs::Outcome::*;
+        let mut names: Vec<String> = report
+            .steps
+            .iter()
+            .filter(|(_, _, o)| matches!(o, Ok))
+            .map(|(s, _, _)| s.clone())
+            .collect();
+        names.dedup();
+        names
+    };
+    if !skipped.is_empty() {
+        println!(
+            "  其中 {} 步因 check 已满足而未执行:{} —— 若本次期望它们做事,\n\
+             \x20 请检查 check 是否检验了**本步自己的效果**(而非前序步骤建立的前提)",
+            skipped.len(),
+            skipped.join(", ")
+        );
+    }
+    println!();
 }
 
 /// `crater procedure <name> -f blueprint.yaml [--set k=v]` —— 跳一支具名的舞。
