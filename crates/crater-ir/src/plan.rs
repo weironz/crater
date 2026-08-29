@@ -238,6 +238,41 @@ pub fn converge(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<RunRepor
     for item in &p.items {
         match &item.change {
             Change::Ok => report.steps.push((item.id.clone(), Outcome::Ok)),
+
+            // 计划期说不清的项:**执行前重新观察一次**,再决定做不做。
+            //
+            // plan 是对"当下现实"的一次性预测,而 converge 走到这一项时现实
+            // 往往已经变了 —— `lineinfile` 要改的 postgresql.conf,是同一轮里
+            // 更早那条 `package` 装出来的。用陈旧的判断跳过它,等于让"同一次
+            // apply 内部的先后依赖"永远不成立。
+            //
+            // 重新观察后仍说不清(裸 shell 这类),就**照跑**并记 warn ——
+            // "接住,不羞辱,但可见"。此前是直接跳过,于是逃生舱形同虚设:
+            // 没写 check 的 shell 在 apply 时一次都不会执行。
+            Change::Unknown(_) if bp.custom_type(&item.ty).is_none() => {
+                let rt = resolve_type(bp, &item.ty)
+                    .ok_or_else(|| anyhow::anyhow!("类型 `{}` 无实现", item.ty))?;
+                let fresh = rt.observe(ctx, &item.args)?;
+                let again = rt.diff(&DiffInput {
+                    args: &item.args,
+                    observed: &fresh,
+                    upstream_changed: false,
+                });
+                match again {
+                    Change::Ok => report.steps.push((item.id.clone(), Outcome::Ok)),
+                    Change::Unknown(_) => {
+                        rt.apply(ctx, &item.args, &again)
+                            .map_err(|e| anyhow::anyhow!("{}: {e}", item.id))?;
+                        report.steps.push((item.id.clone(), Outcome::Warn));
+                    }
+                    determinate => {
+                        let outcome = rt
+                            .apply(ctx, &item.args, &determinate)
+                            .map_err(|e| anyhow::anyhow!("{}: {e}", item.id))?;
+                        report.steps.push((item.id.clone(), outcome));
+                    }
+                }
+            }
             Change::Unknown(_) => report.steps.push((item.id.clone(), Outcome::Warn)),
             // 自定义类型的弥合是机群级的舞 —— 记下来交给调用方,不在这里跑。
             _ if bp.custom_type(&item.ty).is_some() => {

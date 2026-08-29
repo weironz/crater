@@ -90,6 +90,17 @@ fn material_as_copy(args: &ResolvedArgs) -> Result<ResolvedArgs> {
     Ok(a)
 }
 
+/// 地址里的定界符要转义,否则模式里的 `|` 会提前终止地址。
+fn sed_delim(pattern: &str) -> String {
+    pattern.replace('|', r"\|")
+}
+
+/// 替换文本里 `&`(= 整个匹配)、`\`、定界符都得转义 —— 否则一行普通配置
+/// 里出现的 `&` 会被 sed 展开成原文,产出谁也没写过的内容。
+fn sed_repl(line: &str) -> String {
+    line.replace('\\', r"\\").replace('|', r"\|").replace('&', r"\&")
+}
+
 /// `lineinfile` —— 确保某一行在文件里存在 / 不存在。
 ///
 /// 幂等靠一次 grep 探针;`regexp` 存在时按它替换,否则按整行匹配。
@@ -163,11 +174,18 @@ impl ResourceType for LineInFile {
             run_ok(ctx, &format!("touch {}", sh(path)))?;
         }
         // 有匹配就替换,没有就追加 —— 一条命令覆盖两种情形,少一次往返。
+        //
+        // **替换的是整行,不是匹配到的那一段。** 早先写的是 `s|PAT|LINE|`,
+        // 于是 `^#?listen_addresses` 只换掉行首那几个字,行尾的
+        // `= 'localhost'  # 注释` 原样留下 —— 产出一行语法非法的配置,
+        // 而 postgres 要到重启时才告诉你 "invalid line 60"。
+        //
+        // 正确写法是按模式**定址**、再把整行内容替换:`\|PAT|s|.*|LINE|`。
         let cmd = format!(
             "if grep -qE {p} {f}; then sed -i -E {sub} {f}; else printf '%s\\n' {l} >> {f}; fi",
             p = sh(&pattern),
             f = sh(path),
-            sub = sh(&format!("s|{}|{}|", pattern, line.replace('|', r"\|"))),
+            sub = sh(&format!("\\|{}|s|.*|{}|", sed_delim(&pattern), sed_repl(&line))),
             l = sh(line)
         );
         run_ok(ctx, &cmd)?;
@@ -425,5 +443,47 @@ mod tests {
             diff(&Template, &a, &Observed::absent(), false),
             Change::Create(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod lineinfile_replace_tests {
+    use super::*;
+    use crate::ctx::FakeCtx;
+    use crate::eval::Yaml;
+
+    fn args(pairs: &[(&str, &str)]) -> ResolvedArgs {
+        pairs.iter().map(|(k, v)| (k.to_string(), Yaml::from(*v))).collect()
+    }
+
+    #[test]
+    fn a_match_replaces_the_whole_line_not_just_the_matched_part() {
+        // 真机踩过:`^#?listen_addresses` 只换掉行首几个字,行尾的
+        // `= 'localhost'  # 注释` 原样留下,产出一行语法非法的配置 ——
+        // 而 postgres 要到重启时才说 "invalid line 60"。
+        let ctx = FakeCtx::new().on("", 0, "");
+        let a = args(&[
+            ("path", "/etc/postgresql/16/main/postgresql.conf"),
+            ("regexp", "^#?listen_addresses"),
+            ("line", "listen_addresses = '*'"),
+        ]);
+        LineInFile.apply(&ctx, &a, &Change::Update(vec![])).unwrap();
+        let cmd = ctx.calls()[0].text().to_string();
+        // 关键是 `s|.*|` —— 把整行内容换掉,而不是 `s|PAT|LINE|`。
+        assert!(cmd.contains("s|.*|"), "仍是子串替换:{cmd}");
+        assert!(cmd.contains("^#?listen_addresses"), "定址用的仍是原模式:{cmd}");
+    }
+
+    #[test]
+    fn an_ampersand_in_the_replacement_is_escaped() {
+        // sed 的替换文本里 `&` = 整个匹配。不转义的话,一行普通配置里的 `&`
+        // 会被展开成原文,产出谁也没写过的内容。
+        assert_eq!(sed_repl("a & b"), r"a \& b");
+        assert_eq!(sed_repl("x|y"), r"x\|y");
+    }
+
+    #[test]
+    fn a_pipe_in_the_pattern_does_not_terminate_the_address() {
+        assert_eq!(sed_delim("^(foo|bar)"), r"^(foo\|bar)");
     }
 }

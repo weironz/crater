@@ -1,0 +1,151 @@
+# PostgreSQL 主从 —— 一主一备,流复制。
+#
+# 这份蓝图的意义不在"装上 postgres"(apt 一行就够),而在把**主从的非对称性**
+# 表达成声明:谁是主、备库怎么知道主在哪、复制口令怎么传过去。这三件事在
+# shell 脚本里全靠人肉传参,在这里是 first/rest 与 exports。
+name: postgres-ha
+version: "16"
+description: PostgreSQL 主从(流复制),数据盘独立挂载 + 定时备份
+
+fleet:
+  groups:
+    db: {min: 2}
+
+cast:
+  primary:  first(role.db)
+  replicas: rest(role.db)
+  all_db:   role.db
+
+params:
+  data_dir:   { default: "/srv/pgdata", desc: "数据目录(独立挂载点)" }
+  disk_img:   { default: "/var/lib/pgdisk.img", desc: "loop 盘镜像 —— 实验环境替代真实数据盘" }
+  disk_mb:    { type: int, default: 512 }
+  repl_user:  { default: "replicator" }
+  repl_pass:  { default: "replpass2026", desc: "生产应走 secret,这里为可复现固定" }
+  backup_at:  { default: "17 3 * * *", desc: "备份时刻(cron 表达式)" }
+  backup_dir: { default: "/srv/pgbackup" }
+  subnet:     { type: cidr, default: "192.168.73.0/24", desc: "放行复制连接的网段" }
+
+resources:
+  - package:
+      packages:
+        debian: [postgresql-16, postgresql-client-16]
+    target: all_db
+
+  # ---- 数据盘 ----
+  # 用 loop 盘而不是直接建目录:mount 这个类型真正要验的是"重启后还挂不挂"
+  # (/etc/fstab),而一个普通目录根本不经过挂载这条路。
+  - shell:
+      cmd: "truncate -s ${params.disk_mb}M ${params.disk_img} && mkfs.ext4 -q -F ${params.disk_img}"
+      creates: "${params.disk_img}"
+    target: all_db
+  - mount:
+      path: "${params.data_dir}"
+      src: "${params.disk_img}"
+      fstype: ext4
+      opts: "loop,noatime"
+      persist: true
+    target: all_db
+  - file: { path: "${params.data_dir}", state: directory, owner: postgres, group: postgres, mode: "0700" }
+    target: all_db
+  - file: { path: "${params.backup_dir}", state: directory, owner: postgres, group: postgres, mode: "0750" }
+    target: all_db
+
+  # ---- 把集群搬到数据盘 ----
+  #
+  # 建了独立挂载点却不告诉 postgres 用它,是个很容易犯又很难看出来的错:
+  # 服务照常起、psql 照常连,只是数据仍写在系统盘上,而备库的 basebackup
+  # 落在挂载点里 —— 两边各说各话,`pg_is_in_recovery()` 返回 f 才露馅。
+  #
+  # `creates` 认 PG_VERSION:它是数据目录已初始化的标志,只有搬完才存在。
+  - shell:
+      cmd: >-
+        systemctl stop postgresql &&
+        cp -a /var/lib/postgresql/16/main/. ${params.data_dir}/ &&
+        chown -R postgres:postgres ${params.data_dir}
+      creates: "${params.data_dir}/PG_VERSION"
+    target: all_db
+  - lineinfile:
+      path: /etc/postgresql/16/main/postgresql.conf
+      regexp: "^#?data_directory"
+      line: "data_directory = '${params.data_dir}'"
+    target: all_db
+
+  # ---- 配置 ----
+  # lineinfile 而不是整份覆写:postgresql.conf 有几百行发行版默认值,
+  # 我们只对其中四行有意见。
+  - lineinfile: { path: /etc/postgresql/16/main/postgresql.conf, regexp: "^#?listen_addresses", line: "listen_addresses = '*'" }
+    target: all_db
+  - lineinfile: { path: /etc/postgresql/16/main/postgresql.conf, regexp: "^#?wal_level", line: "wal_level = replica" }
+    target: all_db
+  - lineinfile: { path: /etc/postgresql/16/main/postgresql.conf, regexp: "^#?max_wal_senders", line: "max_wal_senders = 10" }
+    target: all_db
+  - lineinfile: { path: /etc/postgresql/16/main/postgresql.conf, regexp: "^#?hot_standby\\b", line: "hot_standby = on" }
+    target: all_db
+  - lineinfile:
+      path: /etc/postgresql/16/main/pg_hba.conf
+      regexp: "^host\\s+replication\\s+${params.repl_user}"
+      line: "host replication ${params.repl_user} ${params.subnet} md5"
+    target: all_db
+
+  - service: { name: postgresql, state: started, enabled: true }
+    target: all_db
+
+  # 备份只在主库跑:备库上做全量备份既无意义又抢 IO。
+  - cron:
+      name: pg-basebackup
+      schedule: "${params.backup_at}"
+      user: postgres
+      # 单引号:cron 里 `%` 必须写成 `\%`,而 YAML 双引号会把 `\%` 当非法转义。
+      job: 'pg_basebackup -D ${params.backup_dir}/$(date +\%F) -Ft -z -X stream 2>>${params.backup_dir}/backup.log' 
+    target: primary
+
+  - cluster_role: { role: "${substrate.name}" }
+    target: replicas
+
+types:
+  # 备库的"已在复制中"是一个期望态,弥合它的动作是一支舞。
+  - name: cluster_role
+    args:
+      role: { type: string }
+    observe:
+      cmd: "test -f /srv/pgdata/standby.signal && echo standby || echo alone"
+      parse: { standby: standby }
+    apply: replicate
+
+procedures:
+  replicate:
+    steps:
+      # 主库先把复制账号建出来,并把自己的地址导出给备库。
+      - shell:
+          cmd: >-
+            su postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='${params.repl_user}'\" | grep -q 1
+            || psql -c \"CREATE ROLE ${params.repl_user} WITH REPLICATION LOGIN PASSWORD '${params.repl_pass}'\""
+          check: >-
+            su postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='${params.repl_user}'\"" | grep -q 1
+        target: primary
+        exports:
+          primary_ip: "hostname -I | awk '{print $1}'"
+
+      # 备库:停服 → 清空数据目录 → basebackup → 起服。
+      #
+      # 判据是 standby.signal 存在(只有 `pg_basebackup -R` 会写它),
+      # **不是**"postgres 在跑" —— 后者在这一步之前就已经为真,拿它当 check
+      # 会让整步被跳过(k8s 那轮踩过同样的坑)。
+      - shell:
+          cmd: >-
+            systemctl stop postgresql &&
+            find ${params.data_dir} -mindepth 1 -delete &&
+            su postgres -c "PGPASSWORD='${params.repl_pass}' pg_basebackup
+            -h ${facts.primary_ip} -U ${params.repl_user} -D ${params.data_dir} -Fp -Xs -R" &&
+            systemctl start postgresql
+          check: "test -f ${params.data_dir}/standby.signal"
+        target: replicas
+        strategy: { throttle: 1 }
+
+health:
+  - port_open: { port: 5432 }
+    target: all_db
+  - cmd:
+      run: "su postgres -c \"psql -tAc 'SELECT count(*) FROM pg_stat_replication'\" | grep -qv '^0$'"
+    target: primary

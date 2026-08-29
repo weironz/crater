@@ -231,8 +231,15 @@ impl ResourceType for Mount {
 
     fn observe(&self, ctx: &dyn Ctx, args: &ResolvedArgs) -> Result<Observed> {
         let path = arg_str(args, "path")?;
+        // loop 挂载的 SOURCE 是 `/dev/loop0`,而作者写的是镜像文件路径 ——
+        // 不还原成后备文件就会永远判定"源变了",于是每次 apply 都要重挂一次
+        // (而它已经挂着,mount 直接失败)。`losetup -O BACK-FILE` 给出真身。
         let cmd = format!(
-            "findmnt -n -o SOURCE,FSTYPE,OPTIONS --target {p} 2>/dev/null | head -1; \
+            "s=$(findmnt -n -o SOURCE --target {p} 2>/dev/null | head -1); \
+             case \"$s\" in /dev/loop*) b=$(losetup -nO BACK-FILE \"$s\" 2>/dev/null | sed 's/ (deleted)$//'); \
+               [ -n \"$b\" ] && s=$b;; esac; \
+             printf '%s' \"$s\"; printf '{SEP}'; \
+             findmnt -n -o FSTYPE --target {p} 2>/dev/null | head -1; \
              printf '{SEP}'; \
              findmnt -n -o TARGET --target {p} 2>/dev/null | head -1; \
              printf '{SEP}'; \
@@ -243,21 +250,21 @@ impl ResourceType for Mount {
         );
         let (_, out) = ctx.probe(&cmd)?;
         let p: Vec<&str> = out.split(SEP).collect();
-        let line = p.first().map(|s| s.trim()).unwrap_or_default();
+        let src = p.first().map(|s| s.trim()).unwrap_or_default();
+        let fstype = p.get(1).map(|s| s.trim()).unwrap_or_default();
         // findmnt --target 会回落到**父挂载点**(/data 没挂时回 /)。
         // 不比对 TARGET 就会把"没挂"读成"挂着 /" —— 一个静默的假绿灯。
-        let target = p.get(1).map(|s| s.trim()).unwrap_or_default();
-        let in_fstab = !p.get(2).map(|s| s.trim()).unwrap_or_default().is_empty();
-        let mounted = !line.is_empty() && target == path;
+        let target = p.get(2).map(|s| s.trim()).unwrap_or_default();
+        let in_fstab = !p.get(3).map(|s| s.trim()).unwrap_or_default().is_empty();
+        let mounted = !src.is_empty() && target == path;
 
         if !mounted && !in_fstab {
             return Ok(Observed::absent());
         }
-        let cols: Vec<&str> = line.split_whitespace().collect();
         Ok(Observed::present([
             ("mounted", mounted.to_string()),
-            ("src", if mounted { cols.first().unwrap_or(&"").to_string() } else { String::new() }),
-            ("fstype", if mounted { cols.get(1).unwrap_or(&"").to_string() } else { String::new() }),
+            ("src", if mounted { src.to_string() } else { String::new() }),
+            ("fstype", if mounted { fstype.to_string() } else { String::new() }),
             ("persist", in_fstab.to_string()),
         ]))
     }
@@ -632,7 +639,7 @@ mod tests {
     fn a_mount_that_would_not_survive_a_reboot_is_not_green() {
         // 最伤人的假绿灯:当下挂着,fstab 里没有,要等下次重启才暴露。
         let ctx = FakeCtx::new()
-            .on("findmnt", 0, &format!("/dev/sdb1 ext4 rw{SEP}/data{SEP}"));
+            .on("s=$(findmnt", 0, &format!("/dev/sdb1{SEP}ext4{SEP}/data{SEP}"));
         let mut a = args(&[("path", "/data"), ("src", "/dev/sdb1"), ("fstype", "ext4")]);
         a.insert("persist".into(), Yaml::from(true));
         let obs = Mount.observe(&ctx, &a).unwrap();
@@ -648,16 +655,33 @@ mod tests {
     fn findmnt_falling_back_to_a_parent_mount_is_not_read_as_mounted() {
         // `findmnt --target /data` 在 /data 没挂时会回落到 `/`。
         // 不比对 TARGET 就会把"没挂"读成"挂着 /" —— 静默的假绿灯。
-        let ctx = FakeCtx::new().on("findmnt", 0, &format!("/dev/sda1 ext4 rw{SEP}/{SEP}"));
+        let ctx = FakeCtx::new().on("s=$(findmnt", 0, &format!("/dev/sda1{SEP}ext4{SEP}/{SEP}"));
         let a = args(&[("path", "/data"), ("src", "/dev/sdb1"), ("fstype", "ext4")]);
         let obs = Mount.observe(&ctx, &a).unwrap();
         assert!(!obs.present, "回落到父挂载点被当成了已挂载:{obs:?}");
     }
 
     #[test]
+    fn a_loop_mount_is_compared_by_its_backing_file_not_the_loop_device() {
+        // findmnt 对 loop 挂载回报 /dev/loop0,而作者写的是镜像路径。
+        // 不还原成后备文件就会永远判"源变了",每次 apply 都要重挂一次 ——
+        // 而它已经挂着,mount 直接失败。探针里已用 losetup -O BACK-FILE 还原,
+        // 所以这里的夹具给出的就是还原后的值。
+        let ctx = FakeCtx::new().on(
+            "s=$(findmnt",
+            0,
+            &format!("/var/lib/pgdisk.img{SEP}ext4{SEP}/srv/pgdata{SEP}/var/lib/pgdisk.img /srv/pgdata ext4"),
+        );
+        let mut a = args(&[("path", "/srv/pgdata"), ("src", "/var/lib/pgdisk.img"), ("fstype", "ext4")]);
+        a.insert("persist".into(), Yaml::from(true));
+        let obs = Mount.observe(&ctx, &a).unwrap();
+        assert_eq!(diff_of(&Mount, &a, &obs), Change::Ok, "{obs:?}");
+    }
+
+    #[test]
     fn a_fully_satisfied_mount_is_a_noop() {
         let ctx = FakeCtx::new()
-            .on("findmnt", 0, &format!("/dev/sdb1 ext4 rw{SEP}/data{SEP}/dev/sdb1 /data ext4"));
+            .on("s=$(findmnt", 0, &format!("/dev/sdb1{SEP}ext4{SEP}/data{SEP}/dev/sdb1 /data ext4"));
         let mut a = args(&[("path", "/data"), ("src", "/dev/sdb1"), ("fstype", "ext4")]);
         a.insert("persist".into(), Yaml::from(true));
         let obs = Mount.observe(&ctx, &a).unwrap();

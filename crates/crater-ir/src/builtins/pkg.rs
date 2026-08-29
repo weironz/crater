@@ -252,6 +252,19 @@ impl ResourceType for Shell {
         "shell"
     }
     fn observe(&self, ctx: &dyn Ctx, args: &ResolvedArgs) -> Result<Observed> {
+        // `creates:` 是 `check:` 的常见特例("这个路径在就算做过了")。
+        // 它一直登记在类型卡上,却从没被实现 —— 于是写了 creates 的 shell
+        // 仍被判为"说不清",连带整步被跳过。文档承诺过的字段必须真的管用。
+        if let Some(path) = arg_str_opt(args, "creates") {
+            let (code, _) = ctx.probe(&format!("test -e {}", sh(path)))?;
+            if code == 0 {
+                return Ok(Observed::present([("creates", "exists".into())]));
+            }
+            // 路径不在:若还写了 check,继续按 check 判;否则就是"没做过"。
+            if arg_str_opt(args, "check").is_none() {
+                return Ok(Observed::absent());
+            }
+        }
         let Some(check) = arg_str_opt(args, "check") else {
             return Ok(Observed::default());
         };
@@ -265,8 +278,9 @@ impl ResourceType for Shell {
         })
     }
     fn diff(&self, input: &DiffInput) -> Change {
-        match arg_str_opt(input.args, "check") {
-            None => Change::Unknown("裸 shell 没有 `check:`,无法预演".into()),
+        let probe = arg_str_opt(input.args, "check").or_else(|| arg_str_opt(input.args, "creates"));
+        match probe {
+            None => Change::Unknown("裸 shell 没有 `check:` 或 `creates:`,无法预演".into()),
             Some(_) if input.observed.present => Change::Ok,
             Some(_) => Change::Create(vec![FieldDiff::set(
                 "cmd",
