@@ -70,6 +70,49 @@ pub async fn run(path: &Path, target: &TargetOpts, sets: &[String], mode: StackM
     Ok(())
 }
 
+/// `crater destroy <栈> [--yes]` —— **逆序**退役。
+///
+/// 顺序反过来不是对称的美学:栈是有依赖的,`k8s` 建在 `containerd` 上。
+/// 正序拆会先把 containerd 抽走,然后 k8s 的资源连观察都观察不了。
+///
+/// 与蓝图级 destroy 一样**默认只预演**;`--yes` 才真拆。
+pub async fn destroy(path: &Path, target: &TargetOpts, sets: &[String], yes: bool) -> Result<()> {
+    let st = stack::from_path(path)?;
+    let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+
+    let mut entries = Vec::new();
+    for u in &st.uses {
+        entries.push((u, stack::resolve_ref(&u.blueprint, &dir)?));
+    }
+    entries.reverse();
+
+    println!(
+        "栈 `{}` —— {} 份蓝图,{}(逆序:{})\n",
+        st.name,
+        entries.len(),
+        if yes { "将逐个退役" } else { "退役预演" },
+        entries.iter().map(|(u, _)| u.label()).collect::<Vec<_>>().join(" → ")
+    );
+
+    for (i, (u, bp_path)) in entries.iter().enumerate() {
+        println!("══ [{}/{}] {} ══", i + 1, entries.len(), u.label());
+        let lens = Lens {
+            groups: u.groups.clone(),
+            params: u.params.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        };
+        // 退役**不**在失败处停:一份拆不掉不该让其余的继续留在机器上。
+        // 与 apply 的"失败即停"相反,因为方向反了 —— 半拆的栈比全拆的栈更糟。
+        if let Err(e) = blueprint::destroy_lensed(bp_path, target, sets, yes, &lens).await {
+            eprintln!("蓝图 `{}` 退役失败 —— {e:#}\n(继续退役其余蓝图)\n", u.label());
+        }
+        println!();
+    }
+    if !yes {
+        println!("以上为**预演**。确认无误后加 `--yes` 执行。");
+    }
+    Ok(())
+}
+
 /// `crater lint <栈>` —— 只做静态检查:引用解析得开吗、蓝图各自 lint 得过吗。
 pub fn lint(path: &Path) -> Result<Stack> {
     let st = stack::from_path(path)?;
@@ -218,6 +261,18 @@ mod tests {
         std::fs::write(&p, s).unwrap();
         let err = lint(&p).unwrap_err().to_string();
         assert!(err.contains("controlplan"), "{err}");
+    }
+
+    #[test]
+    fn destroy_walks_the_stack_in_reverse() {
+        // 顺序反过来不是对称的美学:k8s 建在 containerd 上,正序拆会先抽走
+        // containerd,然后 k8s 的资源连观察都观察不了。
+        let d = fixture();
+        let st = stack::from_path(&d.path().join("s.stack.yaml")).unwrap();
+        let mut order: Vec<&str> = st.uses.iter().map(|u| u.label()).collect();
+        assert_eq!(order, vec!["base", "app"], "apply 是声明序");
+        order.reverse();
+        assert_eq!(order, vec!["app", "base"], "destroy 是逆序");
     }
 
     #[test]

@@ -259,6 +259,50 @@ pub fn converge(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<RunRepor
 }
 
 /// 退役:**逆序** destroy。没有 `teardown:` 段可写错、可与安装步骤不同步。
+/// **退役计划** —— 零写入地回答"会拆掉什么"。
+///
+/// 与 `plan` 同源(同一个 observe),但语义反过来:存在的东西将被删除。
+/// 破坏性动作必须先能被"看"—— 一个不能预演的 destroy,人只能靠勇气去按。
+///
+/// 顺序即声明序的**逆序**:后建的先拆(服务先停,配置后删,目录最后)。
+pub fn plan_destroy(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<Plan> {
+    let mut units = expand(bp, scope)?;
+    units.reverse();
+    let mut items = Vec::new();
+    for u in units {
+        // L2 自定义类型:引擎不懂怎么拆(那是作者的舞),诚实报"说不清",
+        // 而不是假装拆得掉。
+        if bp.custom_type(&u.ty).is_some() {
+            items.push(PlanItem {
+                id: u.id,
+                ty: u.ty.clone(),
+                args: u.args,
+                observed: Observed::default(),
+                change: Change::Unknown(format!(
+                    "自定义类型 `{}` 的退役需要作者声明的舞,引擎不代劳",
+                    u.ty
+                )),
+            });
+            continue;
+        }
+        let Some(rt) = resolve_type(bp, &u.ty) else {
+            items.push(PlanItem {
+                id: u.id,
+                ty: u.ty.clone(),
+                args: u.args,
+                observed: Observed::default(),
+                change: Change::Unknown(format!("类型 `{}` 尚无五动词实现", u.ty)),
+            });
+            continue;
+        };
+        let observed = rt.observe(ctx, &u.args)?;
+        // 不在了就是不在了 —— 对不存在的资源报"将删除"会让人误以为还有残留。
+        let change = if observed.present { Change::Destroy } else { Change::Ok };
+        items.push(PlanItem { id: u.id, ty: u.ty, args: u.args, observed, change });
+    }
+    Ok(Plan { items })
+}
+
 pub fn destroy(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<RunReport> {
     let mut units = expand(bp, scope)?;
     units.reverse();

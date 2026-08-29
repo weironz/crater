@@ -280,6 +280,26 @@ enum Cmd {
         #[arg(long = "set", value_name = "KEY=VAL")]
         set: Vec<String>,
     },
+    /// Retire a blueprint (or a stack, in reverse order) — remove every resource
+    /// it declares. **Previews by default**: without `--yes` it only prints what
+    /// would be removed and touches nothing.
+    ///
+    /// There is no `teardown:` section in a blueprint — retirement is derived
+    /// from the five verbs, run in reverse declaration order.
+    Destroy {
+        /// Blueprint or stack file.
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        /// Same, positionally.
+        source: Option<String>,
+        #[command(flatten)]
+        target: TargetOpts,
+        /// Actually remove. Without this the command is a read-only preview.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long = "set", value_name = "KEY=VAL")]
+        set: Vec<String>,
+    },
     /// Verify a deployed blueprint — read-only drift check against the recorded
     /// state. Answers "is reality still what we deployed?", which `plan` cannot:
     /// without a record, "never deployed" and "drifted" look identical.
@@ -666,6 +686,18 @@ async fn main() -> Result<()> {
             Some(p) => blueprint::run_procedure(&p, &name, &target, &set).await,
             None => anyhow::bail!("`crater procedure` 需要 `-f <blueprint.yaml>`"),
         },
+        Cmd::Destroy { file, source, target, yes, set } => {
+            if let Some(p) = stack_source(&file, &source) {
+                return stack_cmd::destroy(&p, &target, &set, yes).await;
+            }
+            match blueprint_source(&file, &source) {
+                Some(p) => blueprint::destroy_blueprint(&p, &target, &set, yes).await,
+                None => anyhow::bail!(
+                    "`crater destroy` 只支持新 IR blueprint 与 stack;\
+                     旧 task 的删除用 `crater delete`"
+                ),
+            }
+        }
         Cmd::Verify { file, source, target, set } => {
             if let Some(p) = stack_source(&file, &source) {
                 return stack_cmd::run(&p, &target, &set, StackMode::Verify).await;

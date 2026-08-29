@@ -125,6 +125,121 @@ pub async fn apply_blueprint(path: &Path, target: &TargetOpts, sets: &[String]) 
     run_on_targets(path, target, sets, Mode::Apply, &Lens::default()).await
 }
 
+/// `crater destroy -f blueprint.yaml [--yes]` —— 退役。
+///
+/// **默认只预演**。这是破坏性命令唯一负责任的默认值:`plan`/`apply` 的分工
+/// 在这里塌成一条命令,所以安全阀必须在命令自己身上 —— 不加 `--yes` 就只
+/// 打印会拆掉什么,一个字节都不动。
+///
+/// 蓝图里没有 `teardown:` 段:退役由五动词逆序推导(ir-draft §4)。
+pub async fn destroy_blueprint(
+    path: &Path,
+    target: &TargetOpts,
+    sets: &[String],
+    yes: bool,
+) -> Result<()> {
+    destroy_lensed(path, target, sets, yes, &Lens::default()).await?;
+    if !yes {
+        // 只在**直接调用**时收尾;栈驱动时由栈统一说一次,免得每份蓝图重复一遍。
+        println!("以上为**预演**,一个字节都没动。确认无误后加 `--yes` 执行。");
+    }
+    Ok(())
+}
+
+pub(crate) async fn destroy_lensed(
+    path: &Path,
+    target: &TargetOpts,
+    sets: &[String],
+    yes: bool,
+    lens: &Lens,
+) -> Result<()> {
+    let store = FileStore::default_location();
+    let bp = load(path)?;
+    let mut overrides = lens.params.clone();
+    overrides.extend(parse_sets(sets)?);
+    let hosts = target.hosts()?;
+    let fleet = build_fleet(&hosts, target.declared_groups()).remap(&lens.groups);
+    // 退役**不**校验机群契约:契约问的是"够不够装",而拆东西不需要够 ——
+    // 一个只剩一台 master 的残破集群,恰恰是最需要拆掉的那种。
+    let (_closure_dir, blobs) = open_closure(target)?;
+
+    let mut failures = 0usize;
+    let mut removed_any = false;
+    for host in &hosts {
+        let transport = build_transport(host).await?;
+        println!("── {} ──", host_label(host));
+        let facts = crater_ir::facts::Facts::new(transport.as_ref())
+            .gather_all()
+            .with_context(|| format!("{}:采集目标事实", host_label(host)))?;
+        let mut scope = plan::with_overrides(plan::scope_from_defaults(&bp), &overrides);
+        scope.substrate = facts;
+        scope.fleet = Some(fleet.clone());
+        scope.identify(&fleet_name(host), &host.roles);
+        let ctx = MaterialCtx::new(transport, &bp, scope.clone(), blobs.clone(), base_dir(path));
+
+        let plan = plan::plan_destroy(&bp, &scope, &ctx)
+            .with_context(|| format!("{}:求退役计划", host_label(host)))?;
+        print_destroy_plan(&bp, &plan, yes);
+
+        if !yes {
+            continue;
+        }
+        if !plan.has_changes() {
+            println!("没有东西可拆,跳过。\n");
+            continue;
+        }
+        removed_any = true;
+        match plan::destroy(&bp, &scope, &ctx) {
+            Ok(report) => print_report(&report),
+            Err(e) => {
+                failures += 1;
+                eprintln!("{}:退役失败 —— {e}\n", host_label(host));
+            }
+        }
+        // 部署记录跟着资源一起走。留着它,下次 verify 会拿一份已经不存在的
+        // 部署去核对现实,报出一堆"漂移"。
+        let record_id = DeploymentRecord::make_id(&bp.name, &fleet_name(host));
+        if let Err(e) = store.remove(&record_id) {
+            eprintln!("(部署记录清理失败,不影响本次退役:{e})");
+        }
+    }
+
+    if !yes {
+        return Ok(());
+    }
+    if failures > 0 {
+        bail!("{failures}/{} 台目标退役失败", hosts.len());
+    }
+    if !removed_any {
+        println!("所有目标本就是干净的。");
+    }
+    Ok(())
+}
+
+fn print_destroy_plan(bp: &Blueprint, p: &Plan, will_execute: bool) {
+    let mode = if will_execute { "退役(随后执行)" } else { "退役预演(零写入)" };
+    println!("blueprint {} —— {mode}\n", bp.name);
+    for item in &p.items {
+        // 退役计划里 `-` 是"将删除",`✓` 是"本就不在" —— 后者不是成功,
+        // 是"没什么可做",措辞要分得开。
+        let note = match &item.change {
+            Change::Destroy => "将删除",
+            Change::Ok => "不在(无需处理)",
+            Change::Unknown(_) => "说不清",
+            _ => "?",
+        };
+        println!("  {} {:<44} {note}", item.change.sigil(), item.label());
+        if let Change::Unknown(why) = &item.change {
+            println!("       {why}");
+        }
+    }
+    println!("\n退役:{}", p.summary());
+    if !p.has_changes() {
+        println!("目标上没有本蓝图的任何资源。");
+    }
+    println!();
+}
+
 /// 栈驱动的入口:同一条执行路径,只是多戴一副透镜。
 pub(crate) async fn run_lensed(
     path: &Path,

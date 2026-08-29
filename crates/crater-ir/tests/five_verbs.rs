@@ -339,3 +339,43 @@ fn audit_still_reports_genuinely_drifted_resources() {
     let audit = plan_with(&b, &scope_from_defaults(&b), &blank_host(), Intent::Audit).unwrap();
     assert_eq!(audit.changing().count(), 4, "空机器上四项都该报");
 }
+
+#[test]
+fn a_destroy_plan_writes_nothing_and_lists_what_exists() {
+    // 破坏性动作必须先能被"看"。一个不能预演的 destroy,人只能靠勇气去按。
+    use crater_ir::plan::plan_destroy;
+    let ctx = converged_host();
+    let b = bp();
+    let p = plan_destroy(&b, &scope_from_defaults(&b), &ctx).unwrap();
+    assert!(ctx.writes().is_empty(), "退役计划期发生了写操作:{:?}", ctx.writes());
+    assert_eq!(p.summary(), "+0 ~0 -4 ✓0");
+}
+
+#[test]
+fn a_destroy_plan_is_the_reverse_of_declaration_order() {
+    // 后建的先拆:服务先停,配置后删,目录最后。
+    use crater_ir::plan::plan_destroy;
+    let b = bp();
+    let p = plan_destroy(&b, &scope_from_defaults(&b), &converged_host()).unwrap();
+    let order: Vec<&str> = p.items.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(order, vec!["service", "copy", "file[1]", "file[0]"]);
+}
+
+#[test]
+fn a_destroy_plan_on_a_clean_host_shows_nothing_to_remove() {
+    // 对不存在的资源报"将删除"会让人误以为还有残留。
+    use crater_ir::plan::plan_destroy;
+    let b = bp();
+    let p = plan_destroy(&b, &scope_from_defaults(&b), &blank_host()).unwrap();
+    assert_eq!(p.summary(), "+0 ~0 -0 ✓4");
+    assert!(!p.has_changes());
+}
+
+#[test]
+fn a_custom_type_is_not_pretended_to_be_destroyable() {
+    // 引擎不懂怎么拆 kubeadm —— 那是作者的舞。诚实报"说不清"。
+    use crater_ir::plan::plan_destroy;
+    let b = parse::blueprint_from_str(CUSTOM).unwrap();
+    let p = plan_destroy(&b, &scope_from_defaults(&b), &converged_host()).unwrap();
+    assert_eq!(p.debt(), 1, "{:?}", p.items[0].change);
+}
