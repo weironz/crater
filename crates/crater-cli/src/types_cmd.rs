@@ -46,19 +46,8 @@ fn print_index() {
 }
 
 fn print_index_json() {
-    let items: Vec<String> = types::BUILTINS
-        .iter()
-        .map(|t| {
-            format!(
-                r#"{{"name":"{}","kind":"{}","doc":"{}","implemented":{}}}"#,
-                t.name,
-                kind_key(t.kind),
-                esc(t.doc),
-                crater_ir::builtins::get(t.name).is_some()
-            )
-        })
-        .collect();
-    println!("[{}]", items.join(","));
+    // 与 UI 的 /api/types 同一个来源 —— 手拼两遍必然分家。
+    println!("{}", crater_ir::types::catalog_json());
 }
 
 // ---------------------------------------------------------------- 字段卡
@@ -130,35 +119,7 @@ fn print_card(name: &str) -> Result<()> {
 
 fn print_card_json(name: &str) -> Result<()> {
     let t = lookup(name)?;
-    let fields: Vec<String> = t
-        .fields
-        .iter()
-        .map(|f| {
-            format!(
-                r#"{{"name":"{}","type":"{}","required":"{}","values":[{}],"doc":"{}"}}"#,
-                f.name,
-                f.ty.label(),
-                req_key(f.req),
-                f.values
-                    .iter()
-                    .map(|v| format!("\"{}\"", esc(v)))
-                    .collect::<Vec<_>>()
-                    .join(","),
-                esc(f.doc)
-            )
-        })
-        .collect();
-    println!(
-        r#"{{"name":"{}","kind":"{}","doc":"{}","implemented":{},"freeform":{},"fields":[{}]}}"#,
-        t.name,
-        kind_key(t.kind),
-        esc(t.doc),
-        crater_ir::builtins::get(t.name).is_some(),
-        t.freeform
-            .map(|f| format!("\"{f}\""))
-            .unwrap_or_else(|| "null".into()),
-        fields.join(",")
-    );
+    println!("{}", crater_ir::types::type_json(t.name).expect("lookup 已确认存在"));
     Ok(())
 }
 
@@ -181,25 +142,8 @@ fn req_label(r: Req) -> &'static str {
     }
 }
 
-fn req_key(r: Req) -> &'static str {
-    match r {
-        Req::Required => "required",
-        Req::Optional => "optional",
-        Req::OneOf(g) => g,
-    }
-}
 
-fn kind_key(k: Kind) -> &'static str {
-    match k {
-        Kind::Resource => "resource",
-        Kind::Probe => "probe",
-        Kind::Procedural => "procedural",
-    }
-}
 
-fn esc(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ")
-}
 
 #[cfg(test)]
 mod tests {

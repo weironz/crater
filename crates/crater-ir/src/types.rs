@@ -471,6 +471,63 @@ fn distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+/// 登记表的 JSON 投影 —— **给编辑器和 UI 用的那一份**。
+///
+/// 它与 `crater types` 的字段卡、JSON Schema、lint 报错来自同一张表。
+/// 这一点是整个可发现性设计的支点:UI 里一旦手写字段列表,加类型就要改两处,
+/// 而两处迟早会分家 —— 那时 UI 说的和引擎认的就不是一回事了。
+///
+/// (AWX 之所以只能给一个文本框,正是因为 Ansible 没有这样一张表:
+/// 模块参数只存在于远端 Python 里,控制端从来不知道 `copy` 支持什么。)
+pub fn catalog_json() -> serde_json::Value {
+    serde_json::Value::Array(BUILTINS.iter().map(type_value).collect())
+}
+
+/// 单个类型的 JSON;未知名字返回 `None`(附拼写建议由调用方给)。
+pub fn type_json(name: &str) -> Option<serde_json::Value> {
+    builtin(name).map(type_value)
+}
+
+fn type_value(t: &BuiltinType) -> serde_json::Value {
+    serde_json::json!({
+        "name": t.name,
+        "kind": kind_key(t.kind),
+        "doc": t.doc,
+        // 登记了却没有五动词实现的类型必须**显式标注** —— 让人在 UI 里选中
+        // 之后才在 apply 时撞墙,是最坏的发现方式。
+        "implemented": crate::builtins::get(t.name).is_some(),
+        "freeform": t.freeform,
+        "note": t.note,
+        "see_also": t.see_also,
+        "fields": t.fields.iter().map(field_value).collect::<Vec<_>>(),
+        // 互斥组单独给出来:光看每个字段的"择一"看不出它跟谁互斥,
+        // 而表单要据此渲染成单选。
+        "one_of": t.one_of_groups().into_iter()
+            .map(|(g, ms)| serde_json::json!({ "group": g, "members": ms }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn field_value(f: &Field) -> serde_json::Value {
+    serde_json::json!({
+        "name": f.name,
+        "type": f.ty.label(),
+        "required": matches!(f.req, Req::Required),
+        // 互斥组名:表单据此把这几个字段渲染成一组单选,而不是各自独立的输入框。
+        "one_of": match f.req { Req::OneOf(g) => Some(g), _ => None },
+        "values": f.values,
+        "doc": f.doc,
+    })
+}
+
+fn kind_key(k: Kind) -> &'static str {
+    match k {
+        Kind::Resource => "resource",
+        Kind::Probe => "probe",
+        Kind::Procedural => "procedural",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

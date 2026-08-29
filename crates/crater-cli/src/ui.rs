@@ -187,6 +187,12 @@ pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
         .route("/api/apply/{deployment}", post(apply_action))
         .route("/api/delete/{deployment}", post(delete_action))
         .route("/api/job/{id}", get(job_fragment))
+        // ---- 契约 API(阶段 1)----
+        // 把已有的机器可读契约接出来,供编辑器与表单消费。见 ui_contract.rs。
+        .route("/api/types", get(crate::ui_contract::types))
+        .route("/api/schema", post(crate::ui_contract::schema))
+        .route("/api/lint", post(crate::ui_contract::lint))
+        .route("/api/inventory/skeleton", post(crate::ui_contract::inventory_skeleton))
         .route("/htmx.min.js", get(htmx_js))
         .layer(middleware::from_fn_with_state(st.clone(), auth_mw))
         .with_state(st);

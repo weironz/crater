@@ -31,6 +31,7 @@ mod stack_cmd;
 mod target;
 mod types_cmd;
 mod ui;
+mod ui_contract;
 
 use std::path::{Path, PathBuf};
 
