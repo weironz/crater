@@ -113,6 +113,7 @@ fn classify(p: &Path) -> &'static str {
         return "other";
     };
     match serde_yaml::from_str::<serde_yaml::Value>(&text) {
+        Ok(v) if crate::ui_app::is_app_value(&v) => "app",
         Ok(v) if v.get("inventory").is_some() => "inventory",
         _ => "other",
     }
@@ -152,6 +153,83 @@ pub async fn file_put(Query(q): Query<PathQuery>, body: String) -> impl IntoResp
     }
 }
 
+/// `POST /api/file/trash?path=…` —— 移入回收站,不做永久删除。
+///
+/// UI 里一次误点就能删掉几百行带注释的蓝图;`.crater-trash/` 让"删错了"
+/// 是一次拖回,不是一次事故。删除前做**引用检查**:被 app 文件引用的
+/// 蓝图/inventory 拒删并列出引用者(先解绑再删,顺序不能省)。
+pub async fn file_trash(Query(q): Query<PathQuery>) -> impl IntoResponse {
+    let path = match resolve(&q.path) {
+        Ok(p) => p,
+        Err((c, m)) => return (c, Json(json!({ "error": m }))).into_response(),
+    };
+    if !path.exists() {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "文件不存在" }))).into_response();
+    }
+    let refs: Vec<String> = crate::ui_app::list_apps()
+        .into_iter()
+        .filter(|a| a.blueprint == q.path || a.inventory == q.path)
+        .map(|a| a.path)
+        .collect();
+    if !refs.is_empty() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": format!("被 {} 引用,先解绑再删", refs.join(", ")), "refs": refs })),
+        )
+            .into_response();
+    }
+    let root = match root() {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    };
+    let trash = root.join(".crater-trash");
+    let _ = std::fs::create_dir_all(&trash);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dest = trash.join(format!(
+        "{}.{stamp}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    match std::fs::rename(&path, &dest) {
+        Ok(()) => Json(json!({ "ok": true, "trashed_to": dest.display().to_string() })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// `POST /api/file/rename?path=…`(正文=新相对路径)。同样过引用检查:
+/// 改名会让 app 里的引用悬空,先改引用再改名。
+pub async fn file_rename(Query(q): Query<PathQuery>, body: String) -> impl IntoResponse {
+    let from = match resolve(&q.path) {
+        Ok(p) => p,
+        Err((c, m)) => return (c, Json(json!({ "error": m }))).into_response(),
+    };
+    let to = match resolve(body.trim()) {
+        Ok(p) => p,
+        Err((c, m)) => return (c, Json(json!({ "error": m }))).into_response(),
+    };
+    let refs: Vec<String> = crate::ui_app::list_apps()
+        .into_iter()
+        .filter(|a| a.blueprint == q.path || a.inventory == q.path)
+        .map(|a| a.path)
+        .collect();
+    if !refs.is_empty() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": format!("被 {} 引用,先改引用再改名", refs.join(", ")) })),
+        )
+            .into_response();
+    }
+    if to.exists() {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "目标已存在" }))).into_response();
+    }
+    match std::fs::rename(&from, &to) {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
 pub async fn view_edit() -> Html<&'static str> {
     Html(EDIT_HTML)
 }
@@ -171,8 +249,11 @@ const EDIT_HTML: &str = r##"<section class="panel">
     <span id="ed-kind" class="ed-kind"></span>
     <button class="btn" onclick="edSave()">保存</button>
     <button class="btn" onclick="edSkeleton()">生成 inventory 骨架</button>
+    <button class="btn" onclick="edNew('blueprint')">新建蓝图</button>
+    <button class="btn" onclick="edNew('app')">新建 App</button>
     <span id="ed-status" class="ed-status"></span>
   </div>
+  <div id="ed-wiz" class="ed-wiz" style="display:none"></div>
   <div class="ed-wrap">
     <div class="ed-gutter" id="ed-gutter"></div>
     <div class="ed-code">
@@ -214,6 +295,14 @@ const EDIT_HTML: &str = r##"<section class="panel">
   .ed-diag .d.err .ln{color:var(--drift)} .ed-diag .d.warn .ln{color:var(--accent)}
   .ed-diag .d .at{color:var(--faint);font-size:12px}
   .ed-ok{color:var(--ok);padding:6px 8px}
+  .ed-wiz{border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px;
+    background:var(--surface-2);display:flex;gap:8px;flex-wrap:wrap;align-items:center;font-size:13px}
+  .ed-wiz input,.ed-wiz select{background:var(--surface);color:var(--text);border:1px solid var(--border);
+    border-radius:8px;padding:5px 9px;font:inherit}
+  .ed-wiz .types{display:flex;gap:4px;flex-wrap:wrap;max-width:100%}
+  .ed-wiz .types label{border:1px solid var(--border);border-radius:99px;padding:2px 9px;cursor:pointer;font-size:12px}
+  .ed-wiz .types label:has(input:checked){background:var(--tint);border-color:var(--accent);color:var(--accent)}
+  .ed-wiz .types input{display:none}
 </style>
 
 <script>
@@ -316,10 +405,84 @@ const EDIT_HTML: &str = r##"<section class="panel">
     const r = await fetch('/api/inventory/skeleton', {method:'POST', body: ta.value});
     const d = await r.json();
     if (d.error){ status.textContent = '生成失败:'+d.error; return; }
-    diag.innerHTML = '<pre style="white-space:pre-wrap;font-size:12px">'
-      + JSON.stringify(d.inventory, null, 2).replace(/</g,'&lt;')
-      + '\n\n# ' + d.note + '</pre>';
+    // 带注释的 YAML 文本(不是 JSON 投影):注释解释"为什么这组留空",
+    // 那是骨架一半的价值。
+    diag.innerHTML = '<div style="margin:6px 0"><button class="btn" onclick="edAdopt()">✎ 载入为新 inventory 文件</button></div>'
+      + '<pre id="ed-skel" style="white-space:pre-wrap;font-size:12px">'
+      + d.yaml.replace(/</g,'&lt;') + '</pre>';
     status.textContent = '骨架已生成(按蓝图的 fleet.groups)';
+  };
+
+  // 骨架 → 编辑缓冲区:起个配套文件名,用户改完口令按"保存"落盘。
+  window.edAdopt = function(){
+    const y = document.getElementById('ed-skel');
+    if (!y) return;
+    const base = (cur||'inventory').replace(/\.blueprint\.yaml$/,'').replace(/\.yaml$/,'');
+    cur = base + '.inventory.yaml';
+    ta.value = y.textContent; kindEl.textContent = 'inventory(未保存)';
+    diag.innerHTML=''; sync();
+    status.textContent = '未保存 → ' + cur + '(改好地址口令后点"保存")';
+  };
+
+  // ── 新建向导:蓝图(选类型拼骨架)/ App(绑定蓝图×机群×参数)──
+  // 表单字段全部来自后端(/api/types、/api/files):UI 不硬编码任何类型名。
+  window.edWizHide = function(){ document.getElementById('ed-wiz').style.display='none'; };
+  window.edNew = async function(kind){
+    const wiz = document.getElementById('ed-wiz');
+    wiz.style.display='flex';
+    if (kind==='blueprint'){
+      const d = await (await fetch("/api/types")).json();
+      const list = Array.isArray(d) ? d : d.types;
+      wiz.innerHTML = '<b>新建蓝图</b> 名字 <input id="wz-name" placeholder="my-svc" size="12">'
+        + '<span class="types">' + list.map(t=>
+            '<label title="'+(t.doc||'').replace(/"/g,'&quot;')+'"><input type="checkbox" value="'+t.name+'">'+t.name+'</label>'
+          ).join('') + '</span>'
+        + '<button class="btn" onclick="edNewBp()">生成骨架</button>'
+        + '<button class="btn" onclick="edWizHide()">×</button>';
+    } else {
+      const f = await (await fetch('/api/files')).json();
+      const opt = k => f.files.filter(x=>x.kind===k && !x.path.includes('fixtures') && !x.path.includes('/tests/')).map(x=>'<option>'+x.path+'</option>').join('');
+      wiz.innerHTML = '<b>新建 App</b> 名字 <input id="wz-name" placeholder="prod-nginx" size="12">'
+        + ' 蓝图 <select id="wz-bp">'+opt('blueprint')+'</select>'
+        + ' inventory <select id="wz-inv"><option value=""></option>'+opt('inventory')+'</select>'
+        + ' 参数 <input id="wz-params" placeholder="k=v,k2=v2" size="14">'
+        + ' 巡检 <input id="wz-iv" placeholder="30m(留空=只手动)" size="14">'
+        + ' <button class="btn" onclick="edNewApp()">创建</button>'
+        + '<button class="btn" onclick="edWizHide()">×</button>';
+    }
+  };
+  window.edNewBp = async function(){
+    const name = document.getElementById('wz-name').value.trim() || 'unnamed';
+    const types = [...document.querySelectorAll('#ed-wiz input:checked')].map(x=>x.value);
+    const d = await (await fetch('/api/blueprint/skeleton',{method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({name,types})})).json();
+    if (d.error){ status.textContent = d.error; return; }
+    cur = name + '.blueprint.yaml';
+    ta.value = d.yaml; kindEl.textContent = 'blueprint(未保存)';
+    document.getElementById('ed-wiz').style.display='none';
+    sync(); lint();
+    status.textContent = '未保存 → ' + cur + '(补完 TODO 后点"保存")';
+  };
+  window.edNewApp = async function(){
+    const name = document.getElementById('wz-name').value.trim();
+    const params = document.getElementById('wz-params').value.split(',')
+      .map(s=>s.trim()).filter(Boolean).map(s=>{const i=s.indexOf('=');return [s.slice(0,i),s.slice(i+1)];});
+    const d = await (await fetch('/api/app/create',{method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+        name, blueprint:document.getElementById('wz-bp').value,
+        inventory:document.getElementById('wz-inv').value, params,
+        verify_interval:document.getElementById('wz-iv').value.trim()})})).json();
+    if (d.error){ status.textContent = d.error; return; }
+    document.getElementById('ed-wiz').style.display='none';
+    // app 文件立即落盘(它是绑定关系,半成品没有意义),直接载入并跑跨文件校验
+    const o = document.createElement('option');
+    o.value = d.path; o.textContent = d.path + '  · app'; o.dataset.kind='app';
+    sel.appendChild(o); sel.value = d.path;
+    load(d.path);
+    const lr = await (await fetch('/api/lint-project',{method:'POST',body:d.path})).json();
+    status.textContent = '已创建 ' + d.path + (lr.ok?'(校验通过)':'(有 '+lr.diagnostics.length+' 个问题,见下方)');
+    if (!lr.ok) diag.innerHTML = lr.diagnostics.map(x =>
+      '<div class="d err"><span class="ln">—</span><span>'+x.message.replace(/</g,'&lt;')+'</span></div>').join('');
   };
 
   async function load(path){

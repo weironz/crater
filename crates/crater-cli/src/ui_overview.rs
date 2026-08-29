@@ -187,6 +187,7 @@ pub async fn view_overview() -> Html<&'static str> {
 const OVERVIEW_HTML: &str = r##"<section class="panel">
   <h2><span class="mk">◎</span> 机群对账</h2>
   <div id="ov-stats" class="ov-stats"></div>
+  <div id="ov-apps" class="ov-apps"></div>
   <div id="ov-cards" class="ov-cards"></div>
 </section>
 <style>
@@ -209,6 +210,13 @@ const OVERVIEW_HTML: &str = r##"<section class="panel">
   .ov-actions{margin-top:8px;display:flex;gap:6px}
   .ov-actions .btn{font-size:12px;padding:3px 10px}
   .ov-empty{border:1px dashed var(--border);border-radius:12px;padding:22px;text-align:center;color:var(--muted)}
+  .ov-apps{display:flex;flex-direction:column;gap:8px;margin-bottom:14px}
+  .ov-app{display:flex;gap:10px;align-items:center;border:1px solid var(--border);border-radius:10px;
+    padding:8px 12px;background:var(--surface);font-size:13px;flex-wrap:wrap}
+  .ov-app .nm{font-weight:650}
+  .ov-app .meta{color:var(--faint);font-size:12px}
+  .ov-app .sp{margin-left:auto;display:flex;gap:6px}
+  .ov-app .btn{font-size:12px;padding:3px 10px}
 </style>
 <script>
 (function(){
@@ -216,15 +224,37 @@ const OVERVIEW_HTML: &str = r##"<section class="panel">
     progressing:'Progressing', unknown:'Unknown', indeterminate:'Indeterminate', never_applied:'NeverApplied'};
   function age(s){ if (s==null) return '从未核对';
     return s<90?'刚刚核对':s<3600?Math.floor(s/60)+' 分钟前核对':s<86400?Math.floor(s/3600)+' 小时前核对':Math.floor(s/86400)+' 天前核对'; }
-  async function runVerb(verb, path, inv){
+  async function runVerb(verb, path, inv, sets){
     const r = await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({verb, blueprint:path, inventory:inv||''})});
+      body:JSON.stringify({verb, blueprint:path, inventory:inv||'', sets:sets||[]})});
     const d = await r.json();
     if (d.ok) htmx.ajax('GET','/view/job/'+d.job,'#view');
-    else alert(d.error||'启动失败');
+    else alert(d.error||'启动失败');   // 409 = plan 闸门:提示先 Plan,不是故障
   }
   window.ovRun = runVerb;
+  // apps 带:期望态绑定(文件)与部署记录(实际)之间的那条线。
+  // lint 不过的 app 直接在这里亮红 —— 别等 plan 才发现绑错了参数。
+  async function renderApps(){
+    const d = await (await fetch('/api/apps')).json();
+    const el = document.getElementById('ov-apps');
+    if (!d.apps.length){ el.innerHTML=''; return; }
+    el.innerHTML = d.apps.map(a=>{
+      const sets = (a.params||[]).map(p=>p.k+'='+p.v);
+      const bad = a.ok ? '' : ' <span style="color:var(--drift)">✗ '
+        + a.diagnostics.map(x=>x.message).join(';').replace(/</g,'&lt;') + '</span>';
+      const iv = a.verify_interval ? '巡检 '+Math.round(a.verify_interval/60)+'m' : '只手动';
+      const arg = `'${a.blueprint}','${a.inventory||''}',${JSON.stringify(sets).replace(/"/g,'&quot;')}`;
+      return `<div class="ov-app"><span class="nm">▶ ${a.name}</span>
+        <span class="meta">${a.blueprint} × ${a.inventory||'(无 inventory)'} · ${iv}</span>${bad}
+        <span class="sp">
+          <button class="btn" onclick="ovRun('verify',${arg})">Verify</button>
+          <button class="btn" onclick="ovRun('plan',${arg})">Plan</button>
+          <button class="btn" onclick="ovRun('apply',${arg})">Apply</button>
+        </span></div>`;
+    }).join('');
+  }
   async function refresh(){
+    renderApps();
     const d = await (await fetch('/api/overview')).json();
     const s = d.stats;
     document.getElementById('ov-stats').innerHTML =

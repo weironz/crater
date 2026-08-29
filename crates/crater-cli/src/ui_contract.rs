@@ -163,11 +163,68 @@ pub async fn inventory_skeleton(body: String) -> impl IntoResponse {
         }
         groups.insert(g.clone(), members);
     }
+    // **带注释的 YAML 文本**,不是 JSON 结构:JSON 化丢注释,而"这里为什么留空"
+    // 恰恰要靠注释说 —— YAML 是模型这条原则对生成物同样成立。
+    let mut y = String::from(
+        "# 由蓝图的 fleet.groups 生成的 inventory 骨架。\n# min: 0 的组留空是合法拓扑(如单节点的 worker),不是漏填。\ninventory:\n  hosts:\n",
+    );
+    for h in &hosts {
+        y.push_str(&format!(
+            "    - {{ name: {}, address: 192.0.2.1, user: root, password: \"改成真口令,或改用 key:\" }}   # TODO 真实地址\n",
+            h["name"].as_str().unwrap_or("n?")
+        ));
+    }
+    y.push_str("  groups:\n");
+    for (g, members) in &groups {
+        if members.is_empty() {
+            y.push_str(&format!("    {g}: {{ hosts: [] }}\n"));
+        } else {
+            y.push_str(&format!("    {g}: {{ hosts: [{}] }}\n", members.join(", ")));
+        }
+    }
     Json(json!({
         "inventory": { "hosts": hosts, "groups": groups },
+        "yaml": y,
         "note": "按蓝图的 fleet.groups 生成;min: 0 的组留空是合法拓扑,不是漏填",
     }))
     .into_response()
+}
+
+/// `POST /api/blueprint/skeleton` —— 按所选类型生成**带注释**的蓝图骨架。
+///
+/// 注释全部来自登记表的 doc:这正是"UI 不硬编码任何字段"在生成物上的体现 ——
+/// 加一个类型,骨架自动会写它的注释。
+#[derive(Deserialize)]
+pub struct SkeletonReq {
+    pub name: String,
+    #[serde(default)]
+    pub types: Vec<String>,
+}
+
+pub async fn blueprint_skeleton(Json(req): Json<SkeletonReq>) -> impl IntoResponse {
+    use crater_ir::types::{self, Req as FReq};
+    let mut y = format!(
+        "# {} —— 蓝图骨架(由类型登记表生成)。\n# 每个字段的注释来自 `crater types <类型>`;必填项已留 TODO。\nname: {}\nversion: \"1\"\n\nresources:\n",
+        req.name, req.name
+    );
+    let mut missing: Vec<String> = Vec::new();
+    for tname in &req.types {
+        let Some(t) = types::builtin(tname) else {
+            missing.push(tname.clone());
+            continue;
+        };
+        y.push_str(&format!("\n  # ── {} —— {}\n", t.name, t.doc));
+        y.push_str(&format!("  - {}:\n", t.name));
+        for f in t.fields {
+            let (mark, val) = match f.req {
+                FReq::Required => ("必填", "TODO".to_string()),
+                FReq::OneOf(g) => ("择一", format!("TODO(互斥组 {g},恰选一个)")),
+                FReq::Optional => continue, // 可选项不进骨架 —— 骨架要短,字段卡负责发现
+            };
+            y.push_str(&format!("      {}: {}   # [{}] {}\n", f.name, val, mark, f.doc));
+        }
+    }
+    Json(json!({ "yaml": y, "unknown_types": missing }))
 }
 
 #[cfg(test)]

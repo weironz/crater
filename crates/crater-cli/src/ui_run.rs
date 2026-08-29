@@ -9,7 +9,6 @@
 //! 的更彻底版本 —— DB 只该存"关于执行的事实",而文件系统已经存得下。
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use axum::{
     extract::{Path as AxPath, Query},
@@ -38,6 +37,74 @@ pub struct JobMeta {
 fn jobs_root() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     Path::new(&home).join(".crater").join("jobs")
+}
+
+/// plan 闸门:plan 成功时把(蓝图 sha, inventory sha, 参数快照)钉进闸门文件;
+/// apply 必须持有匹配的闸门,否则 409。
+///
+/// **参数也在快照里** —— 否则同一份文件、两次不同的 --set,后者可以骑着
+/// 前者的 plan 直接过闸(评审抓出的洞)。
+fn gate_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    PathBuf::from(home).join(".crater").join("ui").join("plans")
+}
+
+fn gate_key(blueprint: &str, inventory: &str) -> String {
+    format!("{blueprint}|{inventory}")
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .collect()
+}
+
+fn file_sha(rel: &str) -> Option<String> {
+    std::fs::read(rel).ok().map(|b| crater_core::bundle::sha256_hex(&b))
+}
+
+fn params_snapshot(sets: &[String]) -> String {
+    let mut v: Vec<&String> = sets.iter().collect();
+    v.sort();
+    v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("&")
+}
+
+fn write_gate(blueprint: &str, inventory: &str, sets: &[String]) {
+    let _ = std::fs::create_dir_all(gate_dir());
+    let doc = serde_json::json!({
+        "blueprint_sha": file_sha(blueprint),
+        "inventory_sha": if inventory.is_empty() { None } else { file_sha(inventory) },
+        "params": params_snapshot(sets),
+        "ts": now(),
+        // 指纹在提交时钉(plan 展示的就是此刻的文件),但闸门要等 plan **成功**
+        // 才生效 —— 失败的 plan 什么都没展示,不配放行 apply。
+        "pending": true,
+    });
+    let _ = std::fs::write(
+        gate_dir().join(format!("{}.json", gate_key(blueprint, inventory))),
+        serde_json::to_string(&doc).unwrap_or_default(),
+    );
+}
+
+/// 校验闸门。Ok(()) = 放行;Err(原因) = 409。
+fn check_gate(blueprint: &str, inventory: &str, sets: &[String]) -> Result<(), String> {
+    let path = gate_dir().join(format!("{}.json", gate_key(blueprint, inventory)));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Err("还没有对应的 Plan —— 先 Plan 看清将发生什么,再 Apply".into());
+    };
+    let Ok(g) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Err("Plan 记录损坏,请重新 Plan".into());
+    };
+    if g["pending"].as_bool().unwrap_or(false) {
+        return Err("上一次 Plan 未成功完成 —— 等它跑完(或重新 Plan)".into());
+    }
+    if g["blueprint_sha"].as_str() != file_sha(blueprint).as_deref() {
+        return Err("蓝图在 Plan 之后被改过 —— 期望态已变,请重新 Plan".into());
+    }
+    if !inventory.is_empty() && g["inventory_sha"].as_str() != file_sha(inventory).as_deref() {
+        return Err("inventory 在 Plan 之后被改过 —— 请重新 Plan".into());
+    }
+    if g["params"].as_str().unwrap_or("") != params_snapshot(sets) {
+        return Err("参数与 Plan 时不同 —— 换了 --set 就要重新 Plan".into());
+    }
+    Ok(())
 }
 
 fn now() -> u64 {
@@ -202,6 +269,17 @@ pub fn spawn(title: String, verb: String, blueprint: String, inventory: String, 
 
 /// 按 exit_code 文件补记结论。等它的人可能已经换了一茬(UI 重启),
 /// 所以结论必须从磁盘读,而不是从内存里的 wait() 返回值。
+/// plan 成功 → 闸门生效(pending → false)。
+fn promote_gate(m: &JobMeta) {
+    let path = gate_dir().join(format!("{}.json", gate_key(&m.blueprint, &m.inventory)));
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(mut g) = serde_json::from_str::<serde_json::Value>(&text) {
+            g["pending"] = serde_json::json!(false);
+            let _ = std::fs::write(&path, serde_json::to_string(&g).unwrap_or_default());
+        }
+    }
+}
+
 fn finalize(id: &str) {
     // verify 报告 → 对账快照。放在结论判定之前:exit=1(有漂移)时报告同样有效 ——
     // "发现漂移"正是快照最有价值的时刻。
@@ -223,6 +301,9 @@ fn finalize(id: &str) {
         None => "interrupted".into(),
     };
     m.finished = Some(now());
+    if m.verb == "plan" && m.status == "ok" {
+        promote_gate(&m);
+    }
     write_meta(&m);
 }
 
@@ -286,6 +367,17 @@ pub async fn run(Json(req): Json<RunReq>) -> Response {
         }
         args.push("--set".into());
         args.push(kv.clone());
+    }
+    // plan-gated apply:把"先看 diff 再动手"做成结构而非美德。
+    if req.verb == "apply" {
+        if let Err(why) = check_gate(&req.blueprint, &req.inventory, &req.sets) {
+            return err(StatusCode::CONFLICT, why);
+        }
+    }
+    if req.verb == "plan" {
+        // 闸门在**提交时**钉指纹(不是 job 结束时):plan 展示的就是此刻文件的
+        // 内容,期间文件再改,apply 时对不上 —— 这正是想要的。
+        write_gate(&req.blueprint, &req.inventory, &req.sets);
     }
     // verify 自动带 --json:对账看板的供血管道 —— 报告落在 job 目录,
     // finalize 时拆成每条部署记录一份快照。

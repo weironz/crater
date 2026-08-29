@@ -1,0 +1,10 @@
+# nginx-edge —— 把这份蓝图钉在这群机器上。
+# 这个文件就是"任务"本身:可 git、可 diff、可进闭包;改它 = 改任务。
+app:
+  name: nginx-edge
+  blueprint: library/middleware/nginx-lb.blueprint.yaml
+  inventory: library/middleware/inventory.example.yaml
+  params:            # 固化值;没列的参数 = 启动时问
+    listen_port: 8080
+  verify:
+    interval: 10m   # 定时漂移巡检;删掉这段 = 只手动

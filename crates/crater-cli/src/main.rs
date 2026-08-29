@@ -33,6 +33,7 @@ mod types_cmd;
 mod ui;
 mod ui_contract;
 mod ui_edit;
+mod ui_app;
 mod ui_overview;
 mod ui_run;
 

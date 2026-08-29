@@ -174,6 +174,8 @@ pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
     // 上一次进程死掉时正在跑的 job,现在判为 interrupted —— 不清账的话,
     // 重启后列表里会留下永远转圈的僵尸行。
     crate::ui_run::sweep_on_start();
+    // 定时 verify 调度器:读 app 文件的 verify.interval,到点起 job。
+    crate::ui_app::start_scheduler();
     let st = AppState { token, ..Default::default() };
     let app = Router::new()
         .route("/", get(index))
@@ -204,6 +206,13 @@ pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
         .route("/api/run", post(crate::ui_run::run))
         // ---- 对账看板(阶段②)----
         .route("/api/overview", get(crate::ui_overview::overview))
+        // ---- App 绑定与从零闭环(阶段③)----
+        .route("/api/apps", get(crate::ui_app::apps))
+        .route("/api/lint-project", post(crate::ui_app::lint_project))
+        .route("/api/app/create", post(crate::ui_app::create_app))
+        .route("/api/blueprint/skeleton", post(crate::ui_contract::blueprint_skeleton))
+        .route("/api/file/trash", post(crate::ui_edit::file_trash))
+        .route("/api/file/rename", post(crate::ui_edit::file_rename))
         .route("/view/overview", get(crate::ui_overview::view_overview))
         .route("/api/record/{id}", axum::routing::delete(crate::ui_overview::delete_record))
         .route("/api/jobs", get(crate::ui_run::jobs_fragment))
