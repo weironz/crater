@@ -1,0 +1,13 @@
+# 抓取目标 = 机群里 storage 组的全体。与 nginx 上游同一个道理:
+# 机器清单只写在 inventory 一处。
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: minio
+    metrics_path: /minio/v2/metrics/cluster
+    static_configs:
+      - targets:
+{% for n in fleet.storage %}
+          - "{{ n.address }}:9000"
+{% endfor %}

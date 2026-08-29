@@ -1,0 +1,35 @@
+# Nginx 反向代理 —— 上游列表由机群视角渲染。
+#
+# 与 k8s 那份 haproxy.cfg 是同一个形状,放在这里是**刻意复现**:
+# 一个只在单一场景下验过的机制,不能算验过。这次上游是 MinIO 的四台。
+name: nginx-lb
+version: "1"
+description: Nginx 反代 MinIO 集群,上游从 fleet 渲染
+
+fleet:
+  groups:
+    lb:      {min: 1}
+    storage: {min: 1}
+
+params:
+  listen_port:  { type: port, default: 8080 }
+  upstream_port: { type: port, default: 9000 }
+  health_path:  { default: "/minio/health/live" }
+
+materials:
+  - { name: nginx-conf, file: templates/minio-lb.conf.j2 }
+
+resources:
+  - package: { packages: { debian: [nginx] } }
+    target: role.lb
+  # 发行版的默认站点会占住 80 并抢 server_name —— 交付前先摘掉。
+  - file: { path: /etc/nginx/sites-enabled/default, state: absent }
+    target: role.lb
+  - template: { material: nginx-conf, dest: /etc/nginx/conf.d/minio-lb.conf, mode: "0644" }
+    target: role.lb
+  - service: { name: nginx, state: started, enabled: true }
+    target: role.lb
+
+health:
+  - http: { url: "http://127.0.0.1:${params.listen_port}${params.health_path}", status: 200 }
+    target: role.lb

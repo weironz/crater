@@ -1,0 +1,15 @@
+# 中间件验证机群:5 台通用节点。不同蓝图按需分组。
+inventory:
+  hosts:
+    - { name: n1, address: 127.0.0.1, port: 2211, user: root, password: "123456", vars: { ip: "192.168.73.11" } }
+    - { name: n2, address: 127.0.0.1, port: 2212, user: root, password: "123456", vars: { ip: "192.168.73.12" } }
+    - { name: n3, address: 127.0.0.1, port: 2213, user: root, password: "123456", vars: { ip: "192.168.73.13" } }
+    - { name: n4, address: 127.0.0.1, port: 2214, user: root, password: "123456", vars: { ip: "192.168.73.14" } }
+    - { name: n5, address: 127.0.0.1, port: 2215, user: root, password: "123456", vars: { ip: "192.168.73.15" } }
+  groups:
+    all:     { hosts: [n1, n2, n3, n4, n5] }
+    db:      { hosts: [n1, n2] }
+    cache:   { hosts: [n1, n2, n3] }
+    storage: { hosts: [n1, n2, n3, n4] }
+    lb:      { hosts: [n5] }
+    obs:     { hosts: [n5] }

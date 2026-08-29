@@ -1,0 +1,66 @@
+# 观测栈 —— 容器化部署,验 `container` 类型。
+#
+# 前四份都是"二进制/包 + systemd"的形状;这一份刻意换成容器,因为
+# `container` 的幂等判据(镜像+状态而非"名字在")只有真跑才验得到:
+# 同名容器跑着旧镜像是最常见的现实。
+name: observability
+version: "1"
+description: Prometheus + Grafana(容器),抓 MinIO 指标
+
+fleet:
+  groups:
+    obs: {min: 1}
+
+params:
+  prom_image:    { default: "prom/prometheus:v3.1.0" }
+  grafana_image: { default: "grafana/grafana:11.5.1" }
+  prom_port:     { type: port, default: 9090 }
+  grafana_port:  { type: port, default: 3000 }
+  data_root:     { default: "/srv/obs" }
+
+materials:
+  - { name: prom-conf, file: templates/prometheus.yml.j2 }
+
+resources:
+  - package: { packages: { debian: [docker.io] } }
+    target: role.obs
+  - service: { name: docker, state: started, enabled: true }
+    target: role.obs
+
+  - file: { path: "${params.data_root}/prometheus", state: directory, mode: "0777" }
+    target: role.obs
+  - file: { path: "${params.data_root}/grafana", state: directory, mode: "0777" }
+    target: role.obs
+  - template: { material: prom-conf, dest: "${params.data_root}/prometheus/prometheus.yml", mode: "0644" }
+    target: role.obs
+
+  - container:
+      name: prometheus
+      image: "${params.prom_image}"
+      state: started
+      restart_policy: unless-stopped
+      ports: ["${params.prom_port}:9090"]
+      volumes: ["${params.data_root}/prometheus:/etc/prometheus", "${params.data_root}/prometheus:/prometheus"]
+      # `command` 而非 `args`:前者跟在镜像**之后**(给容器内的程序),
+      # 后者插在镜像**之前**(给 docker run 本身)。写错的话
+      # `--config.file` 会被 docker 当成自己的标志,报 exit 125。
+      command: "--config.file=/etc/prometheus/prometheus.yml"
+    target: role.obs
+
+  - container:
+      name: grafana
+      image: "${params.grafana_image}"
+      state: started
+      restart_policy: unless-stopped
+      ports: ["${params.grafana_port}:3000"]
+      volumes: ["${params.data_root}/grafana:/var/lib/grafana"]
+      env:
+        GF_SECURITY_ADMIN_PASSWORD: "crater2026"
+        GF_USERS_ALLOW_SIGN_UP: "false"
+    target: role.obs
+
+health:
+  - http: { url: "http://127.0.0.1:${params.prom_port}/-/healthy", status: 200 }
+    target: role.obs
+  - http: { url: "http://127.0.0.1:${params.grafana_port}/api/health", status: 200 }
+    target: role.obs

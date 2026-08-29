@@ -104,6 +104,20 @@ fn sed_repl(line: &str) -> String {
     line.replace('\\', r"\\").replace('|', r"\|").replace('&', r"\&")
 }
 
+/// 解压清单的落点。放 /var/lib 而不是解压目标里:目标常是 /usr/local 这种
+/// 共享目录,往里塞元数据会污染别人的视野。
+const MANIFEST_DIR: &str = "/var/lib/crater/unarchive";
+
+/// 每个解压目标一份清单,文件名由目标路径拍平而来。
+fn manifest_path(to: &str) -> String {
+    let flat: String = to
+        .trim_matches('/')
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("{MANIFEST_DIR}/{flat}.list")
+}
+
 /// `lineinfile` —— 确保某一行在文件里存在 / 不存在。
 ///
 /// 幂等靠一次 grep 探针;`regexp` 存在时按它替换,否则按整行匹配。
@@ -279,9 +293,26 @@ impl ResourceType for Unarchive {
         } else {
             String::new()
         };
+        // 解压的同时**记下解出了什么** —— 否则退役时无从下手。
+        //
+        // 这不是洁癖。真机上踩过:k8s 那轮 unarchive 把 containerd 全家桶解到
+        // /usr/local/bin,退役只删了 `creates:` 指的那一个;残留的
+        // containerd-shim-runc-v2 在 PATH 里盖过发行版的同名文件,几个月后
+        // 另一个场景装 docker 时报 "unsupported protocol: Yunix" —— 一条与
+        // 真正原因毫无字面关联的错误。
+        //
+        // 清单让退役能**精确删掉自己加过的东西**,既不留残渣、也不越权去动
+        // /usr/local 这种共享目录里别人的文件。
         run_ok(
             ctx,
-            &format!("tar -xf {} -C {}{strip_flag}", sh(&archive), sh(to)),
+            &format!(
+                "mkdir -p {mdir} && tar -xf {a} -C {t}{strip_flag} && \
+                 tar -tf {a} > {m}",
+                a = sh(&archive),
+                t = sh(to),
+                mdir = sh(MANIFEST_DIR),
+                m = sh(&manifest_path(to))
+            ),
         )?;
         if arg_str_opt(args, "from").is_none() {
             let _ = ctx.run(&format!("rm -f {}", sh(&archive)));
@@ -290,16 +321,42 @@ impl ResourceType for Unarchive {
     }
 
     fn destroy(&self, ctx: &dyn Ctx, args: &ResolvedArgs, obs: &Observed) -> Result<Outcome> {
-        // 只删 `creates:` 指的那个产物 —— `to:` 往往是 /usr/local 之类的共享目录,
-        // 整个删掉会连累别人。宁可留下一点残余,也不越权。
         if !obs.present {
             return Ok(Outcome::Ok);
         }
+        let to = arg_str(args, "to")?;
+        let manifest = manifest_path(to);
+
+        // 有清单就按清单删 —— 精确到"我们解出来的那些文件",既不留残渣,
+        // 也不去动 /usr/local 这种共享目录里别人的东西。
+        //
+        // 先删文件、再自底向上删空目录:反过来会因为目录非空而失败,
+        // 留下一半。`strip-components` 让清单里的路径可能与落地路径不同,
+        // 所以只删确实存在的那些。
+        let (code, _) = ctx.probe(&format!("test -f {}", sh(&manifest)))?;
+        if code == 0 {
+            run_ok(
+                ctx,
+                &format!(
+                    "cd {t} && sed 's:/*$::' {m} | grep -v '^$' | while read -r p; do \
+                       [ -f \"$p\" ] && rm -f \"$p\"; done; \
+                     sed 's:/*$::' {m} | grep -v '^$' | sort -r | while read -r p; do \
+                       [ -d \"$p\" ] && rmdir \"$p\" 2>/dev/null; done; \
+                     rm -f {m}; true",
+                    t = sh(to),
+                    m = sh(&manifest)
+                ),
+            )?;
+            return Ok(Outcome::Changed);
+        }
+
+        // 没清单(旧版本装的)只能退回删 `creates:`,并**明确留痕** ——
+        // 悄悄留下残余正是上面那个故障的来源。
         let Some(creates) = arg_str_opt(args, "creates") else {
             return Ok(Outcome::Warn);
         };
         run_ok(ctx, &format!("rm -rf {}", sh(creates)))?;
-        Ok(Outcome::Changed)
+        Ok(Outcome::Warn)
     }
 }
 
@@ -408,16 +465,46 @@ mod tests {
     }
 
     #[test]
-    fn unarchive_destroy_only_removes_what_it_created() {
-        // `to:` 常是 /usr/local 这类共享目录 —— 整个删掉会连累别人。
+    fn unarchive_destroy_without_a_manifest_falls_back_and_warns() {
+        // 旧版本装的东西没有清单,只能退回删 `creates:` —— 但必须**留痕**。
+        // 悄悄留下残余正是这个类型踩过的那个坑:k8s 那轮解到 /usr/local/bin 的
+        // containerd 全家桶只删掉一个,残留的 shim 在 PATH 里盖过发行版同名文件,
+        // 几个月后另一个场景装 docker 报 "unsupported protocol: Yunix" ——
+        // 一条与真正原因毫无字面关联的错误。
         let ctx = FakeCtx::new().on("rm", 0, "");
         let a = args(&[("to", "/usr/local"), ("creates", "/usr/local/bin/containerd"), ("material", "x")]);
-        Unarchive
+        let out = Unarchive
             .destroy(&ctx, &a, &Observed::present([("creates", "x".into())]))
             .unwrap();
-        let cmd = ctx.calls()[0].text().to_string();
-        assert!(cmd.contains("/usr/local/bin/containerd"), "{cmd}");
-        assert!(!cmd.ends_with("'/usr/local'"), "不该删整个 /usr/local:{cmd}");
+        assert_eq!(out, Outcome::Warn, "没清单就该报 warn,而不是假装拆干净了");
+        let cmds: Vec<String> = ctx.calls().iter().map(|c| c.text().to_string()).collect();
+        assert!(cmds.iter().any(|c| c.contains("/usr/local/bin/containerd")), "{cmds:?}");
+        assert!(!cmds.iter().any(|c| c.ends_with("'/usr/local'")), "不该删整个 /usr/local:{cmds:?}");
+    }
+
+    #[test]
+    fn unarchive_records_what_it_extracted() {
+        // 解压的同时记下成员清单,否则退役时无从下手。
+        let ctx = FakeCtx::new().on("", 0, "");
+        let a = args(&[("from", "/tmp/x.tar"), ("to", "/usr/local")]);
+        Unarchive.apply(&ctx, &a, &Change::Create(vec![])).unwrap();
+        let cmds: Vec<String> = ctx.calls().iter().map(|c| c.text().to_string()).collect();
+        assert!(cmds.iter().any(|c| c.contains("tar -tf") && c.contains("usr_local.list")), "{cmds:?}");
+    }
+
+    #[test]
+    fn unarchive_destroy_uses_the_manifest_when_present() {
+        // 有清单就按清单删:精确到"我们解出来的那些",既不留残渣也不越权。
+        let ctx = FakeCtx::new().on("test -f", 0, "").on("cd ", 0, "");
+        let a = args(&[("to", "/usr/local"), ("material", "x")]);
+        let out = Unarchive
+            .destroy(&ctx, &a, &Observed::present([("creates", "x".into())]))
+            .unwrap();
+        assert_eq!(out, Outcome::Changed);
+        let cmds: Vec<String> = ctx.calls().iter().map(|c| c.text().to_string()).collect();
+        let del = cmds.iter().find(|c| c.starts_with("cd ")).expect("按清单删");
+        assert!(del.contains("rmdir"), "空目录也要收:{del}");
+        assert!(del.contains("sort -r"), "自底向上删,否则非空目录删不掉:{del}");
     }
 
     #[test]
