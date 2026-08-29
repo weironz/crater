@@ -322,7 +322,7 @@ mod tests {
         )
         .unwrap();
         let out = dir.path().join("c.tar");
-        build(&bp, &out, &[]).await.unwrap();
+        build(&bp, &out, &[], &[]).await.unwrap();
         (dir, bp, out)
     }
 
@@ -383,7 +383,7 @@ mod tests {
         ]
         .join("\n");
         std::fs::write(&bp, yaml).unwrap();
-        let err = build(&bp, &dir.path().join("c.tar"), &[]).await.unwrap_err().to_string();
+        let err = build(&bp, &dir.path().join("c.tar"), &[], &[]).await.unwrap_err().to_string();
         assert!(err.contains("--for"), "报错要给出下一步动作:{err}");
     }
 
@@ -437,7 +437,7 @@ mod tests {
         // 栈里多份蓝图共用 containerd 是常态;逐个 build 会把它复制 N 遍。
         let d = stack_fixture();
         let out = d.path().join("c.tar");
-        build_stack(&d.path().join("s.stack.yaml"), &out, &[]).await.unwrap();
+        build_stack(&d.path().join("s.stack.yaml"), &out, &[], &[]).await.unwrap();
         let (_tmp, map) = load(&out).unwrap();
         // shared + a 自己的 + b 自己的 = 3,而不是 4。
         assert_eq!(map.len(), 3, "共用物料被存了不止一份:{map:?}");
@@ -450,7 +450,7 @@ mod tests {
         // —— 闭包看起来完整,现场装上的是另一个版本。
         let d = stack_fixture();
         let out = d.path().join("c.tar");
-        build_stack(&d.path().join("s.stack.yaml"), &out, &[]).await.unwrap();
+        build_stack(&d.path().join("s.stack.yaml"), &out, &[], &[]).await.unwrap();
         let (_tmp, map) = load(&out).unwrap();
         assert!(
             map.keys().any(|k| k.ends_with("v-2.0.bin")),
@@ -464,7 +464,7 @@ mod tests {
         // 部署侧不需要知道闭包是从蓝图还是从栈烤出来的 —— 同一个格式。
         let d = stack_fixture();
         let out = d.path().join("c.tar");
-        build_stack(&d.path().join("s.stack.yaml"), &out, &[]).await.unwrap();
+        build_stack(&d.path().join("s.stack.yaml"), &out, &[], &[]).await.unwrap();
         assert!(load(&out).is_ok());
     }
 

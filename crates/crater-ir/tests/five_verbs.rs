@@ -372,10 +372,33 @@ fn a_destroy_plan_on_a_clean_host_shows_nothing_to_remove() {
 }
 
 #[test]
-fn a_custom_type_is_not_pretended_to_be_destroyable() {
-    // 引擎不懂怎么拆 kubeadm —— 那是作者的舞。诚实报"说不清"。
+fn a_custom_type_without_a_destroy_dance_is_not_pretended_to_be_destroyable() {
+    // 引擎不懂怎么拆 kubeadm。没声明 `destroy:` 时诚实报"说不清",
+    // 而不是假装拆得掉。
     use crater_ir::plan::plan_destroy;
     let b = parse::blueprint_from_str(CUSTOM).unwrap();
-    let p = plan_destroy(&b, &scope_from_defaults(&b), &converged_host()).unwrap();
+    assert!(b.types[0].destroy.is_none(), "本夹具刻意不声明 destroy");
+    let ctx = FakeCtx::new().on("kubelet.conf", 0, "joined\n");
+    let p = plan_destroy(&b, &scope_from_defaults(&b), &ctx).unwrap();
     assert_eq!(p.debt(), 1, "{:?}", p.items[0].change);
+}
+
+#[test]
+fn a_custom_type_with_a_destroy_dance_plans_as_a_real_removal() {
+    // 声明了 `destroy:` 就说得出"靠哪支舞退役" —— 不再是一个 `?`。
+    use crater_ir::plan::{destroy_dances, plan_destroy};
+    let src = CUSTOM.replace("apply: bootstrap", "apply: bootstrap\n    destroy: teardown");
+    let src = src.replace("procedures:\n  bootstrap:", "procedures:\n  teardown:\n    steps:\n      - shell: { cmd: \"kubeadm reset -f\", check: \"! test -f /etc/kubernetes/kubelet.conf\" }\n  bootstrap:");
+    let b = parse::blueprint_from_str(&src).expect("夹具应能解析");
+
+    let joined = FakeCtx::new().on("kubelet.conf", 0, "joined\n");
+    let p = plan_destroy(&b, &scope_from_defaults(&b), &joined).unwrap();
+    assert_eq!(p.summary(), "+0 ~0 -1 ✓0", "{:?}", p.items[0].change);
+    assert_eq!(p.debt(), 0);
+    assert_eq!(destroy_dances(&b, &scope_from_defaults(&b), &joined).unwrap(), vec!["teardown"]);
+
+    // 已经不在册的机器不该再跳一次退役的舞。
+    let gone = FakeCtx::new().on("kubelet.conf", 0, "absent\n");
+    assert!(destroy_dances(&b, &scope_from_defaults(&b), &gone).unwrap().is_empty());
+    assert_eq!(plan_destroy(&b, &scope_from_defaults(&b), &gone).unwrap().summary(), "+0 ~0 -0 ✓1");
 }

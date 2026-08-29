@@ -165,6 +165,39 @@ pub(crate) async fn destroy_lensed(
 
     let mut failures = 0usize;
     let mut removed_any = false;
+
+    // 先跳退役的舞,再拆资源 —— 与 apply **相反**,而且必须相反:
+    // apply 时资源要先就位(kubeadm 得先有 containerd);退役时若先卸掉
+    // containerd/kubelet,etcd 里那个成员就成了永远清不掉的孤儿。
+    if yes {
+        let targets =
+            connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs)
+                .await?;
+        let dances = {
+            let first = fleet.members.first().map(|m| m.name.clone());
+            match first {
+                Some(m) => plan::destroy_dances(&bp, &targets.scope(&m)?, targets.ctx(&m)?)?,
+                None => Vec::new(),
+            }
+        };
+        for name in &dances {
+            println!("── procedure {name}(退役)──");
+            match procedure::run(&bp, name, &targets, &BTreeMap::new()) {
+                Ok(r) => {
+                    print_proc_report(&r);
+                    removed_any = true;
+                }
+                Err(e) => {
+                    failures += 1;
+                    eprintln!("退役过程 {name} 失败 —— {e}\n");
+                }
+            }
+        }
+        if failures > 0 {
+            bail!("退役过程失败,已中止 —— 资源未拆除(避免留下半退役状态)");
+        }
+    }
+
     for host in &hosts {
         let transport = build_transport(host).await?;
         println!("── {} ──", host_label(host));

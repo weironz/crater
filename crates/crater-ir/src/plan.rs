@@ -266,23 +266,44 @@ pub fn converge(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<RunRepor
 ///
 /// 顺序即声明序的**逆序**:后建的先拆(服务先停,配置后删,目录最后)。
 pub fn plan_destroy(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<Plan> {
+    plan_destroy_inner(bp, scope, ctx)
+}
+
+/// 本次退役需要跳的舞(按声明序去重)。
+///
+/// **顺序与 apply 相反,这不是对称的美学**:apply 是"资源就位 → 跳舞"
+/// (kubeadm 得先有 containerd);destroy 必须"先跳舞退出集群 → 再拆资源",
+/// 否则 containerd/kubelet 先被卸掉,etcd 里那个成员就成了永远清不掉的孤儿。
+pub fn destroy_dances(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for u in expand(bp, scope)? {
+        let Some(def) = bp.custom_type(&u.ty) else { continue };
+        let Some(dance) = &def.destroy else { continue };
+        if crate::procedure::observe_custom(def, ctx, scope)?.present && !out.contains(dance) {
+            out.push(dance.clone());
+        }
+    }
+    Ok(out)
+}
+
+fn plan_destroy_inner(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<Plan> {
     let mut units = expand(bp, scope)?;
     units.reverse();
     let mut items = Vec::new();
     for u in units {
-        // L2 自定义类型:引擎不懂怎么拆(那是作者的舞),诚实报"说不清",
-        // 而不是假装拆得掉。
-        if bp.custom_type(&u.ty).is_some() {
-            items.push(PlanItem {
-                id: u.id,
-                ty: u.ty.clone(),
-                args: u.args,
-                observed: Observed::default(),
-                change: Change::Unknown(format!(
-                    "自定义类型 `{}` 的退役需要作者声明的舞,引擎不代劳",
+        // L2 自定义类型:现实照样用作者的探针读,但**拆**要靠作者声明的舞。
+        // 声明了 `destroy:` 就说得出"靠哪支舞退役";没声明才是真的说不清。
+        if let Some(def) = bp.custom_type(&u.ty) {
+            let observed = crate::procedure::observe_custom(def, ctx, scope)?;
+            let change = match (&observed.present, &def.destroy) {
+                (false, _) => Change::Ok,
+                (true, Some(_)) => Change::Destroy,
+                (true, None) => Change::Unknown(format!(
+                    "自定义类型 `{}` 没声明 `destroy:`,引擎不知道怎么拆它",
                     u.ty
                 )),
-            });
+            };
+            items.push(PlanItem { id: u.id, ty: u.ty, args: u.args, observed, change });
             continue;
         }
         let Some(rt) = resolve_type(bp, &u.ty) else {
