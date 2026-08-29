@@ -33,6 +33,7 @@ mod types_cmd;
 mod ui;
 mod ui_contract;
 mod ui_edit;
+mod ui_overview;
 mod ui_run;
 
 use std::path::{Path, PathBuf};
@@ -308,6 +309,9 @@ enum Cmd {
     /// state. Answers "is reality still what we deployed?", which `plan` cannot:
     /// without a record, "never deployed" and "drifted" look identical.
     Verify {
+        /// Write a machine-readable verify report here (per-host verdicts).
+        #[arg(long, value_name = "FILE")]
+        json: Option<PathBuf>,
         /// Blueprint file (new IR pipeline).
         #[arg(short, long)]
         file: Option<PathBuf>,
@@ -719,12 +723,12 @@ async fn main() -> Result<()> {
                 ),
             }
         }
-        Cmd::Verify { file, source, target, set } => {
+        Cmd::Verify { json, file, source, target, set } => {
             if let Some(p) = stack_source(&file, &source) {
                 return stack_cmd::run(&p, &target, &set, StackMode::Verify).await;
             }
             match blueprint_source(&file, &source) {
-                Some(p) => blueprint::verify_blueprint(&p, &target, &set).await,
+                Some(p) => blueprint::verify_blueprint_json(&p, &target, &set, json.as_deref()).await,
                 None => anyhow::bail!(
                     "`crater verify` 目前只支持新 IR blueprint 与 stack;\
                      旧 task 的漂移检测用 `crater task list --verify`"

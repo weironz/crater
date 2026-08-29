@@ -39,6 +39,13 @@ pub struct DeploymentRecord {
     /// unix 秒。用整数而非日期字符串:比较不必解析,时区永不出错。
     pub applied_at: u64,
     pub verified_at: Option<u64>,
+    /// apply 时**期望态文件**的指纹(蓝图/inventory 的 sha256)。
+    ///
+    /// OutOfDate 检测的地基:当前文件 hash ≠ 记录 hash ⇒ "期望态已改、尚未
+    /// 收敛" —— ArgoCD OutOfSync 的对应物。旧记录没有这两个字段(None),
+    /// 按 Unknown 处理,不误报。
+    pub blueprint_sha256: Option<String>,
+    pub inventory_sha256: Option<String>,
     pub resources: Vec<ResourceRecord>,
 }
 
@@ -56,6 +63,8 @@ impl DeploymentRecord {
             target: target.to_string(),
             applied_at: now(),
             verified_at: Some(now()),
+            blueprint_sha256: None,
+            inventory_sha256: None,
             resources: plan
                 .items
                 .iter()
@@ -251,6 +260,12 @@ fn encode(r: &DeploymentRecord) -> String {
     if let Some(v) = r.verified_at {
         put("verified_at", v.into());
     }
+    if let Some(v) = &r.blueprint_sha256 {
+        put("blueprint_sha256", v.clone().into());
+    }
+    if let Some(v) = &r.inventory_sha256 {
+        put("inventory_sha256", v.clone().into());
+    }
     let resources: Vec<serde_yaml::Value> = r
         .resources
         .iter()
@@ -283,6 +298,8 @@ fn decode(text: &str) -> anyhow::Result<DeploymentRecord> {
         target: s("target").unwrap_or_default(),
         applied_at: n("applied_at").unwrap_or(0),
         verified_at: n("verified_at"),
+        blueprint_sha256: s("blueprint_sha256"),
+        inventory_sha256: s("inventory_sha256"),
         resources: m
             .get(serde_yaml::Value::from("resources"))
             .and_then(|v| v.as_sequence())

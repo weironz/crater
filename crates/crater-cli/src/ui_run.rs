@@ -167,6 +167,11 @@ pub fn spawn(title: String, verb: String, blueprint: String, inventory: String, 
         // 外面包一层 sh:把退出码写进 exit_code 文件 —— 等它的人可能已经
         // 不在了(UI 重启),退出码必须自己落地。
         let dir = jobs_root().join(&jid);
+        // __JOBDIR__ 占位:spawn 前才知道 job 目录。
+        let args: Vec<String> = args
+            .iter()
+            .map(|a| a.replace("__JOBDIR__", &dir.display().to_string()))
+            .collect();
         let shline = format!(
             "exec >>{log} 2>&1; {exe} {args}; c=$?; echo $c > {dir}/exit_code; exit $c",
             log = shq(&log_path(&jid).display().to_string()),
@@ -198,6 +203,12 @@ pub fn spawn(title: String, verb: String, blueprint: String, inventory: String, 
 /// 按 exit_code 文件补记结论。等它的人可能已经换了一茬(UI 重启),
 /// 所以结论必须从磁盘读,而不是从内存里的 wait() 返回值。
 fn finalize(id: &str) {
+    // verify 报告 → 对账快照。放在结论判定之前:exit=1(有漂移)时报告同样有效 ——
+    // "发现漂移"正是快照最有价值的时刻。
+    let vr = jobs_root().join(id).join("verify.json");
+    if vr.exists() {
+        crate::ui_overview::stash_verify_report(&vr);
+    }
     let Some(mut m) = read_meta(id) else { return };
     if m.status != "running" {
         return; // cancel() 已下结论,不覆盖
@@ -275,6 +286,12 @@ pub async fn run(Json(req): Json<RunReq>) -> Response {
         }
         args.push("--set".into());
         args.push(kv.clone());
+    }
+    // verify 自动带 --json:对账看板的供血管道 —— 报告落在 job 目录,
+    // finalize 时拆成每条部署记录一份快照。
+    if req.verb == "verify" {
+        args.push("--json".into());
+        args.push("__JOBDIR__/verify.json".into());
     }
     // destroy 的 --yes 由服务端追加 —— 客户端只表达意图,阶梯在这里成为结构:
     // 没有经过这个端点的确认语义,就没有 --yes。

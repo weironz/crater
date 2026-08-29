@@ -308,7 +308,77 @@ impl From<StackMode> for Mode {
 /// 与 plan 的差别只在解读:plan 回答"要做什么",verify 回答"部署过的东西还对不对"。
 /// 两者共用同一个 observe —— 所以不可能出现"plan 说要改、verify 说没事"。
 pub async fn verify_blueprint(path: &Path, target: &TargetOpts, sets: &[String]) -> Result<()> {
-    run_on_targets(path, target, sets, Mode::Verify, &Lens::default()).await
+    verify_blueprint_json(path, target, sets, None).await
+}
+
+/// `--json <path>`:核对结果的机器可读输出 —— UI 的对账供血管道。
+pub async fn verify_blueprint_json(
+    path: &Path,
+    target: &TargetOpts,
+    sets: &[String],
+    json_out: Option<&Path>,
+) -> Result<()> {
+    VERIFY_JSON.with(|v| *v.borrow_mut() = Some(Vec::new()));
+    let r = run_on_targets(path, target, sets, Mode::Verify, &Lens::default()).await;
+    let entries = VERIFY_JSON.with(|v| v.borrow_mut().take()).unwrap_or_default();
+    if let Some(out) = json_out {
+        let doc = serde_json::json!({
+            "blueprint": path.display().to_string(),
+            "inventory": target.inventory.as_ref().map(|p| p.display().to_string()),
+            "ts": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+            "hosts": entries,
+        });
+        std::fs::write(out, serde_json::to_string_pretty(&doc)?)?;
+    }
+    r
+}
+
+thread_local! {
+    /// Verify 模式的结构化收集槽。线程局部而非改十几处签名:
+    /// run_on_targets 的调用链很深,verify 又只是三种模式之一。
+    static VERIFY_JSON: std::cell::RefCell<Option<Vec<serde_json::Value>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn verify_collect(entry: serde_json::Value) {
+    VERIFY_JSON.with(|v| {
+        if let Some(list) = v.borrow_mut().as_mut() {
+            list.push(entry);
+        }
+    });
+}
+
+/// 一台主机的核对结论 → JSON(供 --json 与 UI 的对账看板)。
+fn verdict_json(
+    host: &str,
+    record_id: &str,
+    v: &crater_ir::state::DriftVerdict,
+    prev: Option<&DeploymentRecord>,
+) -> serde_json::Value {
+    use crater_ir::state::DriftVerdict as V;
+    let (verdict, drifted, unknown) = match v {
+        V::NeverDeployed => ("never", vec![], 0usize),
+        V::InSync => ("in_sync", vec![], 0),
+        V::Drifted(d) => ("drifted", d.clone(), 0),
+        V::Indeterminate { drifted, unknown } => ("indeterminate", drifted.clone(), *unknown),
+    };
+    serde_json::json!({
+        "host": host,
+        "record_id": record_id,
+        "verdict": verdict,
+        "drifted": drifted.iter().map(|d| serde_json::json!({
+            "id": d.id, "detail": d.detail, "known": d.known,
+        })).collect::<Vec<_>>(),
+        "unknown": unknown,
+        "applied_at": prev.map(|p| p.applied_at),
+        "blueprint_sha256": prev.and_then(|p| p.blueprint_sha256.clone()),
+    })
+}
+
+/// 期望态文件的 sha256(读不到返回 None —— 指纹缺失按 Unknown 处理,不误报)。
+fn file_sha(p: &Path) -> Option<String> {
+    std::fs::read(p).ok().map(|b| crater_core::bundle::sha256_hex(&b))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -381,7 +451,16 @@ async fn run_on_targets(
 
         if mode == Mode::Verify {
             // 只读路径:不打印"将创建"之类的动作语,只回答"还对不对"。
-            if report_drift(&state::assess(&plan, previous.as_ref()), previous.as_ref()) {
+            let verdict = state::assess(&plan, previous.as_ref());
+            verify_collect(verdict_json(&fleet_name(host), &record_id, &verdict, previous.as_ref()));
+            // 核对本身就是一次"上次什么时候看过"的证据 —— 回写 verified_at,
+            // UI 的"多久没核对"才有数据;资源快照保持 apply 时的孪生,不动。
+            if let Some(mut prev) = previous.clone() {
+                prev.verified_at = Some(std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+                let _ = store.save(&prev);
+            }
+            if report_drift(&verdict, previous.as_ref()) {
                 failures += 1;
             }
             continue;
@@ -408,6 +487,11 @@ async fn run_on_targets(
                                 &fleet_name(host),
                                 &after,
                             );
+                            // 期望态指纹:OutOfDate 检测的地基 —— 当前文件 hash ≠
+                            // 记录 hash 时,UI 能判"期望态已改、尚未收敛"。
+                            rec.blueprint_sha256 = file_sha(path);
+                            rec.inventory_sha256 =
+                                target.inventory.as_deref().and_then(file_sha);
                             if let Some(prev) = &previous {
                                 rec.applied_at = prev.applied_at; // 首次部署时间不该被刷新
                             }

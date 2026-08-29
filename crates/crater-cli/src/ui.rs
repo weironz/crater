@@ -202,6 +202,10 @@ pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
         .route("/api/file", get(crate::ui_edit::file_get).post(crate::ui_edit::file_put))
         // ---- 作业系统(阶段①:执行打通)----
         .route("/api/run", post(crate::ui_run::run))
+        // ---- 对账看板(阶段②)----
+        .route("/api/overview", get(crate::ui_overview::overview))
+        .route("/view/overview", get(crate::ui_overview::view_overview))
+        .route("/api/record/{id}", axum::routing::delete(crate::ui_overview::delete_record))
         .route("/api/jobs", get(crate::ui_run::jobs_fragment))
         .route("/api/job2/{id}", get(crate::ui_run::tail))
         .route("/api/job2/{id}/cancel", post(crate::ui_run::cancel))
@@ -337,7 +341,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
   <aside class="sidebar">
     <div class="brand"><span class="mark">▲</span> <span>crater</span></div>
     <div class="navlabel">Overview</div>
-    <a class="nav active" onclick="nav(this)" hx-get="/view/dashboard" hx-target="#view" hx-swap="innerHTML"><span class="ico">◧</span><span>仪表盘</span></a>
+    <a class="nav active" onclick="nav(this)" hx-get="/view/overview" hx-target="#view" hx-swap="innerHTML"><span class="ico">◎</span><span>对账</span></a>
+    <a class="nav" onclick="nav(this)" hx-get="/view/dashboard" hx-target="#view" hx-swap="innerHTML"><span class="ico">◧</span><span>仪表盘</span></a>
     <div class="navlabel">Fleet</div>
     <a class="nav" onclick="nav(this)" hx-get="/view/hosts" hx-target="#view" hx-swap="innerHTML"><span class="ico">▤</span><span>主机</span></a>
     <a class="nav" onclick="nav(this)" hx-get="/view/groups" hx-target="#view" hx-swap="innerHTML"><span class="ico">⊞</span><span>主机组</span></a>
@@ -354,7 +359,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         <button id="themeBtn" class="theme-btn" onclick="toggleTheme()" title="toggle theme">🌙</button>
       </div>
     </header>
-    <main id="view" hx-get="/view/dashboard" hx-trigger="load" hx-swap="innerHTML"><div class="empty">loading…</div></main>
+    <main id="view" hx-get="/view/overview" hx-trigger="load" hx-swap="innerHTML"><div class="empty">loading…</div></main>
   </div>
 </div>
 <script>
