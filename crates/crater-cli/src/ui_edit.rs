@@ -32,6 +32,10 @@ fn root() -> std::io::Result<PathBuf> {
 ///
 /// 对尚不存在的文件(新建),canonicalize 会失败 —— 这时改为核对它的父目录,
 /// 否则"另存为新文件"就永远做不了。
+pub(crate) fn confine(rel: &str) -> Result<PathBuf, (StatusCode, String)> {
+    resolve(rel)
+}
+
 fn resolve(rel: &str) -> Result<PathBuf, (StatusCode, String)> {
     let root = root().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let joined = root.join(rel);

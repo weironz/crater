@@ -45,26 +45,46 @@ pub async fn run(path: &Path, target: &TargetOpts, sets: &[String], mode: StackM
     }
     println!();
 
+    let mut verify_failures: Vec<String> = Vec::new();
     for (i, (u, bp_path)) in entries.iter().enumerate() {
         println!("══ [{}/{}] {} ══", i + 1, entries.len(), u.label());
         let lens = Lens {
             groups: u.groups.clone(),
             params: u.params.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         };
-        blueprint::run_lensed(bp_path, target, sets, mode, &lens)
-            .await
-            // 失败即停:栈是有序的,继续往下只会把一个清晰的失败变成一堆。
-            .with_context(|| {
-                format!(
-                    "栈 `{}` 在第 {}/{} 份蓝图 `{}` 上中止 —— 其后的 {} 份未执行",
-                    st.name,
-                    i + 1,
-                    entries.len(),
-                    u.label(),
-                    entries.len() - i - 1
-                )
-            })?;
+        let r = blueprint::run_lensed(bp_path, target, sets, mode, &lens).await;
+        match r {
+            Ok(()) => {}
+            // **verify 不在失败处停**:核对的价值是一张完整的账单 ——
+            // 第一处漂移就中止,等于告诉运维"后面的我没看"。
+            // apply 则相反,失败即停:栈有序,containerd 没装上,k8s 装了也不会好。
+            Err(e) if mode == StackMode::Verify => {
+                eprintln!("蓝图 `{}` 核对未通过 —— {e:#}\n(继续核对其余蓝图)\n", u.label());
+                verify_failures.push(u.label().to_string());
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "栈 `{}` 在第 {}/{} 份蓝图 `{}` 上中止 —— 其后的 {} 份未执行",
+                        st.name,
+                        i + 1,
+                        entries.len(),
+                        u.label(),
+                        entries.len() - i - 1
+                    )
+                });
+            }
+        }
         println!();
+    }
+    if !verify_failures.is_empty() {
+        anyhow::bail!(
+            "栈 `{}`:{}/{} 份蓝图核对未通过({})",
+            st.name,
+            verify_failures.len(),
+            entries.len(),
+            verify_failures.join(", ")
+        );
     }
     println!("栈 `{}` 全部 {} 份蓝图完成。", st.name, entries.len());
     Ok(())
@@ -94,6 +114,7 @@ pub async fn destroy(path: &Path, target: &TargetOpts, sets: &[String], yes: boo
         entries.iter().map(|(u, _)| u.label()).collect::<Vec<_>>().join(" → ")
     );
 
+    let mut verify_failures: Vec<String> = Vec::new();
     for (i, (u, bp_path)) in entries.iter().enumerate() {
         println!("══ [{}/{}] {} ══", i + 1, entries.len(), u.label());
         let lens = Lens {

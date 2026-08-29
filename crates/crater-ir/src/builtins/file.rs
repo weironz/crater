@@ -79,16 +79,21 @@ impl ResourceType for File {
         }
     }
 
-    fn apply(&self, ctx: &dyn Ctx, args: &ResolvedArgs, change: &Change) -> Result<Outcome> {
+    fn apply(&self, ctx: &dyn Ctx, args: &ResolvedArgs, _change: &Change) -> Result<Outcome> {
         let path = arg_str(args, "path")?;
         let state = arg_str_opt(args, "state").unwrap_or("directory");
-        if matches!(change, Change::Destroy) {
-            return self.destroy(ctx, args, &Observed::default());
+        // `state: absent` 直接删,**不借道 destroy()**。destroy 对 absent 资源的
+        // 语义是"退役时无事可做"(期望本就是不存在,别把别人的东西删了)——
+        // 那对退役是对的,对 apply 是灾难:此前 Destroy 变更被路由过去,
+        // 删除静默变成空操作还报 ok,真机上 nginx 的 sites-enabled/default
+        // 就是这么在 plan 里"将删除"、执行后依然活着的。
+        if state == "absent" {
+            run_ok(ctx, &format!("rm -rf {}", sh(path)))?;
+            return Ok(Outcome::Changed);
         }
         let cmd = match state {
             "directory" => format!("mkdir -p {}", sh(path)),
             "touch" => format!("touch {}", sh(path)),
-            "absent" => format!("rm -rf {}", sh(path)),
             other => anyhow::bail!("未知 state `{other}`"),
         };
         run_ok(ctx, &cmd)?;
@@ -276,5 +281,33 @@ mod mountpoint_guard_tests {
         let out = File.destroy(&ctx, &args("/opt/plain"), &Observed::present([])).unwrap();
         assert_eq!(out, Outcome::Changed);
         assert!(ctx.calls().iter().any(|c| c.text().starts_with("rm -rf '/opt/plain'")));
+    }
+}
+
+#[cfg(test)]
+mod destroy_change_tests {
+    use super::*;
+    use crate::ctx::FakeCtx;
+    use crate::eval::Yaml;
+
+    #[test]
+    fn an_apply_of_a_destroy_change_actually_removes_the_path() {
+        // plan 判了 Destroy,apply 就必须真删。此前这里把 Observed::default()
+        // (present=false)传给 destroy,触发它"不在就不动"的闸 ——
+        // 删除静默变空操作还报 ok。
+        let ctx = FakeCtx::new().on("mountpoint -q", 1, "").on("rm -rf", 0, "");
+        let args: ResolvedArgs = [
+            ("path".to_string(), Yaml::from("/etc/nginx/sites-enabled/default")),
+            ("state".to_string(), Yaml::from("absent")),
+        ]
+        .into_iter()
+        .collect();
+        let out = File.apply(&ctx, &args, &Change::Destroy).unwrap();
+        assert_eq!(out, Outcome::Changed);
+        assert!(
+            ctx.calls().iter().any(|c| c.text().starts_with("rm -rf '/etc/nginx/sites-enabled/default'")),
+            "没有发出删除:{:?}",
+            ctx.calls()
+        );
     }
 }

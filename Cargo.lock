@@ -723,6 +723,7 @@ dependencies = [
  "crater-core",
  "crater-ir",
  "futures",
+ "libc",
  "serde",
  "serde_json",
  "serde_yaml",

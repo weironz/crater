@@ -171,6 +171,9 @@ pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
     if !local && token.is_none() {
         anyhow::bail!("--bind {bind} 暴露到本机之外,必须配 --token <t>(UI 能 apply/delete)");
     }
+    // 上一次进程死掉时正在跑的 job,现在判为 interrupted —— 不清账的话,
+    // 重启后列表里会留下永远转圈的僵尸行。
+    crate::ui_run::sweep_on_start();
     let st = AppState { token, ..Default::default() };
     let app = Router::new()
         .route("/", get(index))
@@ -197,6 +200,14 @@ pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
         .route("/view/edit", get(crate::ui_edit::view_edit))
         .route("/api/files", get(crate::ui_edit::files))
         .route("/api/file", get(crate::ui_edit::file_get).post(crate::ui_edit::file_put))
+        // ---- 作业系统(阶段①:执行打通)----
+        .route("/api/run", post(crate::ui_run::run))
+        .route("/api/jobs", get(crate::ui_run::jobs_fragment))
+        .route("/api/job2/{id}", get(crate::ui_run::tail))
+        .route("/api/job2/{id}/cancel", post(crate::ui_run::cancel))
+        .route("/view/run", get(crate::ui_run::view_run))
+        .route("/view/jobs", get(crate::ui_run::view_jobs))
+        .route("/view/job/{id}", get(crate::ui_run::view_job))
         .route("/htmx.min.js", get(htmx_js))
         .layer(middleware::from_fn_with_state(st.clone(), auth_mw))
         .with_state(st);
@@ -333,6 +344,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <div class="navlabel">Deploy</div>
     <a class="nav" onclick="nav(this)" hx-get="/view/tasks" hx-target="#view" hx-swap="innerHTML"><span class="ico">✦</span><span>任务</span></a>
     <a class="nav" onclick="nav(this)" hx-get="/view/edit" hx-target="#view" hx-swap="innerHTML"><span class="ico">✎</span><span>蓝图</span></a>
+    <a class="nav" onclick="nav(this)" hx-get="/view/run" hx-target="#view" hx-swap="innerHTML"><span class="ico">▶</span><span>运行</span></a>
+    <a class="nav" onclick="nav(this)" hx-get="/view/jobs" hx-target="#view" hx-swap="innerHTML"><span class="ico">≡</span><span>作业</span></a>
   </aside>
   <div class="content">
     <header class="topbar">
