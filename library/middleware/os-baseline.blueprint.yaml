@@ -1,0 +1,63 @@
+# 主机基线 —— 一切中间件之前,把机器拉到同一条线上。
+#
+# 它刻意**不装任何软件**:基线的职责是"让这台机器可预测",不是"让它有用"。
+# 混进去一个 nginx,这份蓝图就再也不能被别的栈复用了。
+name: os-baseline
+version: "1"
+description: 机群基线:身份、时钟、内核参数、服务账号
+
+fleet:
+  groups:
+    all: {min: 1}
+
+params:
+  timezone:    { default: "Asia/Shanghai", desc: "机群统一时区" }
+  ntp_servers: { type: [string], default: ["ntp.aliyun.com", "cn.pool.ntp.org"] }
+  svc_user:    { default: "appsvc", desc: "中间件共用的服务账号(非登录)" }
+  svc_uid:     { type: int, default: 6000, desc: "固定 uid —— 跨机一致才好对 NFS/备份的属主" }
+  max_files:   { type: int, default: 65536, desc: "服务账号的文件描述符上限" }
+
+resources:
+  # ---- 身份与时间 ----
+  - hostname: "${substrate.name}"
+  - timezone: "${params.timezone}"
+  # wait: true —— 中间件的证书、复制、仲裁都吃时钟偏差,让它在基线阶段就收敛。
+  - time_sync: { servers: "${params.ntp_servers}", wait: true }
+
+  # ---- 服务账号 ----
+  # 固定 gid/uid 而不是让系统分配:数据盘在机器间搬动时,属主要对得上。
+  - group: { name: "${params.svc_user}", gid: "${params.svc_uid}", state: present }
+  - user:
+      name: "${params.svc_user}"
+      uid: "${params.svc_uid}"
+      group: "${params.svc_user}"
+      shell: /usr/sbin/nologin
+      home: "/var/lib/${params.svc_user}"
+      system: true
+      state: present
+
+  # ---- 内核与限制 ----
+  - sysctl:
+      set:
+        # 中间件普遍要的三项:连接队列、端口范围、脏页回写。
+        net.core.somaxconn: 4096
+        net.ipv4.ip_local_port_range: "10000 65000"
+        vm.swappiness: 10
+  - swap: { state: disabled, persist: true }
+
+  # limits.conf 是 lineinfile 的典型用武之地:一份系统文件,我们只负责其中两行。
+  # 整份覆写会丢掉发行版和别的组件写进去的内容。
+  - lineinfile:
+      path: /etc/security/limits.conf
+      regexp: "^${params.svc_user}\\s+soft\\s+nofile"
+      line: "${params.svc_user} soft nofile ${params.max_files}"
+      create: true
+  - lineinfile:
+      path: /etc/security/limits.conf
+      regexp: "^${params.svc_user}\\s+hard\\s+nofile"
+      line: "${params.svc_user} hard nofile ${params.max_files}"
+      create: true
+
+health:
+  - cmd: { run: "id ${params.svc_user}" }
+  - cmd: { run: "timedatectl show -p NTPSynchronized --value | grep -qx yes" }

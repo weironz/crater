@@ -307,15 +307,22 @@ pub static BUILTINS: &[BuiltinType] = &[
         f!("name", Str, req, "用户名"),
         f!("state", enum ["present", "absent"], Optional, "默认 present"),
         f!("system", Bool, opt, "系统用户(--system)"),
+        f!("uid", Int, opt, "固定 uid;不写则由系统分配"),
+        f!("group", Str, opt, "主组名(-g);不写则由系统按发行版惯例决定"),
         f!("shell", Path, opt, "登录 shell"),
         f!("home", Path, opt, "家目录"),
-        f!("groups", List, opt, "附加组"),
-    ], see: ["group"]),
+        f!("groups", List, opt, "附加组(-G)"),
+    ],
+      note: "`uid` / `gid` 值得固定:数据盘在机器间搬动、备份归档跨机还原时,\
+              属主靠的是数字而不是名字 —— 系统分配的 uid 各机不同,搬过去就成了\
+              一堆 `nobody`。主组用 `group:`(单数),附加组用 `groups:`(复数)。",
+      see: ["group"]),
 
     t!("group", Resource, "系统组", [
         f!("name", Str, req, "组名"),
         f!("state", enum ["present", "absent"], Optional, "默认 present"),
         f!("system", Bool, opt, "系统组"),
+        f!("gid", Int, opt, "固定 gid;不写则由系统分配"),
     ], see: ["user"]),
 
     t!("mount", Resource, "挂载点", [

@@ -243,6 +243,22 @@ pub fn arg_str_opt<'a>(args: &'a ResolvedArgs, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Yaml::as_str)
 }
 
+/// 取**任意标量**并渲染成字符串 —— 数字、布尔、字符串一视同仁。
+///
+/// `arg_str_opt` 只认 `Yaml::String`:参数声明成 `type: int` 时它返回 `None`,
+/// 于是命令行标志被**悄悄省掉**,而不是报错。真机上的表现是"请求 uid=6000,
+/// 实际拿到系统分配的 999",且因为永远对不上,幂等也一并失效。
+///
+/// 凡是"这个字段可能被写成数字"的地方(uid/gid/端口/超时),都该用这个。
+pub fn arg_scalar_opt<'a>(args: &'a ResolvedArgs, key: &str) -> Option<String> {
+    match args.get(key)? {
+        Yaml::String(s) => Some(s.clone()),
+        Yaml::Number(n) => Some(n.to_string()),
+        Yaml::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 pub fn arg_bool(args: &ResolvedArgs, key: &str) -> Option<bool> {
     args.get(key).and_then(Yaml::as_bool)
 }

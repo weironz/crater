@@ -112,6 +112,12 @@ pub struct KernelModules;
 
 const MODULES_CONF: &str = "/etc/modules-load.d/crater.conf";
 
+/// 把连续空白折叠成单个空格 —— sysctl 的多字段值内核用制表符回读,
+/// 人写的是空格,两者语义相同。
+fn ws_norm(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 impl ResourceType for KernelModules {
     fn name(&self) -> &'static str {
         "kernel_modules"
@@ -192,6 +198,11 @@ impl ResourceType for Sysctl {
             // 探针失败 = 这个键在本机不存在(比如 br_netfilter 还没加载)。
             // 早期版本把 stderr 当成了"当前值",于是错误文本被塞进 diff 里刷屏。
             let current = if code == 0 { out.trim() } else { "(未设置)" };
+            // 多字段的 sysctl(如 ip_local_port_range)内核回读用**制表符**分隔,
+            // 而人写在蓝图里的是空格。不归一就会永久漂移:值其实一模一样,
+            // verify 却天天报警 —— 这种"狼来了"比漏报更伤,报久了没人再看。
+            let current = ws_norm(current);
+            let want = ws_norm(&want);
             if current != want {
                 wrong.push(format!("{k}: {current} → {want}"));
             }
@@ -259,20 +270,29 @@ impl ResourceType for User {
     fn observe(&self, ctx: &dyn Ctx, args: &ResolvedArgs) -> Result<Observed> {
         let name = arg_str(args, "name")?;
         let (code, out) = ctx.probe(&format!(
-            "getent passwd {} | cut -d: -f6,7 --output-delimiter='\u{1}'",
+            "getent passwd {} | cut -d: -f3,4,6,7 --output-delimiter='\u{1}'",
             sh(name)
         ))?;
         if code != 0 || out.trim().is_empty() {
             return Ok(Observed::absent());
         }
         let f: Vec<&str> = out.trim().split('\u{1}').collect();
+        let g = |i: usize| f.get(i).copied().unwrap_or_default().to_string();
+        // passwd 格式:name:x:uid:gid:gecos:home:shell —— 取的是 3,4,6,7 四段。
+        // 主组以**组名**呈现(而非 gid),好与蓝图里写的 `group: appsvc` 直接比。
+        let gname = {
+            let (c, o) = ctx.probe(&format!("getent group {} | cut -d: -f1", sh(&g(1))))?;
+            if c == 0 { o.trim().to_string() } else { g(1) }
+        };
         Ok(Observed::present([
-            ("home", f.first().copied().unwrap_or_default().to_string()),
-            ("shell", f.get(1).copied().unwrap_or_default().to_string()),
+            ("uid", g(0)),
+            ("group", gname),
+            ("home", g(2)),
+            ("shell", g(3)),
         ]))
     }
     fn diff(&self, input: &DiffInput) -> Change {
-        presence_diff(input, &["home", "shell"])
+        presence_diff(input, &["uid", "group", "home", "shell"])
     }
     fn apply(&self, ctx: &dyn Ctx, args: &ResolvedArgs, change: &Change) -> Result<Outcome> {
         let name = arg_str(args, "name")?;
@@ -283,9 +303,11 @@ impl ResourceType for User {
         if arg_bool(args, "system").unwrap_or(false) {
             flags.push_str(" --system");
         }
-        for (k, flag) in [("shell", "--shell"), ("home", "--home")] {
-            if let Some(v) = arg_str_opt(args, k) {
-                flags.push_str(&format!(" {flag} {}", sh(v)));
+        for (k, flag) in [("shell", "--shell"), ("home", "--home"), ("uid", "--uid"), ("group", "--gid")] {
+            // arg_scalar_opt 而非 arg_str_opt:uid 常被写成 `type: int`,
+            // 后者会返回 None 并静默省掉标志。
+            if let Some(v) = arg_scalar_opt(args, k) {
+                flags.push_str(&format!(" {flag} {}", sh(&v)));
             }
         }
         let groups = list_of(args, "groups");
@@ -315,20 +337,32 @@ impl ResourceType for Group {
     fn observe(&self, ctx: &dyn Ctx, args: &ResolvedArgs) -> Result<Observed> {
         let (code, out) = ctx.probe(&format!("getent group {}", sh(arg_str(args, "name")?)))?;
         Ok(if code == 0 && !out.trim().is_empty() {
-            Observed::present([])
+            // getent 格式:name:x:gid:members —— 第三段是 gid。
+            let gid = out.trim().split(':').nth(2).unwrap_or_default().to_string();
+            Observed::present([("gid", gid)])
         } else {
             Observed::absent()
         })
     }
     fn diff(&self, input: &DiffInput) -> Change {
-        presence_diff(input, &[])
+        presence_diff(input, &["gid"])
     }
     fn apply(&self, ctx: &dyn Ctx, args: &ResolvedArgs, change: &Change) -> Result<Outcome> {
         if matches!(change, Change::Destroy) {
             return self.destroy(ctx, args, &Observed::present([]));
         }
         let sys = if arg_bool(args, "system").unwrap_or(false) { " --system" } else { "" };
-        run_ok(ctx, &format!("groupadd -f{sys} {}", sh(arg_str(args, "name")?)))?;
+        let gid = arg_scalar_opt(args, "gid")
+            .map(|g| format!(" --gid {}", sh(&g)))
+            .unwrap_or_default();
+        // `-f` 让"已存在"不算错;但已存在时 groupadd 不会改 gid,
+        // 所以 gid 不符要走 groupmod。
+        let name = arg_str(args, "name")?;
+        if matches!(change, Change::Update(_)) && !gid.is_empty() {
+            run_ok(ctx, &format!("groupmod{gid} {}", sh(name)))?;
+            return Ok(Outcome::Changed);
+        }
+        run_ok(ctx, &format!("groupadd -f{sys}{gid} {}", sh(name)))?;
         Ok(Outcome::Changed)
     }
     fn destroy(&self, ctx: &dyn Ctx, args: &ResolvedArgs, obs: &Observed) -> Result<Outcome> {
@@ -726,6 +760,28 @@ mod time_tests {
     }
 
     // ---------------------------------------------------------- timezone
+
+    #[test]
+    fn a_multi_field_sysctl_does_not_drift_forever_on_whitespace() {
+        // 内核回读 ip_local_port_range 用**制表符**,人写在蓝图里的是空格。
+        // 不归一就会永久漂移:值一模一样,verify 却天天报警 ——
+        // 这种"狼来了"比漏报更伤,报久了没人再看真的告警。
+        let ctx = FakeCtx::new().on("sysctl -n", 0, "10000\t65000\n");
+        let mut a = ResolvedArgs::new();
+        a.insert("set".into(), serde_yaml::from_str("{net.ipv4.ip_local_port_range: \"10000 65000\"}").unwrap());
+        let obs = Sysctl.observe(&ctx, &a).unwrap();
+        assert_eq!(obs.get("wrong"), Some(""), "空白差异被当成了漂移:{obs:?}");
+    }
+
+    #[test]
+    fn a_real_sysctl_difference_is_still_caught() {
+        // 别把归一扩大成"什么差异都忽略"。
+        let ctx = FakeCtx::new().on("sysctl -n", 0, "10000\t60000\n");
+        let mut a = ResolvedArgs::new();
+        a.insert("set".into(), serde_yaml::from_str("{net.ipv4.ip_local_port_range: \"10000 65000\"}").unwrap());
+        let obs = Sysctl.observe(&ctx, &a).unwrap();
+        assert!(obs.get("wrong").unwrap().contains("65000"), "{obs:?}");
+    }
 
     #[test]
     fn a_matching_timezone_is_a_noop() {
