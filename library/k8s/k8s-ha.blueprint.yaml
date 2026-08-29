@@ -408,11 +408,23 @@ procedures:
       - service: { name: kubelet, state: restarted }
         target: all
         strategy: { throttle: 1 }
+      # 解除封锁 —— 判据是**节点真的可调度了**,不是"命令跑过了"。
+      #
+      # 原先写的是 `kubectl uncordon … || true` 配 `check: "false"`:
+      # `|| true` 吞掉失败,check 恒不满足又意味着永不校验,于是这一步无论成没成
+      # 都报 changed。实测里 kubelet 刚重启、apiserver 短暂不可用,uncordon 静默
+      # 失败,cp2 就一直封锁着 —— 而报告显示一切正常。
+      #
+      # 现在 check 直接问集群"这个节点还封锁着吗",失败会被看见。
       - shell:
-          cmd: "kubectl uncordon ${substrate.name} || true"
-          check: "false"
+          cmd: "kubectl uncordon ${substrate.name}"
+          check: >-
+            test "$(kubectl get node ${substrate.name}
+            -o jsonpath='{.spec.unschedulable}' 2>/dev/null)" != "true"
           env: { KUBECONFIG: /etc/kubernetes/admin.conf }
         target: masters
+        # kubelet 刚重启,apiserver 可能还在恢复 —— 重试几次比失败更合理。
+        strategy: { retries: 3 }
 
 health:
   - service_active: kubelet
