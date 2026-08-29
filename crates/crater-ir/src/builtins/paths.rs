@@ -100,6 +100,10 @@ impl ResourceType for LineInFile {
         "lineinfile"
     }
 
+    fn retire_note(&self) -> Option<&'static str> {
+        Some("无法判断这一行原本在不在")
+    }
+
     fn observe(&self, ctx: &dyn Ctx, args: &ResolvedArgs) -> Result<Observed> {
         let path = arg_str(args, "path")?;
         let (exists, _) = ctx.probe(&format!("test -f {}", sh(path)))?;

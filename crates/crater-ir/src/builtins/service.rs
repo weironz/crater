@@ -35,8 +35,14 @@ impl ResourceType for Service {
         let enabled = parts.get(1).map(|s| s.trim()).unwrap_or_default();
         let unit_line = parts.get(2).map(|s| s.trim()).unwrap_or_default();
 
-        // unit 都不存在 ⇒ 资源不存在(而不是"存在但停着")。
-        if unit_line.is_empty() && active.is_empty() {
+        // unit 不存在 ⇒ 资源不存在(而不是"存在但停着")。
+        //
+        // **判据不能用 is-active**:unit 文件已被删除时它照样回 "inactive"
+        // (退出码 4,但输出非空),于是"不存在"会被读成"存在但停着",
+        // 紧接着 destroy 去 stop 一个不存在的 unit,得到 exit 5 而失败。
+        // 真机上重跑 destroy 正是这样炸的 —— 退役因此不幂等。
+        // 权威答案是 is-enabled 的 `not-found`,辅以 list-unit-files 为空。
+        if unit_line.is_empty() && (enabled == "not-found" || enabled.is_empty()) {
             return Ok(Observed::absent());
         }
         Ok(Observed::present([
@@ -127,9 +133,16 @@ impl ResourceType for Service {
             return Ok(Outcome::Ok);
         }
         // 停 + 禁用;unit 文件本身由它自己那条资源的 destroy 删(各归各的)。
+        //
+        // 容忍 exit 5(unit 不存在):observe 与 destroy 之间 unit 可能已被别的
+        // 东西移走(比如同一轮里包被卸了)。那不是失败,是"已经没了"。
         let name = arg_str(args, "name")?;
-        run_ok(ctx, &format!("systemctl stop {}", sh(name)))?;
-        run_ok(ctx, &format!("systemctl disable {}", sh(name)))?;
+        for verb in ["stop", "disable"] {
+            let (code, out) = ctx.run(&format!("systemctl {verb} {}", sh(name)))?;
+            if code != 0 && code != 5 {
+                anyhow::bail!("systemctl {verb} {name} 失败(exit {code}):{}", out.trim());
+            }
+        }
         Ok(Outcome::Changed)
     }
 }
@@ -599,5 +612,61 @@ mod unit_tests {
         let mut a = args();
         a.insert("name".into(), Yaml::from("containerd.socket"));
         assert_eq!(unit_path(&a).unwrap(), "/etc/systemd/system/containerd.socket");
+    }
+}
+
+#[cfg(test)]
+mod absence_tests {
+    use super::*;
+    use crate::ctx::FakeCtx;
+    use crate::eval::Yaml;
+
+    fn args(name: &str) -> ResolvedArgs {
+        [("name".to_string(), Yaml::from(name))].into_iter().collect()
+    }
+
+    #[test]
+    fn a_deleted_unit_is_absent_even_though_is_active_says_inactive() {
+        // 真机实证:unit 文件删掉后 `systemctl is-active` 仍回 "inactive"(非空)。
+        // 早先的判据 `unit_line.is_empty() && active.is_empty()` 因此判不出
+        // "不存在",destroy 会去 stop 一个不存在的 unit 拿到 exit 5 —— 退役不幂等。
+        let ctx = FakeCtx::new()
+            .on("systemctl is-active", 0, &format!("inactive{SEP}not-found{SEP}"));
+        let obs = Service.observe(&ctx, &args("keepalived")).unwrap();
+        assert!(!obs.present, "unit 已删除却被判为存在:{obs:?}");
+    }
+
+    #[test]
+    fn a_stopped_but_installed_service_is_still_present() {
+        // 反向保险:装着但停着,必须仍是"存在" —— 否则 `state: started`
+        // 永远不会去启动它。
+        let ctx = FakeCtx::new().on(
+            "systemctl is-active",
+            0,
+            &format!("inactive{SEP}enabled{SEP}nginx.service enabled"),
+        );
+        let obs = Service.observe(&ctx, &args("nginx")).unwrap();
+        assert!(obs.present, "{obs:?}");
+        assert_eq!(obs.get("active"), Some("inactive"));
+    }
+
+    #[test]
+    fn destroying_a_vanished_unit_is_not_a_failure() {
+        // observe 与 destroy 之间 unit 可能已被别的东西移走(同一轮里包被卸了)。
+        // exit 5 = unit 不存在,那不是失败,是"已经没了"。
+        // FakeCtx 对未注册命令回 exit 1,所以 disable 也要显式注册成 5。
+        let ctx = FakeCtx::new()
+            .on("systemctl stop", 5, "Unit keepalived.service not loaded.")
+            .on("systemctl disable", 5, "Unit keepalived.service does not exist.");
+        let obs = Observed::present([("active", "inactive".into()), ("enabled", "".into())]);
+        assert_eq!(Service.destroy(&ctx, &args("keepalived"), &obs).unwrap(), Outcome::Changed);
+    }
+
+    #[test]
+    fn a_real_stop_failure_still_fails() {
+        // 别把 exit 5 的宽容扩大成"什么错都咽下去"。
+        let ctx = FakeCtx::new().on("systemctl stop", 1, "Job for x.service failed");
+        let obs = Observed::present([("active", "active".into()), ("enabled", "".into())]);
+        assert!(Service.destroy(&ctx, &args("x"), &obs).is_err());
     }
 }

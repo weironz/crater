@@ -344,9 +344,17 @@ procedures:
             pkill -9 containerd-shim 2>/dev/null; true
           check: "! pgrep containerd-shim"
         target: all
+      # 判据要覆盖**这一步删的全部路径**,不能只挑一个。
+      #
+      # 原先写的是 `! test -d /var/lib/etcd` —— 而 worker 上从来就没有 etcd,
+      # 条件天然成立,于是 rm 在 worker 上**一次都没跑过**:真机销毁后
+      # /etc/kubernetes 与 /var/lib/kubelet 原样留在两台 worker 上。
+      # 这与升级那次是同一个毛病:check 检验了一个与本步效果无关的东西。
       - shell:
           cmd: "rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd /root/.kube"
-          check: "! test -d /var/lib/etcd"
+          check: >-
+            ! test -e /etc/kubernetes && ! test -e /var/lib/kubelet
+            && ! test -e /var/lib/etcd && ! test -e /root/.kube
         target: all
 
   # ---- 滚动升级 ----

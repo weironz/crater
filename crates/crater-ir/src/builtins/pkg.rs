@@ -30,7 +30,13 @@ impl ResourceType for Package {
                 missing.push(p.clone());
             }
         }
-        Ok(Observed::present([("missing", missing.join(","))]))
+        // `declared` 让退役能判断"是不是全都已经卸干净了"。
+        // 不能改用 present=false 表达 —— 那个布尔在 diff 里另有含义
+        // (「没有适配本机 family 的包名」),混用会让安装路径失灵。
+        Ok(Observed::present([
+            ("missing", missing.join(",")),
+            ("declared", pkgs.len().to_string()),
+        ]))
     }
     fn diff(&self, input: &DiffInput) -> Change {
         if !input.observed.present {
@@ -71,6 +77,20 @@ impl ResourceType for Package {
         }
         Ok(Outcome::Changed)
     }
+    /// 全都不在了就没什么可卸的 —— 否则重跑 destroy 会永远显示"还有活干"。
+    fn destroy_change(&self, observed: &Observed) -> Change {
+        if !observed.present {
+            return Change::Ok;
+        }
+        let declared: usize = observed.get("declared").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let missing = observed.get("missing").unwrap_or_default();
+        let missing_n = if missing.is_empty() { 0 } else { missing.split(',').count() };
+        if declared > 0 && missing_n >= declared {
+            Change::Ok
+        } else {
+            Change::Destroy
+        }
+    }
     fn destroy(&self, ctx: &dyn Ctx, args: &ResolvedArgs, obs: &Observed) -> Result<Outcome> {
         if !obs.present {
             return Ok(Outcome::Ok);
@@ -88,7 +108,7 @@ impl ResourceType for Package {
 /// 刷新包索引。`|| true` 收口:索引里有个别源不可达是常态,不该因此让
 /// 整条安装路径失败 —— 真正的判据是紧随其后的安装成不成功。
 fn refresh_cmd() -> &'static str {
-    "if command -v apt-get >/dev/null 2>&1; then apt-get update -qq || true; \
+    "if command -v apt-get >/dev/null 2>&1; then apt-get -o DPkg::Lock::Timeout=300 update -qq || true; \
      elif command -v dnf >/dev/null 2>&1; then dnf makecache -q || true; \
      else yum makecache -q || true; fi"
 }
@@ -100,8 +120,14 @@ fn pkg_cmd(install: bool, pkgs: &[String]) -> String {
     } else {
         ("purge -y", "remove -y")
     };
+    // `DPkg::Lock::Timeout` 让 apt **等锁**而不是当场失败。
+    //
+    // Ubuntu 默认开着 unattended-upgrades,它随时可能持有 dpkg 锁 ——
+    // 真机上销毁 5 台就撞上了一台。这类冲突纯属时机问题、几十秒后自然消失,
+    // 让整次部署为它失败是不划算的。apt 自己就支持等,不必我们写重试。
     format!(
-        "if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get {apt_op} {list}; \
+        "if command -v apt-get >/dev/null 2>&1; then \
+           DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 {apt_op} {list}; \
          elif command -v dnf >/dev/null 2>&1; then dnf {rpm_op} {list}; \
          else yum {rpm_op} {list}; fi"
     )
@@ -130,6 +156,10 @@ pub struct ImagePresent;
 impl ResourceType for ImagePresent {
     fn name(&self) -> &'static str {
         "image_present"
+    }
+
+    fn retire_note(&self) -> Option<&'static str> {
+        Some("镜像可能被别的东西用着,不擅自删")
     }
     fn observe(&self, ctx: &dyn Ctx, args: &ResolvedArgs) -> Result<Observed> {
         let runtime = arg_str_opt(args, "runtime").unwrap_or("docker");
@@ -162,6 +192,10 @@ pub struct Wait;
 impl ResourceType for Wait {
     fn name(&self) -> &'static str {
         "wait"
+    }
+
+    fn retire_note(&self) -> Option<&'static str> {
+        Some("等待没有逆操作")
     }
     fn observe(&self, ctx: &dyn Ctx, args: &ResolvedArgs) -> Result<Observed> {
         let (code, _) = ctx.probe(&wait_probe(args))?;

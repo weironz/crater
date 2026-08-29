@@ -258,12 +258,13 @@ fn print_destroy_plan(bp: &Blueprint, p: &Plan, will_execute: bool) {
         let note = match &item.change {
             Change::Destroy => "将删除",
             Change::Ok => "不在(无需处理)",
+            Change::Unknown(w) if w.starts_with("保留:") => "保留",
             Change::Unknown(_) => "说不清",
             _ => "?",
         };
         println!("  {} {:<44} {note}", item.change.sigil(), item.label());
         if let Change::Unknown(why) = &item.change {
-            println!("       {why}");
+            println!("       {}", why.trim_start_matches("保留:"));
         }
     }
     println!("\n退役:{}", p.summary());

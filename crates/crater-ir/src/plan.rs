@@ -317,8 +317,15 @@ fn plan_destroy_inner(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<Pl
             continue;
         };
         let observed = rt.observe(ctx, &u.args)?;
-        // 不在了就是不在了 —— 对不存在的资源报"将删除"会让人误以为还有残留。
-        let change = if observed.present { Change::Destroy } else { Change::Ok };
+        let change = match rt.retire_note() {
+            // 刻意不退役的类型:**照实说保留**。计划承诺删除、apply 时悄悄跳过,
+            // 比一开始就说清楚糟得多 —— 那会让人以为机器被清干净了。
+            Some(why) if observed.present => Change::Unknown(format!("保留:{why}")),
+            Some(_) => Change::Ok,
+            // 其余交给类型自己判:`present` 服务的是收敛,退役要问的是
+            // "还留着什么痕迹"。见 ResourceType::destroy_change。
+            None => rt.destroy_change(&observed),
+        };
         items.push(PlanItem { id: u.id, ty: u.ty, args: u.args, observed, change });
     }
     Ok(Plan { items })

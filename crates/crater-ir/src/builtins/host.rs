@@ -20,6 +20,10 @@ impl ResourceType for Hostname {
     fn name(&self) -> &'static str {
         "hostname"
     }
+
+    fn retire_note(&self) -> Option<&'static str> {
+        Some("没有「原来的主机名」可以改回去")
+    }
     fn observe(&self, ctx: &dyn Ctx, _args: &ResolvedArgs) -> Result<Observed> {
         let (_, out) = ctx.probe("hostname")?;
         Ok(Observed::present([("name", out.trim().to_string())]))
@@ -48,6 +52,10 @@ pub struct Swap;
 impl ResourceType for Swap {
     fn name(&self) -> &'static str {
         "swap"
+    }
+
+    fn retire_note(&self) -> Option<&'static str> {
+        Some("不擅自把 swap 开回来 —— 原来什么样我们并不知道")
     }
     fn observe(&self, ctx: &dyn Ctx, _args: &ResolvedArgs) -> Result<Observed> {
         let (_, active) = ctx.probe("swapon --show --noheadings 2>/dev/null | head -1")?;
@@ -150,6 +158,14 @@ impl ResourceType for KernelModules {
         }
         Ok(Outcome::Changed)
     }
+    /// 退役的痕迹只有那份 persist 配置(不 rmmod)。它没了就没什么可退役的。
+    fn destroy_change(&self, observed: &Observed) -> Change {
+        if observed.get("persisted") == Some("true") {
+            Change::Destroy
+        } else {
+            Change::Ok
+        }
+    }
     fn destroy(&self, ctx: &dyn Ctx, args: &ResolvedArgs, _o: &Observed) -> Result<Outcome> {
         // 只撤掉持久化;不 rmmod —— 别的东西可能正用着这些模块。
         if arg_bool(args, "persist").unwrap_or(true) {
@@ -180,8 +196,14 @@ impl ResourceType for Sysctl {
                 wrong.push(format!("{k}: {current} → {want}"));
             }
         }
+        // 退役的痕迹只有那份 drop-in(运行中的值不回滚)。单独记下来,
+        // 好让 destroy 判断"还有没有可退役的东西"。
+        let (conf, _) = ctx.probe(&format!("test -f {}", sh(SYSCTL_CONF)))?;
         // 用不可能出现在值里的分隔符,而不是空格 —— 值本身可以带空格。
-        Ok(Observed::present([("wrong", wrong.join(SEP))]))
+        Ok(Observed::present([
+            ("wrong", wrong.join(SEP)),
+            ("conf", (conf == 0).to_string()),
+        ]))
     }
     fn diff(&self, input: &DiffInput) -> Change {
         if arg_str_opt(input.args, "from_material").is_some() {
@@ -211,6 +233,14 @@ impl ResourceType for Sysctl {
         }
         run_ok(ctx, "sysctl --system")?;
         Ok(Outcome::Changed)
+    }
+    /// 痕迹只有那份 drop-in;它没了就没什么可退役的。
+    fn destroy_change(&self, observed: &Observed) -> Change {
+        if observed.get("conf") == Some("true") {
+            Change::Destroy
+        } else {
+            Change::Ok
+        }
     }
     fn destroy(&self, ctx: &dyn Ctx, _args: &ResolvedArgs, _o: &Observed) -> Result<Outcome> {
         run_ok(ctx, &format!("rm -f {}", sh(SYSCTL_CONF)))?;
@@ -527,6 +557,10 @@ impl ResourceType for Timezone {
         "timezone"
     }
 
+    fn retire_note(&self) -> Option<&'static str> {
+        Some("没有「原来的时区」可以改回去")
+    }
+
     fn observe(&self, ctx: &dyn Ctx, _args: &ResolvedArgs) -> Result<Observed> {
         let (code, out) = ctx.probe("timedatectl show -p Timezone --value")?;
         if code != 0 {
@@ -570,6 +604,10 @@ pub struct TimeSync;
 impl ResourceType for TimeSync {
     fn name(&self) -> &'static str {
         "time_sync"
+    }
+
+    fn retire_note(&self) -> Option<&'static str> {
+        Some("关掉时钟同步对这台机器上其它东西是纯粹的伤害")
     }
 
     fn observe(&self, ctx: &dyn Ctx, _args: &ResolvedArgs) -> Result<Observed> {

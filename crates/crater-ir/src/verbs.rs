@@ -201,6 +201,34 @@ pub trait ResourceType: Send + Sync {
     fn upgrade_procedure(&self) -> Option<&str> {
         None
     }
+
+    /// 退役时这个资源会发生什么 —— 默认"存在就删"。
+    ///
+    /// 之所以要独立于 `observed.present`:那个布尔服务的是**收敛**
+    /// ("这个资源在不在,好比对期望态"),而退役问的是另一件事
+    /// ("我们在这台机器上还留着什么痕迹")。两者常常不一致 ——
+    /// `package` 在包全被卸掉后仍要 present,否则 diff 无从判断该不该装;
+    /// 但它此刻已经没有可退役的东西了。
+    ///
+    /// 用一个布尔同时回答两个问题的代价是**退役不幂等**:重跑 destroy 永远
+    /// 显示"还有活干",真机上正是这样。
+    fn destroy_change(&self, observed: &Observed) -> Change {
+        if observed.present {
+            Change::Destroy
+        } else {
+            Change::Ok
+        }
+    }
+
+    /// 这个类型**刻意不做退役**时,说明为什么;正常会删除则返回 `None`。
+    ///
+    /// 有些名词没有"退役"可言:改回哪个主机名?哪个时区?关掉时钟同步对这台
+    /// 机器上其它东西是纯粹的伤害。这些类型的 `destroy` 是空操作 ——
+    /// 但**计划必须照实说**,否则它会承诺一件执行根本不会做的事。
+    /// plan 里承诺删除、apply 时悄悄跳过,比一开始就说"保留"糟得多。
+    fn retire_note(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------- 参数取值助手
