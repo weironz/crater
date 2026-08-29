@@ -361,6 +361,8 @@ mod tests {
             target: "local".into(),
             applied_at: 1_700_000_000,
             verified_at: Some(1_700_000_000),
+            blueprint_sha256: None,
+            inventory_sha256: None,
             resources: vec![ResourceRecord {
                 id: "file".into(),
                 ty: "file".into(),
