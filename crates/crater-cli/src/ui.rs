@@ -193,6 +193,10 @@ pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
         .route("/api/schema", post(crate::ui_contract::schema))
         .route("/api/lint", post(crate::ui_contract::lint))
         .route("/api/inventory/skeleton", post(crate::ui_contract::inventory_skeleton))
+        // ---- 编辑器(阶段 2)----
+        .route("/view/edit", get(crate::ui_edit::view_edit))
+        .route("/api/files", get(crate::ui_edit::files))
+        .route("/api/file", get(crate::ui_edit::file_get).post(crate::ui_edit::file_put))
         .route("/htmx.min.js", get(htmx_js))
         .layer(middleware::from_fn_with_state(st.clone(), auth_mw))
         .with_state(st);
@@ -328,6 +332,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <a class="nav" onclick="nav(this)" hx-get="/view/groups" hx-target="#view" hx-swap="innerHTML"><span class="ico">⊞</span><span>主机组</span></a>
     <div class="navlabel">Deploy</div>
     <a class="nav" onclick="nav(this)" hx-get="/view/tasks" hx-target="#view" hx-swap="innerHTML"><span class="ico">✦</span><span>任务</span></a>
+    <a class="nav" onclick="nav(this)" hx-get="/view/edit" hx-target="#view" hx-swap="innerHTML"><span class="ico">✎</span><span>蓝图</span></a>
   </aside>
   <div class="content">
     <header class="topbar">

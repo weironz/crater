@@ -32,6 +32,7 @@ mod target;
 mod types_cmd;
 mod ui;
 mod ui_contract;
+mod ui_edit;
 
 use std::path::{Path, PathBuf};
 
