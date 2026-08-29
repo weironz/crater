@@ -530,6 +530,12 @@ impl Targets for FleetTargets<'_> {
     fn parallelism(&self) -> usize {
         self.parallel
     }
+    fn note(&self, msg: &str) {
+        // 立刻刷出去:舞的每一步都可能是几分钟,缓冲住就失去了意义。
+        use std::io::Write;
+        println!("{msg}");
+        let _ = std::io::stdout().flush();
+    }
 }
 
 /// 把整个机群连起来 —— 舞开始之后才发现某台连不上,是最糟的失败时机。

@@ -36,6 +36,13 @@ pub trait Targets: Sync {
     fn ctx(&self, member: &str) -> Result<&dyn Ctx>;
     /// 该成员的求值作用域(已含它自己的 `substrate.*` 事实)。
     fn scope(&self, member: &str) -> Result<Scope>;
+
+    /// 进度回执:一支舞开始跳某一步时调用。
+    ///
+    /// 舞可能跑十几分钟(kubeadm 逐台升级就是),而报告要到全部结束才输出 ——
+    /// 中间那段时间里,操作者分不清"在干活"和"卡住了"。这条回执让每一步的
+    /// 起点可见。默认空实现:crater-ir 不该知道有没有终端。
+    fn note(&self, _msg: &str) {}
 }
 
 /// 一支舞的执行记录。
@@ -111,6 +118,9 @@ fn run_step(
     report: &mut ProcReport,
 ) -> Result<()> {
     let fleet = targets.fleet();
+    // 进度回执放在**最前面**:一步可能跑几分钟,起点必须可见,否则分不清
+    // "在干活"和"卡住了"。
+    targets.note(&format!("  → {} (target: {})", step.id, step.on));
     let where_ = |e: &str| format!("procedure `{}` 步骤 `{}`:{e}", proc.name, step.id);
 
     // 谁参与这一步。`on:` 是机群层判定,`where` 子句要用各自的单机事实。
@@ -162,6 +172,8 @@ fn run_step(
 
     let rt = crate::builtins::get(&step.ty)
         .ok_or_else(|| anyhow::anyhow!(where_(&format!("类型 `{}` 没有实现", step.ty))))?;
+
+    targets.note(&format!("     选中 {} 台:{}", members.len(), members.join(", ")));
 
     // 一步之内多台机器互不相干,可以并发;**步骤之间**永远严格按序。
     // `throttle` 只往下压:护 etcd 那种"必须逐台 join"的约束,无论机群并发

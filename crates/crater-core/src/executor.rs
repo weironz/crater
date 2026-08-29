@@ -265,22 +265,31 @@ impl SshExecutor {
 
 #[async_trait]
 impl Executor for SshExecutor {
-    /// Stream the blob to the target over a SINGLE channel: `cat > path` with the
-    /// raw bytes on stdin. No base64 (stdin is binary-safe — it's not a shell
-    /// argument, so MAX_ARG_STRLEN doesn't apply) and no per-chunk round trips.
+    /// Stream the blob to the target over a SINGLE channel: `cat > tmp` with the
+    /// raw bytes on stdin, then an atomic `mv` into place. No base64 (stdin is
+    /// binary-safe — it's not a shell argument, so MAX_ARG_STRLEN doesn't apply)
+    /// and no per-chunk round trips.
     ///
-    /// The old writer appended base64 in 60 KB chunks, one SSH `exec` per chunk —
-    /// ~12k sequential round trips for a 500 MB blob, latency-bound at ~1 MB/s
-    /// (≈100× slower than the link, network idle). russh streams a single channel
-    /// with SSH-level windowing, so this runs at line rate.
+    /// **先写临时文件再 rename,不是洁癖。** 直接 `cat > /usr/local/bin/kubelet`
+    /// 在该二进制**正在运行**时会立刻拿到 `ETXTBSY`(Text file busy)——
+    /// 而"替换正在运行的二进制"正是升级的定义。更糟的是失败形态:远端命令
+    /// 当场退出,发送端却还在往一个对端已消失的通道里灌 58MB,russh 在那里
+    /// 等永远不会来的窗口更新,表现为 100% CPU + 零进展。真机升级卡死就是这样。
+    ///
+    /// rename 同时给了原子性:替换过程中不存在"半个二进制"的时刻,而运行中的
+    /// 进程继续持有旧 inode,不受影响。
+    ///
+    /// 旧写法(base64 分块、每块一次 exec)对 500MB 要 ~12k 次串行往返,
+    /// 延迟受限在 ~1MB/s(比链路慢约 100 倍,网络还是空的)。
     async fn write_file(&self, path: &str, content: &[u8]) -> crate::Result<()> {
+        let tmp = format!("{path}.crater-tmp");
         let mut channel = self.handle.channel_open_session().await?;
-        let cmd = format!("mkdir -p \"$(dirname '{path}')\" && cat > '{path}'");
+        let cmd = format!("mkdir -p \"$(dirname '{path}')\" && cat > '{tmp}'");
         channel.exec(true, cmd.as_str()).await?;
         channel
             .data(content)
             .await
-            .map_err(|e| anyhow::anyhow!("stream to {path} failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("stream to {tmp} failed: {e}"))?;
         channel.eof().await?;
 
         let mut code: Option<i32> = None;
@@ -296,9 +305,23 @@ impl Executor for SshExecutor {
         }
         let code = code.unwrap_or(-1);
         if code != 0 {
+            // 临时文件可能已写了一半,留着比没有更危险。
+            let _ = self.run(&format!("rm -f '{tmp}'")).await;
             anyhow::bail!(
                 "write_file {path} failed (code {code}): {}",
                 String::from_utf8_lossy(&stderr).trim()
+            );
+        }
+
+        // 原子落位。`mv` 同目录内是 rename(2):要么旧的、要么新的,不存在
+        // "半个二进制"的时刻;运行中的进程继续持有旧 inode,不受影响。
+        let mv = self.run(&format!("mv -f '{tmp}' '{path}'")).await?;
+        if !mv.ok() {
+            let _ = self.run(&format!("rm -f '{tmp}'")).await;
+            anyhow::bail!(
+                "write_file {path}:临时文件就位后重命名失败(code {}):{}",
+                mv.code,
+                mv.stderr.trim()
             );
         }
         Ok(())
@@ -422,6 +445,8 @@ mod write_file_tests {
         }
     }
 
+    /// SSH writer 的临时文件+rename 不在这里测(它要真 SSH),但**契约**要写清:
+    /// 见 `SshExecutor::write_file` 的注释。这条测试守的是默认实现的分块。
     #[tokio::test]
     async fn a_small_file_still_takes_one_chunk() {
         let r = Recorder { cmds: Mutex::new(Vec::new()) };
