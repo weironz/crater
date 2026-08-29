@@ -27,6 +27,8 @@ pub fn get(name: &str) -> Option<&'static dyn ResourceType> {
         "service" => Some(&service::Service),
         "systemd_unit" => Some(&service::SystemdUnit),
         "hostname" => Some(&host::Hostname),
+        "timezone" => Some(&host::Timezone),
+        "time_sync" => Some(&host::TimeSync),
         "swap" => Some(&host::Swap),
         "kernel_modules" => Some(&host::KernelModules),
         "sysctl" => Some(&host::Sysctl),

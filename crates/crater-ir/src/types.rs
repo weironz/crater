@@ -264,6 +264,25 @@ pub static BUILTINS: &[BuiltinType] = &[
       note: "substrate.name 是 inventory 里的名字(身份);substrate.hostname 是当前 OS 主机名(现实)。\
               退役时不动主机名 —— 没有\"原来的名字\"可以改回去。"),
 
+    t!("timezone", Resource, "系统时区", [
+        f!("name", Str, req, "IANA 时区名,如 Asia/Shanghai;`timedatectl list-timezones` 可列全"),
+    ], free: "name",
+      note: "时区只影响**显示**,不影响时间本身 —— 真正影响 k8s 的是时钟是否同步,那是 time_sync 管的。\
+              但机群时区不一致会让跨机对日志变成一件苦差事,所以它值得是期望态而不是一条命令。\
+              退役时不动时区:没有\"原来的时区\"可以改回去。",
+      see: ["time_sync"]),
+
+    t!("time_sync", Resource, "时钟同步(NTP)", [
+        f!("enabled", Bool, opt, "是否启用 NTP 同步,默认 true"),
+        f!("servers", List, opt, "NTP 服务器;留空用系统默认(境内建议 ntp.aliyun.com)"),
+        f!("wait", Bool, opt, "apply 时等到真正同步上再返回(最多 60s),默认 false"),
+    ],
+      note: "\"启用了同步\"和\"已经同步上\"是两件事,本类型分别观察 NTP 与 NTPSynchronized。\
+              只看前者会让一台刚开机、时钟还差几百毫秒的机器显示为绿灯 —— 而 etcd 的仲裁\
+              和证书有效期恰恰吃这几百毫秒。跨主机比时间戳的一切判据,精度下限都是它。\
+              实现走 systemd-timesyncd(Ubuntu/Debian 默认);退役时不关同步。",
+      see: ["timezone"]),
+
     t!("swap", Resource, "交换分区的启用状态(k8s 要求关闭)", [
         f!("state", enum ["disabled", "enabled"], Required, "期望状态"),
         f!("persist", Bool, opt, "同时注释掉 /etc/fstab 里的 swap 条目,默认 true"),
@@ -452,7 +471,8 @@ mod tests {
     #[test]
     fn catalog_has_the_types_the_touchstones_demanded() {
         // rustfs 裁定 C、k8s 裁定 E:这些是"仪式型 shell 升类型"的实证清单。
-        for t in ["systemd_unit", "swap", "kernel_modules", "sysctl", "hostname", "image_present"] {
+        for t in ["systemd_unit", "swap", "kernel_modules", "sysctl", "hostname", "image_present",
+                  "timezone", "time_sync"] {
             assert!(is_builtin(t), "缺内建类型 {t}");
         }
     }

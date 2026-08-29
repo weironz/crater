@@ -512,3 +512,308 @@ mod tests {
         assert_eq!(diff(&Group, &a, &obs), Change::Ok);
     }
 }
+
+// ============================================================ 时区与时钟
+
+/// `timezone` —— 系统时区。
+///
+/// 时区只影响**显示**,不影响时间本身。但机群时区不一致会让"跨机对日志"变成
+/// 苦差事:同一件事在三台机器上写着三个时刻,排查时先得在脑子里做减法。
+/// 所以它值得是期望态,而不是一条 `timedatectl set-timezone`。
+pub struct Timezone;
+
+impl ResourceType for Timezone {
+    fn name(&self) -> &'static str {
+        "timezone"
+    }
+
+    fn observe(&self, ctx: &dyn Ctx, _args: &ResolvedArgs) -> Result<Observed> {
+        let (code, out) = ctx.probe("timedatectl show -p Timezone --value")?;
+        if code != 0 {
+            return Ok(Observed::absent());
+        }
+        Ok(Observed::present([("name", out.trim().to_string())]))
+    }
+
+    fn diff(&self, input: &DiffInput) -> Change {
+        let want = arg_str_opt(input.args, "name").unwrap_or_default();
+        match input.observed.get("name") {
+            Some(cur) if cur == want => Change::Ok,
+            Some(cur) => Change::Update(vec![FieldDiff::change("name", cur, want)]),
+            None => Change::Update(vec![FieldDiff::set("name", want)]),
+        }
+    }
+
+    fn apply(&self, ctx: &dyn Ctx, args: &ResolvedArgs, _c: &Change) -> Result<Outcome> {
+        run_ok(ctx, &format!("timedatectl set-timezone {}", sh(arg_str(args, "name")?)))?;
+        Ok(Outcome::Changed)
+    }
+
+    fn destroy(&self, _ctx: &dyn Ctx, _args: &ResolvedArgs, _o: &Observed) -> Result<Outcome> {
+        // 与 hostname 同理:没有"原来的时区"可以改回去。
+        Ok(Outcome::Ok)
+    }
+}
+
+/// systemd-timesyncd 的配置落点。用 drop-in 而不是改主配置 ——
+/// 主配置属于发行版,发行版升级时会与我们的改动打架。
+const TIMESYNC_DROPIN: &str = "/etc/systemd/timesyncd.conf.d/99-crater.conf";
+
+/// `time_sync` —— 时钟同步。
+///
+/// **"启用了同步"和"已经同步上"是两件事**,这里分别观察 `NTP` 与
+/// `NTPSynchronized`。只看前者会让一台刚开机、时钟还差几百毫秒的机器显示为绿灯
+/// —— 而 etcd 的仲裁和证书有效期恰恰吃这几百毫秒。跨主机比时间戳的一切判据,
+/// 精度下限都是它(见 library/selftest 的实测:未收敛的虚机偏差 124ms)。
+pub struct TimeSync;
+
+impl ResourceType for TimeSync {
+    fn name(&self) -> &'static str {
+        "time_sync"
+    }
+
+    fn observe(&self, ctx: &dyn Ctx, _args: &ResolvedArgs) -> Result<Observed> {
+        let cmd = format!(
+            "timedatectl show -p NTP --value; printf '{SEP}'; \
+             timedatectl show -p NTPSynchronized --value; printf '{SEP}'; \
+             cat {} 2>/dev/null | grep -i '^NTP=' | head -1 | cut -d= -f2-",
+            sh(TIMESYNC_DROPIN)
+        );
+        let (_, out) = ctx.probe(&cmd)?;
+        let p: Vec<&str> = out.split(SEP).collect();
+        Ok(Observed::present([
+            ("enabled", p.first().unwrap_or(&"").trim().to_string()),
+            ("synced", p.get(1).unwrap_or(&"").trim().to_string()),
+            ("servers", p.get(2).unwrap_or(&"").trim().to_string()),
+        ]))
+    }
+
+    fn diff(&self, input: &DiffInput) -> Change {
+        let want_on = arg_bool(input.args, "enabled").unwrap_or(true);
+        let want_servers = servers_of(input.args);
+        let obs = input.observed;
+        let is_on = obs.get("enabled") == Some("yes");
+        let synced = obs.get("synced") == Some("yes");
+        let have_servers = obs.get("servers").unwrap_or_default();
+
+        let mut fields = Vec::new();
+        if want_on != is_on {
+            fields.push(FieldDiff::change("enabled", is_on.to_string(), want_on.to_string()));
+        }
+        if !want_servers.is_empty() && have_servers != want_servers {
+            fields.push(FieldDiff::change(
+                "servers",
+                if have_servers.is_empty() { "(系统默认)" } else { have_servers },
+                &want_servers,
+            ));
+        }
+        // 已启用但**还没同步上**:这不是"配置不对",是"还没到位"。
+        // 报出来而不是当绿灯 —— 否则跨主机计时的判据会建立在流沙上。
+        if want_on && is_on && !synced && fields.is_empty() {
+            return Change::Update(vec![FieldDiff::change("synced", "no", "yes(等待收敛)")]);
+        }
+        if fields.is_empty() {
+            Change::Ok
+        } else {
+            Change::Update(fields)
+        }
+    }
+
+    fn apply(&self, ctx: &dyn Ctx, args: &ResolvedArgs, _c: &Change) -> Result<Outcome> {
+        let want_on = arg_bool(args, "enabled").unwrap_or(true);
+        let servers = servers_of(args);
+
+        if !servers.is_empty() {
+            run_ok(ctx, &format!("mkdir -p \"$(dirname {})\"", sh(TIMESYNC_DROPIN)))?;
+            ctx.write_file(TIMESYNC_DROPIN, &format!("[Time]\nNTP={servers}\n"))?;
+        }
+        run_ok(ctx, &format!("timedatectl set-ntp {}", if want_on { "true" } else { "false" }))?;
+        if want_on {
+            // 改了服务器就得重启守护进程,否则新配置要等下一次轮换才生效。
+            // 刻意**不**校验退出码:有的系统用 chrony 而非 timesyncd,那里这条
+            // 命令本就该失败,而 `set-ntp true` 已经把同步打开了。
+            let _ = ctx.run("systemctl restart systemd-timesyncd 2>/dev/null || true")?;
+        }
+
+        if want_on && arg_bool(args, "wait").unwrap_or(false) {
+            // 等**真的同步上**。不等的话,紧随其后的 kubeadm 可能拿着偏了几百毫秒
+            // 的时钟去签证书 —— 那种失败发生在很久以后,且极难归因。
+            let (code, _) = ctx.run(
+                "for i in $(seq 1 60); do \
+                   [ \"$(timedatectl show -p NTPSynchronized --value)\" = yes ] && exit 0; \
+                   sleep 1; done; exit 1",
+            )?;
+            if code != 0 {
+                // 软失败:同步不上通常是网络,不该让整个部署停摆,但必须留痕。
+                return Ok(Outcome::Warn);
+            }
+        }
+        Ok(Outcome::Changed)
+    }
+
+    fn destroy(&self, _ctx: &dyn Ctx, _args: &ResolvedArgs, _o: &Observed) -> Result<Outcome> {
+        // 退役时不关时钟同步 —— 那对这台机器上**其它**东西是纯粹的伤害。
+        Ok(Outcome::Ok)
+    }
+}
+
+/// `servers:` 归一成 timesyncd 认的空格分隔串。
+fn servers_of(args: &ResolvedArgs) -> String {
+    match args.get("servers") {
+        Some(crate::eval::Yaml::Sequence(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect::<Vec<_>>()
+            .join(" "),
+        Some(one) => one.as_str().unwrap_or_default().to_string(),
+        None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod time_tests {
+    use super::*;
+    use crate::ctx::FakeCtx;
+    use crate::eval::Yaml;
+
+    fn args(pairs: &[(&str, &str)]) -> ResolvedArgs {
+        pairs.iter().map(|(k, v)| (k.to_string(), Yaml::from(*v))).collect()
+    }
+    fn diff_of(t: &dyn ResourceType, a: &ResolvedArgs, o: &Observed) -> Change {
+        t.diff(&DiffInput { args: a, observed: o, upstream_changed: false })
+    }
+    /// timedatectl 的三段应答:NTP / NTPSynchronized / drop-in 里的 servers
+    fn ts(ntp: &str, synced: &str, servers: &str) -> FakeCtx {
+        FakeCtx::new().on("timedatectl show -p NTP", 0, &format!("{ntp}{SEP}{synced}{SEP}{servers}"))
+    }
+
+    // ---------------------------------------------------------- timezone
+
+    #[test]
+    fn a_matching_timezone_is_a_noop() {
+        let ctx = FakeCtx::new().on("timedatectl show -p Timezone", 0, "Asia/Shanghai\n");
+        let a = args(&[("name", "Asia/Shanghai")]);
+        let obs = Timezone.observe(&ctx, &a).unwrap();
+        assert_eq!(diff_of(&Timezone, &a, &obs), Change::Ok);
+    }
+
+    #[test]
+    fn a_different_timezone_shows_both_sides() {
+        let ctx = FakeCtx::new().on("timedatectl show -p Timezone", 0, "UTC\n");
+        let a = args(&[("name", "Asia/Shanghai")]);
+        let obs = Timezone.observe(&ctx, &a).unwrap();
+        match diff_of(&Timezone, &a, &obs) {
+            Change::Update(f) => assert_eq!(f[0].to_string(), "name: UTC → Asia/Shanghai"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn observing_a_timezone_writes_nothing() {
+        let ctx = FakeCtx::new().on("timedatectl show -p Timezone", 0, "UTC\n");
+        Timezone.observe(&ctx, &args(&[("name", "UTC")])).unwrap();
+        assert!(ctx.writes().is_empty(), "{:?}", ctx.writes());
+    }
+
+    #[test]
+    fn destroying_a_timezone_changes_nothing() {
+        // 没有"原来的时区"可以改回去 —— 与 hostname 同理。
+        let ctx = FakeCtx::new();
+        assert_eq!(Timezone.destroy(&ctx, &args(&[("name", "UTC")]), &Observed::absent()).unwrap(), Outcome::Ok);
+        assert!(ctx.calls().is_empty());
+    }
+
+    // ---------------------------------------------------------- time_sync
+
+    #[test]
+    fn enabled_but_not_yet_synced_is_not_a_green_light() {
+        // 这是本类型存在的**全部理由**:一台刚开机、时钟还差几百毫秒的机器,
+        // 只看 NTP=yes 会显示绿灯 —— 而 etcd 仲裁与证书有效期恰恰吃这几百毫秒。
+        let ctx = ts("yes", "no", "");
+        let a = ResolvedArgs::new();
+        let obs = TimeSync.observe(&ctx, &a).unwrap();
+        match diff_of(&TimeSync, &a, &obs) {
+            Change::Update(f) => assert!(f[0].to_string().contains("synced"), "{f:?}"),
+            other => panic!("已启用但没同步上,不该是 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enabled_and_synced_is_a_noop() {
+        let ctx = ts("yes", "yes", "");
+        let a = ResolvedArgs::new();
+        let obs = TimeSync.observe(&ctx, &a).unwrap();
+        assert_eq!(diff_of(&TimeSync, &a, &obs), Change::Ok);
+    }
+
+    #[test]
+    fn a_disabled_clock_is_reported_as_such() {
+        let ctx = ts("no", "no", "");
+        let a = ResolvedArgs::new();
+        let obs = TimeSync.observe(&ctx, &a).unwrap();
+        match diff_of(&TimeSync, &a, &obs) {
+            Change::Update(f) => assert_eq!(f[0].to_string(), "enabled: false → true"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn changed_servers_are_detected() {
+        let ctx = ts("yes", "yes", "ntp.ubuntu.com");
+        let mut a = ResolvedArgs::new();
+        a.insert("servers".into(), serde_yaml::from_str("[ntp.aliyun.com, cn.pool.ntp.org]").unwrap());
+        let obs = TimeSync.observe(&ctx, &a).unwrap();
+        match diff_of(&TimeSync, &a, &obs) {
+            Change::Update(f) => assert_eq!(
+                f[0].to_string(),
+                "servers: ntp.ubuntu.com → ntp.aliyun.com cn.pool.ntp.org"
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn matching_servers_are_a_noop_so_it_does_not_rewrite_every_run() {
+        let ctx = ts("yes", "yes", "ntp.aliyun.com cn.pool.ntp.org");
+        let mut a = ResolvedArgs::new();
+        a.insert("servers".into(), serde_yaml::from_str("[ntp.aliyun.com, cn.pool.ntp.org]").unwrap());
+        let obs = TimeSync.observe(&ctx, &a).unwrap();
+        assert_eq!(diff_of(&TimeSync, &a, &obs), Change::Ok);
+    }
+
+    #[test]
+    fn servers_go_into_a_dropin_not_the_distro_config() {
+        // 改发行版的主配置会在系统升级时打架;drop-in 才是可维护的落点。
+        let ctx = FakeCtx::new().on("", 0, "");
+        let mut a = ResolvedArgs::new();
+        a.insert("servers".into(), serde_yaml::from_str("[ntp.aliyun.com]").unwrap());
+        TimeSync.apply(&ctx, &a, &Change::Update(vec![])).unwrap();
+        let body = ctx.written_file(TIMESYNC_DROPIN).expect("应写 drop-in");
+        assert_eq!(body, "[Time]\nNTP=ntp.aliyun.com\n");
+        assert!(ctx.written_file("/etc/systemd/timesyncd.conf").is_none(), "不该动主配置");
+    }
+
+    #[test]
+    fn waiting_for_convergence_that_never_comes_is_a_warn_not_a_hard_failure() {
+        // 同步不上通常是网络,不该让整个部署停摆 —— 但必须留痕。
+        let ctx = FakeCtx::new().on("timedatectl set-ntp", 0, "").on("seq 1 60", 1, "");
+        let mut a = ResolvedArgs::new();
+        a.insert("wait".into(), Yaml::from(true));
+        assert_eq!(TimeSync.apply(&ctx, &a, &Change::Update(vec![])).unwrap(), Outcome::Warn);
+    }
+
+    #[test]
+    fn destroying_time_sync_leaves_the_clock_alone() {
+        // 关掉同步对这台机器上**其它**东西是纯粹的伤害。
+        let ctx = FakeCtx::new();
+        assert_eq!(TimeSync.destroy(&ctx, &ResolvedArgs::new(), &Observed::absent()).unwrap(), Outcome::Ok);
+        assert!(ctx.calls().is_empty());
+    }
+
+    #[test]
+    fn observing_time_sync_writes_nothing() {
+        let ctx = ts("yes", "yes", "");
+        TimeSync.observe(&ctx, &ResolvedArgs::new()).unwrap();
+        assert!(ctx.writes().is_empty(), "{:?}", ctx.writes());
+    }
+}

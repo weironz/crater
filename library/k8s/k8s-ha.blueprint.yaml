@@ -46,6 +46,9 @@ params:
   cp_endpoint:     { default: "", desc: "kubeadm --control-plane-endpoint;ha=true 时应为 VIP:8443" }
   subnet:          { type: cidr, default: "192.168.73.0/24", desc: "VIP 所在子网(keepalived 选网卡)" }
   pod_cidr:        { type: cidr, default: "10.244.0.0/16" }
+  timezone:        { default: "Asia/Shanghai", desc: "机群统一时区(IANA 名)" }
+  ntp_servers:     { type: [string], default: ["ntp.aliyun.com", "cn.pool.ntp.org"],
+                     desc: "NTP 源;境外部署改成 pool.ntp.org 之类" }
   image_repo:      { default: "registry.aliyuncs.com/google_containers" }
   apiserver_port:  { type: port, default: 6443, desc: "haproxy 后端各 master 的 apiserver 口" }
   containerd_ver:  { default: "2.3.1",  stage: build }
@@ -113,6 +116,18 @@ resources:
   # ========== 主机基线 ==========
   # kubeadm 用 OS hostname 作 node 名,所以主机名是**期望态**而不是一条命令。
   - hostname: "${substrate.name}"
+
+  # 时区统一:只影响显示,但机群时区不一致会让"跨机对同一件事的日志"变成
+  # 先做减法再看 —— 排查故障时这点摩擦格外贵。
+  - timezone: "${params.timezone}"
+
+  # 时钟同步必须排在 kubeadm **之前**,而且要 `wait: true`。
+  # 理由不是洁癖:etcd 的 raft 仲裁与 kubeadm 签发的证书有效期都吃时钟偏差,
+  # 拿着偏了几百毫秒的时钟去 init,失败会发生在很久以后且极难归因。
+  # 实测未收敛的虚机节点间偏差可达 124ms(见 library/selftest)。
+  - time_sync:
+      servers: "${params.ntp_servers}"
+      wait: true
   # 旧版是 `swapoff -a` + sed /etc/fstab 两步两个 check;类型化后连"重启后 swap
   # 自己回来"这个经典陷阱都在 plan 里看得见。
   - swap: { state: disabled, persist: true }
