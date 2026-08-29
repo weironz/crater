@@ -23,6 +23,7 @@ mod closure;
 mod deployments;
 mod fmt_cmd;
 mod images;
+mod inspect_bp;
 mod material_ctx;
 mod lint;
 mod schema_cmd;
@@ -627,18 +628,29 @@ async fn main() -> Result<()> {
             // 与 apply/plan 同一条按文件格式分派的路子:栈/蓝图烤闭包,task 进 store。
             if stack_cmd::is_stack_file(&file) {
                 let out = output.unwrap_or_else(|| default_closure_path(&file, ".stack"));
-                return closure::build_stack(&file, &out, &profile).await;
+                return closure::build_stack(&file, &out, &profile, &set).await;
             }
             if blueprint::is_blueprint_file(&file) {
                 let out = output.unwrap_or_else(|| default_closure_path(&file, ".blueprint"));
-                return closure::build(&file, &out, &profile).await;
+                return closure::build(&file, &out, &profile, &set).await;
             }
             if output.is_some() || !profile.is_empty() {
                 anyhow::bail!("`--output` / `--for` 只用于蓝图闭包;task 构建请用 `-t/--tag`");
             }
             build::build_to_store(&file, tag, &arch, &set, no_cache).await
         }
-        Cmd::Inspect { source, gen_inventory } => build::inspect_source(&source, gen_inventory).await,
+        Cmd::Inspect { source, gen_inventory } => {
+            // 与 apply/plan 同一条按文件格式分派:蓝图/栈走 IR 的输入契约视图,
+            // 其余(task 文件、OCI ref)仍走旧管线。
+            let p = PathBuf::from(&source);
+            if p.is_file() && (blueprint::is_blueprint_file(&p) || stack_cmd::is_stack_file(&p)) {
+                if gen_inventory {
+                    anyhow::bail!("`--gen-inventory` 暂只支持旧 task;蓝图请照 `需要的机群` 一节手写");
+                }
+                return inspect_bp::run(&p);
+            }
+            build::inspect_source(&source, gen_inventory).await
+        }
         Cmd::Save { reference, output } => {
             ImageStore::open()?.export_oci_archive(&reference, &output)?;
             info!("saved {reference} → {}", output.display());

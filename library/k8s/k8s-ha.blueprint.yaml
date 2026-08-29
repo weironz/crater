@@ -41,7 +41,9 @@ params:
   # 打开它要求 OCI 闭包就位(尚未接入新管线,见 D-115)。
   preload_images:  { type: bool, default: false, desc: "离线:把镜像预先导入目标运行时" }
   version:         { type: version, default: "1.36.1", stage: build }
-  vip:             { type: ip,   default: "192.168.73.14", desc: "控制面 VIP(仅 ha=true 时使用)" }
+  # 默认值刻意选在网段高位:低位常被真实主机占着,而 VIP 撞上一台在跑的
+  # 机器不会报错 —— 只会让两边都间歇性失联,是最难查的一类故障。
+  vip:             { type: ip,   default: "192.168.73.200", desc: "控制面 VIP(仅 ha=true 时使用)" }
   # 留空 = 不传 --control-plane-endpoint(单节点的正确做法:kubeadm 用本机地址)。
   cp_endpoint:     { default: "", desc: "kubeadm --control-plane-endpoint;ha=true 时应为 VIP:8443" }
   subnet:          { type: cidr, default: "192.168.73.0/24", desc: "VIP 所在子网(keepalived 选网卡)" }
@@ -62,6 +64,20 @@ params:
   flannel_cni_ver: { default: "1.9.1-flannel1", stage: build }
 
 materials:
+  # —— 版本即变体维度 ——
+  #
+  # 摘要属于**某一个具体版本**,不属于"kubeadm"这个名字。所以"支持升级到 1.37"
+  # 不是给 URL 里插一个变量就完事 —— 那样摘要必然对不上,而对不上就意味着
+  # 内容寻址失效,离线闭包也就不再可信。
+  #
+  # 正确的表达是把版本当成**变体**(与多架构同一个机制):每个版本一条,各带
+  # 各的摘要,由 `params.version` 选。代价是升级要加三行;换来的是:
+  #   - `crater build` 会把**两个版本**都烤进同一个闭包 → 升级零下载;
+  #   - 回滚就是把 version 改回去,同一个闭包里就有旧版字节;
+  #   - 任何时刻"这个二进制该是什么内容"都有确定答案。
+  #
+  # containerd/runc/cni 不随 k8s 版本走,所以它们仍是单一条目。
+
   # —— 二进制 ——
   # 摘要取自各上游官方 checksum 文件,与上面的 *_ver 一一对应 ——
   # 改版本必须同时改摘要,否则落地即失败(这正是内容寻址该有的样子)。
@@ -79,14 +95,29 @@ materials:
     file: "https://github.com/kubernetes-sigs/cri-tools/releases/download/v${params.crictl_ver}/crictl-v${params.crictl_ver}-linux-${substrate.arch}.tar.gz"
     sha256: "83855e114566a8a8c44c548d515670f51de3a5e1da8b2effb59870e2f10c25a3"
   - name: kubeadm
-    file: "https://dl.k8s.io/release/v${params.version}/bin/linux/${substrate.arch}/kubeadm"
+    file: "https://dl.k8s.io/release/v1.36.1/bin/linux/${substrate.arch}/kubeadm"
     sha256: "f35980333a4dae753807345ae359eca03f48f9945855e6a6a6708fe8b3b24038"
+    when: "params.version == '1.36.1'"
+  - name: kubeadm
+    file: "https://dl.k8s.io/release/v1.37.0/bin/linux/${substrate.arch}/kubeadm"
+    sha256: "9406f2e75c7fc99391f5fb0575b07914f2d90750d2b8c2c473e9c9c5194c9352"
+    when: "params.version == '1.37.0'"
   - name: kubelet
-    file: "https://dl.k8s.io/release/v${params.version}/bin/linux/${substrate.arch}/kubelet"
+    file: "https://dl.k8s.io/release/v1.36.1/bin/linux/${substrate.arch}/kubelet"
     sha256: "7efa1780c73d9fb3a464002864e582eb2d15aa691e475eaae323093d08feae14"
+    when: "params.version == '1.36.1'"
+  - name: kubelet
+    file: "https://dl.k8s.io/release/v1.37.0/bin/linux/${substrate.arch}/kubelet"
+    sha256: "ee554f77da57ad40a5d5f8625ac9c4af8b75d9d5a259367a885e5e816954b044"
+    when: "params.version == '1.37.0'"
   - name: kubectl
-    file: "https://dl.k8s.io/release/v${params.version}/bin/linux/${substrate.arch}/kubectl"
+    file: "https://dl.k8s.io/release/v1.36.1/bin/linux/${substrate.arch}/kubectl"
     sha256: "629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7"
+    when: "params.version == '1.36.1'"
+  - name: kubectl
+    file: "https://dl.k8s.io/release/v1.37.0/bin/linux/${substrate.arch}/kubectl"
+    sha256: "6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f"
+    when: "params.version == '1.37.0'"
   # flannel 上游未发布 checksum 文件 —— 无摘要可钉,于是它在 plan 期
   # 无法内容寻址比对(verify 会如实报"说不清")。不编一个假的。
   - name: flannel-manifest
@@ -318,11 +349,16 @@ procedures:
           check: "! test -d /var/lib/etcd"
         target: all
 
-  # ---- 滚动升级:旧版是另一个 role 文件,这里内置于 blueprint ----
-  # `crater procedure upgrade -f k8s-ha.blueprint.yaml --set to=1.37.0`
+  # ---- 滚动升级 ----
+  # `crater procedure upgrade -f k8s-ha.blueprint.yaml --set version=1.37.0 --closure <含两版的闭包>`
+  #
+  # 参数就叫 `version`,不叫 `to` —— 因为它必须**驱动物料变体的选择**:
+  # 叫 `to` 的话 `params.version` 仍是蓝图默认值,物料会解析成旧版二进制,
+  # 于是"用 1.36.1 的 kubeadm 去 upgrade apply v1.37.0",必然失败。
+  # 过程参数在本支舞的作用域里覆盖蓝图参数,所以同名正是想要的效果。
   upgrade:
     params:
-      to: { type: version, required: true }
+      version: { type: version, required: true }
     steps:
       - copy: { material: kubeadm, dest: /usr/local/bin/kubeadm, mode: "0755" }
         target: all
@@ -333,17 +369,17 @@ procedures:
         target: masters
         strategy: { throttle: 1 }
       - shell:
-          cmd: "kubeadm upgrade apply -y v${params.to}"
-          check: "kubeadm version -o short | grep -q v${params.to}"
+          cmd: "kubeadm upgrade apply -y v${params.version}"
+          check: "kubeadm version -o short | grep -q v${params.version}"
         target: seed
       - shell:
           cmd: "kubeadm upgrade node"
-          check: "kubeadm version -o short | grep -q v${params.to}"
+          check: "kubeadm version -o short | grep -q v${params.version}"
         target: followers
         strategy: { throttle: 1 }
       - shell:
           cmd: "kubeadm upgrade node"
-          check: "kubeadm version -o short | grep -q v${params.to}"
+          check: "kubeadm version -o short | grep -q v${params.version}"
         target: workers
         strategy: { throttle: 1 }
       - copy: { material: "${item}", dest: "/usr/local/bin/${item}", mode: "0755" }

@@ -147,11 +147,12 @@ impl Baker {
 }
 
 /// `crater build -f <blueprint> -o <out.tar> [--for k=v]…`
-pub async fn build(bp_path: &Path, out: &Path, profile: &[String]) -> Result<()> {
+pub async fn build(bp_path: &Path, out: &Path, profile: &[String], sets: &[String]) -> Result<()> {
     let bp = crater_ir::parse::blueprint_from_path(bp_path)?;
     let tmp = tempfile::tempdir()?;
     let mut baker = Baker::new(tmp.path().to_path_buf())?;
-    if baker.absorb(bp_path, profile, &BTreeMap::new()).await? == 0 && baker.skipped.is_empty() {
+    let overrides = parse_params(sets)?;
+    if baker.absorb(bp_path, profile, &overrides).await? == 0 && baker.skipped.is_empty() {
         bail!(
             "blueprint `{}` 没有引用任何物料 —— 没有可烘焙的东西。\n\
              (物料是 `materials:` 里声明、被 copy/template/unarchive 引用的字节)",
@@ -166,7 +167,7 @@ pub async fn build(bp_path: &Path, out: &Path, profile: &[String]) -> Result<()>
 /// 现场只需要拿一个文件走。各蓝图的闭包按内容寻址取并集:同一个 URL 只下载
 /// 一次,相同字节只落盘一份 —— 栈里多份蓝图共用 containerd 是常态,
 /// 逐个 build 会把它复制 N 遍。
-pub async fn build_stack(stack_path: &Path, out: &Path, profile: &[String]) -> Result<()> {
+pub async fn build_stack(stack_path: &Path, out: &Path, profile: &[String], sets: &[String]) -> Result<()> {
     let st = crater_ir::stack::from_path(stack_path)?;
     let dir = stack_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let tmp = tempfile::tempdir()?;
@@ -177,8 +178,10 @@ pub async fn build_stack(stack_path: &Path, out: &Path, profile: &[String]) -> R
         let bp_path = crater_ir::stack::resolve_ref(&u.blueprint, &dir)?;
         println!("── [{}/{}] {} ──", i + 1, st.uses.len(), u.label());
         // 栈的作者侧参数要带进来:物料 URL 常按 `${params.version}` 插值,
-        // 漏掉它会**静默**烤错版本。
-        baker.absorb(&bp_path, profile, &u.params).await?;
+        // 漏掉它会**静默**烤错版本。命令行 `--set` 排在后面,可以盖过它。
+        let mut params = u.params.clone();
+        params.extend(parse_params(sets)?);
+        baker.absorb(&bp_path, profile, &params).await?;
     }
     println!();
     baker.seal(&st.name, out)
@@ -206,6 +209,26 @@ pub fn load(path: &Path) -> Result<(tempfile::TempDir, BlobMap)> {
         .map(|b| (b.source_url.clone(), stage.blob_path(&b.sha256)))
         .collect();
     Ok((tmp, map))
+}
+
+/// `--set k=v` → 参数覆盖。
+///
+/// 烘焙期的参数选择直接决定**闭包里装的是哪个版本的字节** ——
+/// `crater build --set version=1.37.0` 与 `--set version=1.36.1` 产出两个
+/// 内容不同的制品。升级在 crater 的模型里就是**换一个闭包**:
+/// 版本连同它的摘要一起属于制品,而不是部署时才拼出来的一个字符串。
+fn parse_params(sets: &[String]) -> Result<BTreeMap<String, serde_yaml::Value>> {
+    let mut out = BTreeMap::new();
+    for kv in sets {
+        let (k, v) = kv
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("`--set` 要写成 k=v,收到 `{kv}`"))?;
+        // 走 YAML 标量解析,`true`/`3` 才不会变成字符串。
+        let val: serde_yaml::Value =
+            serde_yaml::from_str(v).unwrap_or_else(|_| serde_yaml::Value::String(v.to_string()));
+        out.insert(k.to_string(), val);
+    }
+    Ok(out)
 }
 
 /// 构建期的求值作用域:参数默认值 ⊕ `--for` 给出的目标画像。
