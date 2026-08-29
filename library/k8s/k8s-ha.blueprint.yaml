@@ -162,7 +162,15 @@ resources:
       name: kubelet
       from_material: unit-kubelet
       dropins: [dropin-kubeadm]
-  - service: { name: kubelet, state: started, enabled: true }
+  # 只声明**开机自启**,不声明"正在运行"。
+  #
+  # kubelet 在 kubeadm 写出配置之前根本起不来 —— 此刻断言 `state: started`
+  # 是一个在该时点**不可满足**的期望态,每次 apply 都会报一条"未达期望态"。
+  # 让 plan 长期带着一条注定为红的项,代价是所有人开始忽略这类提示。
+  #
+  # kubelet 的"在跑"是**集群成员资格的后果**,不是一个独立的期望态:
+  # 真正让它跑起来的是 bootstrap 那支舞里的 kubeadm。所以它归 cluster_member 管。
+  - service: { name: kubelet, enabled: true }
 
   # flannel 清单要先落到目标机,bootstrap 那支舞才 apply 得了它。
   - copy: { material: flannel-manifest, dest: /etc/kubernetes/kube-flannel.yml }
