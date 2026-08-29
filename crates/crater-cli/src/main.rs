@@ -35,6 +35,7 @@ mod ui_contract;
 mod ui_edit;
 mod ui_app;
 mod ui_overview;
+mod events;
 mod ui_run;
 
 use std::path::{Path, PathBuf};
@@ -566,6 +567,7 @@ async fn main() -> Result<()> {
     // ANSI only on a real terminal — keeps redirected/piped output and the
     // agent's SSH-forwarded output free of escape codes.
     let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    events::init_from_env(); // CRATER_EVENTS=<path> → NDJSON 事件流(UI 供血)
     tracing_subscriber::fmt()
         .with_max_level(log_level())
         .with_timer(ClockTime)

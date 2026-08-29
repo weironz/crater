@@ -201,6 +201,9 @@ pub(crate) async fn destroy_lensed(
     for host in &hosts {
         let transport = build_transport(host).await?;
         println!("── {} ──", host_label(host));
+        crate::events::emit(serde_json::json!({
+            "e": "host_start", "host": host.name, "label": host_label(host),
+        }));
         let facts = crater_ir::facts::Facts::new(transport.as_ref())
             .gather_all()
             .with_context(|| format!("{}:采集目标事实", host_label(host)))?;
@@ -212,6 +215,12 @@ pub(crate) async fn destroy_lensed(
 
         let plan = plan::plan_destroy(&bp, &scope, &ctx)
             .with_context(|| format!("{}:求退役计划", host_label(host)))?;
+        for item in &plan.items {
+            crate::events::emit(serde_json::json!({
+                "e": "plan_item", "host": host.name,
+                "id": item.id, "change": change_kind(&item.change),
+            }));
+        }
         print_destroy_plan(&bp, &plan, yes);
 
         if !yes {
@@ -219,14 +228,34 @@ pub(crate) async fn destroy_lensed(
         }
         if !plan.has_changes() {
             println!("没有东西可拆,跳过。\n");
+            crate::events::emit(serde_json::json!({
+                "e": "host_done", "host": host.name, "result": "noop",
+            }));
             continue;
         }
         removed_any = true;
         match plan::destroy(&bp, &scope, &ctx) {
-            Ok(report) => print_report(&report),
+            Ok(report) => {
+                // 退役步骤事后逐条发:destroy 单台通常秒级,粒度仍到资源。
+                for (id, oc) in &report.steps {
+                    use crater_ir::verbs::Outcome as O;
+                    crate::events::emit(serde_json::json!({
+                        "e": "step", "host": host.name, "id": id,
+                        "outcome": match oc { O::Ok => "ok", O::Changed => "changed", O::Warn => "warn" },
+                    }));
+                }
+                print_report(&report);
+                crate::events::emit(serde_json::json!({
+                    "e": "host_done", "host": host.name, "result": "ok",
+                }));
+            }
             Err(e) => {
                 failures += 1;
                 eprintln!("{}:退役失败 —— {e}\n", host_label(host));
+                crate::events::emit(serde_json::json!({
+                    "e": "host_done", "host": host.name, "result": "failed",
+                    "detail": format!("{e:#}"),
+                }));
             }
         }
         // 部署记录跟着资源一起走。留着它,下次 verify 会拿一份已经不存在的
@@ -421,6 +450,9 @@ async fn run_on_targets(
     for host in &hosts {
         let transport = build_transport(host).await?;
         println!("── {} ──", host_label(host));
+        crate::events::emit(serde_json::json!({
+            "e": "host_start", "host": host.name, "label": host_label(host),
+        }));
 
         // 先探目标侧事实(裁定 C):物料的多架构变体、`when:` 条件都靠它判定,
         // 所以必须在求计划之前拿到。白名单 + 一次性采全,之后求值零往返。
@@ -443,6 +475,14 @@ async fn run_on_targets(
         };
         let plan = plan::plan_with(&bp, &scope, &ctx, intent)
             .with_context(|| format!("{}:对 {} 求计划", host_label(host), path.display()))?;
+        // 三个动词共用:audit 语境下 ok = 同步、非 ok = 漂移候选;
+        // converge 语境下则是"待执行预告",之后被 step 事件逐条定案。
+        for item in &plan.items {
+            crate::events::emit(serde_json::json!({
+                "e": "plan_item", "host": host.name,
+                "id": item.id, "change": change_kind(&item.change),
+            }));
+        }
 
         // 记录 id 用**机群名**(inventory 的 name),不用展示标签:
         // 标签会因为地址/端口变化而改,记录会因此对不上。
@@ -452,7 +492,11 @@ async fn run_on_targets(
         if mode == Mode::Verify {
             // 只读路径:不打印"将创建"之类的动作语,只回答"还对不对"。
             let verdict = state::assess(&plan, previous.as_ref());
-            verify_collect(verdict_json(&fleet_name(host), &record_id, &verdict, previous.as_ref()));
+            let vj = verdict_json(&fleet_name(host), &record_id, &verdict, previous.as_ref());
+            crate::events::emit(serde_json::json!({
+                "e": "verify", "host": host.name, "report": vj.clone(),
+            }));
+            verify_collect(vj);
             // 核对本身就是一次"上次什么时候看过"的证据 —— 回写 verified_at,
             // UI 的"多久没核对"才有数据;资源快照保持 apply 时的孪生,不动。
             if let Some(mut prev) = previous.clone() {
@@ -460,7 +504,12 @@ async fn run_on_targets(
                     .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
                 let _ = store.save(&prev);
             }
-            if report_drift(&verdict, previous.as_ref()) {
+            let failed = report_drift(&verdict, previous.as_ref());
+            crate::events::emit(serde_json::json!({
+                "e": "host_done", "host": host.name,
+                "result": if failed { "drifted" } else { "ok" },
+            }));
+            if failed {
                 failures += 1;
             }
             continue;
@@ -472,9 +521,20 @@ async fn run_on_targets(
         if converge {
             if !plan.has_changes() {
                 println!("无需变更,跳过执行。\n");
+                crate::events::emit(serde_json::json!({
+                    "e": "host_done", "host": host.name, "result": "noop",
+                }));
                 continue;
             }
-            match plan::converge(&bp, &scope, &ctx) {
+            let step_host = host.name.clone();
+            let on_step = move |id: &str, oc: crater_ir::verbs::Outcome| {
+                use crater_ir::verbs::Outcome as O;
+                crate::events::emit(serde_json::json!({
+                    "e": "step", "host": step_host, "id": id,
+                    "outcome": match oc { O::Ok => "ok", O::Changed => "changed", O::Warn => "warn" },
+                }));
+            };
+            match plan::converge_with(&bp, &scope, &ctx, &on_step) {
                 Ok(report) => {
                     print_report(&report);
                     dances.extend(report.procedures_needed.iter().cloned());
@@ -514,8 +574,20 @@ async fn run_on_targets(
                 Err(e) => {
                     failures += 1;
                     eprintln!("{}:执行失败 —— {e}\n", host_label(host));
+                    crate::events::emit(serde_json::json!({
+                        "e": "host_done", "host": host.name, "result": "failed",
+                        "detail": format!("{e:#}"),
+                    }));
+                    continue;
                 }
             }
+            crate::events::emit(serde_json::json!({
+                "e": "host_done", "host": host.name, "result": "ok",
+            }));
+        } else {
+            crate::events::emit(serde_json::json!({
+                "e": "host_done", "host": host.name, "result": "planned",
+            }));
         }
     }
     // 逐台收敛之后再跳机群级的舞(顺序不能反:舞往往依赖资源已就位)。
@@ -523,16 +595,28 @@ async fn run_on_targets(
         let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs).await?;
         for name in &dances {
             println!("── procedure {name} ──");
+            crate::events::emit(serde_json::json!({ "e": "proc_start", "name": name }));
             match procedure::run(&bp, name, &targets, &BTreeMap::new()) {
-                Ok(r) => print_proc_report(&r),
+                Ok(r) => {
+                    print_proc_report(&r);
+                    crate::events::emit(serde_json::json!({
+                        "e": "proc_done", "name": name, "result": "ok",
+                    }));
+                }
                 Err(e) => {
                     failures += 1;
                     eprintln!("procedure {name} 失败 —— {e}\n");
+                    crate::events::emit(serde_json::json!({
+                        "e": "proc_done", "name": name, "result": "failed", "detail": format!("{e:#}"),
+                    }));
                 }
             }
         }
     }
 
+    crate::events::emit(serde_json::json!({
+        "e": "done", "failures": failures, "hosts": hosts.len(),
+    }));
     if failures > 0 {
         // verify 的失败是"现实不符",不是"执行出错" —— 措辞不能混。
         bail!(
@@ -926,6 +1010,17 @@ fn print_report(r: &RunReport) {
         println!("  {tag} {id}");
     }
     println!("执行:{}\n", r.summary());
+}
+
+/// 事件流用的动作词(与 `describe` 的人话对应,给机器的短形式)。
+fn change_kind(c: &Change) -> &'static str {
+    match c {
+        Change::Ok => "ok",
+        Change::Create(_) => "create",
+        Change::Update(_) => "update",
+        Change::Destroy => "destroy",
+        Change::Unknown(_) => "unknown",
+    }
 }
 
 fn describe(c: &Change) -> String {

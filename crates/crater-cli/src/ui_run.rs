@@ -247,7 +247,11 @@ pub fn spawn(title: String, verb: String, blueprint: String, inventory: String, 
             dir = shq(&dir.display().to_string()),
         );
         let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c").arg(&shline).env("CRATER_LOG", "info");
+        cmd.arg("-c")
+            .arg(&shline)
+            .env("CRATER_LOG", "info")
+            // 结构化事件流(NDJSON)→ job 目录;lint/build 不发事件,文件为空,无碍。
+            .env("CRATER_EVENTS", dir.join("events.ndjson"));
         // 新会话(进程组长):取消时对整组发信号,sh 与真正的 CLI 一起收到。
         unsafe {
             cmd.pre_exec(|| {
@@ -296,6 +300,9 @@ fn finalize(id: &str) {
         .and_then(|s| s.trim().parse::<i32>().ok());
     m.status = match code {
         Some(0) => "ok".into(),
+        // verify 的非零是"现实不符",不是"执行出错" —— 措辞不能混(CLI 同款)。
+        // 靠事件流区分:有 drifted 结论 = 漂移;没有(连不上机器之类)= failed。
+        Some(_) if m.verb == "verify" && events_say_drifted(&m.id) => "drifted".into(),
         Some(_) => "failed".into(),
         // 没有 exit_code 文件 = 进程没走到收尾(被 kill / 断电)。
         None => "interrupted".into(),
@@ -470,7 +477,7 @@ pub async fn jobs_fragment() -> Html<String> {
             let chip = match m.status.as_str() {
                 "ok" => "chip ok",
                 "running" => "chip run",
-                "canceled" | "interrupted" => "chip warn",
+                "canceled" | "interrupted" | "drifted" => "chip warn",
                 _ => "chip fail",
             };
             format!(
@@ -498,6 +505,44 @@ fn fmt_ts(secs: u64) -> String {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => secs.to_string(),
     }
+}
+
+/// `GET /api/job2/{id}/events?after=<字节>` —— 结构化事件的游标轮询。
+///
+/// 与日志尾巴同一套游标哲学:客户端记字节位,服务端只回增量。
+/// 断尾防御:`emit` 逐条 flush,但读的瞬间最后一行可能只写了一半 ——
+/// 只消费到最后一个换行,余下的字节留给下一轮。
+pub async fn events(
+    AxPath(id): AxPath<String>,
+    Query(q): Query<TailQuery>,
+) -> Response {
+    let Some(m) = read_meta(&id) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"没有这个 job"}))).into_response();
+    };
+    let path = jobs_root().join(&id).join("events.ndjson");
+    let bytes = std::fs::read(&path).unwrap_or_default();
+    let start = (q.after as usize).min(bytes.len());
+    let chunk = &bytes[start..];
+    // 只到最后一个换行为止 —— 半行不算数。
+    let end = chunk.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+    let events: Vec<serde_json::Value> = std::str::from_utf8(&chunk[..end])
+        .unwrap_or("")
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    Json(serde_json::json!({
+        "events": events,
+        "cursor": start + end,
+        "status": m.status,
+    }))
+    .into_response()
+}
+
+/// 事件流里有没有"漂移"结论(finalize 用,区分 verify 的两种非零退出)。
+fn events_say_drifted(id: &str) -> bool {
+    std::fs::read_to_string(jobs_root().join(id).join("events.ndjson"))
+        .map(|t| t.contains("\"result\":\"drifted\""))
+        .unwrap_or(false)
 }
 
 fn esc(s: &str) -> String {
@@ -535,6 +580,11 @@ pub async fn view_job(AxPath(id): AxPath<String>) -> Response {
     <button class="btn" onclick="cancelJob()">取消</button>
     <a class="btn" onclick="htmx.ajax('GET','/view/jobs','#view')">← 全部作业</a>
   </div>
+  <div class="mx-bar">
+    <input id="mx-filter" placeholder="过滤资源(子串)" oninput="mxRender()">
+    <span id="mx-legend" class="mx-legend">· 计划中 ✓ 已是期望态 ~ 已变更 ⚠ 软失败 ✗ 漂移/失败</span>
+  </div>
+  <div id="mx" class="mx"></div>
   <pre id="job-log" class="job-log"></pre>
 </section>
 <style>
@@ -544,12 +594,83 @@ pub async fn view_job(AxPath(id): AxPath<String>) -> Response {
   .chip{{padding:2px 8px;border-radius:99px;font-size:12px}}
   .chip.ok{{background:var(--ok-bg);color:var(--ok)}} .chip.fail{{background:var(--drift-bg);color:var(--drift)}}
   .chip.run{{background:var(--tint);color:var(--accent)}} .chip.warn{{background:var(--unknown-bg);color:var(--unknown)}}
+  .mx-bar{{display:flex;gap:10px;align-items:center;margin:6px 0}}
+  .mx-bar input{{background:var(--surface-2);color:var(--text);border:1px solid var(--border);
+    border-radius:8px;padding:5px 10px;font:inherit;font-size:12px;width:220px}}
+  .mx-legend{{font-size:12px;color:var(--faint)}}
+  .mx{{overflow-x:auto;margin-bottom:10px}}
+  .mx table{{border-collapse:collapse;font-size:12px}}
+  .mx th{{padding:4px 8px;color:var(--muted);font-weight:600;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}}
+  .mx th.hf{{color:var(--drift)}}
+  .mx td{{padding:3px 8px;border-bottom:1px solid var(--border);white-space:nowrap}}
+  .mx td.rid{{font-family:ui-monospace,monospace;color:var(--text)}}
+  .mx td.c{{text-align:center;font-family:ui-monospace,monospace}}
+  .mx .s-plan{{color:var(--faint)}} .mx .s-ok{{color:var(--ok)}}
+  .mx .s-changed{{color:var(--accent)}} .mx .s-warn{{color:var(--unknown)}}
+  .mx .s-bad{{color:var(--drift);font-weight:700}}
 </style>
 <script>
 (function(){{
   const log = document.getElementById('job-log');
   const st = document.getElementById('job-status');
   let cursor = 0, stop = false;
+
+  // ── 机器×资源矩阵:事件流(NDJSON 游标轮询)独立于日志尾巴 ──
+  // 行 = 资源(首现顺序),列 = 机器(host_start 顺序);
+  // 单元格状态机:plan_item(预告)→ step(定案)/ verify.drifted(漂移)。
+  let ecur = 0, estop = false;
+  const hosts = [], rows = [], cells = {{}}, hostState = {{}};
+  function put(host, id, cls, ch){{
+    if (!hosts.includes(host)) hosts.push(host);
+    if (!rows.includes(id)) rows.push(id);
+    cells[host+'\u0000'+id] = {{cls, ch}};
+  }}
+  window.mxRender = function(){{
+    if (!hosts.length) return;
+    const f = (document.getElementById('mx-filter').value||'').toLowerCase();
+    const shown = rows.filter(r => !f || r.toLowerCase().includes(f));
+    let h = '<table><tr><th></th>' + hosts.map(x =>
+      '<th class="'+(hostState[x]==='failed'?'hf':'')+'">'+x+(hostState[x]==='failed'?' ✗':hostState[x]==='noop'?' ✓':'')+'</th>').join('') + '</tr>';
+    for (const r of shown){{
+      h += '<tr><td class="rid">'+r.replace(/</g,'&lt;')+'</td>' + hosts.map(x => {{
+        const c = cells[x+'\u0000'+r];
+        return '<td class="c '+(c?c.cls:'')+'" title="'+x+'">'+(c?c.ch:'')+'</td>';
+      }}).join('') + '</tr>';
+    }}
+    h += '</table>';
+    if (f && shown.length < rows.length)
+      h += '<div class="mx-legend">('+(rows.length-shown.length)+' 行被过滤)</div>';
+    document.getElementById('mx').innerHTML = h;
+  }};
+  function feed(ev){{
+    if (ev.e === 'host_start'){{ if (!hosts.includes(ev.host)) hosts.push(ev.host); }}
+    else if (ev.e === 'plan_item'){{
+      // 计划预告:ok 直接落 ✓(已是期望态),其余标"待执行"。
+      if (ev.change === 'ok') put(ev.host, ev.id, 's-ok', '\u2713');
+      else put(ev.host, ev.id, 's-plan', '\u00b7');
+    }}
+    else if (ev.e === 'step'){{
+      const m = {{ok:['s-ok','\u2713'], changed:['s-changed','~'], warn:['s-warn','\u26a0']}}[ev.outcome]||['s-warn','?'];
+      put(ev.host, ev.id, m[0], m[1]);
+    }}
+    else if (ev.e === 'verify'){{
+      const rep = ev.report||{{}};
+      for (const d of (rep.drifted||[])) put(ev.host, d.id, 's-bad', '\u2717');
+      if (rep.verdict === 'in_sync' && !hosts.includes(ev.host)) hosts.push(ev.host);
+    }}
+    else if (ev.e === 'host_done'){{ hostState[ev.host] = ev.result; }}
+  }}
+  async function epoll(){{
+    if (estop) return;
+    try {{
+      const d = await (await fetch('/api/job2/{id}/events?after='+ecur)).json();
+      ecur = d.cursor;
+      if (d.events.length){{ d.events.forEach(feed); mxRender(); }}
+      if (d.status !== 'running' && !d.events.length){{ estop = true; return; }}
+    }} catch(e) {{ /* 事件流是增益:拿不到就只剩日志,不报错 */ }}
+    setTimeout(epoll, 1000);
+  }}
+  epoll();
   window.cancelJob = async () => {{ await fetch('/api/job2/{id}/cancel', {{method:'POST'}}); }};
   async function poll(){{
     if (stop) return;
@@ -557,7 +678,7 @@ pub async fn view_job(AxPath(id): AxPath<String>) -> Response {
     cursor = parseInt(r.headers.get('X-Log-Cursor')||cursor);
     const s = r.headers.get('X-Job-Status')||'?';
     st.textContent = s;
-    st.className = 'chip ' + (s==='ok'?'ok':s==='running'?'run':(s==='canceled'||s==='interrupted')?'warn':'fail');
+    st.className = 'chip ' + (s==='ok'?'ok':s==='running'?'run':(s==='canceled'||s==='interrupted'||s==='drifted')?'warn':'fail');
     const t = await r.text();
     if (t) {{ log.textContent += t; log.scrollTop = log.scrollHeight; }}
     if (r.status === 286) {{ stop = true; return; }}

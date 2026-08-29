@@ -232,7 +232,23 @@ pub fn plan_with(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx, intent: Intent) -
 }
 
 /// plan → 对非 noop 项 apply。幂等契约保证:立即重跑得到全 `ok`。
+fn push_step(r: &mut RunReport, obs: &dyn Fn(&str, Outcome), id: &str, oc: Outcome) {
+    obs(id, oc);
+    r.steps.push((id.to_string(), oc));
+}
+
 pub fn converge(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<RunReport> {
+    converge_with(bp, scope, ctx, &|_, _| {})
+}
+
+/// 每定案一步就回调一次的 `converge` —— 执行呈现(UI 矩阵)的供血口。
+/// 回调拿到的是**已执行**的结果,不是预测;顺序即执行顺序。
+pub fn converge_with(
+    bp: &Blueprint,
+    scope: &Scope,
+    ctx: &dyn Ctx,
+    on_step: &dyn Fn(&str, Outcome),
+) -> Result<RunReport> {
     let p = plan(bp, scope, ctx)?;
     let mut report = RunReport::default();
 
@@ -272,7 +288,7 @@ pub fn converge(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<RunRepor
             &item.change
         };
         match change {
-            Change::Ok => report.steps.push((item.id.clone(), Outcome::Ok)),
+            Change::Ok => push_step(&mut report, on_step, &item.id, Outcome::Ok),
 
             // 计划期说不清的项:**执行前重新观察一次**,再决定做不做。
             //
@@ -295,26 +311,26 @@ pub fn converge(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<RunRepor
                     upstream_changed: false,
                 });
                 match again {
-                    Change::Ok => report.steps.push((item.id.clone(), Outcome::Ok)),
+                    Change::Ok => push_step(&mut report, on_step, &item.id, Outcome::Ok),
                     Change::Unknown(_) => {
                         rt.apply(ctx, &item.args, &again)
                             .map_err(|e| anyhow::anyhow!("{}: {e}", item.id))?;
-                        report.steps.push((item.id.clone(), Outcome::Warn));
+                        push_step(&mut report, on_step, &item.id, Outcome::Warn);
                     }
                     determinate => {
                         let outcome = rt
                             .apply(ctx, &item.args, &determinate)
                             .map_err(|e| anyhow::anyhow!("{}: {e}", item.id))?;
-                        report.steps.push((item.id.clone(), outcome));
+                        push_step(&mut report, on_step, &item.id, outcome);
                     }
                 }
             }
-            Change::Unknown(_) => report.steps.push((item.id.clone(), Outcome::Warn)),
+            Change::Unknown(_) => push_step(&mut report, on_step, &item.id, Outcome::Warn),
             // 自定义类型的弥合是机群级的舞 —— 记下来交给调用方,不在这里跑。
             _ if bp.custom_type(&item.ty).is_some() => {
                 let def = bp.custom_type(&item.ty).expect("checked");
                 report.procedures_needed.insert(def.apply.clone());
-                report.steps.push((item.id.clone(), Outcome::Warn));
+                push_step(&mut report, on_step, &item.id, Outcome::Warn);
             }
             change => {
                 let rt = resolve_type(bp, &item.ty)
@@ -325,7 +341,7 @@ pub fn converge(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<RunRepor
                 if outcome == Outcome::Changed {
                     upstream_changed = true;
                 }
-                report.steps.push((item.id.clone(), outcome));
+                push_step(&mut report, on_step, &item.id, outcome);
             }
         }
     }

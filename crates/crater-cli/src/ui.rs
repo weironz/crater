@@ -218,6 +218,7 @@ pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
         .route("/api/jobs", get(crate::ui_run::jobs_fragment))
         .route("/api/job2/{id}", get(crate::ui_run::tail))
         .route("/api/job2/{id}/cancel", post(crate::ui_run::cancel))
+        .route("/api/job2/{id}/events", get(crate::ui_run::events))
         .route("/view/run", get(crate::ui_run::view_run))
         .route("/view/jobs", get(crate::ui_run::view_jobs))
         .route("/view/job/{id}", get(crate::ui_run::view_job))
