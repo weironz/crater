@@ -1,0 +1,40 @@
+# zot:OCI registry。二进制 + 配置 + unit + 服务。
+name: zot
+version: "1"
+description: zot OCI 镜像仓库
+
+fleet:
+  groups:
+    registry: {min: 1}
+
+params:
+  version: { default: "2.1.17", stage: build }
+
+materials:
+  - name: zot-bin
+    file: "https://github.com/project-zot/zot/releases/download/v${params.version}/zot-linux-amd64"
+    when: "substrate.arch == 'amd64'"
+  - name: zot-bin
+    file: "https://github.com/project-zot/zot/releases/download/v${params.version}/zot-linux-arm64"
+    when: "substrate.arch == 'arm64'"
+  - { name: zot-config, file: files/config.json }
+  - { name: zot-unit,   file: files/zot.service }
+
+resources:
+  - copy: { material: zot-bin, dest: /usr/local/bin/zot, mode: "0755" }
+    target: role.registry
+  - file: { path: /var/lib/zot, state: directory }
+    target: role.registry
+  - file: { path: /etc/zot, state: directory }
+    target: role.registry
+  # 配置变更经上游传导自动重启服务(旧版靠 notify,这里不需要)。
+  - copy: { material: zot-config, dest: /etc/zot/config.json }
+    target: role.registry
+  - systemd_unit: { name: zot, from_material: zot-unit }
+    target: role.registry
+  - service: { name: zot, state: started, enabled: true }
+    target: role.registry
+
+health:
+  - http: { url: "http://127.0.0.1:5000/v2/", status: 200 }
+    target: role.registry

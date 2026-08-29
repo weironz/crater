@@ -1,0 +1,46 @@
+# Docker(静态二进制形态):官方 static tarball → /usr/local/bin → 两个 unit → 起服务。
+# 纯二进制物料,离线闭包可行;amd64/arm64 双变体(官方 URL 命名各异,写全)。
+name: docker
+version: "1"
+description: Docker + containerd,官方静态二进制部署
+
+fleet:
+  groups:
+    docker: {min: 1}
+
+params:
+  version: { default: "27.3.1", stage: build }
+
+materials:
+  - name: docker-tgz
+    file: "https://download.docker.com/linux/static/stable/x86_64/docker-${params.version}.tgz"
+    when: "substrate.arch == 'amd64'"
+  - name: docker-tgz
+    file: "https://download.docker.com/linux/static/stable/aarch64/docker-${params.version}.tgz"
+    when: "substrate.arch == 'arm64'"
+  - { name: containerd-unit, file: files/containerd.service }
+  - { name: docker-unit,     file: files/docker.service }
+  - { name: daemon-json,     file: files/daemon.json }
+
+resources:
+  # tarball 内是 docker/ 一层目录,strip 1 直接落 /usr/local/bin。
+  - unarchive: { material: docker-tgz, to: /usr/local/bin, strip: 1, creates: /usr/local/bin/dockerd }
+    target: role.docker
+  # 两个 unit 各自声明(名字与物料名不同构,each 反而要引入映射,直写更清楚)。
+  - copy: { material: containerd-unit, dest: /etc/systemd/system/containerd.service }
+    target: role.docker
+  - copy: { material: docker-unit, dest: /etc/systemd/system/docker.service }
+    target: role.docker
+  - file: { path: /etc/docker, state: directory }
+    target: role.docker
+  # daemon.json 变更经上游传导自动重启 docker,不需要 notify。
+  - copy: { material: daemon-json, dest: /etc/docker/daemon.json }
+    target: role.docker
+  - service: { name: containerd, state: started, enabled: true }
+    target: role.docker
+  - service: { name: docker, state: started, enabled: true }
+    target: role.docker
+
+health:
+  - cmd: { run: "docker info --format '{{.ServerVersion}}'" }
+    target: role.docker

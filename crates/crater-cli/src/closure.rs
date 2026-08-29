@@ -93,6 +93,8 @@ impl Baker {
                 .await
                 .with_context(|| format!("烘焙物料 {}", item.label()))?;
             // 声明了摘要就当场核对:烤进闭包的字节错了,现场是查不出来的。
+            // 注意核对发生在解包**之前** —— 上游发布的 checksum 是对下载物
+            // (zip)的,不是对里面那个成员的。
             if let Some(want) = &plan.sha256 {
                 let got = bundle::sha256_hex(&bytes);
                 if &got != want {
@@ -103,6 +105,14 @@ impl Baker {
                     );
                 }
             }
+            // `unzip:` 在**这里**兑现(D-103:目标机零依赖,解包只能在控制端)。
+            // 闭包里存的是解出来的成员,不是 zip —— 否则推到目标机的就是个
+            // 没人解得开的压缩包,闭包等于白建。
+            let bytes = match &plan.unzip {
+                Some(member) => crater_core::zip::extract_member(&bytes, member)
+                    .with_context(|| format!("物料 {}:从 zip 抽取 `{member}`", item.label()))?,
+                None => bytes,
+            };
             let entry = self.stage.store_blob(&plan.source, &bytes)?;
             println!(
                 "  ✓ {:<28} {:>9}  {}",
@@ -475,5 +485,116 @@ mod tests {
         std::fs::write(dir.path().join("files/x.conf"), b"body").unwrap();
         let got = fetch_bytes("files/x.conf", dir.path()).await.unwrap();
         assert_eq!(got, b"body");
+    }
+}
+
+#[cfg(test)]
+mod unzip_tests {
+    use super::*;
+
+    /// 手造一个单成员、无压缩(stored)的最小 zip。
+    /// zip 的写侧是刻意不发行的(crater 只读不写),测试就地拼字节。
+    fn make_zip(member: &str, content: &[u8]) -> Vec<u8> {
+        let name = member.as_bytes();
+        let n = content.len() as u32;
+        let mut out = Vec::new();
+        // Local File Header
+        out.extend_from_slice(&0x04034b50u32.to_le_bytes());
+        out.extend_from_slice(&[20, 0, 0, 0, 0, 0]); // ver, flags, method=0(stored)
+        out.extend_from_slice(&[0; 8]); // time, date, crc(读侧按 CD 尺寸取,不验 crc)
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(name);
+        out.extend_from_slice(content);
+        // Central Directory
+        let cd_off = out.len() as u32;
+        out.extend_from_slice(&0x02014b50u32.to_le_bytes());
+        out.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0]); // made-by, needed, flags, method=0
+        out.extend_from_slice(&[0; 8]); // time, date, crc
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&[0; 12]); // extra/comment/disk/attrs
+        out.extend_from_slice(&0u32.to_le_bytes()); // LFH offset
+        out.extend_from_slice(name);
+        let cd_size = out.len() as u32 - cd_off;
+        // End Of Central Directory
+        out.extend_from_slice(&0x06054b50u32.to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&cd_size.to_le_bytes());
+        out.extend_from_slice(&cd_off.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    #[tokio::test]
+    async fn an_unzip_material_is_extracted_at_bake_time_not_shipped_as_a_zip() {
+        // 此前 build 只存原样 zip 字节 —— 推到目标机的是个没人解得开的压缩包,
+        // 而部署路径还叫你"先 build 闭包":两头都对,合起来是死路。
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("files")).unwrap();
+        let zip_bytes = make_zip("rustfs", b"i-am-the-binary");
+        std::fs::write(dir.path().join("files/rustfs.zip"), &zip_bytes).unwrap();
+        let bp = dir.path().join("bp.yaml");
+        std::fs::write(
+            &bp,
+            [
+                "name: t",
+                "materials:",
+                "  - name: tool",
+                "    file: files/rustfs.zip",
+                "    unzip: rustfs",
+                "resources:",
+                "  - copy: { material: tool, dest: /usr/local/bin/rustfs }",
+                "",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let out = dir.path().join("c.tar");
+        build(&bp, &out, &[], &[]).await.unwrap();
+        let (_tmp, map) = load(&out).unwrap();
+        let blob = map.values().next().unwrap();
+        assert_eq!(
+            std::fs::read(blob).unwrap(),
+            b"i-am-the-binary",
+            "闭包里应是解出来的成员,不是 zip"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_declared_sha_is_checked_against_the_zip_before_extraction() {
+        // 上游 checksum 是对下载物(zip)发布的 —— 核对必须在解包之前、
+        // 针对 zip 字节;搞反了每个带摘要的 unzip 物料都烤不出来。
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("files")).unwrap();
+        let zip_bytes = make_zip("tool", b"payload");
+        let zip_sha = crater_core::bundle::sha256_hex(&zip_bytes);
+        std::fs::write(dir.path().join("files/t.zip"), &zip_bytes).unwrap();
+        let bp = dir.path().join("bp.yaml");
+        std::fs::write(
+            &bp,
+            [
+                "name: t",
+                "materials:",
+                "  - name: tool",
+                "    file: files/t.zip",
+                &format!("    sha256: \"{zip_sha}\""),
+                "    unzip: tool",
+                "resources:",
+                "  - copy: { material: tool, dest: /usr/bin/t }",
+                "",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let out = dir.path().join("c.tar");
+        build(&bp, &out, &[], &[]).await.expect("zip 摘要对得上就该烤成");
+        let (_tmp, map) = load(&out).unwrap();
+        assert_eq!(std::fs::read(map.values().next().unwrap()).unwrap(), b"payload");
     }
 }

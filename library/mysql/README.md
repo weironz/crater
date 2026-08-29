@@ -1,2 +1,8 @@
-# mysql —— 数据库交付
-单机 MySQL。`crater inspect mysql` 看参数;`crater apply mysql -i inv.yaml`。
+# mysql —— MySQL Server(blueprint)
+
+发行版包安装;服务名按 family 分叉(debian=mysql / rhel=mysqld),条件写在
+条目的 `when:` 上。
+
+```bash
+crater apply library/mysql/mysql.blueprint.yaml -i inventory.yaml
+```

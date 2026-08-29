@@ -4,8 +4,11 @@ global:
   scrape_interval: 15s
 
 scrape_configs:
-  - job_name: minio
-    metrics_path: /minio/v2/metrics/cluster
+  - job_name: rustfs
+    # 实测(1.0.0-beta.7):/metrics 与 minio 兼容路径都返回 403 —— 指标端点
+    # 需要鉴权,匿名抓取不可用。此 job 会显示 down,留作占位;接通需要配
+    # rustfs 侧的 OBS 鉴权后在此加 authorization,属站点配置不属蓝图。
+    metrics_path: /metrics
     static_configs:
       - targets:
 {% for n in fleet.storage %}

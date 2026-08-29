@@ -1,0 +1,17 @@
+# yq:单二进制工具下发 —— 最小的蓝图长什么样。
+name: yq
+version: "1"
+description: yq 命令行工具
+
+params:
+  version: { default: "4.44.3", stage: build }
+
+materials:
+  - name: yq-bin
+    file: "https://github.com/mikefarah/yq/releases/download/v${params.version}/yq_linux_${substrate.arch}"
+
+resources:
+  - copy: { material: yq-bin, dest: /usr/local/bin/yq, mode: "0755" }
+
+health:
+  - cmd: { run: "yq --version" }

@@ -5,7 +5,7 @@
 # 同名容器跑着旧镜像是最常见的现实。
 name: observability
 version: "1"
-description: Prometheus + Grafana(容器),抓 MinIO 指标
+description: Prometheus + Grafana(容器),抓 rustfs 指标
 
 fleet:
   groups:

@@ -23,8 +23,13 @@ uses:
     params:
       maxmemory: "128mb"
 
-  - blueprint: minio-cluster
+  # rustfs 的正典蓝图在 library/rustfs/(产品目录),栈跨目录引用它 ——
+  # 同一份蓝图既能单独用,也能进栈,这正是 stack 的意义。
+  - blueprint: ../rustfs/rustfs.blueprint.yaml
     groups: { storage: object_store }
+    params:
+      # 实验机群的数据目录是 loop 盘,磁盘独立性校验必须旁路;生产删掉这行。
+      bypass_disk_check: true
 
   # 这一条同时映射两个组:它自己在 edge 上跑,而上游取自 object_store。
   - blueprint: nginx-lb

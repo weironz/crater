@@ -114,6 +114,13 @@ impl<'a> MaterialCtx<'a> {
 
     /// 落地后校验声明的摘要。对不上就删掉半成品 —— 留着比没有更危险。
     fn verify(&self, plan: &MaterialPlan, dest: &str) -> Result<()> {
+        // `unzip:` 物料的声明摘要是**zip 的**(上游 checksum 只对下载物发布),
+        // 而落地的是解出来的成员 —— 拿 zip 摘要去比二进制必然不符,
+        // 会把每一次正确的落地都判成失败。解包物料的完整性由烘焙期的
+        // zip 摘要核对 + 闭包 blob 的内容寻址共同保证。
+        if plan.unzip.is_some() {
+            return Ok(());
+        }
         let Some(want) = &plan.sha256 else {
             return Ok(());
         };
@@ -156,8 +163,12 @@ impl Ctx for MaterialCtx<'_> {
     fn material_digest(&self, name: &str) -> Result<Option<String>> {
         let plan = materials::resolve(self.bp, name, &self.scope)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        if let Some(declared) = &plan.sha256 {
-            return Ok(Some(declared.clone()));
+        // 同上:解包物料的声明摘要属于 zip,不属于落地文件 —— 短路返回它会让
+        // copy 的 diff 永远"不符",每次 apply 都重推一遍。
+        if plan.unzip.is_none() {
+            if let Some(declared) = &plan.sha256 {
+                return Ok(Some(declared.clone()));
+            }
         }
         let path = match self.blobs.get(&plan.source) {
             Some(blob) => blob.clone(),

@@ -1,0 +1,26 @@
+# MySQL:装包 + 起服务。服务名按发行版分叉(debian=mysql / rhel=mysqld),
+# 条件写在条目上(when),不写进命令字符串。
+name: mysql
+version: "1"
+description: MySQL Server(发行版包)
+
+fleet:
+  groups:
+    db: {min: 1}
+
+resources:
+  - package:
+      packages:
+        debian: [mysql-server]
+        rhel: [mysql-server]
+    target: role.db
+  - service: { name: mysql, state: started, enabled: true }
+    target: role.db
+    when: "substrate.family == 'debian'"
+  - service: { name: mysqld, state: started, enabled: true }
+    target: role.db
+    when: "substrate.family == 'rhel'"
+
+health:
+  - port_open: { port: 3306 }
+    target: role.db

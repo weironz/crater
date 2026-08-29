@@ -1,0 +1,18 @@
+[Unit]
+Description=RustFS S3-compatible object storage (crater)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Type=simple 而非 notify —— 分布式模式要等法定人数到齐才可服务,而部署逐台
+# 进行:第一台启动时同伴还不存在。systemd 只负责"进程拉起来了",集群是否
+# 可服务由蓝图的 health 探针(/health)回答。这是 minio 场景真机踩过的坑。
+Type=simple
+EnvironmentFile=-/etc/default/rustfs
+ExecStart=/usr/local/bin/rustfs $RUSTFS_VOLUMES
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

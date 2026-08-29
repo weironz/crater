@@ -1,0 +1,65 @@
+# RustFS —— S3 兼容对象存储(Rust 实现),二进制 + systemd 部署。
+#
+# **单机与多机是同一份蓝图**:拓扑由 inventory 的 storage 组决定 ——
+# 1 台 = 单机模式(本地卷),≥4 台 = 分布式纠删码(卷列表由机群视角渲染)。
+# 这正是旧 task 版做不到的:那里三种形态靠人手写 RUSTFS_VOLUMES 表达式,
+# 写错一台整个集群起不来;这里卷列表是 fleet 的投影,加机器只改 inventory。
+#
+# 上游只发 zip:物料声明 `unzip: rustfs`,闭包构建时在**控制端**解出二进制
+# (目标机零依赖,D-103)。musl 静态链接 → 不挑发行版。
+name: rustfs
+version: "1"
+description: RustFS S3 对象存储 —— 单机/分布式同一份蓝图,拓扑由 fleet 决定
+
+fleet:
+  groups:
+    # min: 1 —— 单机也合法;分布式纠删码要 ≥4 台。
+    # 已知缺口:契约目前只有 min,表达不了"1 或 ≥4"这种取值集 ——
+    # 2~3 台的 inventory 会在 rustfs 首启时被它自己的卷校验拒绝(看 journalctl)。
+    storage: {min: 1}
+
+params:
+  version:    { default: "1.0.0-beta.7", stage: build, desc: "GitHub release tag" }
+  port:       { type: port, default: 9000, desc: "S3 端点" }
+  console_port: { type: port, default: 9001, desc: "控制台" }
+  data_dir:   { default: "/srv/rustfs", desc: "本机数据目录(各节点同路径)" }
+  access_key: { default: "crater-admin", desc: "生产务必用 --set 或 app 文件覆盖" }
+  secret_key: { default: "crater-changeme", desc: "生产务必覆盖" }
+  # 多个数据目录落在同一块物理盘时 rustfs 会拒启(磁盘独立性校验)。
+  # 测试/CI 的 loop 盘要开;生产保持 false。
+  bypass_disk_check: { type: bool, default: false }
+
+materials:
+  # sha256 不钉:钉了会跨版本失配;version 钉 release tag 已保证可复现。
+  # (unzip 物料的摘要语义是对 zip 的,烘焙期核对 —— 见 D-103 与闭包实现。)
+  - name: rustfs-bin
+    file: "https://github.com/rustfs/rustfs/releases/download/${params.version}/rustfs-linux-x86_64-musl-v${params.version}.zip"
+    unzip: rustfs
+    when: "substrate.arch == 'amd64'"
+  - name: rustfs-bin
+    file: "https://github.com/rustfs/rustfs/releases/download/${params.version}/rustfs-linux-aarch64-musl-v${params.version}.zip"
+    unzip: rustfs
+    when: "substrate.arch == 'arm64'"
+  - { name: rustfs-env,  file: templates/rustfs.env.j2 }
+  - { name: rustfs-unit, file: files/rustfs.service }
+
+resources:
+  - copy: { material: rustfs-bin, dest: /usr/local/bin/rustfs, mode: "0755" }
+    target: role.storage
+  - file: { path: "${params.data_dir}", state: directory, mode: "0750" }
+    target: role.storage
+  - file: { path: /var/logs/rustfs, state: directory, mode: "0750" }
+    target: role.storage
+  # 环境文件由机群视角渲染:分布式的卷列表 = fleet.storage 的投影。
+  - template: { material: rustfs-env, dest: /etc/default/rustfs, mode: "0600" }
+    target: role.storage
+  - systemd_unit: { name: rustfs, from_material: rustfs-unit }
+    target: role.storage
+  - service: { name: rustfs, state: started, enabled: true }
+    target: role.storage
+
+health:
+  - http: { url: "http://127.0.0.1:${params.port}/health", status: 200 }
+    target: role.storage
+  - port_open: { port: "${params.console_port}" }
+    target: role.storage

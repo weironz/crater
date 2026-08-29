@@ -1,5 +1,5 @@
 # 上游 = 机群里 storage 组的全体。加机器只需改 inventory,这份配置自动跟上。
-upstream minio_backend {
+upstream storage_backend {
     least_conn;
 {% for n in fleet.storage %}
     server {{ n.address }}:{{ params.upstream_port }} max_fails=2 fail_timeout=10s;
@@ -13,7 +13,7 @@ server {
     proxy_buffering off;
 
     location / {
-        proxy_pass http://minio_backend;
+        proxy_pass http://storage_backend;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_connect_timeout 5s;

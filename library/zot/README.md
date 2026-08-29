@@ -1,2 +1,7 @@
-# zot —— OCI registry 交付
-离线镜像库(zot)。`crater inspect zot`;`crater apply zot -i inv.yaml`。
+# zot —— OCI 镜像仓库(blueprint)
+
+二进制 + 配置 + systemd。配置变更经上游传导自动重启。
+
+```bash
+crater apply library/zot/zot.blueprint.yaml -i inventory.yaml
+```
