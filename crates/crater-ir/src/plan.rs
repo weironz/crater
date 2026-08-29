@@ -235,8 +235,43 @@ pub fn plan_with(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx, intent: Intent) -
 pub fn converge(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<RunReport> {
     let p = plan(bp, scope, ctx)?;
     let mut report = RunReport::default();
+
+    // 上游是否**真的**动过 —— 按执行结果算,不是按计划猜。
+    //
+    // plan 期也算过一次传导,但它只能基于预测,而预测可能是 `Unknown`
+    // (典型:配置文件由同一轮里更早的 package 装出来,预测时还不存在)。
+    // Unknown 不参与 plan 期传导,于是"配置改了却没重启服务"这种最经典的
+    // 故障会静默发生:redis.conf 已是 bind 0.0.0.0,而进程仍监听 127.0.0.1。
+    //
+    // 这里按**实际结果**补一次传导:上游真动过、而某项在计划里是 Ok 的,
+    // 就重新观察一次再判 —— 现实可能已经不是计划时那个样子了。
+    let mut upstream_changed = false;
+
     for item in &p.items {
-        match &item.change {
+        // 上游真动过之后,**这一项的预测就可能过时** —— 不限于"计划说 Ok"。
+        //
+        // 反例正是 redis:plan 时包还没装,service 因此被判为 Create;
+        // 而包在安装时自己就把服务起起来了,`systemctl start` 对已在跑的服务
+        // 是空操作 —— 于是刚被 lineinfile 改过的 bind 配置永远不生效,
+        // 进程一直监听 127.0.0.1,而 crater 报的是成功。
+        //
+        // 代价是首次变更之后的每一项多一次探针。这个代价换的是"配置改了服务
+        // 一定重启"—— 那是本工具最基本的承诺之一。
+        let planned;
+        let change = if upstream_changed && bp.custom_type(&item.ty).is_none() {
+            let rt = resolve_type(bp, &item.ty)
+                .ok_or_else(|| anyhow::anyhow!("类型 `{}` 无实现", item.ty))?;
+            let fresh = rt.observe(ctx, &item.args)?;
+            planned = rt.diff(&DiffInput {
+                args: &item.args,
+                observed: &fresh,
+                upstream_changed: true,
+            });
+            &planned
+        } else {
+            &item.change
+        };
+        match change {
             Change::Ok => report.steps.push((item.id.clone(), Outcome::Ok)),
 
             // 计划期说不清的项:**执行前重新观察一次**,再决定做不做。
@@ -250,6 +285,7 @@ pub fn converge(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<RunRepor
             // "接住,不羞辱,但可见"。此前是直接跳过,于是逃生舱形同虚设:
             // 没写 check 的 shell 在 apply 时一次都不会执行。
             Change::Unknown(_) if bp.custom_type(&item.ty).is_none() => {
+                upstream_changed = true;
                 let rt = resolve_type(bp, &item.ty)
                     .ok_or_else(|| anyhow::anyhow!("类型 `{}` 无实现", item.ty))?;
                 let fresh = rt.observe(ctx, &item.args)?;
@@ -286,6 +322,9 @@ pub fn converge(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<RunRepor
                 let outcome = rt
                     .apply(ctx, &item.args, change)
                     .map_err(|e| anyhow::anyhow!("{}: {e}", item.id))?;
+                if outcome == Outcome::Changed {
+                    upstream_changed = true;
+                }
                 report.steps.push((item.id.clone(), outcome));
             }
         }

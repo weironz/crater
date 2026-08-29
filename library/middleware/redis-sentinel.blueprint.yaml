@@ -1,0 +1,106 @@
+# Redis 主从 + 哨兵 —— 三节点仲裁。
+#
+# 与 postgres 那份的对照点:那里是**静态**主从(谁是主由 inventory 顺序决定,
+# 换主要人介入);这里是**仲裁**拓扑,哨兵自己选主。蓝图要表达的因此不同 ——
+# 不是"你是主/你是备",而是"你们三个互相认识,多数派说了算"。
+name: redis-sentinel
+version: "7"
+description: Redis 一主两备 + 三哨兵仲裁
+
+fleet:
+  groups:
+    cache: {min: 3}
+
+cast:
+  seed:      first(role.cache)
+  followers: rest(role.cache)
+  all_cache: role.cache
+
+params:
+  bind_port:   { type: port, default: 6379 }
+  sentinel_port: { type: port, default: 26379 }
+  master_name: { default: "mymaster" }
+  # 仲裁票数:三哨兵取 2。写成参数而不是写死,因为它必须随节点数变 ——
+  # 五节点还写 2 会让"两台失联即可换主"这种危险配置悄悄成立。
+  quorum:      { type: int, default: 2 }
+  maxmemory:   { default: "256mb" }
+
+resources:
+  - package:
+      packages:
+        debian: [redis-server, redis-sentinel]
+    target: all_cache
+
+  # redis.conf 只改我们在意的四行,其余交给发行版。
+  - lineinfile: { path: /etc/redis/redis.conf, regexp: "^bind ", line: "bind 0.0.0.0 -::1" }
+    target: all_cache
+  - lineinfile: { path: /etc/redis/redis.conf, regexp: "^#?protected-mode", line: "protected-mode no" }
+    target: all_cache
+  - lineinfile: { path: /etc/redis/redis.conf, regexp: "^#?maxmemory ", line: "maxmemory ${params.maxmemory}" }
+    target: all_cache
+  - lineinfile: { path: /etc/redis/redis.conf, regexp: "^#?maxmemory-policy", line: "maxmemory-policy allkeys-lru" }
+    target: all_cache
+
+  - service: { name: redis-server, state: started, enabled: true }
+    target: all_cache
+
+  # 哨兵配置整份由模板渲染:它的内容几乎全是"主库是谁、几票换主",
+  # 没有需要保留的发行版默认值 —— 这正是 template 与 lineinfile 的分界。
+  # 0660 而非 0640:sentinel **会重写自己的配置**(记录当前主库、其它哨兵),
+  # 只读会让它直接拒绝启动 —— 报的是 "config file is not writable",
+  # 而不是任何与权限有关的字样,不看日志根本猜不到。
+  - template: { material: sentinel-conf, dest: /etc/redis/sentinel.conf, owner: redis, group: redis, mode: "0660" }
+    target: all_cache
+  - service: { name: redis-sentinel, state: started, enabled: true }
+    target: all_cache
+
+  # "这台是备库"是期望态;弥合它的动作(把它指向主库)是一支舞。
+  #
+  # 不能写成 `lineinfile: replicaof ${facts.seed_ip}` —— `facts` 只在 procedure
+  # 的作用域里存在,资源里引用它会让整条 `when` 恒假、备库永远配不上。
+  # 跨主机取值本来就是 exports 的职责。
+  - replica_of: { of: "${substrate.name}" }
+    target: followers
+
+types:
+  - name: replica_of
+    args:
+      of: { type: string }
+    observe:
+      cmd: "redis-cli info replication 2>/dev/null | grep -q '^role:slave' && echo slave || echo master"
+      parse: { slave: slave }
+    apply: attach
+
+procedures:
+  attach:
+    steps:
+      # 主库只负责把自己的地址报出来。
+      - shell: { cmd: "redis-cli ping >/dev/null", check: "redis-cli ping >/dev/null" }
+        target: seed
+        exports:
+          seed_ip: "hostname -I | awk '{print $1}'"
+
+      # 备库挂上去。CONFIG REWRITE 把运行期改动写回配置文件 ——
+      # 否则重启就退回独立主库,而"重启后还成不成立"正是持久化该管的事。
+      #
+      # 判据是 role:slave(只有 replicaof 成功才为真),不是"redis 在跑" ——
+      # 后者在这一步之前就已为真,拿它当 check 会让整步被跳过。
+      - shell:
+          cmd: >-
+            redis-cli replicaof ${facts.seed_ip} ${params.bind_port} &&
+            redis-cli config rewrite
+          check: "redis-cli info replication | grep -q '^role:slave'"
+        target: followers
+        strategy: { throttle: 1 }
+
+materials:
+  - { name: sentinel-conf, file: templates/sentinel.conf.j2 }
+
+health:
+  - port_open: { port: "${params.bind_port}" }
+    target: all_cache
+  - port_open: { port: "${params.sentinel_port}" }
+    target: all_cache
+  - cmd:
+      run: "redis-cli -p ${params.sentinel_port} sentinel masters | grep -q ${params.master_name}"
+    target: all_cache

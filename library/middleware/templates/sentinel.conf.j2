@@ -1,0 +1,17 @@
+# 哨兵配置 —— 整份由机群视角渲染。
+#
+# `fleet.cache[0]` 就是主库(与蓝图的 cast.seed 同一条判据)。哨兵之间不必
+# 互相列举:它们通过订阅主库的 __sentinel__:hello 频道自动发现彼此。
+port {{ params.sentinel_port }}
+bind 0.0.0.0
+daemonize no
+pidfile /run/sentinel/redis-sentinel.pid
+logfile ""
+dir /var/lib/redis
+
+# quorum 是"判定主库失联所需的哨兵票数"。它必须随节点数走:
+# 三哨兵取 2,五哨兵取 3 —— 写死 2 会让"两台失联即可换主"在更大机群里成立。
+sentinel monitor {{ params.master_name }} {{ fleet.cache[0].address }} {{ params.bind_port }} {{ params.quorum }}
+sentinel down-after-milliseconds {{ params.master_name }} 5000
+sentinel failover-timeout {{ params.master_name }} 60000
+sentinel parallel-syncs {{ params.master_name }} 1

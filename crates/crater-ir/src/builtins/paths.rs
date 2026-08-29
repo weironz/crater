@@ -57,6 +57,7 @@ impl ResourceType for Template {
             if let Some(text) = ctx.render_material(name)? {
                 let dest = arg_str(args, "dest")?;
                 ctx.write_file(dest, &text)?;
+                crate::builtins::copy::apply_ownership(ctx, dest, args)?;
                 if let Some(mode) = arg_str_opt(args, "mode") {
                     run_ok(ctx, &format!("chmod {} {}", mode, sh(dest)))?;
                 }
@@ -74,8 +75,10 @@ impl ResourceType for Template {
 fn dest_as_copy(args: &ResolvedArgs) -> Result<ResolvedArgs> {
     let mut a = ResolvedArgs::new();
     a.insert("dest".into(), args.get("dest").cloned().unwrap_or_default());
-    if let Some(m) = args.get("mode") {
-        a.insert("mode".into(), m.clone());
+    for k in ["mode", "owner", "group"] {
+        if let Some(v) = args.get(k) {
+            a.insert(k.into(), v.clone());
+        }
     }
     Ok(a)
 }

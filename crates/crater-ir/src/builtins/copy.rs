@@ -9,6 +9,21 @@ use crate::builtins::file::run_ok;
 use crate::eval::ResolvedArgs;
 use crate::verbs::*;
 
+/// 落 `owner:` / `group:` —— 两个类型都登记了这对字段,却都只应用了 `mode`。
+///
+/// 后果不是"权限差一点":redis-sentinel 要**重写自己的配置文件**,属主不对
+/// 就直接拒绝启动。而 crater 这边报的是成功 —— 又一个"文档承诺过但没实现"。
+pub(crate) fn apply_ownership(ctx: &dyn Ctx, path: &str, args: &ResolvedArgs) -> Result<()> {
+    let owner = arg_str_opt(args, "owner");
+    let group = arg_str_opt(args, "group");
+    if owner.is_none() && group.is_none() {
+        return Ok(());
+    }
+    let spec = format!("{}:{}", owner.unwrap_or(""), group.unwrap_or(""));
+    run_ok(ctx, &format!("chown {} {}", sh(&spec), sh(path)))?;
+    Ok(())
+}
+
 pub struct Copy;
 
 impl ResourceType for Copy {
@@ -19,7 +34,7 @@ impl ResourceType for Copy {
     fn observe(&self, ctx: &dyn Ctx, args: &ResolvedArgs) -> Result<Observed> {
         let dest = arg_str(args, "dest")?;
         let cmd = format!(
-            "test -f {d} && sha256sum {d} | cut -d' ' -f1 && stat -c '%a' {d}",
+            "test -f {d} && sha256sum {d} | cut -d' ' -f1 && stat -c '%a\n%U\n%G' {d}",
             d = sh(dest)
         );
         let (code, out) = ctx.probe(&cmd)?;
@@ -30,6 +45,8 @@ impl ResourceType for Copy {
         let mut obs = Observed::present([
             ("sha256", lines.next().unwrap_or_default().trim().to_string()),
             ("mode", lines.next().unwrap_or_default().trim().to_string()),
+            ("owner", lines.next().unwrap_or_default().trim().to_string()),
+            ("group", lines.next().unwrap_or_default().trim().to_string()),
         ]);
         // 内容来自物料时,把**期望摘要**一并取来 —— 它是控制端事实,
         // 没有它 diff 只能报"说不清",verify 就永远给不出绿灯。
@@ -87,6 +104,13 @@ impl ResourceType for Copy {
                 }
             },
         }
+        for key in ["owner", "group"] {
+            if let (Some(want), Some(have)) = (arg_str_opt(input.args, key), obs.get(key)) {
+                if want != have {
+                    fields.push(FieldDiff::change(key, have, want));
+                }
+            }
+        }
         if let (Some(want), Some(have)) = (arg_str_opt(input.args, "mode"), obs.get("mode")) {
             if want.trim_start_matches('0') != have.trim_start_matches('0') {
                 fields.push(FieldDiff::change("mode", have, want));
@@ -110,6 +134,7 @@ impl ResourceType for Copy {
         } else {
             anyhow::bail!("copy 需要 content / src / material 之一");
         }
+        apply_ownership(ctx, dest, args)?;
         if let Some(mode) = arg_str_opt(args, "mode") {
             run_ok(ctx, &format!("chmod {} {}", sh(mode), sh(dest)))?;
         }
