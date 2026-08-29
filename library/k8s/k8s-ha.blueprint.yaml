@@ -368,20 +368,40 @@ procedures:
           env: { KUBECONFIG: /etc/kubernetes/admin.conf }
         target: masters
         strategy: { throttle: 1 }
+      # ── check 必须检验**本步自己的效果** ──────────────────────────
+      #
+      # 这里踩过一个静默的坑:原先三步的 check 都写
+      # `kubeadm version -o short | grep -q v${params.version}`。而第一步刚把
+      # 新版 kubeadm 二进制 copy 到所有机器 —— 于是这个条件当场成立,
+      # 三步全部被判为"已完成"跳过,报告显示 ok,而集群一点没升。
+      #
+      # 教训是通用的:**check 不能检验一个由前序步骤建立的前提**,
+      # 它只能检验这一步做完之后才为真的东西。前提该由 `deps` 或步骤顺序表达。
       - shell:
+          # 集群声明的版本 —— 只有 `upgrade apply` 成功才会改写它。
           cmd: "kubeadm upgrade apply -y v${params.version}"
-          check: "kubeadm version -o short | grep -q v${params.version}"
+          check: >-
+            kubectl -n kube-system get cm kubeadm-config
+            -o jsonpath='{.data.ClusterConfiguration}'
+            | grep -q 'kubernetesVersion: v${params.version}'
+          env: { KUBECONFIG: /etc/kubernetes/admin.conf }
         target: seed
       - shell:
+          # 其余控制面:静态 Pod 清单里的镜像标签,只有 `upgrade node` 会改它。
           cmd: "kubeadm upgrade node"
-          check: "kubeadm version -o short | grep -q v${params.version}"
+          check: "grep -q 'kube-apiserver:v${params.version}' /etc/kubernetes/manifests/kube-apiserver.yaml"
+          env: { KUBECONFIG: /etc/kubernetes/admin.conf }
         target: followers
         strategy: { throttle: 1 }
       - shell:
+          # worker 没有静态 Pod,`upgrade node` 只是把 kubelet 配置从集群同步下来,
+          # 没有版本化的落点可查。它**本身幂等**,所以每次都跑是正确且廉价的 ——
+          # 与其编一个查不准的 check,不如老实承认没有。
           cmd: "kubeadm upgrade node"
-          check: "kubeadm version -o short | grep -q v${params.version}"
+          check: "false"
         target: workers
         strategy: { throttle: 1 }
+
       - copy: { material: "${item}", dest: "/usr/local/bin/${item}", mode: "0755" }
         each: ["kubelet", "kubectl"]
         target: all
