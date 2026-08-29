@@ -332,15 +332,11 @@ impl From<StackMode> for Mode {
     }
 }
 
-/// `crater verify -f blueprint.yaml [--host H]` —— **只读**核对:现实还符合期望吗?
+/// `crater verify -f blueprint.yaml [--json <path>]` —— **只读**核对:现实还符合期望吗?
 ///
 /// 与 plan 的差别只在解读:plan 回答"要做什么",verify 回答"部署过的东西还对不对"。
 /// 两者共用同一个 observe —— 所以不可能出现"plan 说要改、verify 说没事"。
-pub async fn verify_blueprint(path: &Path, target: &TargetOpts, sets: &[String]) -> Result<()> {
-    verify_blueprint_json(path, target, sets, None).await
-}
-
-/// `--json <path>`:核对结果的机器可读输出 —— UI 的对账供血管道。
+/// `--json` 给核对结果一份机器可读输出 —— UI 的对账供血管道。
 pub async fn verify_blueprint_json(
     path: &Path,
     target: &TargetOpts,

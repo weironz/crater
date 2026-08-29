@@ -1772,3 +1772,33 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   这条边界曾被我写成一个错误的测试,已改正。
 - **验证**:真实 k8s 蓝图 split → lint → join,前后均为
   "26 资源, 24 物料, 3 procedure, 1 自定义类型",往返语义一致。351 测试全绿。
+
+### D-118:UI 五阶段落地(对账中心世界观的全部兑现)
+
+- **背景**:docs/research/ui-design.md 定案后按五阶段实施,全部真机
+  (5 台 VM,SSH 隧道)+ 浏览器闭环验证。三次提交:
+  1c5e814(①②③)/ 60167e8(④)/ ad878b7(⑤)。
+- **阶段①② 执行打通 + 对账供血**:落盘 job 系统(子进程直写日志,UI 死
+  不卡部署;setsid 进程组;exit_code 落地;sweep+watcher 重启恢复),
+  verify --json 拆库入对账快照,两轴卡片墙(Synced/OutOfDate/Progressing
+  × 记录),OutOfDate 靠 apply 记账的 blueprint/inventory sha 指纹。
+- **阶段③ 从零闭环**:app 文件 = 期望态绑定(带注释 YAML,零入库),
+  跨文件 lint(param 对账 + 拼写建议),plan-gated apply(提交时钉指纹
+  蓝图 sha+inventory sha+**参数快照**,plan 成功才生效,apply 对不上 409),
+  编辑器新建向导(登记表驱动骨架),60s 调度器(verify.interval 巡检)。
+- **阶段④ 执行呈现**:`CRATER_EVENTS=<path>` 打开 NDJSON 事件流(机器
+  契约走环境变量,不占人用旗标);crater-ir `converge_with(observer)`
+  逐步回调;UI 字节游标轮询画"机器×资源"实况矩阵(·→~/✓/⚠/✗);
+  verify 非零按事件流分流 drifted(黄)/failed(红)——"现实不符"
+  与"执行出错"措辞不混。
+- **阶段⑤ 表单投影**:/api/context 光标字段卡 + /api/patch 单行 scalar
+  定点补丁(保行尾注释;锚点/flow/块标量 409 降级只读;安全裸词裸写、
+  歧义词加引号)。行级启发式而非 YAML 解析器 —— 半成品文本是编辑常态,
+  坏输入降级成"不认识"。
+- **原则重申**:UI 全程零外部依赖(htmx+原生 JS);所有字段知识来自
+  26 类型登记表,UI 不硬编码任何类型名 —— 新类型登记即出现在骨架、
+  向导、字段卡、lint 四处。
+- **验证**:漂移全周期真机实况 —— 停 n3 chrony → verify 矩阵 ✗ 精确
+  命中(time_sync×n3)→ plan 过闸 → apply 治愈实况 ·→~ 逐格定案;
+  plan 闸门四格(无 plan/改蓝图/换参数被拒,plan→apply 放行);
+  调度器 auto-verify 自动点火。564 tests 绿。
