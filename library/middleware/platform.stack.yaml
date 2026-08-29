@@ -1,0 +1,36 @@
+# 平台栈 —— 六份蓝图的组合。
+#
+# 顺序**就是**语义:基线先行(所有中间件都假定机器已规格化),存储在反代之前
+# (nginx 的上游要能连上),观测放最后(它抓的是前面几个的指标)。
+# apply 自上而下,destroy 逆序。
+crater: 1
+stack: platform
+
+uses:
+  # 基线不带参数:它对所有站点都一样,这正是它值得独立成蓝图的原因。
+  - blueprint: os-baseline
+    groups: { all: nodes }
+
+  - blueprint: postgres-ha
+    groups: { db: pg_nodes }
+    params:
+      # 站点级口径:备份挪到凌晨两点,盘给大一点。
+      backup_at: "0 2 * * *"
+      disk_mb: 640
+
+  - blueprint: redis-sentinel
+    groups: { cache: redis_nodes }
+    params:
+      maxmemory: "128mb"
+
+  - blueprint: minio-cluster
+    groups: { storage: object_store }
+
+  # 这一条同时映射两个组:它自己在 edge 上跑,而上游取自 object_store。
+  - blueprint: nginx-lb
+    groups: { lb: edge, storage: object_store }
+    params:
+      listen_port: 8080
+
+  - blueprint: observability
+    groups: { obs: monitoring, storage: object_store }

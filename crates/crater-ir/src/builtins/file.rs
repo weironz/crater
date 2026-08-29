@@ -110,7 +110,21 @@ impl ResourceType for File {
             // 期望本就是"不存在" —— 退役时无事可做(别把别人的东西删了)。
             return Ok(Outcome::Ok);
         }
-        run_ok(ctx, &format!("rm -rf {}", sh(arg_str(args, "path")?)))?;
+        let path = arg_str(args, "path")?;
+
+        // **挂载点不归 file 管。**
+        //
+        // 一份蓝图里常见 `mount: /srv/data` 紧跟 `file: /srv/data`(后者只是
+        // 给挂载点设属主和权限)。逆序退役时 file 排在 mount 之前,于是
+        // `rm -rf` 打在一个活着的挂载点上 —— 轻则失败(Device busy,真机上
+        // 就是这么炸的),重则在挂载已被卸掉时**删光底层目录里的真实数据**。
+        //
+        // 目录本身归 mount 的退役处理(卸载 + 清 fstab),这里让开。
+        let (mp, _) = ctx.probe(&format!("mountpoint -q {}", sh(path)))?;
+        if mp == 0 {
+            return Ok(Outcome::Warn);
+        }
+        run_ok(ctx, &format!("rm -rf {}", sh(path)))?;
         Ok(Outcome::Changed)
     }
 }
@@ -224,5 +238,43 @@ mod tests {
         let a = args(&[("path", "/data"), ("state", "directory")]);
         let err = File.apply(&ctx, &a, &Change::Create(vec![])).unwrap_err().to_string();
         assert!(err.contains("Permission denied"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod mountpoint_guard_tests {
+    use super::*;
+    use crate::ctx::FakeCtx;
+    use crate::eval::Yaml;
+
+    fn args(path: &str) -> ResolvedArgs {
+        [("path".to_string(), Yaml::from(path)), ("state".to_string(), Yaml::from("directory"))]
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn destroying_a_mountpoint_is_refused_not_attempted() {
+        // 蓝图里 `mount: /srv/data` 后面常跟 `file: /srv/data`(设属主权限)。
+        // 逆序退役时 file 排在 mount 前面 —— `rm -rf` 打在活着的挂载点上,
+        // 轻则 Device busy(真机上就是这么炸的),重则在挂载已卸时**删光
+        // 底层目录里的真实数据**。目录归 mount 的退役管,这里必须让开。
+        let ctx = FakeCtx::new().on("mountpoint -q", 0, "");
+        let out = File.destroy(&ctx, &args("/srv/data"), &Observed::present([])).unwrap();
+        assert_eq!(out, Outcome::Warn);
+        assert!(
+            !ctx.calls().iter().any(|c| c.text().starts_with("rm -rf")),
+            "对挂载点发了 rm:{:?}",
+            ctx.calls()
+        );
+    }
+
+    #[test]
+    fn destroying_a_plain_directory_still_removes_it() {
+        // 别把守卫扩大成"什么都不敢删"。
+        let ctx = FakeCtx::new().on("mountpoint -q", 1, "").on("rm -rf", 0, "");
+        let out = File.destroy(&ctx, &args("/opt/plain"), &Observed::present([])).unwrap();
+        assert_eq!(out, Outcome::Changed);
+        assert!(ctx.calls().iter().any(|c| c.text().starts_with("rm -rf '/opt/plain'")));
     }
 }

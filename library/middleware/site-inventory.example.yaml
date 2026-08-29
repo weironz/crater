@@ -1,0 +1,16 @@
+# 站点 inventory —— 组名按**这个站点自己的习惯**取,与蓝图里的名字不一样。
+# 这正是 A2 组名重映射要解决的问题:蓝图不该因为别人的命名习惯而改。
+inventory:
+  hosts:
+    - { name: n1, address: 127.0.0.1, port: 2211, user: root, password: "123456", vars: { ip: "192.168.73.11" } }
+    - { name: n2, address: 127.0.0.1, port: 2212, user: root, password: "123456", vars: { ip: "192.168.73.12" } }
+    - { name: n3, address: 127.0.0.1, port: 2213, user: root, password: "123456", vars: { ip: "192.168.73.13" } }
+    - { name: n4, address: 127.0.0.1, port: 2214, user: root, password: "123456", vars: { ip: "192.168.73.14" } }
+    - { name: n5, address: 127.0.0.1, port: 2215, user: root, password: "123456", vars: { ip: "192.168.73.15" } }
+  groups:
+    nodes:        { hosts: [n1, n2, n3, n4, n5] }
+    pg_nodes:     { hosts: [n1, n2] }
+    redis_nodes:  { hosts: [n1, n2, n3] }
+    object_store: { hosts: [n1, n2, n3, n4] }
+    edge:         { hosts: [n5] }
+    monitoring:   { hosts: [n5] }

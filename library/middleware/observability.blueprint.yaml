@@ -10,6 +10,9 @@ description: Prometheus + Grafana(容器),抓 MinIO 指标
 fleet:
   groups:
     obs: {min: 1}
+    # 抓取目标从 fleet.storage 渲染 —— 用到的组必须声明,否则调用方无从知道
+    # 这份蓝图除了 obs 还需要什么。lint 会拿它跟栈的组名映射对账。
+    storage: {min: 1}
 
 params:
   prom_image:    { default: "prom/prometheus:v3.1.0" }

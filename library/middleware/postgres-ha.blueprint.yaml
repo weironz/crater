@@ -32,6 +32,22 @@ resources:
         debian: [postgresql-16, postgresql-client-16]
     target: all_db
 
+  # Debian 的 postgresql-16 只在**首次安装**时调 pg_createcluster;
+  # purge 之后重装不会再建 —— 于是 /etc/postgresql/16/main 是空的,
+  # 后面所有 lineinfile 都会失败。蓝图不能假设"装完包就有集群",
+  # 那个假设只在干净机器上成立,而重建恰恰是最需要它成立的时候。
+  # 先清掉孤儿数据目录再建。
+  #
+  # 安全性来自 `creates:` 这道门:它只在 /etc/postgresql/16/main/postgresql.conf
+  # **不存在**时才跑,而那意味着没有任何已注册的集群 —— 此时
+  # /var/lib/postgresql/16/main 里的东西是上一次 purge 留下的孤儿,
+  # postgres 自己也用不了它(pg_createcluster 会因目录非空而拒绝 initdb)。
+  # 有集群在跑时这一步根本不会被执行。
+  - shell:
+      cmd: "rm -rf /var/lib/postgresql/16/main && pg_createcluster 16 main"
+      creates: "/etc/postgresql/16/main/postgresql.conf"
+    target: all_db
+
   # ---- 数据盘 ----
   # 用 loop 盘而不是直接建目录:mount 这个类型真正要验的是"重启后还挂不挂"
   # (/etc/fstab),而一个普通目录根本不经过挂载这条路。
