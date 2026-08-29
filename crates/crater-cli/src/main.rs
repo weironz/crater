@@ -540,6 +540,12 @@ fn blueprint_source(file: &Option<PathBuf>, source: &Option<String>) -> Option<P
     (candidate.is_file() && blueprint::is_blueprint_file(&candidate)).then_some(candidate)
 }
 
+/// `k8s-ha.blueprint.yaml` → `k8s-ha.closure.tar`;`platform.stack.yaml` → `platform.closure.tar`。
+fn default_closure_path(file: &Path, kind_suffix: &str) -> PathBuf {
+    let stem = file.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    PathBuf::from(format!("{}.closure.tar", stem.trim_end_matches(kind_suffix)))
+}
+
 /// 同上,但认的是**栈**。栈与蓝图靠形状分辨(`stack:` + `uses:`),不靠文件名。
 fn stack_source(file: &Option<PathBuf>, source: &Option<String>) -> Option<PathBuf> {
     let candidate = file.clone().or_else(|| source.as_ref().map(PathBuf::from))?;
@@ -618,13 +624,13 @@ async fn main() -> Result<()> {
         },
         Cmd::Ui { bind, port, token } => ui::serve(&bind, port, token).await,
         Cmd::Build { file, output, profile, tag, arch, no_cache, set } => {
-            // 与 apply/plan 同一条按文件格式分派的路子:蓝图烤闭包,task 进 store。
+            // 与 apply/plan 同一条按文件格式分派的路子:栈/蓝图烤闭包,task 进 store。
+            if stack_cmd::is_stack_file(&file) {
+                let out = output.unwrap_or_else(|| default_closure_path(&file, ".stack"));
+                return closure::build_stack(&file, &out, &profile).await;
+            }
             if blueprint::is_blueprint_file(&file) {
-                let out = output.unwrap_or_else(|| {
-                    let stem = file.file_stem().unwrap_or_default().to_string_lossy();
-                    // `k8s-ha.blueprint.yaml` → `k8s-ha.closure.tar`
-                    PathBuf::from(format!("{}.closure.tar", stem.trim_end_matches(".blueprint")))
-                });
+                let out = output.unwrap_or_else(|| default_closure_path(&file, ".blueprint"));
                 return closure::build(&file, &out, &profile).await;
             }
             if output.is_some() || !profile.is_empty() {

@@ -13,7 +13,7 @@
 //! 装不上" —— 断网之后补救的成本是无限大。
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
 use crater_core::bundle::{self, BundleStage, Manifest};
@@ -24,99 +24,164 @@ use crater_ir::Blueprint;
 
 use crate::material_ctx::BlobMap;
 
+/// 一次烘焙的累积状态 —— 栈级 bake 靠它把多份蓝图的闭包并成一个。
+///
+/// 去重发生在两层:`seen` 挡住重复的 URL(不重复下载),`store_blob` 按
+/// sha256 落盘(相同字节共用一个文件)。所以"各蓝图闭包的并集"是内容寻址的
+/// 自然结果,不需要额外一遍比对。
+struct Baker {
+    stage: BundleStage,
+    blobs: Vec<crater_core::bundle::BlobEntry>,
+    seen: BTreeMap<String, ()>,
+    skipped: Vec<String>,
+}
+
+impl Baker {
+    fn new(root: PathBuf) -> Result<Self> {
+        Ok(Baker {
+            stage: BundleStage::new(root)?,
+            blobs: Vec::new(),
+            seen: BTreeMap::new(),
+            skipped: Vec::new(),
+        })
+    }
+
+    /// 把一份蓝图引用到的字节收进袋子。
+    ///
+    /// `extra_params` 来自栈的 `uses[].params` —— 物料 URL 里可能插值
+    /// `${params.version}`,不把它带进来就会烤错版本(而且是**静默**烤错)。
+    async fn absorb(
+        &mut self,
+        bp_path: &Path,
+        profile: &[String],
+        extra_params: &BTreeMap<String, serde_yaml::Value>,
+    ) -> Result<usize> {
+        let bp = crater_ir::parse::blueprint_from_path(bp_path)?;
+        let base = bp_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let mut scope = bake_scope(&bp, profile)?;
+        for (k, v) in extra_params {
+            scope.params.insert(k.clone(), v.clone());
+        }
+        let items = materials::bake(&bp, &scope, !profile.is_empty());
+        println!("烘焙 `{}` —— {} 个物料变体", bp.name, items.len());
+
+        let mut taken = 0usize;
+        for item in &items {
+            let plan = match &item.plan {
+                Ok(p) => p,
+                // URL 本身依赖目标事实(`.../${substrate.arch}/tool`)时,不给画像
+                // 就渲染不出来。这不是内部错误,是**作者需要补一句 `--for`**。
+                Err(e) => bail!(
+                    "物料 {} 无法在构建期定型:{e}\n\
+                     提示:它的 URL 引用了目标事实,请用 `--for arch=amd64` 之类给出\
+                     要烘焙的目标画像(可给多次)",
+                    item.label()
+                ),
+            };
+            // 镜像与系统包不是"一份字节":前者要整棵 OCI 树,后者根本在 apt/yum 那边。
+            if plan.kind != MaterialKind::File {
+                self.skipped.push(format!("{} ({:?} 类型)", item.label(), plan.kind));
+                continue;
+            }
+            // 同一个 URL 只取一次 —— 跨蓝图共享物料是栈里的常态。
+            if self.seen.insert(plan.source.clone(), ()).is_some() {
+                println!("  ↩ {:<28} (已在闭包中)", item.name);
+                continue;
+            }
+
+            let bytes = fetch_bytes(&plan.source, &base)
+                .await
+                .with_context(|| format!("烘焙物料 {}", item.label()))?;
+            // 声明了摘要就当场核对:烤进闭包的字节错了,现场是查不出来的。
+            if let Some(want) = &plan.sha256 {
+                let got = bundle::sha256_hex(&bytes);
+                if &got != want {
+                    bail!(
+                        "物料 {} 摘要不符 —— 声明 {want},实得 {got}\n源:{}",
+                        item.label(),
+                        plan.source
+                    );
+                }
+            }
+            let entry = self.stage.store_blob(&plan.source, &bytes)?;
+            println!(
+                "  ✓ {:<28} {:>9}  {}",
+                item.name,
+                human(entry.size),
+                &entry.sha256[..12]
+            );
+            self.blobs.push(entry);
+            taken += 1;
+        }
+        Ok(taken)
+    }
+
+    /// 收尾:写 manifest、打包。
+    fn seal(self, name: &str, out: &Path) -> Result<()> {
+        for s in &self.skipped {
+            println!("  · 跳过 {s}");
+        }
+        if self.blobs.is_empty() {
+            bail!("没有一个物料被烤进闭包 —— 检查 `materials:` 是否都是 image/os_package 类型");
+        }
+        let total: u64 = self.blobs.iter().map(|b| b.size).sum();
+        let count = self.blobs.len();
+        self.stage.write_manifest(&Manifest {
+            format_version: bundle::BUNDLE_FORMAT_VERSION,
+            name: name.to_string(),
+            components: Vec::new(),
+            blobs: self.blobs,
+            images: Vec::new(),
+            rootfs: Vec::new(),
+        })?;
+        if let Some(dir) = out.parent() {
+            if !dir.as_os_str().is_empty() {
+                std::fs::create_dir_all(dir)?;
+            }
+        }
+        bundle::pack(self.stage.root.as_path(), out)?;
+        println!("\n闭包 → {} ({count} 份物料,{})", out.display(), human(total));
+        println!("现场用法:crater apply -f <蓝图或栈> --closure {}", out.display());
+        Ok(())
+    }
+}
+
 /// `crater build -f <blueprint> -o <out.tar> [--for k=v]…`
 pub async fn build(bp_path: &Path, out: &Path, profile: &[String]) -> Result<()> {
     let bp = crater_ir::parse::blueprint_from_path(bp_path)?;
-    let base = bp_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let scope = bake_scope(&bp, profile)?;
-    let items = materials::bake(&bp, &scope, !profile.is_empty());
-
-    if items.is_empty() {
+    let tmp = tempfile::tempdir()?;
+    let mut baker = Baker::new(tmp.path().to_path_buf())?;
+    if baker.absorb(bp_path, profile, &BTreeMap::new()).await? == 0 && baker.skipped.is_empty() {
         bail!(
             "blueprint `{}` 没有引用任何物料 —— 没有可烘焙的东西。\n\
              (物料是 `materials:` 里声明、被 copy/template/unarchive 引用的字节)",
             bp.name
         );
     }
+    baker.seal(&bp.name, out)
+}
 
+/// `crater build -f <栈>.stack.yaml -o <out.tar>` —— **一个**制品装下整个栈。
+///
+/// 现场只需要拿一个文件走。各蓝图的闭包按内容寻址取并集:同一个 URL 只下载
+/// 一次,相同字节只落盘一份 —— 栈里多份蓝图共用 containerd 是常态,
+/// 逐个 build 会把它复制 N 遍。
+pub async fn build_stack(stack_path: &Path, out: &Path, profile: &[String]) -> Result<()> {
+    let st = crater_ir::stack::from_path(stack_path)?;
+    let dir = stack_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let tmp = tempfile::tempdir()?;
-    let stage = BundleStage::new(tmp.path().to_path_buf())?;
-    let mut blobs = Vec::new();
-    let mut skipped = Vec::new();
-    let mut seen: BTreeMap<String, ()> = BTreeMap::new();
+    let mut baker = Baker::new(tmp.path().to_path_buf())?;
 
-    println!("烘焙 `{}` 的离线闭包 —— {} 个物料变体", bp.name, items.len());
-    for item in &items {
-        let plan = match &item.plan {
-            Ok(p) => p,
-            // URL 本身依赖目标事实(`.../${substrate.arch}/tool`)时,不给画像
-            // 就渲染不出来。这不是内部错误,是**作者需要补一句 `--for`**。
-            Err(e) => bail!(
-                "物料 {} 无法在构建期定型:{e}\n\
-                 提示:它的 URL 引用了目标事实,请用 `--for arch=amd64` 之类给出\
-                 要烘焙的目标画像(可给多次)",
-                item.label()
-            ),
-        };
-        // 镜像与系统包不是"一份字节":前者要整棵 OCI 树,后者根本在 apt/yum 那边。
-        if plan.kind != MaterialKind::File {
-            skipped.push(format!("{} ({:?} 类型)", item.label(), plan.kind));
-            continue;
-        }
-        // 同一个 URL 只取一次 —— 多个变体共享一份字节是常态(如同名不同 when)。
-        if seen.insert(plan.source.clone(), ()).is_some() {
-            continue;
-        }
-
-        let bytes = fetch_bytes(&plan.source, &base)
-            .await
-            .with_context(|| format!("烘焙物料 {}", item.label()))?;
-        // 声明了摘要就当场核对:烤进闭包的字节错了,现场是查不出来的。
-        if let Some(want) = &plan.sha256 {
-            let got = bundle::sha256_hex(&bytes);
-            if &got != want {
-                bail!(
-                    "物料 {} 摘要不符 —— 声明 {want},实得 {got}\n源:{}",
-                    item.label(),
-                    plan.source
-                );
-            }
-        }
-        let entry = stage.store_blob(&plan.source, &bytes)?;
-        println!(
-            "  ✓ {:<28} {:>9}  {}",
-            item.name,
-            human(entry.size),
-            &entry.sha256[..12]
-        );
-        blobs.push(entry);
+    println!("烘焙栈 `{}` 的离线闭包 —— {} 份蓝图\n", st.name, st.uses.len());
+    for (i, u) in st.uses.iter().enumerate() {
+        let bp_path = crater_ir::stack::resolve_ref(&u.blueprint, &dir)?;
+        println!("── [{}/{}] {} ──", i + 1, st.uses.len(), u.label());
+        // 栈的作者侧参数要带进来:物料 URL 常按 `${params.version}` 插值,
+        // 漏掉它会**静默**烤错版本。
+        baker.absorb(&bp_path, profile, &u.params).await?;
     }
-
-    for s in &skipped {
-        println!("  · 跳过 {s}");
-    }
-    if blobs.is_empty() {
-        bail!("没有一个物料被烤进闭包 —— 检查 `materials:` 是否都是 image/os_package 类型");
-    }
-
-    let total: u64 = blobs.iter().map(|b| b.size).sum();
-    stage.write_manifest(&Manifest {
-        format_version: bundle::BUNDLE_FORMAT_VERSION,
-        name: bp.name.clone(),
-        components: Vec::new(),
-        blobs,
-        images: Vec::new(),
-        rootfs: Vec::new(),
-    })?;
-    if let Some(dir) = out.parent() {
-        if !dir.as_os_str().is_empty() {
-            std::fs::create_dir_all(dir)?;
-        }
-    }
-    bundle::pack(stage.root.as_path(), out)?;
-    println!("\n闭包 → {} ({})", out.display(), human(total));
-    println!("现场用法:crater apply -f <blueprint> --closure {}", out.display());
-    Ok(())
+    println!();
+    baker.seal(&st.name, out)
 }
 
 /// 装载一个闭包 → (解包目录, 按**源 URL** 索引的 blob 表)。
@@ -297,6 +362,87 @@ mod tests {
         std::fs::write(&bp, yaml).unwrap();
         let err = build(&bp, &dir.path().join("c.tar"), &[]).await.unwrap_err().to_string();
         assert!(err.contains("--for"), "报错要给出下一步动作:{err}");
+    }
+
+    /// 一个栈:两份蓝图共用 `shared`,另各有一份自己的物料。
+    fn stack_fixture() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("files");
+        std::fs::create_dir_all(&f).unwrap();
+        std::fs::write(f.join("shared.bin"), b"shared").unwrap();
+        std::fs::write(f.join("only-a.bin"), b"a").unwrap();
+        std::fs::write(f.join("v-2.0.bin"), b"v2").unwrap();
+        for (name, extra) in [("a", "only-a.bin"), ("b", "v-${params.version}.bin")] {
+            std::fs::write(
+                d.path().join(format!("{name}.blueprint.yaml")),
+                [
+                    &format!("name: {name}"),
+                    "params:",
+                    "  version: { type: string, default: \"1.0\" }",
+                    "materials:",
+                    "  - name: shared",
+                    "    file: files/shared.bin",
+                    "  - name: own",
+                    &format!("    file: \"files/{extra}\""),
+                    "resources:",
+                    "  - copy: { material: shared, dest: /opt/s }",
+                    "  - copy: { material: own, dest: /opt/o }",
+                    "",
+                ]
+                .join("\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            d.path().join("s.stack.yaml"),
+            [
+                "stack: demo",
+                "uses:",
+                "  - blueprint: a",
+                "  - blueprint: b",
+                "    params: { version: \"2.0\" }",
+                "",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        d
+    }
+
+    #[tokio::test]
+    async fn a_stack_bakes_into_one_artifact_with_shared_bytes_stored_once() {
+        // 栈里多份蓝图共用 containerd 是常态;逐个 build 会把它复制 N 遍。
+        let d = stack_fixture();
+        let out = d.path().join("c.tar");
+        build_stack(&d.path().join("s.stack.yaml"), &out, &[]).await.unwrap();
+        let (_tmp, map) = load(&out).unwrap();
+        // shared + a 自己的 + b 自己的 = 3,而不是 4。
+        assert_eq!(map.len(), 3, "共用物料被存了不止一份:{map:?}");
+        assert_eq!(map.keys().filter(|k| k.contains("shared")).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn stack_params_reach_the_material_urls() {
+        // 物料 URL 常按 `${params.version}` 插值。漏掉栈参数会**静默**烤错版本
+        // —— 闭包看起来完整,现场装上的是另一个版本。
+        let d = stack_fixture();
+        let out = d.path().join("c.tar");
+        build_stack(&d.path().join("s.stack.yaml"), &out, &[]).await.unwrap();
+        let (_tmp, map) = load(&out).unwrap();
+        assert!(
+            map.keys().any(|k| k.ends_with("v-2.0.bin")),
+            "栈的 version=2.0 没进 URL:{map:?}"
+        );
+        assert!(!map.keys().any(|k| k.ends_with("v-1.0.bin")), "烤成了蓝图默认值");
+    }
+
+    #[tokio::test]
+    async fn a_stack_closure_is_loadable_like_any_other() {
+        // 部署侧不需要知道闭包是从蓝图还是从栈烤出来的 —— 同一个格式。
+        let d = stack_fixture();
+        let out = d.path().join("c.tar");
+        build_stack(&d.path().join("s.stack.yaml"), &out, &[]).await.unwrap();
+        assert!(load(&out).is_ok());
     }
 
     #[tokio::test]
