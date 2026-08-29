@@ -1105,3 +1105,52 @@ fleet:
 
 两者合起来,`crater schema -f <蓝图>` 生成的 JSON Schema 会把本蓝图的选角名
 排进 `target:` 的补全候选 —— 可发现性三件套(字段卡 / Schema / 报错)在这里合上了闭环。
+
+---
+
+### A6 · 已知缺口:滚动升级需要"逐台跑完整组步骤"
+
+procedure 的执行模型是 **步骤为外层、主机为内层**:一步跑遍所有选中的机器,
+再进下一步。`throttle` 控制的是"一步之内同时几台"。
+
+这个形状对建集群是对的(首台 init 必须先于其余台 join),但**滚动升级要的是
+相反的嵌套**:每台机器跑完"drain → 升级 → 重启 → uncordon"整组步骤,再动下一台。
+
+k8s-ha 的 upgrade 因此只能写成:
+
+```
+drain 全部 master → upgrade apply(seed)→ upgrade node(其余)
+                  → 换 kubelet(全部)→ 重启(全部)→ uncordon 全部
+```
+
+后果是**升级窗口内三台 master 同时处于 cordoned**。对控制面尚可接受(它们跑的是
+静态 Pod,不受调度影响);但同样的形状套到 worker 上就不成立了 —— 那意味着一次性
+drain 掉全部工作负载承载节点。所以现有蓝图**根本没 drain worker**,代价是 kubelet
+重启时工作负载会有短暂扰动。两种都不理想,只是取舍不同。
+
+**这不是蓝图写法的问题,是执行模型缺一层。** 补的方向不是给 `throttle` 加参数
+(它管的是并发度,不是嵌套顺序),而是引入**步骤组**:
+
+```yaml
+upgrade:
+  steps:
+    - shell: { cmd: "kubeadm upgrade apply -y v${params.version}" }   # 只在 seed 跑一次
+      target: seed
+    - rolling:                    # ← 这一组按**主机**外层展开
+        target: all
+        throttle: 1               # 一次一台跑完整组
+        steps:
+          - shell: { cmd: "kubectl drain ${substrate.name} ..." }
+          - shell: { cmd: "kubeadm upgrade node" }
+          - copy:  { material: kubelet, dest: /usr/local/bin/kubelet }
+          - service: { name: kubelet, state: restarted }
+          - shell: { cmd: "kubectl uncordon ${substrate.name}" }
+```
+
+语义:`rolling` 块内的步骤对每台机器按序跑完,再换下一台;块外仍是原来的
+步骤外层模型。`exports` 在块内不可用 —— 逐台滚动与"从一台取值给其余台"是
+互斥的两种意图,允许它只会制造难解的顺序依赖。
+
+暂不实现的理由:现有形状在控制面上能用,而这个块会引入嵌套的作用域与错误归属
+问题(块内第三台失败时,前两台已经完成 —— 报告与重试语义都要重新定义)。
+**先把缺口写清楚,比先造一个形状可疑的机制重要。**
