@@ -901,8 +901,10 @@ mod remote_ctx_tests {
         ctx.write_file("/etc/demo", "body").unwrap();
 
         let calls = seen.lock().unwrap().clone();
-        assert_eq!(calls.len(), 2, "{calls:?}");
-        assert!(calls[1].contains("base64 -d"), "写文件走分块 base64:{}", calls[1]);
+        // 一次探针 + 写文件的两条(先清空、再写块)。
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        assert!(calls[1].contains(": > '/etc/demo'"), "先截断:{}", calls[1]);
+        assert!(calls[2].contains("base64 -d"), "再按块写:{}", calls[2]);
     }
 
     /// 并发调度会从**普通 std 线程**调用这座桥。

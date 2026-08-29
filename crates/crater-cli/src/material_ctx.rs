@@ -167,10 +167,14 @@ impl Ctx for MaterialCtx<'_> {
         let Ok(bytes) = std::fs::read(&path) else {
             return Ok(None);
         };
-        // 只对文本算 —— 二进制走 OCI 闭包时会带自己的 digest。
-        Ok(String::from_utf8(bytes)
-            .ok()
-            .map(|text| crater_ir::builtins::copy::sha256_hex(&text)))
+        // 按**字节**算,不要求 UTF-8。
+        //
+        // 早先这里写的是 `String::from_utf8(bytes).ok().map(sha256_hex)` ——
+        // 对二进制必然失败、返回 None,于是 `copy` 比不出内容差异。资源路径上
+        // 还有 `upstream_changed` 兜底,而 **procedure 里 upstream_changed 恒为
+        // false**,结果是"升级时替换二进制"这件事根本不会发生。
+        // 闭包运的绝大多数就是二进制,这个 None 等于让内容寻址在最需要的地方失效。
+        Ok(Some(crater_core::bundle::sha256_hex(&bytes)))
     }
 
     /// 读物料原文,用当前 scope 渲染 → 最终字节。

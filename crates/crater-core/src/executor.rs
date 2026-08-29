@@ -28,20 +28,43 @@ pub trait Executor: Send + Sync {
     /// base64-encoded through `run`, so it works for both local and SSH
     /// targets without an extra file-transfer channel.
     async fn write_file(&self, path: &str, content: &[u8]) -> crate::Result<()> {
-        let b64 = base64::engine::general_purpose::STANDARD.encode(content);
-        let cmd = format!(
-            "mkdir -p \"$(dirname '{path}')\" && printf %s '{b64}' | base64 -d > '{path}'"
-        );
-        let out = self.run(&cmd).await?;
-        if out.ok() {
-            Ok(())
-        } else {
-            anyhow::bail!(
-                "write_file {path} failed (code {}): {}",
-                out.code,
-                out.stderr.trim()
-            )
+        // **分块**,而不是把整份 base64 拼成一条命令。
+        //
+        // 早先的实现把 58MB 二进制编码成 78MB 字符串再 format! 进单条 shell 命令。
+        // 真机上实测的后果:进程 100% 占满一个核、网络零流量、目标机上没有任何
+        // 会话 —— SSH 传输层要把这个超大请求塞进它的缓冲区,缓冲区按小增量增长
+        // 就是 O(n²) 的 memcpy(78MB / 32KB ≈ 2400 次重分配,约 94GB 拷贝)。
+        // 远端 `sh -c` 还得再解析一遍这个 78MB 的单引号字符串。
+        //
+        // 块大小是往返次数与单请求大小之间的取舍:2 MiB 原始数据 ≈ 2.7 MiB 命令,
+        // 一个 58MB 的二进制 29 次往返 —— 在跳板/隧道那种高 RTT 链路上仍然可接受,
+        // 而任何一次请求都不会大到让传输层退化。
+        const CHUNK: usize = 2 * 1024 * 1024;
+
+        // 先建目录并清空目标 —— 后续块一律追加,所以第一步必须是截断。
+        let head = format!("mkdir -p \"$(dirname '{path}')\" && : > '{path}'");
+        let out = self.run(&head).await?;
+        if !out.ok() {
+            anyhow::bail!("write_file {path}:建目录/清空失败(code {}):{}", out.code, out.stderr.trim());
         }
+
+        // base64 的字母表是 A-Za-z0-9+/= ,不含单引号,所以块可以直接放进
+        // 单引号里,无需转义。
+        for (i, part) in content.chunks(CHUNK).enumerate() {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(part);
+            let cmd = format!("printf %s '{b64}' | base64 -d >> '{path}'");
+            let out = self.run(&cmd).await?;
+            if !out.ok() {
+                anyhow::bail!(
+                    "write_file {path}:第 {} 块(共 {} 块)写入失败(code {}):{}",
+                    i + 1,
+                    content.len().div_ceil(CHUNK),
+                    out.code,
+                    out.stderr.trim()
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Human-readable label for logging (e.g. `root@host:22` or `local`).
@@ -348,5 +371,71 @@ mod tests {
         assert!(verify_host_key_at("192.0.2.7", 2222, &other, &path));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod write_file_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// 记录每条命令的假 Executor —— 用来断言"分块"这件事真的发生了。
+    struct Recorder {
+        cmds: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl Executor for Recorder {
+        async fn run(&self, cmd: &str) -> crate::Result<CmdOutput> {
+            self.cmds.lock().unwrap().push(cmd.to_string());
+            Ok(CmdOutput { code: 0, stdout: String::new(), stderr: String::new() })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_large_file_is_written_in_bounded_chunks() {
+        // 这条测试守的是一次真机事故:把 58MB 编码成 78MB 拼进单条命令,
+        // 进程 100% 占满一个核、网络零流量。任何一条命令都不该大到那个地步。
+        let r = Recorder { cmds: Mutex::new(Vec::new()) };
+        let content = vec![0xABu8; 5 * 1024 * 1024]; // 5 MiB
+        r.write_file("/opt/big.bin", &content).await.unwrap();
+
+        let cmds = r.cmds.lock().unwrap().clone();
+        assert!(cmds[0].contains(": > '/opt/big.bin'"), "第一条应清空目标:{}", &cmds[0][..60.min(cmds[0].len())]);
+        assert_eq!(cmds.len(), 1 + 3, "5MiB / 2MiB → 3 块:{}", cmds.len());
+        // 单条命令的上限:2MiB 原始 → 约 2.7MiB base64,留一倍余量。
+        for c in &cmds {
+            assert!(c.len() < 6 * 1024 * 1024, "有命令过大:{} 字节", c.len());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_first_chunk_truncates_and_the_rest_append() {
+        // 顺序反了会得到一个"内容是最后一块"的文件,而且大小看着还挺像。
+        let r = Recorder { cmds: Mutex::new(Vec::new()) };
+        r.write_file("/opt/x", &vec![1u8; 3 * 1024 * 1024]).await.unwrap();
+        let cmds = r.cmds.lock().unwrap().clone();
+        assert!(cmds[0].contains(": >"), "首条截断");
+        for c in &cmds[1..] {
+            assert!(c.contains(">> '/opt/x'"), "其余追加:{c}");
+            assert!(!c.contains("> '/opt/x'") || c.contains(">> '/opt/x'"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_small_file_still_takes_one_chunk() {
+        let r = Recorder { cmds: Mutex::new(Vec::new()) };
+        r.write_file("/etc/small.conf", b"hello").await.unwrap();
+        assert_eq!(r.cmds.lock().unwrap().len(), 2, "清空 + 一块");
+    }
+
+    #[tokio::test]
+    async fn an_empty_file_is_created_and_left_empty() {
+        // `chunks()` 对空切片不产出任何块 —— 清空那一步必须已经把文件建出来。
+        let r = Recorder { cmds: Mutex::new(Vec::new()) };
+        r.write_file("/etc/empty", b"").await.unwrap();
+        let cmds = r.cmds.lock().unwrap().clone();
+        assert_eq!(cmds.len(), 1);
+        assert!(cmds[0].contains(": > '/etc/empty'"));
     }
 }
