@@ -4,7 +4,7 @@
 //! 当前只支持**本机**目标 —— SSH / 自举 agent 的 `Ctx` 实现在执行层(P1)。
 //! 但"plan 零写入"这条纪律与目标是谁无关,本机就能把它演示清楚。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::{oops, say};
@@ -448,6 +448,11 @@ async fn run_on_targets(
     // 自定义类型(L2)的弥合是机群级的舞:逐台 converge 只记下"需要跳哪支",
     // 收齐去重后在机群层跑**一次** —— 在循环里跑会把同一支舞跳 N 遍。
     let mut dances: std::collections::BTreeSet<String> = Default::default();
+    // linear 策略走另一条执行路径:资源在外层、机器在内层。
+    if target.strategy == crate::target::Strategy::Linear && mode == Mode::Apply {
+        return run_linear(&bp, &hosts, &fleet, &overrides, path, target, &blobs, &store).await;
+    }
+
     // 前缀列宽按本轮全体主机定,各行正文才对得齐。
     crate::out::fleet(&hosts.iter().map(|h| h.name.clone()).collect::<Vec<_>>());
     // 模式与蓝图名**只报一次** —— 每台重复一遍,五台就是五遍同样的话。
@@ -486,7 +491,7 @@ async fn run_on_targets(
     let mut mx_rows: Vec<String> = Vec::new();               // 资源 id,首现顺序
     let mut mx_label: BTreeMap<String, String> = BTreeMap::new();
     let mut mx: BTreeMap<String, BTreeMap<String, char>> = BTreeMap::new();
-    let mut note = |rows: &mut Vec<String>,
+    let note = |rows: &mut Vec<String>,
                     lab: &mut BTreeMap<String, String>,
                     cells: &mut BTreeMap<String, BTreeMap<String, char>>,
                     host: &str,
@@ -846,6 +851,174 @@ fn report_closure(bp: &Blueprint, scope: &plan::Scope) {
     if broken > 0 {
         say!("闭包 {broken}/{} 项无法解析", items.len());
     }
+}
+
+/// task-major 执行:**一个资源在全机群跑完,再下一个**(ansible 的 linear)。
+///
+/// 与默认的逐台执行是同一套语义、不同的顺序 —— 逐项收敛的判断
+/// (Unknown 要重新观察、上游动过要复查预测)只有 `converge_item` 一份实现,
+/// 两条路径共用它,否则最微妙的地方会分家。
+///
+/// 为什么值得单独一条路径:滚动升级问的是"这一步在所有机器上都成了吗"。
+/// 逐台执行要等最后一台跑完,才会发现第三步早在第二台上就炸了 —— 而那时
+/// 第一台已经被改完了。
+async fn run_linear(
+    bp: &Blueprint,
+    hosts: &[Host],
+    fleet: &Fleet,
+    overrides: &[(String, Yaml)],
+    path: &Path,
+    target: &TargetOpts,
+    blobs: &BlobMap,
+    store: &FileStore,
+) -> Result<()> {
+    use crater_ir::verbs::Outcome as O;
+
+    crate::out::fleet(&hosts.iter().map(|h| h.name.clone()).collect::<Vec<_>>());
+    say!("blueprint {} —— 逐资源执行(linear),{} 台目标", bp.name, hosts.len());
+
+    // 全部连接**同时**建起来 —— 这是 task-major 的前提。
+    let targets =
+        connect_fleet(bp, hosts, fleet, overrides, &base_dir(path), target.parallel, blobs).await?;
+
+    // 每台各求各的计划:资源集合可以不同(选择器 / when / each)。
+    let mut plans: BTreeMap<String, plan::Plan> = BTreeMap::new();
+    for host in hosts {
+        let name = fleet_name(host);
+        let sc = targets.scope(&name)?;
+        let p = plan::plan(bp, &sc, targets.ctx(&name)?)
+            .with_context(|| format!("{}:对 {} 求计划", host_label(host), path.display()))?;
+        plans.insert(name, p);
+    }
+
+    // 资源顺序取**各台计划的并集**,按首现次序 —— 蓝图里的书写顺序即依赖顺序,
+    // 而某台可能没有其中几项(选择器没选中),不能拿任意一台的计划当全集。
+    let mut order: Vec<String> = Vec::new();
+    let mut labels: BTreeMap<String, String> = BTreeMap::new();
+    for host in hosts {
+        for item in &plans[&fleet_name(host)].items {
+            if !labels.contains_key(&item.id) {
+                order.push(item.id.clone());
+                labels.insert(item.id.clone(), item.label());
+            }
+        }
+    }
+
+    let mut upstream: BTreeMap<String, bool> = hosts.iter().map(|h| (fleet_name(h), false)).collect();
+    // 某台失败后就把它摘出去,后续资源不再对它下手 —— 与 ansible 一致:
+    // 在一台半坏的机器上继续往下做,只会把故障现场搅得更难查。
+    let mut down: BTreeSet<String> = BTreeSet::new();
+    let mut outcomes: BTreeMap<String, BTreeMap<String, char>> = BTreeMap::new();
+    let mut dances: BTreeSet<String> = Default::default();
+    let mut failures = 0usize;
+
+    for id in &order {
+        let label = &labels[id];
+        let mut row: BTreeMap<String, char> = BTreeMap::new();
+        let mut n_changed = 0usize;
+        let mut n_ok = 0usize;
+        let mut n_fail = 0usize;
+        for host in hosts {
+            let name = fleet_name(host);
+            if down.contains(&name) {
+                row.insert(name, '✗');
+                continue;
+            }
+            let Some(item) = plans[&name].items.iter().find(|i| &i.id == id) else {
+                // 这台没有这一项 —— 选择器没选中它。等价于 ansible 的 skipping。
+                row.insert(name, '·');
+                continue;
+            };
+            crate::out::enter(&name);
+            if let Some(def) = bp.custom_type(&item.ty) {
+                if !matches!(item.change, crater_ir::verbs::Change::Ok) {
+                    dances.insert(def.apply.clone());
+                }
+                say!("  warn    {label}(自定义类型,交给机群级 procedure)");
+                row.insert(name, '!');
+                continue;
+            }
+            match plan::converge_item(bp, targets.ctx(&name)?, item, upstream[&name]) {
+                Ok((oc, changed)) => {
+                    if changed {
+                        upstream.insert(name.clone(), true);
+                    }
+                    let (tag, c) = match oc {
+                        O::Ok => ("ok     ", '✓'),
+                        O::Changed => ("changed", '~'),
+                        O::Warn => ("warn   ", '!'),
+                    };
+                    match oc {
+                        O::Changed => n_changed += 1,
+                        O::Ok => n_ok += 1,
+                        O::Warn => {}
+                    }
+                    say!("  {tag} {label}");
+                    row.insert(name, c);
+                }
+                Err(e) => {
+                    n_fail += 1;
+                    failures += 1;
+                    oops!("failed  {label} —— {e}");
+                    row.insert(name.clone(), '✗');
+                    down.insert(name);
+                }
+            }
+        }
+        crate::out::leave();
+        // **每个资源做完立刻给全机群的结论** —— 这正是逐台执行给不了的那句话。
+        say!(
+            "→ {label}:changed={n_changed} ok={n_ok} failed={n_fail}{}",
+            if down.is_empty() { String::new() } else { format!(",已摘除 {} 台", down.len()) }
+        );
+        outcomes.insert(id.clone(), row);
+        if !down.is_empty() && down.len() == hosts.len() {
+            oops!("全部目标已失败,中止");
+            break;
+        }
+    }
+    say!();
+
+    // 记账:收敛后**重新观察**,记的是现实不是意图(与逐台路径同一条纪律)。
+    for host in hosts {
+        let name = fleet_name(host);
+        if down.contains(&name) {
+            continue;
+        }
+        let sc = targets.scope(&name)?;
+        if let Ok(after) = plan::plan(bp, &sc, targets.ctx(&name)?) {
+            let mut rec = DeploymentRecord::from_plan(&bp.name, bp.version.as_deref(), &name, &after);
+            rec.blueprint_sha256 = file_sha(path);
+            rec.inventory_sha256 = target.inventory.as_deref().and_then(file_sha);
+            if let Ok(Some(prev)) = store.load(&rec.id) {
+                rec.applied_at = prev.applied_at;
+            }
+            if let Err(e) = store.save(&rec) {
+                oops!("(记账失败,不影响本次部署:{e})");
+            }
+        }
+    }
+
+    // 机群级的舞照跑(顺序不变:资源先就位,再跳舞)。
+    if !dances.is_empty() && failures == 0 {
+        for name in &dances {
+            say!("── procedure {name} ──");
+            match procedure::run(bp, name, &targets, &BTreeMap::new()) {
+                Ok(r) => print_proc_report(&r),
+                Err(e) => {
+                    failures += 1;
+                    oops!("procedure {name} 失败 —— {e}");
+                }
+            }
+        }
+    }
+
+    let names: Vec<String> = hosts.iter().map(|h| fleet_name(h)).collect();
+    print_matrix(&names, &order, &labels, &outcomes);
+    if failures > 0 {
+        bail!("{failures} 处执行失败");
+    }
+    Ok(())
 }
 
 /// 资源 × 主机矩阵:横着看一个资源在全机群的落点。

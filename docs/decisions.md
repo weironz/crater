@@ -1825,3 +1825,31 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   SQLite + 一个数据目录,git 壳调二进制、OCI 借 CNCF distribution、npm/maven/
   python/nuget/cargo 等自己实现,blob.Store 只有五个方法)。全文在 mica
   `devops/harness/architecture`。
+
+### D-120:执行策略 host / linear,以及零警告门禁
+
+- **起因**:与 ansible 对比 —— 它在每个 TASK 跑完时就报出所有主机的结果,
+  而 crater 逐台执行,要等最后一台跑完才知道第三步早在第二台上炸了。
+  对滚动升级这是真差距,而且改不了输出形状就绕不过去:**组织轴由执行模型
+  决定**,不是格式选择。
+- **做法**:加 `--strategy`,而不是改默认行为。ansible 自己也有 strategy
+  的概念,两种顺序各有其对的场景:
+  - `host`(默认):一台跑完全部资源再下一台。排障时最顺手 —— 一台机器的
+    来龙去脉连在一起。
+  - `linear`:一个资源在全机群跑完再下一个。每个资源做完立刻给出
+    `→ <资源>:changed=4 ok=0 failed=1,已摘除 1 台`。
+- **语义只有一份**:把逐项收敛的判断(Unknown 要重新观察、上游动过要复查
+  预测)从 `converge_with` 的循环体抽成 `plan::converge_item`,两条路径共用。
+  否则两种顺序会在最微妙的地方分家 —— 而那正是"配置改了服务没重启"那类
+  故障的温床。抽取本身是纯重构,297 个 IR 测试原样通过。
+- **失败摘除**:某台失败后从后续资源里摘出去(与 ansible 一致)。在一台
+  半坏的机器上继续往下做,只会把故障现场搅得更难查。
+- **资源顺序取各台计划的并集**(按首现次序):某台可能没有其中几项
+  (选择器/when 没选中),拿任意一台的计划当全集会漏。
+- **仍缺**:linear 下的机群级 procedure 与逐台路径一样是在资源全就位后跑,
+  没有做"每一步之间插舞"。
+- **顺带**:零警告门禁进 CI(`RUSTFLAGS=-D warnings`)。此前"零警告"全靠
+  人肉 grep 声称,而 grep 写窄了就会漏 —— `does not need to be mutable` 和
+  测试代码里的 unused variable 都这么溜过去过。cargo 对 registry 依赖自动
+  `--cap-lints allow`,所以这条只管得住本仓库,不会被上游误伤。
+  `just check` 是同一条口径的本地版。

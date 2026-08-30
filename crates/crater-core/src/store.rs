@@ -748,7 +748,8 @@ mod tests {
     fn fake_store(dir: &std::path::Path) -> ImageStore {
         let store = ImageStore { root: dir.to_path_buf() };
         std::fs::create_dir_all(store.blobs_dir()).unwrap();
-        let put = |name: &str, data: &[u8]| {
+        // 名字只为读代码时看清这是哪个 blob;内容寻址不需要它。
+        let put = |_name: &str, data: &[u8]| {
             let d = crate::bundle::sha256_hex(data);
             std::fs::write(store.blobs_dir().join(&d), data).unwrap();
             d

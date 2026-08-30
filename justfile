@@ -29,6 +29,14 @@ build:
 test:
     cargo test --release
 
+# 提交前自检:零警告 + 全量测试。
+#
+# `-D warnings` 只管得住本仓库(cargo 对 registry 依赖自动 --cap-lints allow),
+# 所以不会被上游警告误伤。CI 用的是同一条口径。
+check:
+    RUSTFLAGS="-D warnings" cargo build --release --all-targets
+    RUSTFLAGS="-D warnings" cargo test --release
+
 # 用 install 而不是 cp:它一步做完权限设置,且**先写再原子替换**,
 # 不会像 cp 那样在覆盖正在运行的二进制时撞上 ETXTBSY。
 #

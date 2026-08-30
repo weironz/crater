@@ -11,10 +11,15 @@ on:
         required: true
 
 env:
-  # 仓库的 .cargo/config.toml 给 gnu 目标配了 -fuse-ld=mold(D-079 本地提速),
-  # 而 runner 上没有 mold,不覆盖就直接链接失败。
-  # RUSTFLAGS 环境变量的优先级高于 config.toml 的 target.*.rustflags。
-  RUSTFLAGS: ""
+  # 两件事一起做:
+  # 1. 覆盖仓库 .cargo/config.toml 的 -fuse-ld=mold(D-079 本地提速)——
+  #    runner 上没有 mold,不覆盖直接链接失败。
+  #    RUSTFLAGS 环境变量的优先级高于 config.toml 的 target.*.rustflags。
+  # 2. **零警告门禁**。cargo 对 registry 依赖自动 --cap-lints allow,
+  #    所以这条只管得住本仓库的 crate,不会被上游的警告误伤。
+  #    在此之前"零警告"全靠人肉 grep 声称,而 grep 写窄了就会漏
+  #    (`does not need to be mutable` 就这么溜过去过)。
+  RUSTFLAGS: "-D warnings"
   CARGO_TERM_COLOR: always
 
 jobs:

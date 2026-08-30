@@ -46,6 +46,25 @@ pub(crate) struct TargetOpts {
     /// (`--limit n3` / `--limit lb,db`)。机群契约仍按整份 inventory 成立。
     #[arg(long, value_name = "NAMES")]
     pub(crate) limit: Option<String>,
+    /// 执行顺序。
+    ///
+    /// `host`(默认):一台机器跑完全部资源,再下一台。排障时最顺手 ——
+    /// 一台机器的来龙去脉连在一起。
+    ///
+    /// `linear`:一个资源在全机群跑完,再下一个(ansible 的默认策略)。
+    /// 滚动升级时要的就是它:每一步做完立刻知道**所有机器**成没成,
+    /// 而不是等最后一台跑完才发现第三步在第二台上就炸了。
+    #[arg(long, value_enum, default_value_t = Strategy::Host)]
+    pub(crate) strategy: Strategy,
+}
+
+/// 执行顺序策略。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+pub(crate) enum Strategy {
+    /// 逐台:一台跑完全部资源再下一台。
+    Host,
+    /// 逐资源:一个资源在全机群跑完再下一个(ansible 的 linear)。
+    Linear,
 }
 
 impl TargetOpts {

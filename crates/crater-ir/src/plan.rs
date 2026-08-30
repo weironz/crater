@@ -264,88 +264,106 @@ pub fn converge_with(
     let mut upstream_changed = false;
 
     for item in &p.items {
-        // 上游真动过之后,**这一项的预测就可能过时** —— 不限于"计划说 Ok"。
+        let (outcome, changed) = converge_item(bp, ctx, item, upstream_changed)?;
+        if changed {
+            upstream_changed = true;
+        }
+        if let Some(def) = bp.custom_type(&item.ty) {
+            if !matches!(item.change, Change::Ok) {
+                report.procedures_needed.insert(def.apply.clone());
+            }
+        }
+        push_step(&mut report, on_step, &item.id, outcome);
+    }
+    Ok(report)
+}
+
+/// 收敛**单个**资源项。返回 (结果, 这一项是否真的动过)。
+///
+/// 从 `converge_with` 的循环体里抽出来,是为了让调用方能按**别的顺序**驱动
+/// 收敛 —— 比如 task-major:一个资源在全机群跑完,再下一个。逐项的语义
+/// (Unknown 要重新观察、上游动过要复查预测)必须只有一份实现,否则两种
+/// 顺序会在最微妙的地方分家。
+///
+/// `upstream_changed`:同一台机器上、这一项之前有没有东西真的改过。
+pub fn converge_item(
+    bp: &Blueprint,
+    ctx: &dyn Ctx,
+    item: &PlanItem,
+    upstream_changed: bool,
+) -> Result<(Outcome, bool)> {
+    // 上游真动过之后,**这一项的预测就可能过时** —— 不限于"计划说 Ok"。
+    //
+    // 反例正是 redis:plan 时包还没装,service 因此被判为 Create;
+    // 而包在安装时自己就把服务起起来了,`systemctl start` 对已在跑的服务
+    // 是空操作 —— 于是刚被 lineinfile 改过的 bind 配置永远不生效,
+    // 进程一直监听 127.0.0.1,而 crater 报的是成功。
+    //
+    // 代价是首次变更之后的每一项多一次探针。这个代价换的是"配置改了服务
+    // 一定重启" —— 那是本工具最基本的承诺之一。
+    let planned;
+    let change = if upstream_changed && bp.custom_type(&item.ty).is_none() {
+        let rt = resolve_type(bp, &item.ty)
+            .ok_or_else(|| anyhow::anyhow!("类型 `{}` 无实现", item.ty))?;
+        let fresh = rt.observe(ctx, &item.args)?;
+        planned = rt.diff(&DiffInput {
+            args: &item.args,
+            observed: &fresh,
+            upstream_changed: true,
+        });
+        &planned
+    } else {
+        &item.change
+    };
+    match change {
+        Change::Ok => Ok((Outcome::Ok, false)),
+
+        // 计划期说不清的项:**执行前重新观察一次**,再决定做不做。
         //
-        // 反例正是 redis:plan 时包还没装,service 因此被判为 Create;
-        // 而包在安装时自己就把服务起起来了,`systemctl start` 对已在跑的服务
-        // 是空操作 —— 于是刚被 lineinfile 改过的 bind 配置永远不生效,
-        // 进程一直监听 127.0.0.1,而 crater 报的是成功。
+        // plan 是对"当下现实"的一次性预测,而 converge 走到这一项时现实
+        // 往往已经变了 —— `lineinfile` 要改的 postgresql.conf,是同一轮里
+        // 更早那条 `package` 装出来的。用陈旧的判断跳过它,等于让"同一次
+        // apply 内部的先后依赖"永远不成立。
         //
-        // 代价是首次变更之后的每一项多一次探针。这个代价换的是"配置改了服务
-        // 一定重启"—— 那是本工具最基本的承诺之一。
-        let planned;
-        let change = if upstream_changed && bp.custom_type(&item.ty).is_none() {
+        // 重新观察后仍说不清(裸 shell 这类),就**照跑**并记 warn ——
+        // "接住,不羞辱,但可见"。此前是直接跳过,于是逃生舱形同虚设:
+        // 没写 check 的 shell 在 apply 时一次都不会执行。
+        Change::Unknown(_) if bp.custom_type(&item.ty).is_none() => {
             let rt = resolve_type(bp, &item.ty)
                 .ok_or_else(|| anyhow::anyhow!("类型 `{}` 无实现", item.ty))?;
             let fresh = rt.observe(ctx, &item.args)?;
-            planned = rt.diff(&DiffInput {
+            let again = rt.diff(&DiffInput {
                 args: &item.args,
                 observed: &fresh,
-                upstream_changed: true,
+                upstream_changed: false,
             });
-            &planned
-        } else {
-            &item.change
-        };
-        match change {
-            Change::Ok => push_step(&mut report, on_step, &item.id, Outcome::Ok),
-
-            // 计划期说不清的项:**执行前重新观察一次**,再决定做不做。
-            //
-            // plan 是对"当下现实"的一次性预测,而 converge 走到这一项时现实
-            // 往往已经变了 —— `lineinfile` 要改的 postgresql.conf,是同一轮里
-            // 更早那条 `package` 装出来的。用陈旧的判断跳过它,等于让"同一次
-            // apply 内部的先后依赖"永远不成立。
-            //
-            // 重新观察后仍说不清(裸 shell 这类),就**照跑**并记 warn ——
-            // "接住,不羞辱,但可见"。此前是直接跳过,于是逃生舱形同虚设:
-            // 没写 check 的 shell 在 apply 时一次都不会执行。
-            Change::Unknown(_) if bp.custom_type(&item.ty).is_none() => {
-                upstream_changed = true;
-                let rt = resolve_type(bp, &item.ty)
-                    .ok_or_else(|| anyhow::anyhow!("类型 `{}` 无实现", item.ty))?;
-                let fresh = rt.observe(ctx, &item.args)?;
-                let again = rt.diff(&DiffInput {
-                    args: &item.args,
-                    observed: &fresh,
-                    upstream_changed: false,
-                });
-                match again {
-                    Change::Ok => push_step(&mut report, on_step, &item.id, Outcome::Ok),
-                    Change::Unknown(_) => {
-                        rt.apply(ctx, &item.args, &again)
-                            .map_err(|e| anyhow::anyhow!("{}: {e}", item.id))?;
-                        push_step(&mut report, on_step, &item.id, Outcome::Warn);
-                    }
-                    determinate => {
-                        let outcome = rt
-                            .apply(ctx, &item.args, &determinate)
-                            .map_err(|e| anyhow::anyhow!("{}: {e}", item.id))?;
-                        push_step(&mut report, on_step, &item.id, outcome);
-                    }
+            match again {
+                Change::Ok => Ok((Outcome::Ok, true)),
+                Change::Unknown(_) => {
+                    rt.apply(ctx, &item.args, &again)
+                        .map_err(|e| anyhow::anyhow!("{}: {e}", item.id))?;
+                    Ok((Outcome::Warn, true))
                 }
-            }
-            Change::Unknown(_) => push_step(&mut report, on_step, &item.id, Outcome::Warn),
-            // 自定义类型的弥合是机群级的舞 —— 记下来交给调用方,不在这里跑。
-            _ if bp.custom_type(&item.ty).is_some() => {
-                let def = bp.custom_type(&item.ty).expect("checked");
-                report.procedures_needed.insert(def.apply.clone());
-                push_step(&mut report, on_step, &item.id, Outcome::Warn);
-            }
-            change => {
-                let rt = resolve_type(bp, &item.ty)
-                    .ok_or_else(|| anyhow::anyhow!("类型 `{}` 无实现", item.ty))?;
-                let outcome = rt
-                    .apply(ctx, &item.args, change)
-                    .map_err(|e| anyhow::anyhow!("{}: {e}", item.id))?;
-                if outcome == Outcome::Changed {
-                    upstream_changed = true;
+                determinate => {
+                    let outcome = rt
+                        .apply(ctx, &item.args, &determinate)
+                        .map_err(|e| anyhow::anyhow!("{}: {e}", item.id))?;
+                    Ok((outcome, true))
                 }
-                push_step(&mut report, on_step, &item.id, outcome);
             }
         }
+        Change::Unknown(_) => Ok((Outcome::Warn, false)),
+        // 自定义类型的弥合是机群级的舞 —— 记下来交给调用方,不在这里跑。
+        _ if bp.custom_type(&item.ty).is_some() => Ok((Outcome::Warn, false)),
+        change => {
+            let rt = resolve_type(bp, &item.ty)
+                .ok_or_else(|| anyhow::anyhow!("类型 `{}` 无实现", item.ty))?;
+            let outcome = rt
+                .apply(ctx, &item.args, change)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", item.id))?;
+            Ok((outcome, outcome == Outcome::Changed))
+        }
     }
-    Ok(report)
 }
 
 /// 退役:**逆序** destroy。没有 `teardown:` 段可写错、可与安装步骤不同步。
