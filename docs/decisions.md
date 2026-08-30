@@ -1802,3 +1802,26 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   命中(time_sync×n3)→ plan 过闸 → apply 治愈实况 ·→~ 逐格定案;
   plan 闸门四格(无 plan/改蓝图/换参数被拒,plan→apply 放行);
   调度器 auto-verify 自动点火。564 tests 绿。
+
+### D-119:存储分层参考(三分与窄接口)
+
+- **起因**:"YAML 该存哪 —— git / rustfs / SQLite / PostgreSQL"。结论是这四个
+  不是备选项,而是**三个不同位置**上的答案,写进 `docs/research/storage-design.md`。
+- **三分**:期望态(蓝图/inventory/app)→ git;物料与闭包 → 窄接口后面的 blob
+  存储;运行态(部署记录/job/对账快照)→ 保持本地文件。划分依据是三种根本不同
+  的访问模式,不是分类学。
+- **期望态不入库**再次确认:用 DB 存它等于把 git 重新实现一遍且更差 —— 而这条
+  路 D-106 已经走过又退回来(旧管线 TursoStore 的 deployments/job_runs 两张表)。
+- **数据库的真正临界点是并发控制,不是数据量**:现在两台控制机同时 apply 没有
+  任何东西拦得住,`~/.crater/state` 会被后写的覆盖。单机用文件锁;多控制端需要
+  共享租约 —— 那才是 PostgreSQL 唯一站得住的位置。
+- **窄接口**:建议 `BlobSource`(contains/fetch/manifest/origin)与 `BlobSink`
+  (put/finish),复用已有的 `crater_core::bundle::{Manifest, BlobEntry}`。现有
+  tar 闭包作为第一个实现搬进去应是**纯重构**。刻意不预加 list/delete/signed_url
+  —— 每个方法都要能说出"谁在调它"。
+- **硬前提**:密钥外置排在一切之前。inventory 里现在是明文口令,进 git 就是永久
+  泄漏(历史删不掉)。优先 SSH key 直接绕开口令。
+- **旁证**:harness/harness 的实现分析(一个容器 = 一个 Go 静态二进制 + 一个
+  SQLite + 一个数据目录,git 壳调二进制、OCI 借 CNCF distribution、npm/maven/
+  python/nuget/cargo 等自己实现,blob.Store 只有五个方法)。全文在 mica
+  `devops/harness/architecture`。
