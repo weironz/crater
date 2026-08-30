@@ -73,7 +73,14 @@ jobs:
           $BIN types >/dev/null
           # 静态是这次改动的全部意义 —— 退回动态链接要当场红,而不是
           # 等到有人把它拷到别的机器上才发现跑不起来。
-          file "$BIN" | grep -q "static-pie linked" || { file "$BIN"; echo "::error::不是静态链接"; exit 1; }
+          #
+          # 两种措辞都算数:x86_64 出的是 `static-pie linked`,aarch64 出的是
+          # `statically linked`(非 PIE)。只认前一种会把好好的 arm 产物判成失败。
+          # 真正要拒的是动态链接,直接证据是**有没有 INTERP 段**。
+          file "$BIN"
+          if readelf -l "$BIN" | grep -q INTERP; then
+            echo "::error::不是静态链接(存在 INTERP 段,依赖动态链接器)"; exit 1
+          fi
 
       - name: 打包
         run: |
