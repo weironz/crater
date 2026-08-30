@@ -203,6 +203,14 @@ jobs:
           file: docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          # 关掉 buildx 默认附带的 provenance / SBOM 证明。
+          #
+          # 它们会往 manifest list 里塞一个 application/vnd.oci.empty.v1+json
+          # 的空描述符,而阿里云 ACR 不认这个类型,推送直接
+          # `denied: unknown manifest class`。Docker Hub 认,ACR 不认 ——
+          # 要同时推两个仓,就得按最保守的那个来。
+          provenance: false
+          sbom: false
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/crater:${{ steps.meta.outputs.version }}
             ${{ secrets.DOCKERHUB_USERNAME }}/crater:latest
