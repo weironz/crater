@@ -504,7 +504,20 @@ async fn run_on_targets(
         }
         cells.entry(id.to_string()).or_default().insert(host.to_string(), c);
     };
-    for host in &hosts {
+    let batches = crate::target::batches(&hosts, target.serial.as_deref())?;
+    let n_batches = batches.len();
+    'outer: for (bi, batch) in batches.iter().enumerate() {
+    if n_batches > 1 {
+        crate::out::leave();
+        say!(
+            "── 批次 {}/{}({})──",
+            bi + 1,
+            n_batches,
+            batch.iter().map(|h| h.name.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
+    let batch_fail_before = failures;
+    for host in batch {
         let transport = build_transport(host).await?;
         crate::out::enter(&host.name);
         // `@local` 是本机哨兵值,直接渲染出来是 `root@@local:22`,像个 bug。
@@ -740,6 +753,20 @@ async fn run_on_targets(
             }));
         }
     }
+    // 这一批出事就停 —— 滚动的意义正在于此:出事时还剩大半个机群是好的。
+    // 继续推下去,等于把一个已知会失败的变更铺满全场。
+    if failures > batch_fail_before && bi + 1 < n_batches {
+        crate::out::leave();
+        oops!(
+            "批次 {}/{} 有 {} 处失败 —— 停止滚动,剩余 {} 批未执行",
+            bi + 1,
+            n_batches,
+            failures - batch_fail_before,
+            n_batches - bi - 1
+        );
+        break 'outer;
+    }
+    }
     // 机群汇总。逐台的 `执行:...` 散在几百行中间,五台跑完拼不出全貌 ——
     // 这一段就是 ansible 的 PLAY RECAP 干的事。
     crate::out::leave();
@@ -875,9 +902,33 @@ async fn run_linear(
     use crater_ir::verbs::Outcome as O;
 
     crate::out::fleet(&hosts.iter().map(|h| h.name.clone()).collect::<Vec<_>>());
-    say!("blueprint {} —— 逐资源执行(linear),{} 台目标", bp.name, hosts.len());
+    let batches = crate::target::batches(hosts, target.serial.as_deref())?;
+    say!(
+        "blueprint {} —— 逐资源执行(linear),{} 台目标{}",
+        bp.name,
+        hosts.len(),
+        if batches.len() > 1 { format!(",分 {} 批", batches.len()) } else { String::new() }
+    );
 
-    // 全部连接**同时**建起来 —— 这是 task-major 的前提。
+    let n_batches = batches.len();
+    let mut all_order: Vec<String> = Vec::new();
+    let mut all_labels: BTreeMap<String, String> = BTreeMap::new();
+    let mut all_cells: BTreeMap<String, BTreeMap<String, char>> = BTreeMap::new();
+    let mut failures = 0usize;
+    let mut dances: BTreeSet<String> = Default::default();
+
+    'batches: for (bi, hosts) in batches.iter().enumerate() {
+    if n_batches > 1 {
+        crate::out::leave();
+        say!(
+            "── 批次 {}/{}({})──",
+            bi + 1,
+            n_batches,
+            hosts.iter().map(|h| h.name.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
+    let batch_fail_before = failures;
+    // 只连**这一批** —— 滚动的前提是没轮到的机器一根手指都不碰。
     let targets =
         connect_fleet(bp, hosts, fleet, overrides, &base_dir(path), target.parallel, blobs).await?;
 
@@ -909,8 +960,6 @@ async fn run_linear(
     // 在一台半坏的机器上继续往下做,只会把故障现场搅得更难查。
     let mut down: BTreeSet<String> = BTreeSet::new();
     let mut outcomes: BTreeMap<String, BTreeMap<String, char>> = BTreeMap::new();
-    let mut dances: BTreeSet<String> = Default::default();
-    let mut failures = 0usize;
 
     for id in &order {
         let label = &labels[id];
@@ -999,8 +1048,11 @@ async fn run_linear(
         }
     }
 
-    // 机群级的舞照跑(顺序不变:资源先就位,再跳舞)。
-    if !dances.is_empty() && failures == 0 {
+    // 机群级的舞:**每批跑完就跳自己这一批的**(顺序不变:资源先就位再跳舞)。
+    //
+    // 分批时这一步只握着本批的连接 —— 如果某支舞要靠别批机器的 exports,
+    // 它会在这里明确失败,而不是拿到半个机群的事实悄悄算错。
+    if !dances.is_empty() && failures == batch_fail_before {
         for name in &dances {
             say!("── procedure {name} ──");
             match procedure::run(bp, name, &targets, &BTreeMap::new()) {
@@ -1011,10 +1063,35 @@ async fn run_linear(
                 }
             }
         }
+        dances.clear();
     }
 
-    let names: Vec<String> = hosts.iter().map(|h| fleet_name(h)).collect();
-    print_matrix(&names, &order, &labels, &outcomes);
+    // 本批结果并入总表(矩阵与退出码是全局的)。
+    for id in &order {
+        if !all_labels.contains_key(id) {
+            all_order.push(id.clone());
+            all_labels.insert(id.clone(), labels[id].clone());
+        }
+        all_cells.entry(id.clone()).or_default().extend(
+            outcomes.get(id).cloned().unwrap_or_default(),
+        );
+    }
+
+    if failures > batch_fail_before && bi + 1 < n_batches {
+        crate::out::leave();
+        oops!(
+            "批次 {}/{} 有 {} 处失败 —— 停止滚动,剩余 {} 批未执行",
+            bi + 1,
+            n_batches,
+            failures - batch_fail_before,
+            n_batches - bi - 1
+        );
+        break 'batches;
+    }
+    }
+
+    let names: Vec<String> = batches.iter().flatten().map(fleet_name).collect();
+    print_matrix(&names, &all_order, &all_labels, &all_cells);
     if failures > 0 {
         bail!("{failures} 处执行失败");
     }

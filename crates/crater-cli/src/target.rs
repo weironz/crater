@@ -56,6 +56,13 @@ pub(crate) struct TargetOpts {
     /// 而不是等最后一台跑完才发现第三步在第二台上就炸了。
     #[arg(long, value_enum, default_value_t = Strategy::Host)]
     pub(crate) strategy: Strategy,
+    /// 分批滚动:每批多少台(`--serial 1` / `--serial 25%`)。
+    ///
+    /// 一批**整批做完**再下一批;**任一批失败就停**,后面的机器根本不碰 ——
+    /// 这才是滚动升级的意义:出事时还剩大半个机群是好的。
+    /// 不给则一次过全部(现有行为)。
+    #[arg(long, value_name = "N|N%")]
+    pub(crate) serial: Option<String>,
 }
 
 /// 执行顺序策略。
@@ -65,6 +72,27 @@ pub(crate) enum Strategy {
     Host,
     /// 逐资源:一个资源在全机群跑完再下一个(ansible 的 linear)。
     Linear,
+}
+
+/// 把执行目标切成批次。`spec` 是 `N` 或 `N%`;空/无效 → 一批到底。
+///
+/// 百分比向上取整且至少 1 台 —— `--serial 10%` 在 5 台上得到 1,
+/// 而不是 0(那会让整条命令什么都不做,还看不出是为什么)。
+pub(crate) fn batches(hosts: &[crater_core::spec::Host], spec: Option<&str>) -> Result<Vec<Vec<crater_core::spec::Host>>> {
+    let Some(spec) = spec.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(vec![hosts.to_vec()]);
+    };
+    let size = if let Some(pct) = spec.strip_suffix('%') {
+        let pct: usize = pct.trim().parse().map_err(|_| anyhow::anyhow!("--serial 百分比要写成整数,如 25%:{spec}"))?;
+        if pct == 0 || pct > 100 {
+            anyhow::bail!("--serial 百分比要在 1..=100:{spec}");
+        }
+        ((hosts.len() * pct) as f64 / 100.0).ceil() as usize
+    } else {
+        spec.parse::<usize>().map_err(|_| anyhow::anyhow!("--serial 要写成台数或百分比:{spec}"))?
+    };
+    let size = size.max(1);
+    Ok(hosts.chunks(size).map(|c| c.to_vec()).collect())
 }
 
 impl TargetOpts {
@@ -330,5 +358,52 @@ pub(crate) fn target_hosts(
     } else {
         // No target → local install on the control machine.
         Ok(vec![crater_core::spec::Host::local()])
+    }
+}
+
+
+#[cfg(test)]
+mod batch_tests {
+    use super::batches;
+    use crater_core::spec::Host;
+
+    fn hosts(n: usize) -> Vec<Host> {
+        (0..n)
+            .map(|i| Host { name: format!("n{i}"), ..Host::local() })
+            .collect()
+    }
+
+    #[test]
+    fn no_serial_means_one_batch() {
+        assert_eq!(batches(&hosts(5), None).unwrap().len(), 1);
+        assert_eq!(batches(&hosts(5), Some("")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn count_splits_with_a_short_last_batch() {
+        let b = batches(&hosts(5), Some("2")).unwrap();
+        assert_eq!(b.iter().map(|c| c.len()).collect::<Vec<_>>(), vec![2, 2, 1]);
+    }
+
+    /// 百分比向上取整、且至少 1 台 —— 向下取整会得到 0,
+    /// 那会让整条命令什么都不做,而且看不出是为什么。
+    #[test]
+    fn percentage_rounds_up_and_never_yields_an_empty_batch() {
+        assert_eq!(batches(&hosts(5), Some("40%")).unwrap().len(), 3); // 每批 2
+        let b = batches(&hosts(5), Some("10%")).unwrap();
+        assert_eq!(b.len(), 5, "10% of 5 → 1 台一批,不是 0");
+        assert!(b.iter().all(|c| !c.is_empty()));
+    }
+
+    #[test]
+    fn bad_specs_are_refused_not_guessed() {
+        assert!(batches(&hosts(3), Some("abc")).is_err());
+        assert!(batches(&hosts(3), Some("0%")).is_err());
+        assert!(batches(&hosts(3), Some("101%")).is_err());
+    }
+
+    #[test]
+    fn a_batch_larger_than_the_fleet_is_just_one_batch() {
+        assert_eq!(batches(&hosts(3), Some("99")).unwrap().len(), 1);
     }
 }
