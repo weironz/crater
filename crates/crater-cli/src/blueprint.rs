@@ -475,6 +475,30 @@ async fn run_on_targets(
         drifted: usize,
     }
     let mut recap: Vec<(String, Tally)> = Vec::new();
+
+    // 资源 × 主机的矩阵。逐行输出回答"这台机器怎么了",矩阵回答"这个资源
+    // 在哪几台上出了状况" —— 后者正是 ansible 的 task-major 视图擅长的事,
+    // 而 crater 的执行是逐台的,所以把它做成**跑完之后的一次汇总**,
+    // 不必为了输出形状去改执行模型。
+    //
+    // 顺带补上了 skipped 的信息:某台没有某个资源(选择器/when 没选中它)时
+    // 格子是 `·` —— 此前那种情况在输出里直接消失,分不清"跳过"和"没这条"。
+    let mut mx_rows: Vec<String> = Vec::new();               // 资源 id,首现顺序
+    let mut mx_label: BTreeMap<String, String> = BTreeMap::new();
+    let mut mx: BTreeMap<String, BTreeMap<String, char>> = BTreeMap::new();
+    let mut note = |rows: &mut Vec<String>,
+                    lab: &mut BTreeMap<String, String>,
+                    cells: &mut BTreeMap<String, BTreeMap<String, char>>,
+                    host: &str,
+                    id: &str,
+                    label: &str,
+                    c: char| {
+        if !lab.contains_key(id) {
+            rows.push(id.to_string());
+            lab.insert(id.to_string(), label.to_string());
+        }
+        cells.entry(id.to_string()).or_default().insert(host.to_string(), c);
+    };
     for host in &hosts {
         let transport = build_transport(host).await?;
         crate::out::enter(&host.name);
@@ -539,11 +563,21 @@ async fn run_on_targets(
                 let _ = store.save(&prev);
             }
             let failed = report_drift(&verdict, previous.as_ref());
+            for item in &plan.items {
+                note(&mut mx_rows, &mut mx_label, &mut mx, &host.name, &item.id, &item.label(), '✓');
+            }
             let n_drift = match &verdict {
                 crater_ir::state::DriftVerdict::Drifted(d) => d.len(),
                 crater_ir::state::DriftVerdict::Indeterminate { drifted, .. } => drifted.len(),
                 _ => 0,
             };
+            if let crater_ir::state::DriftVerdict::Drifted(d) = &verdict {
+                for it in d {
+                    if let Some(row) = mx.get_mut(&it.id) {
+                        row.insert(host.name.clone(), '✗');
+                    }
+                }
+            }
             recap.push((
                 host.name.clone(),
                 Tally {
@@ -573,6 +607,10 @@ async fn run_on_targets(
                 say!("跳过执行(无变更)");
                 // 未变更的机器**也要进汇总** —— 汇总缺了它们,就无法回答
                 // "这次到底覆盖了几台",而那正是多机部署后第一个要确认的事。
+                for item in &plan.items {
+                    note(&mut mx_rows, &mut mx_label, &mut mx, &host.name,
+                         &item.id, &item.label(), '✓');
+                }
                 // 已是期望态 ≠ 什么都没发生:这些资源都被观察过、判定为符合。
                 // 报 ok=0 会让"全都对"和"一个都没查"看起来一样。
                 recap.push((
@@ -600,6 +638,14 @@ async fn run_on_targets(
             match plan::converge_with(&bp, &scope, &ctx, &on_step) {
                 Ok(report) => {
                     print_report(&report);
+                    let by_id: BTreeMap<&str, String> =
+                        plan.items.iter().map(|i| (i.id.as_str(), i.label())).collect();
+                    for (id, oc) in &report.steps {
+                        use crater_ir::verbs::Outcome as O;
+                        let c = match oc { O::Ok => '✓', O::Changed => '~', O::Warn => '!' };
+                        let lab = by_id.get(id.as_str()).cloned().unwrap_or_else(|| id.clone());
+                        note(&mut mx_rows, &mut mx_label, &mut mx, &host.name, id, &lab, c);
+                    }
                     recap.push((
                         host.name.clone(),
                         Tally {
@@ -647,6 +693,10 @@ async fn run_on_targets(
                 }
                 Err(e) => {
                     failures += 1;
+                    for item in &plan.items {
+                        note(&mut mx_rows, &mut mx_label, &mut mx, &host.name,
+                             &item.id, &item.label(), '✗');
+                    }
                     recap.push((
                         host.name.clone(),
                         Tally { failed: 1, ..Default::default() },
@@ -663,6 +713,10 @@ async fn run_on_targets(
                 "e": "host_done", "host": host.name, "result": "ok",
             }));
         } else {
+            for item in &plan.items {
+                note(&mut mx_rows, &mut mx_label, &mut mx, &host.name,
+                     &item.id, &item.label(), item.change.sigil());
+            }
             // plan 不执行,但"有几项已符合"是它算出来的结论,该报。
             recap.push((
                 host.name.clone(),
@@ -684,6 +738,13 @@ async fn run_on_targets(
     // 机群汇总。逐台的 `执行:...` 散在几百行中间,五台跑完拼不出全貌 ——
     // 这一段就是 ansible 的 PLAY RECAP 干的事。
     crate::out::leave();
+
+    // ── 矩阵 ──
+    let host_names: Vec<String> = hosts.iter().map(|h| h.name.clone()).collect();
+    if host_names.len() > 1 && !mx_rows.is_empty() {
+        print_matrix(&host_names, &mx_rows, &mx_label, &mx);
+    }
+
     if recap.len() > 1 {
         say!("── 汇总 ──");
         let w = recap.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0).max(8);
@@ -785,6 +846,85 @@ fn report_closure(bp: &Blueprint, scope: &plan::Scope) {
     if broken > 0 {
         say!("闭包 {broken}/{} 项无法解析", items.len());
     }
+}
+
+/// 资源 × 主机矩阵:横着看一个资源在全机群的落点。
+///
+/// 逐行输出是 host-major(这台机器怎么了),矩阵补上 task-major 的那一半
+/// (这个资源在哪几台上出了状况)—— 两个问题都常问,而 crater 的执行是
+/// 逐台的,所以把后者做成跑完之后的汇总,不必为输出形状改执行模型。
+fn print_matrix(
+    hosts: &[String],
+    rows: &[String],
+    labels: &BTreeMap<String, String>,
+    cells: &BTreeMap<String, BTreeMap<String, char>>,
+) {
+    const LABEL_MAX: usize = 38;
+    // 列宽 = 主机名宽(至少 3,给记号留位置)。
+    let colw = hosts.iter().map(|h| h.chars().count()).max().unwrap_or(3).max(3);
+    let labw = rows
+        .iter()
+        .map(|id| labels.get(id).map(|l| l.chars().count()).unwrap_or(0))
+        .max()
+        .unwrap_or(0)
+        .min(LABEL_MAX);
+    // 太宽就没法读了 —— 与其吐一屏错位的字符,不如换一种说法。
+    let too_wide = labw + 2 + hosts.len() * (colw + 1) > 160;
+
+    say!("── 矩阵 ──");
+    if too_wide {
+        // 宽机群降级:只列**有状况**的资源,并把涉及的主机名直接写出来。
+        // 一百台的网格没人看得懂,而"哪几台不一样"永远是那个真问题。
+        let mut any = false;
+        for id in rows {
+            let row = &cells[id];
+            let odd: Vec<&String> = hosts
+                .iter()
+                .filter(|h| !matches!(row.get(*h), Some('✓') | None))
+                .collect();
+            if odd.is_empty() {
+                continue;
+            }
+            any = true;
+            let names: Vec<String> = odd
+                .iter()
+                .map(|h| format!("{}{}", row.get(h.as_str()).copied().unwrap_or('·'), h))
+                .collect();
+            say!("  {:<labw$}  {}", elide_label(labels, id, LABEL_MAX), names.join(" "), labw = labw);
+        }
+        if !any {
+            say!("  ({} 台全部符合期望态)", hosts.len());
+        }
+        say!("  ({} 台超出网格宽度,只列有状况的资源)", hosts.len());
+        say!();
+        return;
+    }
+    // 表头
+    let head: String = hosts.iter().map(|h| format!("{h:>colw$} ")).collect();
+    say!("  {:<labw$}  {}", "", head.trim_end(), labw = labw);
+    for id in rows {
+        let row = &cells[id];
+        let line: String = hosts
+            .iter()
+            // `·` = 这台没有这一项(选择器/when 没选中)—— 与"跳过"是同一件事,
+            // 而此前它在输出里完全不可见。
+            .map(|h| format!("{:>colw$} ", row.get(h).copied().unwrap_or('·')))
+            .collect();
+        say!("  {:<labw$}  {}", elide_label(labels, id, LABEL_MAX), line.trim_end(), labw = labw);
+    }
+    say!();
+}
+
+/// 标签太长就从中间省 —— 掐头会丢类型名,掐尾会丢是哪个文件,两头都要留。
+fn elide_label(labels: &BTreeMap<String, String>, id: &str, max: usize) -> String {
+    let l = labels.get(id).cloned().unwrap_or_else(|| id.to_string());
+    if l.chars().count() <= max {
+        return l;
+    }
+    let keep = max.saturating_sub(1) / 2;
+    let head: String = l.chars().take(keep).collect();
+    let tail: String = l.chars().skip(l.chars().count() - keep).collect();
+    format!("{head}…{tail}")
 }
 
 /// 机群级执行上下文 —— procedure 的舞要在多台之间走,所以得**同时**握住全部成员。
