@@ -4,8 +4,10 @@
 # 会直接链接失败。空 RUSTFLAGS 覆盖掉它:装了 mold 想要提速,删这行即可。
 export RUSTFLAGS := ""
 
-# 一键拉起 UI:`just ui`;换端口 `just ui 9000`,对外开放 `just ui 8899 0.0.0.0`
+# 换端口 `just ui 9000`,对外开放 `just ui 8899 0.0.0.0`
 # (注意:UI 无认证,0.0.0.0 仅限可信内网)。
+#
+# 一键拉起 UI(默认 127.0.0.1:8899)
 ui port="8899" bind="127.0.0.1":
     cargo build --release -p crater-cli
     ./target/release/crater ui --bind {{bind}} --port {{port}}
@@ -17,3 +19,39 @@ build:
 # 全量测试
 test:
     cargo test --release
+
+# 用 install 而不是 cp:它一步做完权限设置,且**先写再原子替换**,
+# 不会像 cp 那样在覆盖正在运行的二进制时撞上 ETXTBSY。
+#
+# 构建 CLI 并装到 /usr/local/bin(需要 sudo)
+app:
+    cargo build --release -p crater-cli
+    sudo install -m 0755 target/release/crater /usr/local/bin/crater
+    @echo "已安装 → $(command -v crater)"
+    @crater --version
+
+# 不接 traefik、不要证书、不设 token —— dev 要的是"改完立刻能点"。
+# 换端口:`just dev 9090`
+#
+# 本地 dev 容器:构建二进制 → 打镜像 → compose 起来(默认 :8080)
+dev port="8080":
+    #!/usr/bin/env bash
+    # shebang 配方:整段跑在**同一个 shell** 里(普通配方是一行一个 shell,
+    # ARCH 活不过下一行)。
+    set -euo pipefail
+    cargo build --release -p crater-cli
+    mkdir -p dist
+    ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+    cp target/release/crater "dist/crater-$ARCH"
+    # TARGETARCH 只有 buildx/BuildKit 会自动注入,经典 builder 下是空的
+    # (COPY 会去找 `dist/crater-` 然后失败)—— 本地显式给。
+    docker build --build-arg TARGETARCH="$ARCH" -f docker/Dockerfile -t crater:dev .
+    CRATER_DEV_PORT={{port}} docker compose -f deploy/docker-compose.dev.yaml up -d
+    docker compose -f deploy/docker-compose.dev.yaml ps
+    echo
+    echo "→ http://127.0.0.1:{{port}}/?token=${CRATER_DEV_TOKEN:-dev}"
+    echo "  (首访带 ?token= 会换成 cookie,之后直接开 http://127.0.0.1:{{port}} 即可)"
+
+# 停掉本地 dev 容器
+dev-down:
+    docker compose -f deploy/docker-compose.dev.yaml down

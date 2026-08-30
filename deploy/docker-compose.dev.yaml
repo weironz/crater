@@ -1,0 +1,43 @@
+name: crater-dev
+
+# 本地开发编排:`just dev`。
+#
+# 与生产那份的差别是刻意的:不接 traefik、不要域名证书、不设 token,
+# 直接把 8080 映到本机 —— dev 要的是"改完立刻能点",不是一套完整的接入层。
+# 镜像用**本地刚构建的二进制**现场打包(just dev 会先备好 dist/crater-amd64)。
+
+services:
+  crater:
+    # 刻意**不写 build:** —— 镜像由 `just dev` 用 `docker build` 事先打好。
+    # compose 自己的构建路径要走 BuildKit,在没有 buildx 的机器上会卡死;
+    # 而"先 build 再 up"两步分明,也与 CI 的做法一致。
+    image: crater:dev
+    container_name: crater-dev
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      CRATER_LOG: ${CRATER_LOG:-info}
+    command:
+      - ui
+      - --bind
+      - "0.0.0.0"
+      - --port
+      - "8080"
+      # 容器里只能绑 0.0.0.0(端口靠 -p 映射),而 crater 拒绝"对外暴露且无凭据"
+      # —— 这道闸是对的,dev 也别绕开它,只是把 token 固定成一个好记的值。
+      - --token
+      - ${CRATER_DEV_TOKEN:-dev}
+    ports:
+      - "${CRATER_DEV_PORT:-8080}:8080"
+    volumes:
+      # 工作区直接挂仓库的 library/ 上层 —— 改蓝图不用重启容器。
+      - ../:/workspace
+      - crater-dev-state:/data
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/crater", "--version"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  crater-dev-state:

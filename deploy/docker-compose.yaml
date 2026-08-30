@@ -1,0 +1,60 @@
+name: crater
+
+# 部署在 /data/crater,由 GitHub Actions 的 deploy 作业同步过来。
+# 前面挡的是宿主上已有的 traefik(/data/traefik),走 traefik-network 这张外部网。
+#
+# 版本走 .env 里的 CRATER_VERSION,且**刻意不给默认值**:`:?` 让"忘了设版本"
+# 当场失败,而不是悄悄把生产拉到一个不确定的镜像上。
+
+services:
+  crater:
+    image: ${CRATER_IMAGE:-willdockerhub/crater}:${CRATER_VERSION:?先在 .env 里指定版本}
+    container_name: crater
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    command:
+      - ui
+      - --bind
+      - "0.0.0.0"
+      - --port
+      - "8080"
+      # UI 本身没有用户体系,这个 token 是唯一的门 —— 只从 .env 读,不进版本库。
+      - --token
+      - ${CRATER_UI_TOKEN:?先在 .env 里设一个 token}
+    volumes:
+      # 工作区:蓝图 / inventory / app 文件。**里面会有目标机凭据**,
+      # 所以用宿主目录而不是匿名卷 —— 备份和审计都得看得见它在哪。
+      - ./workspace:/workspace
+      # 运行态:部署记录、作业日志、对账快照(容器内 $HOME=/data)。
+      - crater-state:/data
+      # 目标机的 SSH 私钥(只读)。inventory 里写 `key:` 指向容器内路径,
+      # 比把明文口令写进 YAML 干净得多。
+      - ./ssh:/data/.ssh:ro
+    networks:
+      - traefik
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik-network
+      traefik.http.routers.crater.rule: Host(`${CRATER_DOMAIN:?先在 .env 里设域名}`)
+      traefik.http.routers.crater.entrypoints: websecure
+      traefik.http.routers.crater.tls: "true"
+      traefik.http.routers.crater.tls.certresolver: letsencrypt
+      traefik.http.services.crater.loadbalancer.server.port: "8080"
+      traefik.http.services.crater.loadbalancer.passhostheader: "true"
+    healthcheck:
+      # 探活刻意不打 HTTP:带了 token 的 UI 会把无凭据的请求挡下来,
+      # 那样探活永远是红的 —— 用二进制自检,证明进程还活着就够了。
+      test: ["CMD", "/usr/local/bin/crater", "--version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  traefik:
+    external: true
+    name: traefik-network
+
+volumes:
+  crater-state:

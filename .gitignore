@@ -43,3 +43,6 @@ Thumbs.db
 *.bak
 *.yaml.bak
 .crater-trash/
+
+# just dev / CI 打镜像用的临时二进制
+/dist/
