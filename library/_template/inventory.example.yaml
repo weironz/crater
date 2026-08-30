@@ -1,4 +1,11 @@
 inventory:
   # vars: { some_input: "..." }   # 覆盖 params 默认
   hosts:
+    # 占位值 —— 改成真地址与真口令再用。
+    # 更好的做法是根本不写口令:`key: ~/.ssh/id_ed25519` 一步绕开明文这件事,
+    # 尤其当这份 inventory 会进 git 时(历史删不掉)。
     - { name: node1, address: 192.168.1.11, user: root, password: "changeme" }
+  groups:
+    # 组名要与蓝图的 `fleet.groups` 对得上 —— 对不上时 app 的 lint 会报。
+    # 空组是合法拓扑(单节点里 min: 0 的 worker),不是漏填。
+    all: { hosts: [node1] }
