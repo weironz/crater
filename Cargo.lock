@@ -714,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "crater-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "crater-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -757,7 +757,7 @@ dependencies = [
 
 [[package]]
 name = "crater-ir"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "cel",

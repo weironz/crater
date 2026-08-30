@@ -39,10 +39,16 @@ dev port="8080":
     # shebang 配方:整段跑在**同一个 shell** 里(普通配方是一行一个 shell,
     # ARCH 活不过下一行)。
     set -euo pipefail
-    cargo build --release -p crater-cli
-    mkdir -p dist
+    # 与 CI 用同一个目标 —— 本地跑通而 CI 产物不同,等于没验。
+    # 需要 musl-tools(aws-lc-sys 点名要 <arch>-linux-musl-gcc)。
     ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-    cp target/release/crater "dist/crater-$ARCH"
+    TARGET=$(uname -m)-unknown-linux-musl
+    command -v "$(uname -m)-linux-musl-gcc" >/dev/null || {
+      echo "缺 musl 工具链:sudo apt-get install -y musl-tools"; exit 1; }
+    rustup target add "$TARGET" >/dev/null
+    cargo build --release --target "$TARGET" -p crater-cli
+    mkdir -p dist
+    cp "target/$TARGET/release/crater" "dist/crater-$ARCH"
     # TARGETARCH 只有 buildx/BuildKit 会自动注入,经典 builder 下是空的
     # (COPY 会去找 `dist/crater-` 然后失败)—— 本地显式给。
     docker build --build-arg TARGETARCH="$ARCH" -f docker/Dockerfile -t crater:dev .

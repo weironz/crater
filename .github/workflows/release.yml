@@ -28,10 +28,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --release --locked
 
-  # ── 各架构原生构建 ──
-  # 刻意不跨编译:aws-lc-sys(rustls 的后端)需要 C 工具链,交叉到 musl 要
-  # x86_64-linux-musl-gcc,在 QEMU 里编 arm64 更是几十分钟起步。
-  # 公共仓库有免费的 arm runner,原生编最省事也最不容易坏。
+  # ── 各架构原生构建,目标是 musl 静态 ──
+  #
+  # **原生**:aws-lc-sys(rustls 的后端)要 C 工具链,QEMU 里编 arm64 是几十
+  # 分钟起步;公共仓库有免费 arm runner,各编各的最省事。
+  #
+  # **musl 静态**:产物 static-pie、零动态依赖 —— 下载即用,不看目标机的
+  # glibc 脸色,镜像也能落在 alpine 上(159MB → 44MB)。
+  # 它需要 musl-tools 提供的 x86_64-linux-musl-gcc(aws-lc-sys 点名要它)。
+  # 静态 musl 的经典疑点是 DNS,已实测:容器内拉 https 物料正常。
   build:
     needs: test
     strategy:
@@ -41,30 +46,39 @@ jobs:
           # ubuntu-22.04 = glibc 2.35 基线,比 24.04 覆盖更广的发行版。
           - runner: ubuntu-22.04
             arch: amd64
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
           - runner: ubuntu-22.04-arm
             arch: arm64
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
-      - name: 构建
-        run: cargo build --release --locked -p crater-cli
+      - name: 装 musl 工具链
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: 自检(装出来的东西真能跑)
+      - name: 构建
+        run: cargo build --release --locked --target ${{ matrix.target }} -p crater-cli
+
+      - name: 自检(装出来的东西真能跑,且真的是静态的)
         run: |
-          ./target/release/crater --version
-          ./target/release/crater types >/dev/null
+          BIN=target/${{ matrix.target }}/release/crater
+          $BIN --version
+          $BIN types >/dev/null
+          # 静态是这次改动的全部意义 —— 退回动态链接要当场红,而不是
+          # 等到有人把它拷到别的机器上才发现跑不起来。
+          file "$BIN" | grep -q "static-pie linked" || { file "$BIN"; echo "::error::不是静态链接"; exit 1; }
 
       - name: 打包
         run: |
           mkdir -p dist
-          cp target/release/crater dist/crater-${{ matrix.arch }}
+          cp target/${{ matrix.target }}/release/crater dist/crater-${{ matrix.arch }}
           strip dist/crater-${{ matrix.arch }} || true
           # 解包出来就叫 crater,不带架构后缀 —— 下载的人不该再改名。
           tar -czf crater-${{ matrix.target }}.tar.gz \

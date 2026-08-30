@@ -7,19 +7,16 @@
 # 因此 build 前必须先备好:
 #   dist/crater-amd64   dist/crater-arm64
 # 然后 `docker buildx build --platform linux/amd64,linux/arm64 -f docker/Dockerfile .`
-# 基础镜像的 glibc 必须 **>= 构建机的 glibc** —— 否则镜像能 build 成功,
-# 容器一起就是 `version GLIBC_2.39 not found`。
-# ubuntu:24.04 是 2.39:既容得下 CI(ubuntu-22.04,glibc 2.35)编出的二进制,
-# 也容得下本机 dev 直接编的。换更老的底(如 bookworm 的 2.36)会砍掉后者。
-ARG RUNTIME_BASE=ubuntu:24.04
+# 二进制是 **musl 静态链接**(static-pie),所以底可以是 alpine ——
+# 也因此彻底没有 glibc 版本耦合:此前用 debian:bookworm(glibc 2.36)装
+# 本机编的二进制,镜像能 build 成功、容器一起就是 `GLIBC_2.39 not found`。
+# 静态之后那类问题从根上消失,镜像也从 159MB 降到 ~44MB。
+ARG RUNTIME_BASE=alpine:3.21
 FROM ${RUNTIME_BASE}
 
 # ca-certificates 是**必需**的:物料常来自 https,没有根证书下载一律失败。
-# 其余保持最小 —— crater 是 agentless 的,目标机什么都不用装,
-# 控制端也就不需要一整套工具链。
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# alpine 自带 busybox sh —— crater 的本机执行器要 `sh -c`,不能用 scratch。
+RUN apk add --no-cache ca-certificates
 
 # buildx 自动注入,值为 amd64 / arm64 —— 一份 Dockerfile 出两个架构的镜像。
 ARG TARGETARCH

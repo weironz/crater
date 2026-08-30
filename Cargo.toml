@@ -23,10 +23,10 @@ strip = true
 panic = "abort"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/your-org/crater"
+repository = "https://github.com/weironz/crater"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
