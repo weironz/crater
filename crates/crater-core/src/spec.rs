@@ -144,8 +144,15 @@ pub struct Host {
     pub port: u16,
     /// SSH password. Mutually optional with `key` — one of them is needed for
     /// remote hosts (local hosts need neither).
+    ///
+    /// 值可以写成 `${env:VAR}` —— 执行前才解析(见 target::resolve_secrets)。
+    /// **inventory 常常要进 git,而 git 历史删不掉**:凡是会进版本库的清单,
+    /// 口令都该走 `${env:}` 或 `password_file:`,或者干脆用 `key:` 绕开。
     #[serde(default)]
     pub password: Option<String>,
+    /// 从文件读口令(文件本身不进版本库)。与 `password` 二选一。
+    #[serde(default)]
+    pub password_file: Option<PathBuf>,
     /// SSH private-key file path. Takes precedence over `password` when set.
     #[serde(default)]
     pub key: Option<PathBuf>,
@@ -167,6 +174,7 @@ impl Host {
             user: default_user(),
             port: 22,
             password: None,
+            password_file: None,
             key: None,
             roles: Vec::new(),
             vars: BTreeMap::new(),

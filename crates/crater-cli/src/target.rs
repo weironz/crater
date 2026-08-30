@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::info;
 
 use crater_core::executor::{Executor, LocalExecutor, SshExecutor};
@@ -317,6 +317,92 @@ pub(crate) fn apply_limit(
     Ok(picked)
 }
 
+/// 把 `${env:VAR}` 与 `password_file:` 解成真值。
+///
+/// 只认 `${env:NAME}` 这一种形式,不做通用插值 —— 凭据字段上支持任意表达式
+/// 只会让"这个口令到底从哪来"变成一道谜题,而那正是出事时最不想面对的谜题。
+fn resolve_secrets(hosts: &mut [crater_core::spec::Host]) -> Result<()> {
+    for h in hosts.iter_mut() {
+        if let Some(pw) = h.password.take() {
+            h.password = Some(expand_env(&pw).with_context(|| format!("主机 {}", h.name))?);
+        }
+        if let Some(pf) = h.password_file.take() {
+            let path = expand_tilde(&pf);
+            let raw = std::fs::read_to_string(&path)
+                .with_context(|| format!("主机 {}:读口令文件 {}", h.name, path.display()))?;
+            if h.password.is_some() {
+                anyhow::bail!(
+                    "主机 {}:password 与 password_file 同时给了 —— 哪个生效不该靠猜",
+                    h.name
+                );
+            }
+            // 末尾换行是 `echo secret > f` 的必然产物,不该被当成口令的一部分。
+            h.password = Some(raw.trim_end_matches(['\n', '\r']).to_string());
+        }
+        if let Some(k) = h.key.take() {
+            let expanded = expand_env(&k.to_string_lossy()).with_context(|| format!("主机 {}", h.name))?;
+            h.key = Some(PathBuf::from(expanded));
+        }
+    }
+    Ok(())
+}
+
+/// `${env:NAME}` → 环境变量。变量缺失是**硬错误**:悄悄替成空串,
+/// 表现出来是"认证失败",而真因(忘了 export)要查很久。
+fn expand_env(s: &str) -> Result<String> {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("${env:") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 6..];
+        let Some(j) = after.find('}') else {
+            anyhow::bail!("`${{env:` 没有闭合的 `}}`:{s}");
+        };
+        let name = &after[..j];
+        let v = std::env::var(name)
+            .map_err(|_| anyhow::anyhow!("环境变量 `{name}` 没设(inventory 里引用了 ${{env:{name}}})"))?;
+        out.push_str(&v);
+        rest = &after[j + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// 字面口令的提醒。**只提醒一次、只在有字面口令时** —— 每次 apply 都刷一屏
+/// 警告,结果只会是所有人都学会无视它。
+fn warn_literal_passwords(hosts: &[crater_core::spec::Host], path: &Path) {
+    let n = hosts
+        .iter()
+        .filter(|h| h.password.is_some() && h.password_file.is_none() && !h.is_local())
+        .count();
+    if n == 0 {
+        return;
+    }
+    // 已经在 git 里的才提醒:不在版本库的 inventory 里写明文,是本地的事。
+    let in_git = std::process::Command::new("git")
+        .args(["ls-files", "--error-unmatch"])
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !in_git {
+        return;
+    }
+    // 同一条命令里 hosts() 会被调用不止一次(hosts / exec_hosts),
+    // 不去重就把同一句刷两遍 —— 重复的告警是最快被无视的那一种。
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    if let Ok(mut set) = WARNED.get_or_init(Default::default).lock() {
+        if !set.insert(path.to_path_buf()) {
+            return;
+        }
+    }
+    eprintln!("提醒:{} 已被 git 跟踪,其中 {n} 台写着字面口令 —— git 历史删不掉。", path.display());
+    eprintln!("      改用 `key:`、`password_file:` 或 `password: \"${{env:VAR}}\"`。");
+}
+
 pub(crate) fn target_hosts(
     inv: Option<&Path>,
     host: Option<String>,
@@ -334,7 +420,15 @@ pub(crate) fn target_hosts(
         // Derive roles from groups (D-077) + merge the three var levels into each
         // host (D-082: global ⊕ group ⊕ host).
         inv.resolve();
-        Ok(inv.hosts)
+        // 凭据在**执行前**才解成真值。
+        //
+        // 刻意不在 from_yaml_file 里做:UI 的读取路径也走那条,而那条不该
+        // 看见明文 —— 解析得越晚,明文在进程里活得越短、泄进日志/接口的
+        // 机会越少。
+        let mut hosts = inv.hosts;
+        resolve_secrets(&mut hosts)?;
+        warn_literal_passwords(&hosts, p);
+        Ok(hosts)
     } else if let Some(h) = host {
         let hosts: Vec<_> = h
             .split(',')
@@ -346,6 +440,7 @@ pub(crate) fn target_hosts(
                 user: user.to_string(),
                 port,
                 password: password.clone(),
+                password_file: None,   // --host 是命令行直给,没有文件那一层
                 key: key.clone(),
                 roles: vec![],
                 vars: BTreeMap::new(),
@@ -405,5 +500,63 @@ mod batch_tests {
     #[test]
     fn a_batch_larger_than_the_fleet_is_just_one_batch() {
         assert_eq!(batches(&hosts(3), Some("99")).unwrap().len(), 1);
+    }
+}
+
+
+#[cfg(test)]
+mod secret_tests {
+    use super::{expand_env, resolve_secrets};
+    use crater_core::spec::Host;
+
+    fn host() -> Host {
+        Host { name: "n1".into(), address: "10.0.0.1".into(), ..Host::local() }
+    }
+
+    #[test]
+    fn env_refs_expand_in_place() {
+        std::env::set_var("CRATER_TEST_PW", "s3cret");
+        assert_eq!(expand_env("${env:CRATER_TEST_PW}").unwrap(), "s3cret");
+        // 前后缀保留:`${env:X}` 只是值的一部分也算数。
+        assert_eq!(expand_env("pre-${env:CRATER_TEST_PW}-post").unwrap(), "pre-s3cret-post");
+        assert_eq!(expand_env("没有引用").unwrap(), "没有引用");
+    }
+
+    /// 变量缺失必须**硬失败**。悄悄替成空串,表现出来是"认证失败",
+    /// 而真因(忘了 export)要查很久。
+    #[test]
+    fn a_missing_variable_is_an_error_not_an_empty_string() {
+        let e = expand_env("${env:CRATER_TEST_DEFINITELY_UNSET}").unwrap_err();
+        assert!(e.to_string().contains("CRATER_TEST_DEFINITELY_UNSET"), "{e}");
+    }
+
+    #[test]
+    fn an_unclosed_reference_is_refused() {
+        assert!(expand_env("${env:OPEN").is_err());
+    }
+
+    #[test]
+    fn password_file_is_read_and_trailing_newline_stripped() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("pw");
+        // `echo secret > f` 的必然产物 —— 换行不该被当成口令的一部分。
+        std::fs::write(&f, "s3cret\n").unwrap();
+        let mut hs = vec![Host { password_file: Some(f), ..host() }];
+        resolve_secrets(&mut hs).unwrap();
+        assert_eq!(hs[0].password.as_deref(), Some("s3cret"));
+    }
+
+    /// 两个都给时不许猜 —— "哪个生效"靠猜,是最难复现的一类故障。
+    #[test]
+    fn password_and_password_file_together_are_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("pw");
+        std::fs::write(&f, "x").unwrap();
+        let mut hs = vec![Host {
+            password: Some("y".into()),
+            password_file: Some(f),
+            ..host()
+        }];
+        assert!(resolve_secrets(&mut hs).is_err());
     }
 }

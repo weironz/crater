@@ -181,7 +181,11 @@ pub async fn inv_read(Query(q): Query<PathQ>) -> Response {
                 .collect();
             json!({
                 "name": h.name, "address": h.address, "user": h.user, "port": h.port,
-                "auth": if h.key.is_some() { "key" } else if h.password.is_some() { "password" } else { "none" },
+                "auth": if h.key.is_some() { "key" }
+                    else if h.password_file.is_some() { "password_file" }
+                    else if h.password.as_deref().map(|p| p.contains("${env:")).unwrap_or(false) { "env" }
+                    else if h.password.is_some() { "password" }
+                    else { "none" },
                 "key": h.key.as_ref().map(|p| p.display().to_string()),
                 "vars": h.vars,
                 "groups": groups,
@@ -251,6 +255,9 @@ pub struct HostFields {
     pub password: String,
     #[serde(default)]
     pub key: String,
+    /// 从文件读口令(文件不进版本库)。与 password 二选一。
+    #[serde(default)]
+    pub password_file: String,
     /// 主机变量,`k=v` 列表。
     #[serde(default)]
     pub vars: Vec<(String, String)>,
@@ -275,10 +282,16 @@ fn render_host(req: &HostFields, indent: usize) -> String {
     }
     let user = if req.user.trim().is_empty() { "root" } else { req.user.trim() };
     fields.push(format!("user: {}", scalar(user)));
+    // 优先级刻意如此:密钥 > 口令文件 > 字面口令。
+    // inventory 常要进 git,而 git 历史删不掉 —— 字面口令是最后的退路,
+    // 不是默认选择。
     if !req.key.trim().is_empty() {
         fields.push(format!("key: {}", scalar(req.key.trim())));
+    } else if !req.password_file.trim().is_empty() {
+        fields.push(format!("password_file: {}", scalar(req.password_file.trim())));
     } else if !req.password.is_empty() {
         // 口令恒加引号 —— 纯数字口令裸写会被解析成整数,反序列化直接失败。
+        // `${env:VAR}` 写进来也一样合法,执行前才解析。
         fields.push(format!("password: \"{}\"", req.password.replace('"', "\\\"")));
     }
     if !req.vars.is_empty() {
@@ -392,7 +405,11 @@ pub async fn host_update(Json(req): Json<HostUpdate>) -> Response {
         .map(|p| lines[i][p + 1..].to_string())
         .unwrap_or_default();
     let mut host = req.host;
-    if req.keep_password && host.password.is_empty() && host.key.trim().is_empty() {
+    if req.keep_password
+        && host.password.is_empty()
+        && host.key.trim().is_empty()
+        && host.password_file.trim().is_empty()
+    {
         host.password = password_of(lines[i]).unwrap_or_default();
     }
     let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
@@ -1092,11 +1109,17 @@ const HOSTS_HTML: &str = r##"<section class="panel">
     <label>地址<input id="h-addr" placeholder="192.168.1.10"></label>
     <label>端口<input id="h-port" class="narrow" placeholder="22"></label>
     <label>用户<input id="h-user" placeholder="root"></label>
-    <label>口令<input id="h-pass" type="password" placeholder="留空则用密钥"></label>
-    <label>密钥路径<input id="h-key" placeholder="~/.ssh/id_ed25519"></label>
+    <label>密钥路径<input id="h-key" placeholder="~/.ssh/id_ed25519(推荐)"></label>
+    <label>口令文件<input id="h-passfile" placeholder=".secrets/n1(不进 git)"></label>
+    <label>口令<input id="h-pass" type="password" placeholder="或写 ${env:N1_PASS}"></label>
     <label>变量<input id="h-vars" placeholder="k=v,k2=v2"></label>
     <button class="btn primary" id="h-submit" onclick="hostSubmit()">新增主机</button>
     <button class="btn" id="h-cancel" style="display:none" onclick="hostCancel()">取消编辑</button>
+    <div style="flex-basis:100%;font-size:11.5px;color:var(--faint);line-height:1.6">
+      三选一,优先级 密钥 &gt; 口令文件 &gt; 口令。
+      inventory 常要进 git,而 <b>git 历史删不掉</b> —— 字面口令是最后的退路,
+      不是默认选择;真要写,用 <code>${env:VAR}</code> 让它执行时才解析。
+    </div>
   </div>
   <div id="inv-body"></div>
 </section>
@@ -1184,7 +1207,7 @@ const HOSTS_JS: &str = r##"
   // 同一个表单兼作新增与编辑 —— editing 非空即编辑态。
   let editing = null, lastRows = [];
   function formClear(){
-    for (const i of ['h-name','h-addr','h-port','h-pass','h-key','h-vars'])
+    for (const i of ['h-name','h-addr','h-port','h-pass','h-key','h-passfile','h-vars'])
       document.getElementById(i).value='';
     editing = null;
     document.getElementById('h-submit').textContent = '新增主机';
@@ -1198,6 +1221,7 @@ const HOSTS_JS: &str = r##"
     document.getElementById('h-port').value = h.port;
     document.getElementById('h-user').value = h.user;
     document.getElementById('h-key').value  = h.key || '';
+    document.getElementById('h-passfile').value = '';
     document.getElementById('h-vars').value =
       Object.entries(h.vars||{}).map(([k,v])=>k+'='+v).join(',');
     // 口令不回填(文件里是明文,但没必要再把它铺到页面上);留空 = 不改。
@@ -1216,7 +1240,7 @@ const HOSTS_JS: &str = r##"
     const pass = document.getElementById('h-pass').value;
     const payload = {path:sel.value, name:g('h-name'), address:g('h-addr'),
       port:g('h-port')?parseInt(g('h-port')):null, user:g('h-user'),
-      password:pass, key:g('h-key'), vars};
+      password:pass, key:g('h-key'), password_file:g('h-passfile'), vars};
     if (editing){
       // 口令留空 = 保持原样。做法是把原行的口令读回来 —— 但 read 接口
       // 刻意不回传明文口令,所以让服务端保留:留空且原来就是口令认证时,
