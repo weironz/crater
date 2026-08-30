@@ -36,6 +36,7 @@ mod ui_edit;
 mod ui_app;
 mod ui_overview;
 mod events;
+mod ui_inventory;
 mod ui_run;
 
 use std::path::{Path, PathBuf};

@@ -26,8 +26,8 @@ use crater_core::state::{self, StateStore, TursoStore};
 /// htmx, vendored + embedded so the dashboard works with zero network (air-gap).
 const HTMX_JS: &[u8] = include_bytes!("../assets/htmx.min.js");
 
-/// Conventional inventory the write actions use (no launch flag, like AWX's
-/// configured inventory). Read at click time; missing ⇒ a runtime note.
+/// 旧管线(仪表盘的 verify/heal/delete 动作)约定的 inventory 路径。
+/// 新管线的机群清单是工作区里任意 `*.inventory.yaml` —— 见 ui_inventory.rs。
 const INVENTORY: &str = "inventory.yaml";
 
 // ---- background jobs (D-099) -------------------------------------------------
@@ -180,9 +180,9 @@ pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
     let app = Router::new()
         .route("/", get(index))
         .route("/view/dashboard", get(view_dashboard))
-        .route("/view/tasks", get(view_tasks))
-        .route("/view/hosts", get(view_hosts))
-        .route("/view/groups", get(view_groups))
+        .route("/view/tasks", get(crate::ui_app::view_tasks))
+        .route("/view/hosts", get(crate::ui_inventory::view_hosts))
+        .route("/view/groups", get(crate::ui_inventory::view_groups))
         .route("/api/stats", get(stats_fragment))
         .route("/api/deployments", get(deployments_fragment))
         .route("/api/history", get(history_fragment))
@@ -211,6 +211,17 @@ pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
         .route("/api/lint-project", post(crate::ui_app::lint_project))
         .route("/api/app/create", post(crate::ui_app::create_app))
         .route("/api/blueprint/skeleton", post(crate::ui_contract::blueprint_skeleton))
+        .route("/api/inventory/read", get(crate::ui_inventory::inv_read))
+        .route("/api/inventory/create", post(crate::ui_inventory::inv_create))
+        .route(
+            "/api/inventory/host",
+            post(crate::ui_inventory::host_add).delete(crate::ui_inventory::host_remove),
+        )
+        .route(
+            "/api/inventory/group",
+            post(crate::ui_inventory::group_set).delete(crate::ui_inventory::group_remove),
+        )
+        .route("/api/inventory/probe", post(crate::ui_inventory::probe))
         .route("/api/context", post(crate::ui_contract::context))
         .route("/api/patch", post(crate::ui_contract::patch))
         .route("/api/file/trash", post(crate::ui_edit::file_trash))
@@ -398,79 +409,6 @@ async fn view_dashboard() -> Html<&'static str> {
     )
 }
 
-async fn view_tasks() -> Html<&'static str> {
-    // `#jobs` is a separate, non-polled area (D-099): a write action's log
-    // panel lives there, safe from the deployments pane's own 5s refresh.
-    Html(
-        r#"<section class="panel"><h2><span class="mk">⚙</span> Operations</h2>
-  <div id="jobs"><div class="note">no operation running — verify / heal / delete land here</div></div></section>
-<section class="panel"><h2><span class="mk">✦</span> Deployments</h2>
-  <div id="deps-pane" hx-get="/api/deployments" hx-trigger="load, every 5s" hx-swap="innerHTML"><div class="empty">loading…</div></div></section>"#,
-    )
-}
-
-async fn view_hosts() -> Html<&'static str> {
-    Html(
-        r#"<section class="panel"><h2><span class="mk">▤</span> Hosts</h2>
-  <div hx-get="/api/hosts" hx-trigger="load, every 5s" hx-swap="innerHTML"><div class="empty">loading…</div></div></section>"#,
-    )
-}
-
-/// Host groups — read from the conventional inventory (data, not display-gating).
-async fn view_groups() -> Html<String> {
-    let text = match std::fs::read_to_string(INVENTORY) {
-        Ok(t) => t,
-        Err(_) => {
-            return Html("<section class='panel'><h2><span class='mk'>⊞</span> Host groups</h2><div class='empty'>no <code>./inventory.yaml</code> — create one with <code>crater create inventory</code></div></section>".into());
-        }
-    };
-    let spec: crater_core::spec::CraterSpec = match serde_yaml::from_str(&text) {
-        Ok(s) => s,
-        Err(e) => {
-            return Html(format!("<section class='panel'><h2><span class='mk'>⊞</span> Host groups</h2><div class='empty fail'>inventory parse error: {}</div></section>", esc(&e.to_string())));
-        }
-    };
-    let mut groups = String::new();
-    if spec.inventory.groups.is_empty() {
-        groups.push_str("<div class='empty'>no groups defined in inventory</div>");
-    } else {
-        groups.push_str("<table><thead><tr><th>Group</th><th>Members</th></tr></thead><tbody>");
-        for (g, members) in &spec.inventory.groups {
-            let tags: String = members
-                .hosts
-                .iter()
-                .map(|m| format!("<span class='tag'>{}</span>", esc(m)))
-                .chain(
-                    members
-                        .groups
-                        .iter()
-                        .map(|m| format!("<span class='tag'>@{}</span>", esc(m))),
-                )
-                .collect();
-            groups.push_str(&format!("<tr><td><code>{}</code></td><td>{}</td></tr>", esc(g), tags));
-        }
-        groups.push_str("</tbody></table>");
-    }
-    // host → roles table
-    let mut hosts = String::new();
-    hosts.push_str("<table><thead><tr><th>Host</th><th>Address</th><th>Roles</th></tr></thead><tbody>");
-    for h in &spec.inventory.hosts {
-        let roles: String = if h.roles.is_empty() {
-            "<span class='muted'>—</span>".into()
-        } else {
-            h.roles.iter().map(|r| format!("<span class='tag'>{}</span>", esc(r))).collect()
-        };
-        hosts.push_str(&format!(
-            "<tr><td><code>{}</code></td><td class='mono muted'>{}</td><td>{}</td></tr>",
-            esc(&h.name), esc(&h.address), roles
-        ));
-    }
-    hosts.push_str("</tbody></table>");
-    Html(format!(
-        "<section class='panel'><h2><span class='mk'>⊞</span> Host groups</h2>{groups}</section>\
-         <section class='panel'><h2><span class='mk'>▤</span> Inventory hosts</h2>{hosts}</section>"
-    ))
-}
 
 // ---- data fragments (polled) ------------------------------------------------
 

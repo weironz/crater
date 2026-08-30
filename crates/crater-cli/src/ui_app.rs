@@ -450,3 +450,127 @@ mod tests {
             && d["message"].as_str().unwrap().contains("version")), "{diags:?}");
     }
 }
+
+/// `GET /view/tasks` —— 任务:app 文件的增删改跑。
+///
+/// "任务"在新管线里不是数据库里的一行,而是一份 app 文件:蓝图 × 机群 ×
+/// 参数的绑定。所以这一页做的是文件的增删,不是记录的增删 —— 它可 git、
+/// 可 diff、可进闭包,而 UI 只是它的一个面。
+pub async fn view_tasks() -> axum::response::Html<&'static str> {
+    axum::response::Html(TASKS_HTML)
+}
+
+const TASKS_HTML: &str = r##"<section class="panel">
+  <h2><span class="mk">✦</span> 任务</h2>
+  <div class="tk-form">
+    <label>名字<input id="t-name" placeholder="prod-nginx"></label>
+    <label>蓝图<select id="t-bp"></select></label>
+    <label>机群<select id="t-inv"><option value="">(不指定 —— 本机)</option></select></label>
+    <label>参数<input id="t-params" placeholder="k=v,k2=v2"></label>
+    <label>巡检<input id="t-iv" placeholder="30m(留空=只手动)"></label>
+    <button class="btn primary" onclick="taskAdd()">新建任务</button>
+    <span id="t-msg" class="tk-msg"></span>
+  </div>
+  <div id="t-body"></div>
+</section>
+<style>
+  .tk-form{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;border:1px solid var(--border);
+    border-radius:10px;padding:12px;background:var(--surface-2);margin-bottom:14px}
+  .tk-form label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+  .tk-form input,.tk-form select{background:var(--surface);color:var(--text);
+    border:1px solid var(--border);border-radius:8px;padding:6px 9px;font:inherit;font-size:13px}
+  .tk-form input{width:150px}
+  .tk-form select{max-width:280px}
+  .tk-msg{font-size:12px;color:var(--muted);margin-left:auto}
+  .tk-msg.bad{color:var(--drift)}
+  .btn.primary{background:var(--accent);color:#fff;border:0}
+  .tk{border:1px solid var(--border);border-radius:10px;padding:10px 14px;background:var(--surface);
+    margin-bottom:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px}
+  .tk .nm{font-weight:650}
+  .tk .meta{color:var(--faint);font-size:12px}
+  .tk .bad{color:var(--drift);font-size:12px}
+  .tk .sp{margin-left:auto;display:flex;gap:6px}
+  .tk .btn{font-size:12px;padding:3px 10px}
+  .tk-empty{border:1px dashed var(--border);border-radius:12px;padding:20px;
+    text-align:center;color:var(--muted)}
+</style>
+<script>
+(function(){
+  const msg = document.getElementById('t-msg');
+  const body = document.getElementById('t-body');
+  function say(t, bad){ msg.textContent=t; msg.className='tk-msg'+(bad?' bad':''); }
+  function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+  async function fillPickers(){
+    const d = await (await fetch('/api/files')).json();
+    const pick = k => d.files.filter(f => f.kind === k
+      && !f.path.includes('fixtures') && !f.path.includes('/tests/'));
+    document.getElementById('t-bp').innerHTML =
+      pick('blueprint').concat(pick('stack')).map(f=>'<option>'+f.path+'</option>').join('');
+    document.getElementById('t-inv').innerHTML = '<option value="">(不指定 —— 本机)</option>'
+      + pick('inventory').map(f=>'<option>'+f.path+'</option>').join('');
+  }
+  async function load(){
+    const d = await (await fetch('/api/apps')).json();
+    if (!d.apps.length){
+      body.innerHTML = '<div class="tk-empty">还没有任务。<br><br>'
+        + '任务 = 一份 <b>app 文件</b>:把某张蓝图钉在某群机器上,附带固化参数。<br>'
+        + '用上面的表单建第一个 —— 它会落成工作区里的 <code>&lt;名字&gt;.app.yaml</code>,可 git 可 diff。</div>';
+      return;
+    }
+    body.innerHTML = d.apps.map(a=>{
+      const sets = (a.params||[]).map(p=>p.k+'='+p.v);
+      const arg = `'${a.blueprint}','${a.inventory||''}',${JSON.stringify(sets).replace(/"/g,'&quot;')}`;
+      const q = JSON.stringify(a.path).replace(/"/g,'&quot;');
+      const bad = a.ok ? '' : '<span class="bad">✗ '
+        + esc(a.diagnostics.map(x=>x.message).join(';')) + '</span>';
+      const iv = a.verify_interval ? '巡检 '+Math.round(a.verify_interval/60)+'m' : '只手动';
+      return `<div class="tk"><span class="nm">${esc(a.name)}</span>
+        <span class="meta">${esc(a.blueprint)} × ${esc(a.inventory||'本机')} · ${iv}
+          ${sets.length?' · '+esc(sets.join(' ')):''}</span>${bad}
+        <span class="sp">
+          <button class="btn" onclick="tkRun('verify',${arg})">Verify</button>
+          <button class="btn" onclick="tkRun('plan',${arg})">Plan</button>
+          <button class="btn" onclick="tkRun('apply',${arg})">Apply</button>
+          <button class="btn" onclick="tkEdit(${q})">编辑</button>
+          <button class="btn" onclick="tkDel(${q})">删除</button>
+        </span></div>`;
+    }).join('');
+  }
+  window.tkRun = async function(verb, bp, inv, sets){
+    if (verb === 'apply' && !confirm('确认收敛?将对目标机做出变更。')) return;
+    const d = await (await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({verb, blueprint:bp, inventory:inv, sets})})).json();
+    if (d.ok) htmx.ajax('GET','/view/job/'+d.job,'#view');
+    else say(d.error||'启动失败', true);   // 409 = plan 闸门:先 Plan 再 Apply
+  };
+  window.tkAdd = null;
+  window.taskAdd = async function(){
+    const g = id => document.getElementById(id).value.trim();
+    const params = g('t-params').split(',').map(s=>s.trim()).filter(Boolean)
+      .map(s=>{const i=s.indexOf('='); return [s.slice(0,i), s.slice(i+1)];});
+    const d = await (await fetch('/api/app/create',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:g('t-name'), blueprint:g('t-bp'), inventory:g('t-inv'),
+        params, verify_interval:g('t-iv')})})).json();
+    if (d.error){ say(d.error, true); return; }
+    // 建完立刻跨文件校验:参数拼错、机群台数不够,现在就说,别等 plan。
+    const lr = await (await fetch('/api/lint-project',{method:'POST',body:d.path})).json();
+    say(lr.ok ? ('已创建 '+d.path+'(校验通过)')
+              : ('已创建 '+d.path+',但有问题:'+lr.diagnostics.map(x=>x.message).join(';')), !lr.ok);
+    for (const i of ['t-name','t-params','t-iv']) document.getElementById(i).value='';
+    load();
+  };
+  window.tkEdit = function(path){
+    localStorage.setItem('crater.edit', path);
+    htmx.ajax('GET','/view/edit','#view');
+  };
+  window.tkDel = async function(path){
+    if (!confirm('删掉任务 '+path+'?(进 .crater-trash,可拖回来;蓝图与机群不动)')) return;
+    const d = await (await fetch('/api/file/trash?path='+encodeURIComponent(path),{method:'POST'})).json();
+    if (d.error){ say(d.error, true); return; }
+    say('已移入 .crater-trash'); load();
+  };
+  fillPickers().then(load);
+})();
+</script>
+"##;
