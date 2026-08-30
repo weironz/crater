@@ -24,8 +24,21 @@ pub struct PathQuery {
 ///
 /// 不做成可配置的:UI 能 apply/delete 已经足够危险,再加一个"想读哪儿读哪儿"
 /// 的开关,一次配置失误就是整台机器的文件。要换目录就换个工作目录起进程。
+/// 工作区根。启动时由 `crater ui --workspace` 钉一次,之后全进程共用。
+static WORKSPACE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// 由 `serve()` 在起服务前调用。**只能钉一次** —— 工作区中途换根,
+/// 意味着已经发出去的相对路径突然指向别处,那是最难查的一类错乱。
+pub(crate) fn set_workspace(p: PathBuf) {
+    let _ = WORKSPACE.set(p);
+}
+
 fn root() -> std::io::Result<PathBuf> {
-    std::env::current_dir()?.canonicalize()
+    match WORKSPACE.get() {
+        Some(p) => Ok(p.clone()),
+        // 没指定就沿用旧行为(进程 CWD)—— 不破坏 `cd 某处 && crater ui`。
+        None => std::env::current_dir()?.canonicalize(),
+    }
 }
 
 /// 把请求里的相对路径解析成绝对路径,并确认它**确实**落在根内。

@@ -160,6 +160,13 @@ enum Cmd {
         /// beyond localhost — the UI can apply/delete deployments.
         #[arg(long)]
         token: Option<String>,
+        /// 工作区目录:蓝图 / inventory / app 文件都从这里找,UI 的写入也
+        /// **只能落在它之内**。不给则沿用进程当前目录。
+        ///
+        /// 强烈建议显式指定并与工具源码分开:UI 在哪个目录起,点一下就在改
+        /// 那个目录 —— 从仓库里起 UI,编辑动作会直接落到随工具发行的文件上。
+        #[arg(long, env = "CRATER_WORKSPACE", value_name = "DIR")]
+        workspace: Option<PathBuf>,
     },
     /// Build a task into a B 类 OCI artifact in the local store (like
     /// `docker build`). Export to a file with `crater save`.
@@ -634,7 +641,7 @@ async fn main() -> Result<()> {
             TaskCmd::Show { name, target, verify } => deployments::task_show(&name, target, verify).await,
             TaskCmd::History { limit } => deployments::task_history(limit).await,
         },
-        Cmd::Ui { bind, port, token } => ui::serve(&bind, port, token).await,
+        Cmd::Ui { bind, port, token, workspace } => ui::serve(&bind, port, token, workspace).await,
         Cmd::Build { file, output, profile, tag, arch, no_cache, set } => {
             // 与 apply/plan 同一条按文件格式分派的路子:栈/蓝图烤闭包,task 进 store。
             if stack_cmd::is_stack_file(&file) {

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     extract::{Path as AxPath, Request, State},
     http::header,
@@ -160,7 +160,24 @@ async fn auth_mw(State(st): State<AppState>, req: Request, next: Next) -> Respon
         .into_response()
 }
 
-pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
+pub async fn serve(
+    bind: &str,
+    port: u16,
+    token: Option<String>,
+    workspace: Option<std::path::PathBuf>,
+) -> Result<()> {
+    // 工作区先定,再起任何东西 —— 后面 sweep、调度器都要按它找文件。
+    let ws = match workspace {
+        Some(p) => {
+            // 不存在就建出来:第一次用不该被"先去 mkdir"挡住。
+            std::fs::create_dir_all(&p)
+                .with_context(|| format!("建工作区目录 {}", p.display()))?;
+            p.canonicalize()?
+        }
+        None => std::env::current_dir()?.canonicalize()?,
+    };
+    crate::ui_edit::set_workspace(ws.clone());
+    println!("工作区 {}", ws.display());
     // Validate the DB is openable up front; handlers re-open per request so they
     // always see the latest writes from the CLI process (Turso cross-process
     // visibility — a fresh handle reads committed state, D-056).

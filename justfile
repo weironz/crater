@@ -4,13 +4,22 @@
 # 会直接链接失败。空 RUSTFLAGS 覆盖掉它:装了 mold 想要提速,删这行即可。
 export RUSTFLAGS := ""
 
-# 换端口 `just ui 9000`,对外开放 `just ui 8899 0.0.0.0`
+# 换端口 `just ui 9000`,换工作区 `just ui 8899 127.0.0.1 /srv/crater`。
 # (注意:UI 无认证,0.0.0.0 仅限可信内网)。
 #
-# 一键拉起 UI(默认 127.0.0.1:8899)
-ui port="8899" bind="127.0.0.1":
+# **工作区默认在仓库之外**(~/crater):UI 在哪个目录起,点一下就在改那个
+# 目录 —— 从仓库里起 UI,主机页上的一次编辑会直接落到随工具发行的
+# library/ 文件里(真发生过:模板 inventory 被写进了实验机的真口令)。
+# 想拿库里的蓝图,复制一份过去,而不是就地改。
+#
+# 一键拉起 UI(默认 127.0.0.1:8899,工作区 ~/crater)
+ui port="8899" bind="127.0.0.1" workspace="~/crater":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    WS=$(eval echo {{workspace}})    # 展开 ~
+    mkdir -p "$WS"
     cargo build --release -p crater-cli
-    ./target/release/crater ui --bind {{bind}} --port {{port}}
+    ./target/release/crater ui --bind {{bind}} --port {{port}} --workspace "$WS"
 
 # release 构建
 build:
