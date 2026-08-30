@@ -80,7 +80,7 @@ fn plan_reports_convergence_once_reality_matches() {
 
     let out = stdout(&plan(&["-f", bp.to_str().unwrap()]));
     assert!(out.contains("+0 ~0 -0 ✓2"), "{out}");
-    assert!(out.contains("目标已处于期望态"), "{out}");
+    assert!(out.contains("已是期望态"), "{out}");
 }
 
 #[test]

@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::{oops, say};
 use anyhow::{bail, Context, Result};
 use crater_core::executor::Executor;
 use crater_core::spec::Host;
@@ -141,7 +142,7 @@ pub async fn destroy_blueprint(
     destroy_lensed(path, target, sets, yes, &Lens::default()).await?;
     if !yes {
         // 只在**直接调用**时收尾;栈驱动时由栈统一说一次,免得每份蓝图重复一遍。
-        println!("以上为**预演**,一个字节都没动。确认无误后加 `--yes` 执行。");
+        say!("以上为**预演**,一个字节都没动。确认无误后加 `--yes` 执行。");
     }
     Ok(())
 }
@@ -182,7 +183,7 @@ pub(crate) async fn destroy_lensed(
             }
         };
         for name in &dances {
-            println!("── procedure {name}(退役)──");
+            say!("── procedure {name}(退役)──");
             match procedure::run(&bp, name, &targets, &BTreeMap::new()) {
                 Ok(r) => {
                     print_proc_report(&r);
@@ -190,7 +191,7 @@ pub(crate) async fn destroy_lensed(
                 }
                 Err(e) => {
                     failures += 1;
-                    eprintln!("退役过程 {name} 失败 —— {e}\n");
+                    oops!("退役过程 {name} 失败 —— {e}\n");
                 }
             }
         }
@@ -201,7 +202,7 @@ pub(crate) async fn destroy_lensed(
 
     for host in &hosts {
         let transport = build_transport(host).await?;
-        println!("── {} ──", host_label(host));
+        say!("── {} ──", host_label(host));
         crate::events::emit(serde_json::json!({
             "e": "host_start", "host": host.name, "label": host_label(host),
         }));
@@ -228,7 +229,7 @@ pub(crate) async fn destroy_lensed(
             continue;
         }
         if !plan.has_changes() {
-            println!("没有东西可拆,跳过。\n");
+            say!("没有东西可拆,跳过。\n");
             crate::events::emit(serde_json::json!({
                 "e": "host_done", "host": host.name, "result": "noop",
             }));
@@ -252,7 +253,7 @@ pub(crate) async fn destroy_lensed(
             }
             Err(e) => {
                 failures += 1;
-                eprintln!("{}:退役失败 —— {e}\n", host_label(host));
+                oops!("退役失败 —— {e}");
                 crate::events::emit(serde_json::json!({
                     "e": "host_done", "host": host.name, "result": "failed",
                     "detail": format!("{e:#}"),
@@ -263,7 +264,7 @@ pub(crate) async fn destroy_lensed(
         // 部署去核对现实,报出一堆"漂移"。
         let record_id = DeploymentRecord::make_id(&bp.name, &fleet_name(host));
         if let Err(e) = store.remove(&record_id) {
-            eprintln!("(部署记录清理失败,不影响本次退役:{e})");
+            oops!("(部署记录清理失败,不影响本次退役:{e})");
         }
     }
 
@@ -274,14 +275,14 @@ pub(crate) async fn destroy_lensed(
         bail!("{failures}/{} 台目标退役失败", hosts.len());
     }
     if !removed_any {
-        println!("所有目标本就是干净的。");
+        say!("所有目标本就是干净的。");
     }
     Ok(())
 }
 
 fn print_destroy_plan(bp: &Blueprint, p: &Plan, will_execute: bool) {
     let mode = if will_execute { "退役(随后执行)" } else { "退役预演(零写入)" };
-    println!("blueprint {} —— {mode}\n", bp.name);
+    say!("blueprint {} —— {mode}\n", bp.name);
     for item in &p.items {
         // 退役计划里 `-` 是"将删除",`✓` 是"本就不在" —— 后者不是成功,
         // 是"没什么可做",措辞要分得开。
@@ -292,16 +293,16 @@ fn print_destroy_plan(bp: &Blueprint, p: &Plan, will_execute: bool) {
             Change::Unknown(_) => "说不清",
             _ => "?",
         };
-        println!("  {} {:<44} {note}", item.change.sigil(), item.label());
+        say!("  {} {:<44} {note}", item.change.sigil(), item.label());
         if let Change::Unknown(why) = &item.change {
-            println!("       {}", why.trim_start_matches("保留:"));
+            say!("       {}", why.trim_start_matches("保留:"));
         }
     }
-    println!("\n退役:{}", p.summary());
+    say!("\n退役:{}", p.summary());
     if !p.has_changes() {
-        println!("目标上没有本蓝图的任何资源。");
+        say!("目标上没有本蓝图的任何资源。");
     }
-    println!();
+    say!();
 }
 
 /// 栈驱动的入口:同一条执行路径,只是多戴一副透镜。
@@ -447,9 +448,31 @@ async fn run_on_targets(
     // 自定义类型(L2)的弥合是机群级的舞:逐台 converge 只记下"需要跳哪支",
     // 收齐去重后在机群层跑**一次** —— 在循环里跑会把同一支舞跳 N 遍。
     let mut dances: std::collections::BTreeSet<String> = Default::default();
+    // 前缀列宽按本轮全体主机定,各行正文才对得齐。
+    crate::out::fleet(&hosts.iter().map(|h| h.name.clone()).collect::<Vec<_>>());
+    // 模式与蓝图名**只报一次** —— 每台重复一遍,五台就是五遍同样的话。
+    say!(
+        "blueprint {} —— {},{} 台目标",
+        bp.name,
+        match mode {
+            Mode::Plan => "零写入预演",
+            Mode::Apply => "计划随后执行",
+            Mode::Verify => "只读核对",
+        },
+        hosts.len()
+    );
+    // 机群汇总:每台一行,跑完一起给 —— 逐台的 `执行:...` 散在几百行中间,
+    // 五台机器跑完根本拼不出全貌。
+    let mut recap: Vec<(String, String)> = Vec::new();
     for host in &hosts {
         let transport = build_transport(host).await?;
-        println!("── {} ──", host_label(host));
+        crate::out::enter(&host.name);
+        // `@local` 是本机哨兵值,直接渲染出来是 `root@@local:22`,像个 bug。
+        if host.is_local() {
+            say!("本机执行");
+        } else {
+            say!("连接 {}@{}:{}", host.user, host.address, host.port);
+        }
         crate::events::emit(serde_json::json!({
             "e": "host_start", "host": host.name, "label": host_label(host),
         }));
@@ -505,6 +528,10 @@ async fn run_on_targets(
                 let _ = store.save(&prev);
             }
             let failed = report_drift(&verdict, previous.as_ref());
+            recap.push((
+                host.name.clone(),
+                if failed { "漂移".into() } else { "符合期望".into() },
+            ));
             crate::events::emit(serde_json::json!({
                 "e": "host_done", "host": host.name,
                 "result": if failed { "drifted" } else { "ok" },
@@ -520,7 +547,10 @@ async fn run_on_targets(
 
         if converge {
             if !plan.has_changes() {
-                println!("无需变更,跳过执行。\n");
+                say!("跳过执行(无变更)");
+                // 未变更的机器**也要进汇总** —— 汇总缺了它们,就无法回答
+                // "这次到底覆盖了几台",而那正是多机部署后第一个要确认的事。
+                recap.push((host.name.clone(), "无变更".into()));
                 crate::events::emit(serde_json::json!({
                     "e": "host_done", "host": host.name, "result": "noop",
                 }));
@@ -537,6 +567,7 @@ async fn run_on_targets(
             match plan::converge_with(&bp, &scope, &ctx, &on_step) {
                 Ok(report) => {
                     print_report(&report);
+                    recap.push((host.name.clone(), report.summary()));
                     dances.extend(report.procedures_needed.iter().cloned());
                     // 收敛后**重新观察一次**再记账:记录的是现实,不是意图。
                     match plan::plan(&bp, &scope, &ctx) {
@@ -556,7 +587,7 @@ async fn run_on_targets(
                                 rec.applied_at = prev.applied_at; // 首次部署时间不该被刷新
                             }
                             if let Err(e) = store.save(&rec) {
-                                eprintln!("(记账失败,不影响本次部署:{e})");
+                                oops!("(记账失败,不影响本次部署:{e})");
                             }
                             // 自定义类型此刻本就还没弥合(舞在逐台循环之后才跳),
                             // 不该当成"收敛失败"吓人;其余项才是真的没达成。
@@ -565,15 +596,16 @@ async fn run_on_targets(
                                 .filter(|i| bp.custom_type(&i.ty).is_none())
                                 .count();
                             if stuck > 0 {
-                                println!("注意:收敛后仍有 {stuck} 项未达期望态 —— 见上方 plan");
+                                say!("注意:收敛后仍有 {stuck} 项未达期望态 —— 见上方 plan");
                             }
                         }
-                        Err(e) => eprintln!("(收敛后复观察失败:{e})"),
+                        Err(e) => oops!("(收敛后复观察失败:{e})"),
                     }
                 }
                 Err(e) => {
                     failures += 1;
-                    eprintln!("{}:执行失败 —— {e}\n", host_label(host));
+                    recap.push((host.name.clone(), format!("失败:{e}")));
+                    oops!("执行失败 —— {e}");
                     crate::events::emit(serde_json::json!({
                         "e": "host_done", "host": host.name, "result": "failed",
                         "detail": format!("{e:#}"),
@@ -585,16 +617,28 @@ async fn run_on_targets(
                 "e": "host_done", "host": host.name, "result": "ok",
             }));
         } else {
+            recap.push((host.name.clone(), format!("计划 {}", plan.summary())));
             crate::events::emit(serde_json::json!({
                 "e": "host_done", "host": host.name, "result": "planned",
             }));
         }
     }
+    // 机群汇总。逐台的 `执行:...` 散在几百行中间,五台跑完拼不出全貌 ——
+    // 这一段就是 ansible 的 PLAY RECAP 干的事。
+    crate::out::leave();
+    if recap.len() > 1 {
+        say!("── 汇总 ──");
+        let w = recap.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
+        for (name, s) in &recap {
+            say!("  {:<w$}  {s}", name, w = w);
+        }
+        say!();
+    }
     // 逐台收敛之后再跳机群级的舞(顺序不能反:舞往往依赖资源已就位)。
     if converge && !dances.is_empty() && failures == 0 {
         let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs).await?;
         for name in &dances {
-            println!("── procedure {name} ──");
+            say!("── procedure {name} ──");
             crate::events::emit(serde_json::json!({ "e": "proc_start", "name": name }));
             match procedure::run(&bp, name, &targets, &BTreeMap::new()) {
                 Ok(r) => {
@@ -605,7 +649,7 @@ async fn run_on_targets(
                 }
                 Err(e) => {
                     failures += 1;
-                    eprintln!("procedure {name} 失败 —— {e}\n");
+                    oops!("procedure {name} 失败 —— {e}\n");
                     crate::events::emit(serde_json::json!({
                         "e": "proc_done", "name": name, "result": "failed", "detail": format!("{e:#}"),
                     }));
@@ -661,11 +705,17 @@ fn report_closure(bp: &Blueprint, scope: &plan::Scope) {
             }
         }
     }
-    println!("闭包({} 项{}):", items.len(), if broken > 0 { format!(",{broken} 项无法解析") } else { String::new() });
+    // 一行一物料,**带来源**。
+    //
+    // 曾经压成"闭包 1 项:yq-bin"只报名字 —— 但清单的价值恰恰在来源:
+    // `${substrate.arch}` 选出了哪个变体、摘要有没有,全靠这一列看出来。
+    // 名字谁都能从蓝图里读到,来源才是运行期才定的东西。
     for l in lines {
-        println!("{l}");
+        say!("闭包{l}");
     }
-    println!();
+    if broken > 0 {
+        say!("闭包 {broken}/{} 项无法解析", items.len());
+    }
 }
 
 /// 机群级执行上下文 —— procedure 的舞要在多台之间走,所以得**同时**握住全部成员。
@@ -702,7 +752,7 @@ impl Targets for FleetTargets<'_> {
     fn note(&self, msg: &str) {
         // 立刻刷出去:舞的每一步都可能是几分钟,缓冲住就失去了意义。
         use std::io::Write;
-        println!("{msg}");
+        say!("{msg}");
         let _ = std::io::stdout().flush();
     }
 }
@@ -751,19 +801,19 @@ fn print_proc_report(report: &procedure::ProcReport) {
             Changed => "changed",
             Warn => "warn   ",
         };
-        println!("  {tag} {member:<10} {step}");
+        say!("  {tag} {member:<10} {step}");
     }
     for note in &report.skipped {
         // 一支舞"什么都没做"最常见的原因就是组选错了 —— 必须看得见。
-        println!("  skip    {note}");
+        say!("  skip    {note}");
     }
     if !report.facts.is_empty() {
-        println!(
+        say!(
             "  跨主机 fact:{}",
             report.facts.keys().cloned().collect::<Vec<_>>().join(", ")
         );
     }
-    println!("执行:{}", report.summary());
+    say!("执行:{}", report.summary());
 
     // 把"被 check 跳过"单独点名。
     //
@@ -783,14 +833,14 @@ fn print_proc_report(report: &procedure::ProcReport) {
         names
     };
     if !skipped.is_empty() {
-        println!(
+        say!(
             "  其中 {} 步因 check 已满足而未执行:{} —— 若本次期望它们做事,\n\
              \x20 请检查 check 是否检验了**本步自己的效果**(而非前序步骤建立的前提)",
             skipped.len(),
             skipped.join(", ")
         );
     }
-    println!();
+    say!();
 }
 
 /// `crater procedure <name> -f blueprint.yaml [--set k=v]` —— 跳一支具名的舞。
@@ -820,7 +870,7 @@ pub async fn run_procedure(
     let (_closure_dir, blobs) = open_closure(target)?;
     let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs).await?;
 
-    println!("procedure {proc_name} —— {} 台目标\n", targets.fleet.members.len());
+    say!("procedure {proc_name} —— {} 台目标\n", targets.fleet.members.len());
     // `--set` 既是 deploy 期参数覆盖,也是过程参数(`--set to=1.37.0`)。
     let args: BTreeMap<String, Yaml> = overrides.into_iter().collect();
     let report = procedure::run(&bp, proc_name, &targets, &args)?;
@@ -833,34 +883,34 @@ fn report_drift(verdict: &DriftVerdict, previous: Option<&DeploymentRecord>) -> 
     match verdict {
         DriftVerdict::NeverDeployed => {
             // 关键区分:没部署过 ≠ 漂了。混为一谈会让 verify 天天报警。
-            println!("未部署过 —— 没有记录可核对(先 `crater apply`)\n");
+            say!("未部署过 —— 没有记录可核对(先 `crater apply`)\n");
             false
         }
         DriftVerdict::InSync => {
             let when = previous
                 .map(|p| format!(",上次部署于 {}", fmt_epoch(p.applied_at)))
                 .unwrap_or_default();
-            println!("✓ 现实符合期望{when}\n");
+            say!("✓ 现实符合期望{when}\n");
             false
         }
         DriftVerdict::Drifted(items) => {
-            println!("✗ 检测到漂移({} 项):", items.len());
+            say!("✗ 检测到漂移({} 项):", items.len());
             for i in items {
                 let tag = if i.known { "漂移" } else { "新声明" };
-                println!("  {tag} {:<14} {}", i.id, i.detail);
+                say!("  {tag} {:<14} {}", i.id, i.detail);
             }
-            println!();
+            say!();
             true
         }
         DriftVerdict::Indeterminate { drifted, unknown } => {
             if !drifted.is_empty() {
-                println!("✗ 检测到漂移({} 项):", drifted.len());
+                say!("✗ 检测到漂移({} 项):", drifted.len());
                 for i in drifted {
-                    println!("  {:<14} {}", i.id, i.detail);
+                    say!("  {:<14} {}", i.id, i.detail);
                 }
             }
             // 有说不清的项就不能说"一切正常" —— 那是假的安心。
-            println!("? {unknown} 项无法核对(模型化欠债)—— 不能断言一切正常\n");
+            say!("? {unknown} 项无法核对(模型化欠债)—— 不能断言一切正常\n");
             true
         }
     }
@@ -893,7 +943,7 @@ fn open_closure(target: &TargetOpts) -> Result<(Option<tempfile::TempDir>, BlobM
         return Ok((None, BlobMap::new()));
     };
     let (dir, map) = crate::closure::load(path)?;
-    println!("离线闭包 {} —— {} 份物料已备好\n", path.display(), map.len());
+    say!("离线闭包 {} —— {} 份物料已备好\n", path.display(), map.len());
     Ok((Some(dir), map))
 }
 
@@ -953,7 +1003,7 @@ fn load(path: &Path) -> Result<Blueprint> {
     let errs = lint::errors(&diags);
     if !errs.is_empty() {
         for d in &errs {
-            eprintln!("  {d}");
+            oops!("  {d}");
         }
         bail!("{} 有 {} 处 lint error,先修再 plan", path.display(), errs.len());
     }
@@ -975,28 +1025,25 @@ fn parse_sets(sets: &[String]) -> Result<Vec<(String, Yaml)>> {
 }
 
 fn print_plan(bp: &Blueprint, p: &Plan, will_execute: bool) {
-    let mode = if will_execute { "计划(随后执行)" } else { "计划(零写入预演)" };
-    println!("blueprint {} —— {mode}\n", bp.name);
+    let _ = (bp, will_execute); // 模式与蓝图名已在机群层报过一次
     for item in &p.items {
         let sigil = item.change.sigil();
-        println!("  {sigil} {:<44} {}", item.label(), describe(&item.change));
+        say!("  {sigil} {:<44} {}", item.label(), describe(&item.change));
         for f in item.change.fields() {
-            println!("       {f}");
+            say!("       {f}");
         }
     }
-    println!();
-    println!("计划:{}", p.summary());
+    say!("计划 {}", p.summary());
     if p.debt() > 0 {
         // "接住,不羞辱,但可见":说不清的项要显式计数,不能混在成功里。
-        println!(
+        say!(
             "其中 {} 项 plan 说不清(模型化欠债)—— 这些项 apply 前后都无法预演",
             p.debt()
         );
     }
     if !p.has_changes() {
-        println!("目标已处于期望态,无需变更。");
+        say!("已是期望态,无需变更");
     }
-    println!();
 }
 
 fn print_report(r: &RunReport) {
@@ -1007,9 +1054,9 @@ fn print_report(r: &RunReport) {
             Changed => "changed",
             Warn => "warn   ",
         };
-        println!("  {tag} {id}");
+        say!("  {tag} {id}");
     }
-    println!("执行:{}\n", r.summary());
+    say!("执行 {}", r.summary());
 }
 
 /// 事件流用的动作词(与 `describe` 的人话对应,给机器的短形式)。

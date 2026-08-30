@@ -72,29 +72,31 @@ resources:
     p
 }
 
-/// 每台目标那一段的计划条数(按 `── host ──` 分段统计计划行)。
+/// 每台目标的计划条数。
+///
+/// 靠**每行自带的主机前缀**统计,而不是先前的 `── host ──` 分段:
+/// 段头是"当前在哪台"的隐式状态,一旦输出里插入别的段落就会串行;
+/// 前缀让每一行自足,解析不依赖顺序。
 fn per_host_counts(out: &str) -> Vec<(String, usize)> {
-    let mut result = Vec::new();
-    let mut current: Option<String> = None;
-    let mut n = 0usize;
+    let mut order: Vec<String> = Vec::new();
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
     for line in out.lines() {
-        if let Some(rest) = line.trim().strip_prefix("── ") {
-            if let Some(h) = current.take() {
-                result.push((h, n));
-            }
-            current = Some(rest.trim_end_matches(" ──").to_string());
-            n = 0;
-        } else {
-            let t = line.trim_start();
-            if t.starts_with("+ ") || t.starts_with("✓ ") || t.starts_with("~ ") {
-                n += 1;
-            }
+        // `n1  + copy …` —— 前缀与正文之间是两个空格。
+        let Some((host, body)) = line.split_once("  ") else { continue };
+        let host = host.trim();
+        if host.is_empty() || host.contains(' ') {
+            continue;
+        }
+        if !counts.contains_key(host) {
+            order.push(host.to_string());
+            counts.insert(host.to_string(), 0);
+        }
+        let t = body.trim_start();
+        if t.starts_with("+ ") || t.starts_with("✓ ") || t.starts_with("~ ") {
+            *counts.get_mut(host).unwrap() += 1;
         }
     }
-    if let Some(h) = current {
-        result.push((h, n));
-    }
-    result
+    order.into_iter().map(|h| (h.clone(), counts[&h])).collect()
 }
 
 #[test]
@@ -131,15 +133,28 @@ fn first_and_rest_split_the_control_plane() {
         &home,
         &["plan", "-f", bp.to_str().unwrap(), "-i", inv.to_str().unwrap()],
     ));
-    let segments: Vec<&str> = out.split("── ").skip(1).collect();
-    assert_eq!(segments.len(), 3);
+    // 按主机前缀归拢各自的行(输出不再有 `── host ──` 段头,
+    // 每行自带主机名 —— 这样解析不依赖行的先后顺序)。
+    let lines_of = |h: &str| -> String {
+        out.lines()
+            .filter(|l| l.split_once("  ").map(|(p, _)| p.trim() == h).unwrap_or(false))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let (a, b) = (lines_of("n11"), lines_of("n12"));
+    assert!(!a.is_empty() && !b.is_empty(), "两台都该有输出:{out}");
     // 首台拿到 init,不该拿到 join;第二台反之。这是 HA 编排的地基。
-    assert!(segments[0].contains("/init"), "n11 段:{}", segments[0]);
-    assert!(!segments[0].contains("/join"), "n11 不该有 join:{}", segments[0]);
-    assert!(segments[1].contains("/join"), "n12 段:{}", segments[1]);
-    assert!(!segments[1].contains("/init"), "n12 不该有 init:{}", segments[1]);
+    assert!(a.contains("/init"), "n11:{a}");
+    assert!(!a.contains("/join"), "n11 不该有 join:{a}");
+    assert!(b.contains("/join"), "n12:{b}");
+    assert!(!b.contains("/init"), "n12 不该有 init:{b}");
     // worker 两个都不该有
-    assert!(!segments[2].contains("/init") && !segments[2].contains("/join"));
+    // 第三台(worker)既不 init 也不 join —— 选择器没选中它。
+    let c = lines_of("w01");
+    // 先确认真取到了它的行:名字写错会让 c 为空,而 `!空.contains(..)`
+    // 恒成立 —— 那是一条看着绿、其实什么都没验的断言。
+    assert!(!c.is_empty(), "没取到 w01 的输出行:{out}");
+    assert!(!c.contains("/init") && !c.contains("/join"), "w01:{c}");
 }
 
 #[test]

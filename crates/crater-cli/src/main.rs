@@ -36,6 +36,7 @@ mod ui_edit;
 mod ui_app;
 mod ui_overview;
 mod events;
+mod out;
 mod ui_inventory;
 mod ui_run;
 
@@ -58,6 +59,14 @@ use crater_core::store::ImageStore;
     about = "Deploy anything — declarative remote-execution engine (task model, online & offline)"
 )]
 struct Cli {
+    /// 把终端输出**同时**写一份到这里,每行带时间戳。
+    ///
+    /// 部署跑十分钟、翻回去想知道"哪一步慢"时,没有落盘就只剩滚屏。
+    #[arg(long, global = true, env = "CRATER_LOG_FILE", value_name = "FILE")]
+    log_file: Option<PathBuf>,
+    /// 终端也带上 HH:MM:SS。默认关 —— 单机短命令带时间戳是噪音。
+    #[arg(long, global = true)]
+    timestamps: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -584,7 +593,10 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stdout)
         .init();
 
-    match Cli::parse().cmd {
+    let cli = Cli::parse();
+    // 输出层要在任何命令跑起来之前定好 —— 晚一步,前面的行就没进日志。
+    out::init(cli.log_file.as_deref(), cli.timestamps);
+    match cli.cmd {
         Cmd::Apply {
             arg1,
             arg2,
