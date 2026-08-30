@@ -33,7 +33,9 @@ pub(crate) fn set_workspace(p: PathBuf) {
     let _ = WORKSPACE.set(p);
 }
 
-fn root() -> std::io::Result<PathBuf> {
+/// 工作区根。**所有** UI 侧的相对路径都必须经它落地 —— 谁绕过去直接用
+/// `current_dir()`,谁就在另一个目录里读写,而症状是"UI 上看不到我建的东西"。
+pub(crate) fn root() -> std::io::Result<PathBuf> {
     match WORKSPACE.get() {
         Some(p) => Ok(p.clone()),
         // 没指定就沿用旧行为(进程 CWD)—— 不破坏 `cd 某处 && crater ui`。

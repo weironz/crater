@@ -17,7 +17,6 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::path::Path;
 
 // ───────────────────────────── 文本定位 ─────────────────────────────
 
@@ -698,7 +697,11 @@ pub async fn inv_create(Json(req): Json<InvCreate>) -> Response {
         return err(StatusCode::BAD_REQUEST, "文件名只允许字母数字-_.");
     }
     let file = format!("{stem}.inventory.yaml");
-    if Path::new(&file).exists() {
+    let abs = match crate::ui_edit::confine(&file) {
+        Ok(p) => p,
+        Err((c, m)) => return err(c, m),
+    };
+    if abs.exists() {
         return err(StatusCode::CONFLICT, format!("{file} 已存在"));
     }
     let body = concat!(
@@ -712,7 +715,7 @@ pub async fn inv_create(Json(req): Json<InvCreate>) -> Response {
         "    # 组名要与蓝图的 fleet.groups 对得上(对不上时 app 的 lint 会报)。\n",
         "    # all: { hosts: [n1] }\n",
     );
-    if let Err(e) = std::fs::write(&file, body) {
+    if let Err(e) = std::fs::write(&abs, body) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, format!("写入失败:{e}"));
     }
     Json(json!({ "ok": true, "path": file })).into_response()

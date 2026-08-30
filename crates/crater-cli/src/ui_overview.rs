@@ -56,7 +56,7 @@ fn load_snap(record_id: &str) -> Option<serde_json::Value> {
 /// 文件是它的当前载体 —— 同名多文件时如实报 ambiguous,不猜。
 fn name_to_path() -> BTreeMap<String, Vec<String>> {
     let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let Ok(root) = std::env::current_dir() else { return map };
+    let Ok(root) = crate::ui_edit::root() else { return map };
     let mut stack = vec![root.clone()];
     let mut seen = 0;
     while let Some(dir) = stack.pop() {

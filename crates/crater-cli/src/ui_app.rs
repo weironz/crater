@@ -92,7 +92,7 @@ fn parse_interval(s: &str) -> Result<u64, String> {
 /// 工作目录里全部 app 文件。
 pub fn list_apps() -> Vec<AppDef> {
     let mut out = Vec::new();
-    let Ok(root) = std::env::current_dir() else { return out };
+    let Ok(root) = crate::ui_edit::root() else { return out };
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
@@ -129,7 +129,10 @@ pub fn lint_app(app: &AppDef) -> Vec<serde_json::Value> {
     let mut diags = Vec::new();
     let mut push = |sev: &str, msg: String| diags.push(json!({ "severity": sev, "message": msg }));
 
-    let bp_path = PathBuf::from(&app.blueprint);
+    // app 里的路径是**工作区相对路径**,不是进程 CWD 相对 —— UI 可以起在
+    // 任意目录(--workspace),按 CWD 解析会把"文件明明在树里"报成不存在。
+    let ws = crate::ui_edit::root().unwrap_or_else(|_| PathBuf::from("."));
+    let bp_path = ws.join(&app.blueprint);
     let bp = if !bp_path.is_file() {
         push("error", format!("blueprint 不存在:{}", app.blueprint));
         None
@@ -159,7 +162,7 @@ pub fn lint_app(app: &AppDef) -> Vec<serde_json::Value> {
         }
     }
     if !app.inventory.is_empty() {
-        let inv_path = PathBuf::from(&app.inventory);
+        let inv_path = ws.join(&app.inventory);
         if !inv_path.is_file() {
             push("error", format!("inventory 不存在:{}", app.inventory));
         } else if let Some(bp) = &bp {
@@ -304,7 +307,11 @@ pub async fn create_app(Json(req): Json<CreateApp>) -> Response {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "app 名只允许字母数字-_" }))).into_response();
     }
     let file = format!("{}.app.yaml", req.name);
-    if Path::new(&file).exists() {
+    let abs = match crate::ui_edit::confine(&file) {
+        Ok(p) => p,
+        Err((c, m)) => return (c, Json(json!({ "error": m }))).into_response(),
+    };
+    if abs.exists() {
         return (StatusCode::CONFLICT, Json(json!({ "error": format!("{file} 已存在") }))).into_response();
     }
     let mut body = format!(
@@ -335,7 +342,7 @@ pub async fn create_app(Json(req): Json<CreateApp>) -> Response {
             req.verify_interval
         ));
     }
-    if let Err(e) = std::fs::write(&file, &body) {
+    if let Err(e) = std::fs::write(&abs, &body) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
     }
     Json(json!({ "ok": true, "path": file })).into_response()
