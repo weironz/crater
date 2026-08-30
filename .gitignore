@@ -38,3 +38,8 @@ Thumbs.db
 # Added by code-review-graph
 .code-review-graph/
 .env
+
+# UI 写回前留的旧版(误操作能拖回来),以及回收站 —— 都不该进版本库
+*.bak
+*.yaml.bak
+.crater-trash/

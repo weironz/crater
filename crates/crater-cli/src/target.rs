@@ -42,6 +42,10 @@ pub(crate) struct TargetOpts {
     /// Default 1 (serial). A step's own `throttle` can only cap *below* this.
     #[arg(long, default_value_t = 1, value_name = "N")]
     pub(crate) parallel: usize,
+    /// 只对 inventory 里的一部分执行:主机名 / 组名,逗号分隔
+    /// (`--limit n3` / `--limit lb,db`)。机群契约仍按整份 inventory 成立。
+    #[arg(long, value_name = "NAMES")]
+    pub(crate) limit: Option<String>,
 }
 
 impl TargetOpts {
@@ -49,6 +53,11 @@ impl TargetOpts {
     /// commands like `gc` where the localhost fallback would be wrong.
     pub(crate) fn has_explicit_targets(&self) -> bool {
         self.inventory.is_some() || self.host.is_some()
+    }
+
+    /// 这次真正要动的目标(`--limit` 过滤后)。求计划、连接、记账都走它。
+    pub(crate) fn exec_hosts(&self) -> Result<Vec<crater_core::spec::Host>> {
+        apply_limit(&self.hosts()?, self.limit.as_deref())
     }
 
     /// Resolve to a concrete host list: inventory > `--host` > localhost.
@@ -220,6 +229,45 @@ pub(crate) fn task_hosts(
         }
     }
     target_hosts(None, None, user, password, key, port) // → localhost
+}
+
+/// `--limit`:在 inventory 里挑一部分**执行目标**(主机名或组名)。
+///
+/// 语义与 ansible 的 `--limit` 一致,而且必须一致:机群契约、cast/exports
+/// 仍按**整份 inventory** 成立 —— 限定的是"这次动谁",不是"机群变小了"。
+/// 否则想对一台机器重跑一次 apply,就会被"控制面至少 3 台"的契约拦下来。
+pub(crate) fn apply_limit(
+    all: &[crater_core::spec::Host],
+    limit: Option<&str>,
+) -> Result<Vec<crater_core::spec::Host>> {
+    let Some(spec) = limit.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(all.to_vec());
+    };
+    let wanted: Vec<&str> = spec
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    // 组名靠 host.roles 匹配 —— roles 由组成员关系派生(D-077),已经是传递闭包。
+    let picked: Vec<crater_core::spec::Host> = all
+        .iter()
+        .filter(|h| wanted.iter().any(|w| h.name == *w || h.roles.iter().any(|r| r == w)))
+        .cloned()
+        .collect();
+    if picked.is_empty() {
+        // 报错要**把可选项列出来**:打错一个组名与"这组本来就空"是两回事,
+        // 而只说"没选中"会让人反复猜。
+        let names: Vec<&str> = all.iter().map(|h| h.name.as_str()).collect();
+        let mut groups: Vec<&str> = all.iter().flat_map(|h| h.roles.iter().map(|r| r.as_str())).collect();
+        groups.sort_unstable();
+        groups.dedup();
+        anyhow::bail!(
+            "--limit `{spec}` 没选中任何主机\n  可选主机:{}\n  可选组:{}",
+            names.join(", "),
+            if groups.is_empty() { "(inventory 没有分组)".into() } else { groups.join(", ") }
+        );
+    }
+    Ok(picked)
 }
 
 pub(crate) fn target_hosts(

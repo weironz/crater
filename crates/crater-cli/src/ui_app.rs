@@ -27,6 +27,8 @@ pub struct AppDef {
     pub params: Vec<(String, String)>,
     /// 巡检间隔(秒);None = 只手动。
     pub verify_interval: Option<u64>,
+    /// 只对机群里的这些主机 / 组执行(`--limit`);空 = 全量。
+    pub limit: Vec<String>,
 }
 
 /// 这份 YAML 是不是 app 文件(形状判定,与其它 classify 同思路)。
@@ -64,6 +66,11 @@ pub fn parse_app(path: &Path, text: &str) -> Result<AppDef, String> {
         inventory: s("inventory").unwrap_or_default(),
         params,
         verify_interval: interval,
+        limit: a
+            .get("limit")
+            .and_then(|x| x.as_sequence())
+            .map(|xs| xs.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
     })
 }
 
@@ -234,6 +241,7 @@ pub async fn apps() -> impl IntoResponse {
                 "inventory": a.inventory,
                 "params": a.params.iter().map(|(k, v)| json!({"k": k, "v": v})).collect::<Vec<_>>(),
                 "verify_interval": a.verify_interval,
+                "limit": a.limit,
                 "ok": diags.iter().all(|d| d["severity"] != "error"),
                 "diagnostics": diags,
             })
@@ -286,6 +294,9 @@ pub struct CreateApp {
     pub params: Vec<(String, String)>,
     #[serde(default)]
     pub verify_interval: String,
+    /// 主机名 / 组名;空 = 整份 inventory。
+    #[serde(default)]
+    pub limit: Vec<String>,
 }
 
 pub async fn create_app(Json(req): Json<CreateApp>) -> Response {
@@ -305,6 +316,12 @@ pub async fn create_app(Json(req): Json<CreateApp>) -> Response {
     );
     if !req.inventory.is_empty() {
         body.push_str(&format!("  inventory: {}\n", req.inventory));
+    }
+    if !req.limit.is_empty() {
+        body.push_str(&format!(
+            "  limit: [{}]   # 只对这些主机/组执行;删掉 = 整份 inventory\n",
+            req.limit.join(", ")
+        ));
     }
     if !req.params.is_empty() {
         body.push_str("  params:            # 固化值;没列的参数 = 启动时问\n");
@@ -361,6 +378,12 @@ pub fn start_scheduler() {
                 if !app.inventory.is_empty() {
                     args.push("-i".into());
                     args.push(app.inventory.clone());
+                }
+                // 巡检要跟任务盯的是同一批机器 —— 少带 limit,巡检会去核对
+                // 这个任务根本没管的主机,然后报一堆与它无关的"漂移"。
+                if !app.limit.is_empty() {
+                    args.push("--limit".into());
+                    args.push(app.limit.join(","));
                 }
                 for (k, v) in &app.params {
                     args.push("--set".into());
@@ -466,6 +489,7 @@ const TASKS_HTML: &str = r##"<section class="panel">
     <label>名字<input id="t-name" placeholder="prod-nginx"></label>
     <label>蓝图<select id="t-bp"></select></label>
     <label>机群<select id="t-inv"><option value="">(不指定 —— 本机)</option></select></label>
+    <label>限定范围<span id="t-limit" class="limitbox"><span class="hint">先选机群</span></span></label>
     <label>参数<input id="t-params" placeholder="k=v,k2=v2"></label>
     <label>巡检<input id="t-iv" placeholder="30m(留空=只手动)"></label>
     <button class="btn primary" onclick="taskAdd()">新建任务</button>
@@ -493,6 +517,14 @@ const TASKS_HTML: &str = r##"<section class="panel">
   .tk .btn{font-size:12px;padding:3px 10px}
   .tk-empty{border:1px dashed var(--border);border-radius:12px;padding:20px;
     text-align:center;color:var(--muted)}
+  .limitbox{display:flex;gap:4px;flex-wrap:wrap;padding:6px;border:1px solid var(--border);
+    border-radius:8px;background:var(--surface);min-height:30px;max-width:340px}
+  .limitbox label{border:1px solid var(--border);border-radius:99px;padding:1px 9px;
+    cursor:pointer;font-size:12px;color:var(--text);flex-direction:row}
+  .limitbox label:has(input:checked){background:var(--tint);border-color:var(--accent);color:var(--accent)}
+  .limitbox label.grp{border-style:dashed}
+  .limitbox input{display:none}
+  .limitbox .hint{font-size:12px;color:var(--faint)}
 </style>
 <script>
 (function(){
@@ -508,6 +540,22 @@ const TASKS_HTML: &str = r##"<section class="panel">
       pick('blueprint').concat(pick('stack')).map(f=>'<option>'+f.path+'</option>').join('');
     document.getElementById('t-inv').innerHTML = '<option value="">(不指定 —— 本机)</option>'
       + pick('inventory').map(f=>'<option>'+f.path+'</option>').join('');
+    document.getElementById('t-inv').addEventListener('change', fillLimit);
+  }
+  // 限定候选来自选中的机群 —— 主机与组同列(CLI --limit 两者都收)。
+  async function fillLimit(){
+    const box = document.getElementById('t-limit');
+    const inv = document.getElementById('t-inv').value;
+    if (!inv){ box.innerHTML = '<span class="hint">不指定机群 = 本机,无从限定</span>'; return; }
+    try{
+      const d = await (await fetch('/api/inventory/read?path='+encodeURIComponent(inv))).json();
+      if (d.error){ box.innerHTML = '<span class="hint">'+esc(d.error)+'</span>'; return; }
+      box.innerHTML = d.groups.map(g=>'<label class="grp" title="组"><input type="checkbox" value="'
+          + esc(g.name)+'">@'+esc(g.name)+'</label>').join('')
+        + d.hosts.map(h=>'<label title="主机"><input type="checkbox" value="'
+          + esc(h.name)+'">'+esc(h.name)+'</label>').join('')
+        || '<span class="hint">这份机群是空的</span>';
+    }catch(e){ box.innerHTML = '<span class="hint">读取失败</span>'; }
   }
   async function load(){
     const d = await (await fetch('/api/apps')).json();
@@ -519,13 +567,15 @@ const TASKS_HTML: &str = r##"<section class="panel">
     }
     body.innerHTML = d.apps.map(a=>{
       const sets = (a.params||[]).map(p=>p.k+'='+p.v);
-      const arg = `'${a.blueprint}','${a.inventory||''}',${JSON.stringify(sets).replace(/"/g,'&quot;')}`;
+      const arg = `'${a.blueprint}','${a.inventory||''}',${JSON.stringify(sets).replace(/"/g,'&quot;')}`
+        + ',' + JSON.stringify(a.limit||[]).replace(/"/g,'&quot;');
       const q = JSON.stringify(a.path).replace(/"/g,'&quot;');
       const bad = a.ok ? '' : '<span class="bad">✗ '
         + esc(a.diagnostics.map(x=>x.message).join(';')) + '</span>';
       const iv = a.verify_interval ? '巡检 '+Math.round(a.verify_interval/60)+'m' : '只手动';
+      const lim = (a.limit||[]).length ? ' · 限定 '+esc(a.limit.join(', ')) : '';
       return `<div class="tk"><span class="nm">${esc(a.name)}</span>
-        <span class="meta">${esc(a.blueprint)} × ${esc(a.inventory||'本机')} · ${iv}
+        <span class="meta">${esc(a.blueprint)} × ${esc(a.inventory||'本机')} · ${iv}${lim}
           ${sets.length?' · '+esc(sets.join(' ')):''}</span>${bad}
         <span class="sp">
           <button class="btn" onclick="tkRun('verify',${arg})">Verify</button>
@@ -536,10 +586,11 @@ const TASKS_HTML: &str = r##"<section class="panel">
         </span></div>`;
     }).join('');
   }
-  window.tkRun = async function(verb, bp, inv, sets){
-    if (verb === 'apply' && !confirm('确认收敛?将对目标机做出变更。')) return;
+  window.tkRun = async function(verb, bp, inv, sets, limit){
+    const scope = (limit||[]).length ? ('\n限定范围:'+limit.join(', ')) : '\n范围:整份机群';
+    if (verb === 'apply' && !confirm('确认收敛?将对目标机做出变更。'+scope)) return;
     const d = await (await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({verb, blueprint:bp, inventory:inv, sets})})).json();
+      body:JSON.stringify({verb, blueprint:bp, inventory:inv, sets, limit:limit||[]})})).json();
     if (d.ok) htmx.ajax('GET','/view/job/'+d.job,'#view');
     else say(d.error||'启动失败', true);   // 409 = plan 闸门:先 Plan 再 Apply
   };
@@ -551,7 +602,8 @@ const TASKS_HTML: &str = r##"<section class="panel">
     const d = await (await fetch('/api/app/create',{method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({name:g('t-name'), blueprint:g('t-bp'), inventory:g('t-inv'),
-        params, verify_interval:g('t-iv')})})).json();
+        params, verify_interval:g('t-iv'),
+        limit:[...document.querySelectorAll('#t-limit input:checked')].map(x=>x.value)})})).json();
     if (d.error){ say(d.error, true); return; }
     // 建完立刻跨文件校验:参数拼错、机群台数不够,现在就说,别等 plan。
     const lr = await (await fetch('/api/lint-project',{method:'POST',body:d.path})).json();

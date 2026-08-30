@@ -224,9 +224,9 @@ const OVERVIEW_HTML: &str = r##"<section class="panel">
     progressing:'Progressing', unknown:'Unknown', indeterminate:'Indeterminate', never_applied:'NeverApplied'};
   function age(s){ if (s==null) return '从未核对';
     return s<90?'刚刚核对':s<3600?Math.floor(s/60)+' 分钟前核对':s<86400?Math.floor(s/3600)+' 小时前核对':Math.floor(s/86400)+' 天前核对'; }
-  async function runVerb(verb, path, inv, sets){
+  async function runVerb(verb, path, inv, sets, limit){
     const r = await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({verb, blueprint:path, inventory:inv||'', sets:sets||[]})});
+      body:JSON.stringify({verb, blueprint:path, inventory:inv||'', sets:sets||[], limit:limit||[]})});
     const d = await r.json();
     if (d.ok) htmx.ajax('GET','/view/job/'+d.job,'#view');
     else alert(d.error||'启动失败');   // 409 = plan 闸门:提示先 Plan,不是故障
@@ -243,7 +243,8 @@ const OVERVIEW_HTML: &str = r##"<section class="panel">
       const bad = a.ok ? '' : ' <span style="color:var(--drift)">✗ '
         + a.diagnostics.map(x=>x.message).join(';').replace(/</g,'&lt;') + '</span>';
       const iv = a.verify_interval ? '巡检 '+Math.round(a.verify_interval/60)+'m' : '只手动';
-      const arg = `'${a.blueprint}','${a.inventory||''}',${JSON.stringify(sets).replace(/"/g,'&quot;')}`;
+      const arg = `'${a.blueprint}','${a.inventory||''}',${JSON.stringify(sets).replace(/"/g,'&quot;')}`
+        + ',' + JSON.stringify(a.limit||[]).replace(/"/g,'&quot;');
       return `<div class="ov-app"><span class="nm">▶ ${a.name}</span>
         <span class="meta">${a.blueprint} × ${a.inventory||'(无 inventory)'} · ${iv}</span>${bad}
         <span class="sp">

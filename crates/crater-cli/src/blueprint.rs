@@ -157,8 +157,9 @@ pub(crate) async fn destroy_lensed(
     let bp = load(path)?;
     let mut overrides = lens.params.clone();
     overrides.extend(parse_sets(sets)?);
-    let hosts = target.hosts()?;
-    let fleet = build_fleet(&hosts, target.declared_groups()).remap(&lens.groups);
+    let all_hosts = target.hosts()?;
+    let hosts = target.exec_hosts()?;
+    let fleet = build_fleet(&all_hosts, target.declared_groups()).remap(&lens.groups);
     // 退役**不**校验机群契约:契约问的是"够不够装",而拆东西不需要够 ——
     // 一个只剩一台 master 的残破集群,恰恰是最需要拆掉的那种。
     let (_closure_dir, blobs) = open_closure(target)?;
@@ -429,11 +430,14 @@ async fn run_on_targets(
     // 栈只是往"默认值"那一层里加了一笔。
     let mut overrides = lens.params.clone();
     overrides.extend(parse_sets(sets)?);
-    let hosts = target.hosts()?;
+    // 机群契约按**整份 inventory** 成立,循环只走 `--limit` 选中的那些 ——
+    // 限定的是"这次动谁",不是"机群变小了"(见 target::apply_limit)。
+    let all_hosts = target.hosts()?;
+    let hosts = target.exec_hosts()?;
 
     // 组名重映射:蓝图写 `role.controlplane`,inventory 叫 `k8s_masters`,
     // 栈把两个词接上 —— 蓝图本身一字不改。
-    let fleet = build_fleet(&hosts, target.declared_groups()).remap(&lens.groups);
+    let fleet = build_fleet(&all_hosts, target.declared_groups()).remap(&lens.groups);
     enforce_contract(&bp, &fleet)?;
     // 闭包在**连机器之前**装载并校验:字节坏了要在这里知道,不是推到一半。
     // `_closure_dir` 必须活到本函数结束 —— blob 就在那个临时目录里。

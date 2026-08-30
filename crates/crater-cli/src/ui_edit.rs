@@ -474,16 +474,30 @@ const EDIT_HTML: &str = r##"<section class="panel">
     }
   };
   window.edNewBp = async function(){
-    const name = document.getElementById('wz-name').value.trim() || 'unnamed';
+    const name = document.getElementById('wz-name').value.trim();
+    if (!name){ status.textContent = '先给蓝图起个名字'; return; }
     const types = [...document.querySelectorAll('#ed-wiz input:checked')].map(x=>x.value);
     const d = await (await fetch('/api/blueprint/skeleton',{method:'POST',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify({name,types})})).json();
     if (d.error){ status.textContent = d.error; return; }
-    cur = name + '.blueprint.yaml';
-    ta.value = d.yaml; kindEl.textContent = 'blueprint(未保存)';
+    const path = name + '.blueprint.yaml';
+    // **立刻落盘**,不是只往缓冲区塞文本。
+    //
+    // 之前只塞缓冲区,于是新蓝图没有文件身份:不在下拉里、lint 按上一个
+    // 文件的 kind 判、保存时也不知道往哪写 —— 表现出来就是"新建还得先
+    // 绑定一个已经存在的文件"。文件先建出来,后面每一步才有落点。
+    const w = await (await fetch('/api/file?path='+encodeURIComponent(path),
+      {method:'POST', body:d.yaml})).json();
+    if (w.error){ status.textContent = '建文件失败:'+w.error; return; }
+    if (![...sel.options].some(o=>o.value===path)){
+      const o = document.createElement('option');
+      o.value = path; o.textContent = path + '  · blueprint'; o.dataset.kind = 'blueprint';
+      sel.appendChild(o);
+    }
+    sel.value = path;
     document.getElementById('ed-wiz').style.display='none';
-    sync(); lint();
-    status.textContent = '未保存 → ' + cur + '(补完 TODO 后点"保存")';
+    await load(path);
+    status.textContent = '已创建 ' + path + ' —— 补完 TODO 后点"保存"';
   };
   window.edNewApp = async function(){
     const name = document.getElementById('wz-name').value.trim();
@@ -591,6 +605,12 @@ const EDIT_HTML: &str = r##"<section class="panel">
       sel.appendChild(o);
     }
     status.textContent = d.files.length + ' 个 YAML(根:' + d.root + ')';
+    // 别的页面点"编辑"跳过来时,直接打开它指名的那个文件。
+    const want = localStorage.getItem('crater.edit');
+    if (want){
+      localStorage.removeItem('crater.edit');
+      if ([...sel.options].some(o=>o.value===want)){ sel.value = want; load(want); }
+    }
   });
 })();
 </script>

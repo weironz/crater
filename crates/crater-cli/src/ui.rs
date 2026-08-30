@@ -215,7 +215,9 @@ pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
         .route("/api/inventory/create", post(crate::ui_inventory::inv_create))
         .route(
             "/api/inventory/host",
-            post(crate::ui_inventory::host_add).delete(crate::ui_inventory::host_remove),
+            post(crate::ui_inventory::host_add)
+                .put(crate::ui_inventory::host_update)
+                .delete(crate::ui_inventory::host_remove),
         )
         .route(
             "/api/inventory/group",

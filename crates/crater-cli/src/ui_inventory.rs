@@ -238,9 +238,10 @@ fn find_group_line(lines: &[&str], name: &str) -> Option<usize> {
 
 // ───────────────────────────── 写:主机 ─────────────────────────────
 
+/// 一台主机的字段集。**不含 path** —— 新增与编辑共用它(flatten 进各自的
+/// 请求体),内外都放一个 `path` 的话 flatten 会互相打架。
 #[derive(Deserialize)]
-pub struct HostAdd {
-    pub path: String,
+pub struct HostFields {
     pub name: String,
     pub address: String,
     #[serde(default)]
@@ -256,31 +257,16 @@ pub struct HostAdd {
     pub vars: Vec<(String, String)>,
 }
 
-/// `POST /api/inventory/host` —— 新增一台主机(在 `hosts:` 块末尾**插一行**)。
-pub async fn host_add(Json(req): Json<HostAdd>) -> Response {
-    if req.name.is_empty()
-        || !req.name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return err(StatusCode::BAD_REQUEST, "主机名只允许字母数字-_");
-    }
-    if req.address.trim().is_empty() {
-        return err(StatusCode::BAD_REQUEST, "地址不能为空");
-    }
-    let text = match read_text(&req.path) {
-        Ok(t) => t,
-        Err((c, m)) => return err(c, m),
-    };
-    let lines: Vec<&str> = text.lines().collect();
-    if find_host_line(&lines, &req.name).is_some() {
-        return err(StatusCode::CONFLICT, format!("主机 `{}` 已存在", req.name));
-    }
-    let Some(b) = block_of(&lines, "hosts") else {
-        return err(
-            StatusCode::CONFLICT,
-            "找不到 `inventory:` 下的 `hosts:` 块 —— 请直接改文本",
-        );
-    };
+#[derive(Deserialize)]
+pub struct HostAdd {
+    pub path: String,
+    #[serde(flatten)]
+    pub f: HostFields,
+}
 
+/// 把一台主机渲染成一行 flow 条目。**新增与编辑共用这一个渲染器** ——
+/// 两份渲染代码迟早会在引号规则上分家,而分家的那天没人看得出来。
+fn render_host(req: &HostFields, indent: usize) -> String {
     let mut fields = vec![
         format!("name: {}", scalar(&req.name)),
         format!("address: {}", scalar(req.address.trim())),
@@ -304,8 +290,58 @@ pub async fn host_add(Json(req): Json<HostAdd>) -> Response {
             .collect();
         fields.push(format!("vars: {{ {} }}", vs.join(", ")));
     }
-    let entry = format!("{}- {{ {} }}", " ".repeat(b.item_indent), fields.join(", "));
+    format!("{}- {{ {} }}", " ".repeat(indent), fields.join(", "))
+}
 
+/// 缺 `hosts:` / `groups:` 块时把它补出来 —— 只有 hosts 没有 groups 的
+/// inventory 是常态,不该因此完全建不了组。返回补完之后的行。
+fn ensure_block(lines: &[String], key: &str) -> Option<Vec<String>> {
+    let refreshed: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+    if block_of(&refreshed, key).is_some() {
+        return None;
+    }
+    let iv = refreshed
+        .iter()
+        .position(|l| l.trim_start().starts_with("inventory:") && indent_of(l) == 0)?;
+    // 子键缩进跟已有的那个走(文件的风格是文件的,不是我们的)。
+    let child = refreshed[iv + 1..]
+        .iter()
+        .find(|l| !is_blank(l))
+        .map(|l| indent_of(l))
+        .filter(|i| *i > 0)
+        .unwrap_or(2);
+    let mut out = lines.to_vec();
+    out.push(format!("{}{key}:", " ".repeat(child)));
+    Some(out)
+}
+
+/// `POST /api/inventory/host` —— 新增一台主机(在 `hosts:` 块末尾**插一行**)。
+pub async fn host_add(Json(req): Json<HostAdd>) -> Response {
+    if req.f.name.is_empty()
+        || !req.f.name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return err(StatusCode::BAD_REQUEST, "主机名只允许字母数字-_");
+    }
+    if req.f.address.trim().is_empty() {
+        return err(StatusCode::BAD_REQUEST, "地址不能为空");
+    }
+    let text = match read_text(&req.path) {
+        Ok(t) => t,
+        Err((c, m)) => return err(c, m),
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    if find_host_line(&lines, &req.f.name).is_some() {
+        return err(StatusCode::CONFLICT, format!("主机 `{}` 已存在", req.f.name));
+    }
+    // 缺 hosts: 块就补一个 —— 这不是"看不懂的结构",只是还没写。
+    let patched = ensure_block(&lines.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "hosts");
+    let owned: Vec<String> = patched.unwrap_or_else(|| lines.iter().map(|s| s.to_string()).collect());
+    let lines: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+    let Some(b) = block_of(&lines, "hosts") else {
+        return err(StatusCode::CONFLICT, "这份文件没有顶层 `inventory:` —— 请直接改文本");
+    };
+
+    let entry = render_host(&req.f, b.item_indent);
     let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
     match b.last_content {
         Some(i) => out.insert(i + 1, entry),
@@ -319,9 +355,123 @@ pub async fn host_add(Json(req): Json<HostAdd>) -> Response {
         }
     }
     match write_text(&req.path, &join(&out, text.ends_with('\n'))) {
-        Ok(()) => Json(json!({ "ok": true, "host": req.name })).into_response(),
+        Ok(()) => Json(json!({ "ok": true, "host": req.f.name })).into_response(),
         Err((c, m)) => err(c, m),
     }
+}
+
+/// `PUT /api/inventory/host` —— 编辑一台主机(**换一行**)。
+///
+/// 改名会连带改各组成员:组里留着旧名字,等于把机器悄悄踢出了组,
+/// 而这种"改完之后少跑了一台"最难在事后看出来。
+pub async fn host_update(Json(req): Json<HostUpdate>) -> Response {
+    let text = match read_text(&req.path) {
+        Ok(t) => t,
+        Err((c, m)) => return err(c, m),
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(i) = find_host_line(&lines, &req.old_name) else {
+        return err(StatusCode::NOT_FOUND, format!("找不到主机 `{}`", req.old_name));
+    };
+    if !is_single_line(&lines, i) {
+        return err(StatusCode::CONFLICT, "这是块式条目(多行)—— 请直接改文本");
+    }
+    if req.host.name != req.old_name && find_host_line(&lines, &req.host.name).is_some() {
+        return err(StatusCode::CONFLICT, format!("主机 `{}` 已存在", req.host.name));
+    }
+    if req.host.name.is_empty()
+        || !req.host.name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return err(StatusCode::BAD_REQUEST, "主机名只允许字母数字-_");
+    }
+    if req.host.address.trim().is_empty() {
+        return err(StatusCode::BAD_REQUEST, "地址不能为空");
+    }
+    // 行尾注释保真:`}` 之后的部分原样接回去。
+    let tail = lines[i]
+        .rfind('}')
+        .map(|p| lines[i][p + 1..].to_string())
+        .unwrap_or_default();
+    let mut host = req.host;
+    if req.keep_password && host.password.is_empty() && host.key.trim().is_empty() {
+        host.password = password_of(lines[i]).unwrap_or_default();
+    }
+    let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+    out[i] = format!("{}{}", render_host(&host, indent_of(lines[i])), tail);
+
+    let mut manual: Vec<String> = Vec::new();
+    if host.name != req.old_name {
+        let refreshed: Vec<&str> = out.iter().map(|s| s.as_str()).collect();
+        let targets: Vec<usize> = match block_of(&refreshed, "groups") {
+            Some(b) => (b.key_line + 1..refreshed.len())
+                .take_while(|&j| is_blank(refreshed[j]) || indent_of(refreshed[j]) > b.key_indent)
+                .filter(|&j| !is_blank(refreshed[j]) && contains_member(refreshed[j], &req.old_name))
+                .collect(),
+            None => Vec::new(),
+        };
+        for j in targets {
+            if !out[j].contains('[') {
+                manual.push(out[j].trim().split(':').next().unwrap_or("?").to_string());
+                continue;
+            }
+            out[j] = rename_member(&out[j], &req.old_name, &host.name);
+        }
+    }
+    match write_text(&req.path, &join(&out, text.ends_with('\n'))) {
+        Ok(()) => Json(json!({ "ok": true, "host": host.name, "manual_groups": manual }))
+            .into_response(),
+        Err((c, m)) => err(c, m),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct HostUpdate {
+    pub path: String,
+    /// 改之前的名字 —— 定位靠它,改名才可能。
+    pub old_name: String,
+    /// 口令留空 = 沿用原来那个。
+    ///
+    /// 读接口**刻意不回传明文口令**(没必要为了改个端口就把口令铺到页面上),
+    /// 所以客户端送不回来,只能由服务端从原行里取。
+    #[serde(default)]
+    pub keep_password: bool,
+    #[serde(flatten)]
+    pub host: HostFields,
+}
+
+/// 从一行 flow 主机条目里抠出口令原文(带引号的与裸写的都认)。
+fn password_of(line: &str) -> Option<String> {
+    let at = line.find("password:")? + "password:".len();
+    let rest = line[at..].trim_start();
+    if let Some(q) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') {
+        let body = &rest[1..];
+        let end = body.find(q)?;
+        return Some(body[..end].replace("\\\"", "\""));
+    }
+    let end = rest.find([',', '}']).unwrap_or(rest.len());
+    Some(rest[..end].trim().to_string())
+}
+
+/// 在 flow 成员列表里把一个名字换成另一个,其余字节不动。
+fn rename_member(line: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(open) = rest.find('[') {
+        let Some(close_rel) = rest[open..].find(']') else { break };
+        let close = open + close_rel;
+        out.push_str(&rest[..=open]);
+        let inner: Vec<String> = rest[open + 1..close]
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| if s == from || s.trim_matches('"') == from { to.to_string() } else { s.to_string() })
+            .collect();
+        out.push_str(&inner.join(", "));
+        out.push(']');
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[derive(Deserialize)]
@@ -428,12 +578,13 @@ pub async fn group_set(Json(req): Json<GroupSet>) -> Response {
         Ok(t) => t,
         Err((c, m)) => return err(c, m),
     };
-    let lines: Vec<&str> = text.lines().collect();
+    let lines0: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+    // 只有 hosts 没有 groups 的 inventory 是常态 —— 缺块就补一个,
+    // 而不是让人"先去手写一行 groups: 再回来点按钮"。
+    let owned = ensure_block(&lines0, "groups").unwrap_or(lines0);
+    let lines: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
     let Some(b) = block_of(&lines, "groups") else {
-        return err(
-            StatusCode::CONFLICT,
-            "找不到 `inventory:` 下的 `groups:` 块 —— 请直接改文本",
-        );
+        return err(StatusCode::CONFLICT, "这份文件没有顶层 `inventory:` —— 请直接改文本");
     };
     // 成员必须是本文件里真实存在的主机 —— 幽灵成员是最难查的一类问题。
     for h in &req.hosts {
@@ -881,6 +1032,21 @@ const INV_CSS: &str = r##"<style>
     cursor:pointer;font-size:12px}
   .mem label:has(input:checked){background:var(--tint);border-color:var(--accent);color:var(--accent)}
   .mem input{display:none}
+  .meta-hint{font-size:12px;color:var(--faint)}
+  .inv-t tr.grow{cursor:pointer}
+  .inv-t tr.grow:hover{background:var(--surface-2)}
+  .inv-t tr.open{background:var(--surface-2)}
+  .gedit{background:var(--surface-2)}
+  .gedit td{padding:12px 14px}
+  .gedit .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+  .gedit .row b{font-size:12px;color:var(--muted);font-weight:600}
+  .gedit input{background:var(--surface);color:var(--text);border:1px solid var(--border);
+    border-radius:8px;padding:5px 9px;font:inherit;font-size:13px;width:150px}
+  .chipx{display:inline-flex;align-items:center;gap:5px;padding:2px 6px 2px 10px;
+    border-radius:99px;background:var(--surface);border:1px solid var(--border);font-size:12px}
+  .chipx button{border:0;background:transparent;color:var(--faint);cursor:pointer;
+    font-size:14px;line-height:1;padding:0 2px}
+  .chipx button:hover{color:var(--drift)}
 </style>"##;
 
 /// 选文件条 + 新建 inventory,两页共用的那段 JS。
@@ -926,7 +1092,8 @@ const HOSTS_HTML: &str = r##"<section class="panel">
     <label>口令<input id="h-pass" type="password" placeholder="留空则用密钥"></label>
     <label>密钥路径<input id="h-key" placeholder="~/.ssh/id_ed25519"></label>
     <label>变量<input id="h-vars" placeholder="k=v,k2=v2"></label>
-    <button class="btn primary" onclick="hostAdd()">新增主机</button>
+    <button class="btn primary" id="h-submit" onclick="hostSubmit()">新增主机</button>
+    <button class="btn" id="h-cancel" style="display:none" onclick="hostCancel()">取消编辑</button>
   </div>
   <div id="inv-body"></div>
 </section>
@@ -941,8 +1108,8 @@ const GROUPS_HTML: &str = r##"<section class="panel">
   </div>
   <div class="inv-form">
     <label>组名<input id="g-name" placeholder="db"></label>
-    <label style="flex:1">成员<span id="g-mem" class="mem"></span></label>
-    <button class="btn primary" onclick="groupSet()">建组 / 覆盖</button>
+    <button class="btn primary" onclick="groupNew()">新建空组</button>
+    <span class="meta-hint">空组是合法拓扑(单节点的 worker),建完点开就能加成员</span>
   </div>
   <div id="inv-body"></div>
 </section>
@@ -991,6 +1158,7 @@ const HOSTS_JS: &str = r##"
       body.innerHTML = '<div class="inv-empty">这份 inventory 还没有主机 —— 用上面的表单加第一台。</div>';
       return;
     }
+    lastRows = d.hosts;
     body.innerHTML = '<table class="inv-t"><thead><tr><th>状态</th><th>名字</th><th>地址</th><th>端口</th>'
       + '<th>用户</th><th>认证</th><th>组</th><th>变量</th><th></th></tr></thead><tbody>'
       + d.hosts.map(h => {
@@ -1004,22 +1172,66 @@ const HOSTS_JS: &str = r##"
           + '<td>'+h.port+'</td><td>'+esc(h.user)+'</td><td>'+esc(h.auth)+'</td>'
           + '<td>'+(h.groups||[]).map(g=>'<span class="tag">'+esc(g)+'</span>').join('')+'</td>'
           + '<td>'+vars+'</td>'
-          + '<td><button class="btn" onclick="probeOne('+q+')">重探</button> ' + del + '</td></tr>';
+          + '<td><button class="btn" onclick="probeOne('+q+')">重探</button> '
+          + (h.editable ? '<button class="btn" onclick="hostEdit('+q+')">编辑</button> ' : '')
+          + del + '</td></tr>';
       }).join('') + '</tbody></table>';
     paintDots();
   };
-  window.hostAdd = async function(){
+  // 同一个表单兼作新增与编辑 —— editing 非空即编辑态。
+  let editing = null, lastRows = [];
+  function formClear(){
+    for (const i of ['h-name','h-addr','h-port','h-pass','h-key','h-vars'])
+      document.getElementById(i).value='';
+    editing = null;
+    document.getElementById('h-submit').textContent = '新增主机';
+    document.getElementById('h-cancel').style.display = 'none';
+  }
+  window.hostCancel = formClear;
+  window.hostEdit = function(name){
+    const h = lastRows.find(x=>x.name===name); if (!h) return;
+    document.getElementById('h-name').value = h.name;
+    document.getElementById('h-addr').value = h.address;
+    document.getElementById('h-port').value = h.port;
+    document.getElementById('h-user').value = h.user;
+    document.getElementById('h-key').value  = h.key || '';
+    document.getElementById('h-vars').value =
+      Object.entries(h.vars||{}).map(([k,v])=>k+'='+v).join(',');
+    // 口令不回填(文件里是明文,但没必要再把它铺到页面上);留空 = 不改。
+    document.getElementById('h-pass').value = '';
+    document.getElementById('h-pass').placeholder = '留空 = 不改动原口令';
+    editing = name;
+    document.getElementById('h-submit').textContent = '保存修改';
+    document.getElementById('h-cancel').style.display = '';
+    say('正在编辑 '+name);
+  };
+  window.hostSubmit = async function(){
     const g = id => document.getElementById(id).value.trim();
     const vars = g('h-vars').split(',').map(s=>s.trim()).filter(Boolean)
       .map(s=>{const i=s.indexOf('='); return [s.slice(0,i), s.slice(i+1)];});
-    const r = await fetch('/api/inventory/host',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({path:sel.value, name:g('h-name'), address:g('h-addr'),
-        port:g('h-port')?parseInt(g('h-port')):null, user:g('h-user'),
-        password:document.getElementById('h-pass').value, key:g('h-key'), vars})});
+    const prev = editing ? lastRows.find(x=>x.name===editing) : null;
+    const pass = document.getElementById('h-pass').value;
+    const payload = {path:sel.value, name:g('h-name'), address:g('h-addr'),
+      port:g('h-port')?parseInt(g('h-port')):null, user:g('h-user'),
+      password:pass, key:g('h-key'), vars};
+    if (editing){
+      // 口令留空 = 保持原样。做法是把原行的口令读回来 —— 但 read 接口
+      // 刻意不回传明文口令,所以让服务端保留:留空且原来就是口令认证时,
+      // 前端不覆盖 key/password 两项之外的判断,交给下面的 keep_password。
+      payload.old_name = editing;
+      payload.keep_password = !pass && prev && prev.auth === 'password';
+    }
+    const r = await fetch('/api/inventory/host',
+      {method: editing ? 'PUT' : 'POST', headers:{'Content-Type':'application/json'},
+       body:JSON.stringify(payload)});
     const d = await r.json();
     if (d.error){ say(d.error, true); return; }
-    for (const i of ['h-name','h-addr','h-port','h-pass','h-key','h-vars']) document.getElementById(i).value='';
-    say('已加入 '+d.host+'(未探测)'); load();
+    const was = editing;
+    formClear();
+    say(was ? ('已保存 '+d.host + ((d.manual_groups||[]).length
+        ? ';这些块式组里的旧名字要手工改:'+d.manual_groups.join(', ') : ''))
+            : ('已加入 '+d.host+'(探测中)'));
+    load();
   };
   window.hostDel = async function(name){
     if (!confirm('从 inventory 里删掉主机 '+name+'?(机器本身不动;旧版存 .bak)')) return;
@@ -1049,47 +1261,96 @@ const HOSTS_JS: &str = r##"
 
 const GROUPS_JS: &str = r##"
   const body = document.getElementById('inv-body');
-  let hostNames = [];
+  let hostNames = [], groups = [], open = null;
   window.load = async function(){
     if (!sel.value){ body.innerHTML = '<div class="inv-empty">工作区还没有 inventory 文件。</div>'; return; }
     const d = await (await fetch('/api/inventory/read?path='+encodeURIComponent(sel.value))).json();
     if (d.error){ body.innerHTML = '<div class="inv-empty bad-d">'+esc(d.error)+'</div>'; return; }
+    // 可加的成员只来自这份 inventory 的真实主机 —— 打不出幽灵成员。
     hostNames = d.hosts.map(h=>h.name);
-    // 成员勾选来自这份 inventory 的真实主机 —— 打不出幽灵成员。
-    document.getElementById('g-mem').innerHTML = hostNames.length
-      ? hostNames.map(n=>'<label><input type="checkbox" value="'+esc(n)+'">'+esc(n)+'</label>').join('')
-      : '<span class="tag ro">先去"主机"页加机器</span>';
     if (!d.groups.length){
-      body.innerHTML = '<div class="inv-empty">还没有组。组名要与蓝图的 <code>fleet.groups</code> 对得上。</div>';
+      body.innerHTML = '<div class="inv-empty">还没有组。<br><br>'
+        + '组名要与蓝图的 <code>fleet.groups</code> 对得上 —— 对不上时 app 的 lint 会报。<br>'
+        + '上面填个组名点【新建空组】,建完点开就能加成员。</div>';
+      groups = [];
       return;
     }
+    groups = d.groups;
     body.innerHTML = '<table class="inv-t"><thead><tr><th>组</th><th>成员</th><th>嵌套组</th><th></th></tr></thead><tbody>'
       + d.groups.map(g => {
         const q = JSON.stringify(g.name).replace(/"/g,'&quot;');
         const act = g.editable
-          ? '<button class="btn" onclick="groupEdit('+q+','+JSON.stringify(g.hosts).replace(/"/g,'&quot;')+')">载入编辑</button> '
-            + '<button class="btn" onclick="groupDel('+q+')">删除</button>'
+          ? '<button class="btn" onclick="event.stopPropagation();groupDel('+q+')">删除</button>'
           : '<span class="tag ro">块式/嵌套组,只读</span>';
-        return '<tr><td class="mono">'+esc(g.name)+'</td>'
-          + '<td>'+(g.hosts||[]).map(h=>'<span class="tag">'+esc(h)+'</span>').join('')+'</td>'
+        const cls = g.editable ? 'grow' + (open===g.name?' open':'') : '';
+        const click = g.editable ? ' onclick="groupToggle('+q+')"' : '';
+        const rows = '<tr class="'+cls+'"'+click+'><td class="mono">'
+          + (g.editable ? (open===g.name?'▾ ':'▸ ') : '')+esc(g.name)+'</td>'
+          + '<td>'+((g.hosts||[]).length
+              ? g.hosts.map(h=>'<span class="tag">'+esc(h)+'</span>').join('')
+              : '<span class="tag ro">空组</span>')+'</td>'
           + '<td>'+(g.groups||[]).map(h=>'<span class="tag">@'+esc(h)+'</span>').join('')+'</td>'
           + '<td>'+act+'</td></tr>';
+        return rows + (open===g.name ? editorRow(g) : '');
       }).join('') + '</tbody></table>';
   };
-  window.groupEdit = function(name, hosts){
-    document.getElementById('g-name').value = name;
-    for (const cb of document.querySelectorAll('#g-mem input')) cb.checked = hosts.includes(cb.value);
-    say('已载入 '+name+' —— 改完点【建组 / 覆盖】');
-  };
-  window.groupSet = async function(){
-    const name = document.getElementById('g-name').value.trim();
-    const hosts = [...document.querySelectorAll('#g-mem input:checked')].map(x=>x.value);
+  // 展开行:成员增删(点 chip 上的 × 移除,勾选未入组的主机加入)、改名。
+  function editorRow(g){
+    const inn = hostNames.filter(n=>!g.hosts.includes(n));
+    const q = JSON.stringify(g.name).replace(/"/g,'&quot;');
+    return '<tr class="gedit"><td colspan="4">'
+      + '<div class="row"><b>成员</b>'
+      + (g.hosts.length ? g.hosts.map(h=>'<span class="chipx">'+esc(h)
+          + '<button title="移出本组" onclick="memDrop('+q+','+JSON.stringify(h).replace(/"/g,'&quot;')+')">×</button></span>').join('')
+        : '<span class="tag ro">还没有成员</span>')
+      + '</div>'
+      + '<div class="row"><b>加入</b>'
+      + (inn.length ? inn.map(h=>'<button class="btn" onclick="memAdd('+q+','
+          + JSON.stringify(h).replace(/"/g,'&quot;')+')">+ '+esc(h)+'</button>').join('')
+        : '<span class="tag ro">这份 inventory 的主机都已在组内</span>')
+      + '</div>'
+      + '<div class="row"><b>改名</b><input id="g-rn" value="'+esc(g.name)+'">'
+      + '<button class="btn" onclick="groupRename('+q+')">保存新名字</button></div>'
+      + '</td></tr>';
+  }
+  window.groupToggle = function(name){ open = (open===name ? null : name); load(); };
+  async function setMembers(name, hosts, note){
     const d = await (await fetch('/api/inventory/group',{method:'POST',
       headers:{'Content-Type':'application/json'},body:JSON.stringify({path:sel.value,name,hosts})})).json();
+    if (d.error){ say(d.error, true); return false; }
+    say(note); load(); return true;
+  }
+  window.memAdd = function(g, h){
+    const cur = groups.find(x=>x.name===g); if (!cur) return;
+    setMembers(g, cur.hosts.concat([h]), h+' 已加入 '+g);
+  };
+  window.memDrop = function(g, h){
+    const cur = groups.find(x=>x.name===g); if (!cur) return;
+    setMembers(g, cur.hosts.filter(x=>x!==h), h+' 已移出 '+g);
+  };
+  window.groupNew = async function(){
+    const name = document.getElementById('g-name').value.trim();
+    if (!name){ say('先填组名', true); return; }
+    // 空组照建 —— 建完展开就能加成员,不必先凑齐机器。
+    if (await setMembers(name, [], '已建组 '+name+'(空组,点开加成员)')){
+      document.getElementById('g-name').value=''; open = name;
+    }
+  };
+  window.groupRename = async function(oldName){
+    const nn = document.getElementById('g-rn').value.trim();
+    if (!nn || nn === oldName) return;
+    const cur = groups.find(x=>x.name===oldName); if (!cur) return;
+    // 先建新的再删旧的:反过来的话中间那一刻组没了,而删除是不可撤的。
+    const d = await (await fetch('/api/inventory/group',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({path:sel.value,name:nn,hosts:cur.hosts})})).json();
     if (d.error){ say(d.error, true); return; }
-    document.getElementById('g-name').value='';
-    for (const cb of document.querySelectorAll('#g-mem input')) cb.checked=false;
-    say('已写入组 '+d.group); load();
+    const r = await (await fetch('/api/inventory/group',{method:'DELETE',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({path:sel.value,name:oldName})})).json();
+    if (r.error){ say('新组已建,旧组没删掉:'+r.error, true); }
+    else say(oldName+' → '+nn+'(引用旧组名的蓝图会在 app 的 lint 里报)');
+    open = nn; load();
   };
   window.groupDel = async function(name){
     if (!confirm('删掉组 '+name+'?(引用它的蓝图会在 app 的 lint 里报出来)')) return;

@@ -60,18 +60,24 @@ fn file_sha(rel: &str) -> Option<String> {
     std::fs::read(rel).ok().map(|b| crater_core::bundle::sha256_hex(&b))
 }
 
-fn params_snapshot(sets: &[String]) -> String {
-    let mut v: Vec<&String> = sets.iter().collect();
+/// 参数 + 限定一起进快照。
+///
+/// limit 必须进来:对 n3 求出的计划,绝不该放行一次对全部 5 台的 apply ——
+/// 那是"看了一台的 diff、动了五台"。
+fn params_snapshot(sets: &[String], limit: &[String]) -> String {
+    let mut v: Vec<String> = sets.to_vec();
     v.sort();
-    v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("&")
+    let mut l: Vec<String> = limit.to_vec();
+    l.sort();
+    format!("{}|limit={}", v.join("&"), l.join(","))
 }
 
-fn write_gate(blueprint: &str, inventory: &str, sets: &[String]) {
+fn write_gate(blueprint: &str, inventory: &str, sets: &[String], limit: &[String]) {
     let _ = std::fs::create_dir_all(gate_dir());
     let doc = serde_json::json!({
         "blueprint_sha": file_sha(blueprint),
         "inventory_sha": if inventory.is_empty() { None } else { file_sha(inventory) },
-        "params": params_snapshot(sets),
+        "params": params_snapshot(sets, limit),
         "ts": now(),
         // 指纹在提交时钉(plan 展示的就是此刻的文件),但闸门要等 plan **成功**
         // 才生效 —— 失败的 plan 什么都没展示,不配放行 apply。
@@ -84,7 +90,7 @@ fn write_gate(blueprint: &str, inventory: &str, sets: &[String]) {
 }
 
 /// 校验闸门。Ok(()) = 放行;Err(原因) = 409。
-fn check_gate(blueprint: &str, inventory: &str, sets: &[String]) -> Result<(), String> {
+fn check_gate(blueprint: &str, inventory: &str, sets: &[String], limit: &[String]) -> Result<(), String> {
     let path = gate_dir().join(format!("{}.json", gate_key(blueprint, inventory)));
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Err("还没有对应的 Plan —— 先 Plan 看清将发生什么,再 Apply".into());
@@ -101,8 +107,8 @@ fn check_gate(blueprint: &str, inventory: &str, sets: &[String]) -> Result<(), S
     if !inventory.is_empty() && g["inventory_sha"].as_str() != file_sha(inventory).as_deref() {
         return Err("inventory 在 Plan 之后被改过 —— 请重新 Plan".into());
     }
-    if g["params"].as_str().unwrap_or("") != params_snapshot(sets) {
-        return Err("参数与 Plan 时不同 —— 换了 --set 就要重新 Plan".into());
+    if g["params"].as_str().unwrap_or("") != params_snapshot(sets, limit) {
+        return Err("参数或限定范围与 Plan 时不同 —— 换了 --set / --limit 就要重新 Plan".into());
     }
     Ok(())
 }
@@ -335,6 +341,9 @@ pub struct RunReq {
     pub closure: String,
     #[serde(default)]
     pub sets: Vec<String>,
+    /// 只对这些主机 / 组执行(`--limit`);空 = 整份 inventory。
+    #[serde(default)]
+    pub limit: Vec<String>,
 }
 
 pub async fn run(Json(req): Json<RunReq>) -> Response {
@@ -375,16 +384,20 @@ pub async fn run(Json(req): Json<RunReq>) -> Response {
         args.push("--set".into());
         args.push(kv.clone());
     }
+    if !req.limit.is_empty() {
+        args.push("--limit".into());
+        args.push(req.limit.join(","));
+    }
     // plan-gated apply:把"先看 diff 再动手"做成结构而非美德。
     if req.verb == "apply" {
-        if let Err(why) = check_gate(&req.blueprint, &req.inventory, &req.sets) {
+        if let Err(why) = check_gate(&req.blueprint, &req.inventory, &req.sets, &req.limit) {
             return err(StatusCode::CONFLICT, why);
         }
     }
     if req.verb == "plan" {
         // 闸门在**提交时**钉指纹(不是 job 结束时):plan 展示的就是此刻文件的
         // 内容,期间文件再改,apply 时对不上 —— 这正是想要的。
-        write_gate(&req.blueprint, &req.inventory, &req.sets);
+        write_gate(&req.blueprint, &req.inventory, &req.sets, &req.limit);
     }
     // verify 自动带 --json:对账看板的供血管道 —— 报告落在 job 目录,
     // finalize 时拆成每条部署记录一份快照。
@@ -710,6 +723,8 @@ pub async fn view_run() -> Html<&'static str> {
       </select></label>
     <label>蓝图 / 栈 <select id="r-bp"></select></label>
     <label>inventory <select id="r-inv"><option value="">(不指定 —— 本机)</option></select></label>
+    <label>限定范围(不选 = 整份 inventory)
+      <span id="r-limit" class="limitbox"><span class="hint">先选 inventory</span></span></label>
     <label>闭包(可选)<input id="r-closure" placeholder="path/to/x.closure.tar"></label>
     <label>--set(每行一个 k=v)<textarea id="r-sets" rows="3"></textarea></label>
     <button class="btn primary" onclick="launch()">启动</button>
@@ -722,6 +737,14 @@ pub async fn view_run() -> Html<&'static str> {
   .run-form select,.run-form input,.run-form textarea{background:var(--surface-2);color:var(--text);
     border:1px solid var(--border);border-radius:8px;padding:7px 10px;font:inherit}
   .btn.primary{background:var(--accent);color:#fff;border:0}
+  .limitbox{display:flex;gap:4px;flex-wrap:wrap;padding:6px;border:1px solid var(--border);
+    border-radius:8px;background:var(--surface-2);min-height:32px}
+  .limitbox label{border:1px solid var(--border);border-radius:99px;padding:2px 10px;
+    cursor:pointer;font-size:12px;color:var(--text);flex-direction:row}
+  .limitbox label:has(input:checked){background:var(--tint);border-color:var(--accent);color:var(--accent)}
+  .limitbox label.grp{border-style:dashed}
+  .limitbox input{display:none}
+  .limitbox .hint{font-size:12px;color:var(--faint)}
 </style>
 <script>
 (function(){
@@ -735,6 +758,23 @@ pub async fn view_run() -> Html<&'static str> {
       }
     }
   });
+  // 限定范围的候选来自选中的那份 inventory —— 主机与组同列(CLI --limit 两者都收)。
+  const invSel = document.getElementById('r-inv');
+  async function fillLimit(){
+    const box = document.getElementById('r-limit');
+    if (!invSel.value){ box.innerHTML = '<span class="hint">先选 inventory</span>'; return; }
+    try{
+      const d = await (await fetch('/api/inventory/read?path='+encodeURIComponent(invSel.value))).json();
+      if (d.error){ box.innerHTML = '<span class="hint">读不到:'+d.error+'</span>'; return; }
+      const esc = x => String(x).replace(/</g,'&lt;');
+      box.innerHTML = d.groups.map(g=>'<label class="grp" title="组"><input type="checkbox" value="'
+          + esc(g.name)+'">@'+esc(g.name)+'</label>').join('')
+        + d.hosts.map(h=>'<label title="主机"><input type="checkbox" value="'
+          + esc(h.name)+'">'+esc(h.name)+'</label>').join('')
+        || '<span class="hint">这份 inventory 是空的</span>';
+    }catch(e){ box.innerHTML = '<span class="hint">读取失败</span>'; }
+  }
+  invSel.addEventListener('change', fillLimit);
   window.launch = async () => {
     const verb = document.getElementById('r-verb').value;
     if ((verb === 'apply' || verb === 'destroy') &&
@@ -743,7 +783,8 @@ pub async fn view_run() -> Html<&'static str> {
     const r = await fetch('/api/run', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({verb, blueprint: document.getElementById('r-bp').value,
         inventory: document.getElementById('r-inv').value,
-        closure: document.getElementById('r-closure').value.trim(), sets})});
+        closure: document.getElementById('r-closure').value.trim(), sets,
+        limit: [...document.querySelectorAll('#r-limit input:checked')].map(x=>x.value)})});
     const d = await r.json();
     if (d.ok) htmx.ajax('GET', '/view/job/'+d.job, '#view');
     else document.getElementById('r-msg').textContent = d.error || '启动失败';
