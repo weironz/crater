@@ -835,6 +835,12 @@ async fn run_on_targets(
 }
 
 /// 只负责"把命令送到目标"的裸传输层(本机 / SSH),不懂物料。
+/// 只读探针用的连接。与部署走同一条建连路径 —— 免得"facts 能连、apply 连不上"
+/// 这种最误导人的差异。
+pub(crate) async fn probe_ctx(host: &Host) -> Result<Box<dyn Ctx>> {
+    build_transport(host).await
+}
+
 async fn build_transport(host: &Host) -> Result<Box<dyn Ctx>> {
     if host.is_local() {
         return Ok(Box::new(LocalCtx));

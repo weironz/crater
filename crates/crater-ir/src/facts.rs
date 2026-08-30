@@ -15,30 +15,52 @@ use std::collections::BTreeMap;
 use crate::eval::Yaml;
 use crate::verbs::Ctx;
 
-/// 一项可探测事实:名字 + 取值命令 + 归一化。
-struct FactSpec {
-    name: &'static str,
-    cmd: &'static str,
+/// 一项可探测事实:名字 + 取值命令 + 归一化 + 一句人话。
+///
+/// `doc` 与定义放在一起,是为了让 `crater facts` 能把它印出来 ——
+/// 此前白名单只存在于源码里,作者要知道 `substrate.` 下有什么,只能读这个
+/// 文件或者猜。类型的字段是可发现的,事实却不是,这在同一个项目里说不通。
+pub struct FactSpec {
+    pub name: &'static str,
+    pub cmd: &'static str,
+    pub doc: &'static str,
     normalize: fn(&str) -> String,
 }
 
+/// 白名单本身 —— `crater facts` 与将来的编辑器补全都读它。
+pub fn catalog() -> &'static [FactSpec] {
+    FACTS
+}
+
 const FACTS: &[FactSpec] = &[
-    FactSpec { name: "arch", cmd: "uname -m", normalize: normalize_arch },
-    FactSpec { name: "kernel", cmd: "uname -r", normalize: trim },
-    FactSpec { name: "hostname", cmd: "hostname", normalize: trim },
+    FactSpec {
+        name: "arch",
+        cmd: "uname -m",
+        doc: "CPU 架构,已归一到 OCI 平台名(amd64/arm64/arm)—— 物料 URL 可直接拼",
+        normalize: normalize_arch,
+    },
+    FactSpec { name: "kernel", cmd: "uname -r", doc: "内核版本", normalize: trim },
+    FactSpec {
+        name: "hostname",
+        cmd: "hostname",
+        doc: "机器自报的主机名。注意与 substrate.name 不同 —— 后者是 inventory 里的名字",
+        normalize: trim,
+    },
     FactSpec {
         name: "distro",
         cmd: ". /etc/os-release 2>/dev/null && echo \"$ID\"",
+        doc: "发行版 ID(ubuntu/debian/rocky…);容器里可能探不到,那时是空串",
         normalize: trim,
     },
     FactSpec {
         name: "version",
         cmd: ". /etc/os-release 2>/dev/null && echo \"$VERSION_ID\"",
+        doc: "发行版版本号(24.04 / 9.4…)",
         normalize: trim,
     },
     FactSpec {
-        // deb / rpm —— 决定包管理器分叉的那一位。
         name: "family",
+        doc: "包管理器族:debian / rhel / unknown —— 决定包名表走哪一支",
         cmd: "if command -v apt-get >/dev/null 2>&1; then echo debian; \
               elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then echo rhel; \
               else echo unknown; fi",
@@ -47,20 +69,21 @@ const FACTS: &[FactSpec] = &[
     FactSpec {
         name: "init",
         cmd: "if command -v systemctl >/dev/null 2>&1; then echo systemd; else echo none; fi",
+        doc: "init 系统:systemd / none(容器里常是 none)",
         normalize: trim,
     },
-    // 这台机器在机群里的**主地址**:按默认路由选出的那个,而不是 `hostname -I`
-    // 的第一个 —— 后者在有 docker0/cni0 的机器上会给出网桥地址,拿它去配
-    // apiserver 后端会得到一个别人连不上的集群。
     FactSpec {
         name: "ip",
+        doc: "主地址:按**默认路由**选出的那个。不用 `hostname -I` 的第一个 —— \
+              有 docker0/cni0 的机器上那会给出网桥地址,拿它配 apiserver 后端\
+              会得到一个别人连不上的集群",
         cmd: "ip -4 route get 1.1.1.1 2>/dev/null | grep -oE 'src [0-9.]+' | awk '{print $2}' | head -1",
         normalize: |s| s.trim().to_string(),
     },
-    // 默认路由所在网卡。keepalived 的 VIP 必须绑在它上面,写死 eth0 在
-    // ens18/enp0s3 这类命名下会直接失效。
     FactSpec {
         name: "iface",
+        doc: "默认路由所在网卡。keepalived 的 VIP 必须绑在它上面 —— \
+              写死 eth0 在 ens18/enp0s3 这类命名下会直接失效",
         cmd: "ip -4 route show default 2>/dev/null | grep -oE 'dev [^ ]+' | awk '{print $2}' | head -1",
         normalize: |s| s.trim().to_string(),
     },

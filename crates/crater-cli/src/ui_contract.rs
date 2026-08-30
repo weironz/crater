@@ -322,6 +322,17 @@ mod tests {
 // 认出 `key:` 前缀"这种启发式,恰恰在半成品文本上最有用 —— 坏输入降级
 // 成"不认识",永不报错(设计文档:坏输入降级)。
 
+/// 这一行里第一个 `${substrate.xxx}` 的字段名。
+///
+/// 只认前缀 `${substrate.` —— 不做通用表达式解析:这里要的是"给个提示",
+/// 认不出就退回类型卡,而不是把一个半成品表达式解析器塞进编辑器。
+fn substrate_ref(line: &str) -> Option<String> {
+    let i = line.find("${substrate.")?;
+    let rest = &line[i + "${substrate.".len()..];
+    let end = rest.find(|c: char| !(c.is_alphanumeric() || c == '_'))?;
+    (end > 0).then(|| rest[..end].to_string())
+}
+
 /// 光标行落在哪个类型上。
 ///
 /// **先认段落,再认条目**。此前只会"向上找 `- <type>:` 资源头",于是
@@ -410,6 +421,21 @@ fn locate(lines: &[&str], cur: usize) -> Option<(String, Option<String>)> {
     }
 }
 
+/// `GET /api/facts` —— `substrate.*` 白名单(编辑器补全与字段卡用)。
+pub async fn facts() -> impl IntoResponse {
+    let items: Vec<serde_json::Value> = crater_ir::facts::catalog()
+        .iter()
+        .map(|f| json!({ "name": f.name, "doc": f.doc, "cmd": f.cmd }))
+        .chain([
+            // 这两项来自 inventory,不是探出来的 —— 补全里也该有,
+            // 否则作者会以为 substrate 下只有能探的那些。
+            json!({ "name": "name", "doc": "inventory 里的机器名 —— 部署记录按它归档", "cmd": null }),
+            json!({ "name": "roles", "doc": "该机器所属的组(含嵌套传播)", "cmd": null }),
+        ])
+        .collect();
+    Json(json!({ "facts": items }))
+}
+
 #[derive(Deserialize)]
 pub struct CtxReq {
     pub text: String,
@@ -421,6 +447,26 @@ pub struct CtxReq {
 pub async fn context(Json(req): Json<CtxReq>) -> impl IntoResponse {
     let lines: Vec<&str> = req.text.lines().collect();
     let cur = req.line.saturating_sub(1);
+    // 光标那一行引用了 substrate.* 就先给事实卡 —— 它不在蓝图里定义,
+    // 而"这个名字合法吗、值从哪来"正是看到它时的第一个问题。
+    if let Some(l) = lines.get(cur) {
+        if let Some(f) = substrate_ref(l) {
+            return match crater_ir::facts::catalog().iter().find(|x| x.name == f) {
+                Some(spec) => Json(json!({
+                    "context": "fact", "field": spec.name,
+                    "card": { "doc": spec.doc, "cmd": spec.cmd },
+                })),
+                None if matches!(f.as_str(), "name" | "roles") => Json(json!({
+                    "context": "fact", "field": f,
+                    "card": { "doc": "来自 inventory,不是探出来的", "cmd": null },
+                })),
+                None => Json(json!({
+                    "context": "unknown_fact", "field": f,
+                    "known": crater_ir::facts::catalog().iter().map(|x| x.name).collect::<Vec<_>>(),
+                })),
+            };
+        }
+    }
     let Some((ty, field)) = locate(&lines, cur) else {
         return Json(json!({ "context": "none" }));
     };
@@ -532,6 +578,21 @@ mod projection_tests {
     use super::locate;
 
     const BP: &str = "name: demo\nversion: \"1\"\n\nmaterials:\n  - name: yq-bin\n    file: \"https://x/yq\"\n\nresources:\n  - package:\n      packages:\n        debian: [nginx]\n  - service:\n      name: nginx   # 服务名\n      enabled: true\n";
+
+    /// `${substrate.x}` 的识别只认前缀,不做通用表达式解析 ——
+    /// 认不出就退回类型卡,而不是把半成品解析器塞进编辑器。
+    #[test]
+    fn substrate_refs_are_recognised_by_prefix_only() {
+        use super::substrate_ref;
+        assert_eq!(
+            substrate_ref("    file: \"https://x/${substrate.arch}/y\""),
+            Some("arch".into())
+        );
+        assert_eq!(substrate_ref("  when: \"${substrate.family}\""), Some("family".into()));
+        // 不是 substrate 的插值不该被认成事实。
+        assert_eq!(substrate_ref("  v: ${params.version}"), None);
+        assert_eq!(substrate_ref("  普通的一行"), None);
+    }
 
     #[test]
     fn cursor_on_field_resolves_type_and_field() {

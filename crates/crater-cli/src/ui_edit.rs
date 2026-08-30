@@ -643,6 +643,21 @@ const EDIT_HTML: &str = r##"<section class="panel">
     const d = await (await fetch('/api/context',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({text:ta.value, line:curLine})})).json();
     const esc = x => String(x).replace(/</g,'&lt;');
+    if (d.context === 'fact'){
+      card.innerHTML = '<h4>substrate.'+esc(d.field)+'</h4>'
+        + '<div class="doc">'+esc(d.card.doc)+'</div>'
+        + (d.card.cmd ? '<div class="ty">探法:<code>'+esc(d.card.cmd)+'</code></div>'
+                      : '<div class="ty">来自 inventory,不经探测</div>')
+        + '<div class="doc" style="margin-top:8px">目标机事实,不在蓝图里定义 ——'
+        + ' 构建期没有机器可探,离线打包要用 <code>--for</code> 补上。</div>';
+      card.className='ed-card on'; return;
+    }
+    if (d.context === 'unknown_fact'){
+      card.innerHTML = '<h4>substrate.'+esc(d.field)+'</h4>'
+        + '<div class="err">不在白名单里 —— 求值会得到空。可用:</div>'
+        + '<ul class="flist">'+d.known.map(k=>'<li><b>'+esc(k)+'</b></li>').join('')+'</ul>';
+      card.className='ed-card on'; return;
+    }
     if (d.context === 'field'){
       const c = d.card;
       let h = '<h4>'+esc(d.type)+' · '+esc(d.field)

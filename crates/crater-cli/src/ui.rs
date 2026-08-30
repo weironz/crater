@@ -212,6 +212,7 @@ pub async fn serve(
         // ---- 契约 API(阶段 1)----
         // 把已有的机器可读契约接出来,供编辑器与表单消费。见 ui_contract.rs。
         .route("/api/types", get(crate::ui_contract::types))
+        .route("/api/facts", get(crate::ui_contract::facts))
         .route("/api/schema", post(crate::ui_contract::schema))
         .route("/api/lint", post(crate::ui_contract::lint))
         .route("/api/inventory/skeleton", post(crate::ui_contract::inventory_skeleton))

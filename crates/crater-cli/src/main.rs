@@ -36,6 +36,7 @@ mod ui_edit;
 mod ui_app;
 mod ui_overview;
 mod events;
+mod facts_cmd;
 mod out;
 mod ui_catalog;
 mod ui_inventory;
@@ -259,6 +260,12 @@ enum Cmd {
         /// Print to stdout instead of writing a file.
         #[arg(long = "stdout")]
         to_stdout: bool,
+    },
+    /// 列出 `substrate.*` 能写哪些目标机事实;给了 `-i`/`--host` 就真去探一遍,
+    /// 摆成 事实 × 主机 的表 —— `when:` 不成立时,要看的正是"那这台到底是什么"。
+    Facts {
+        #[command(flatten)]
+        target: TargetOpts,
     },
     /// Show the built-in resource types and their fields — the answer to
     /// "what fields does `systemd_unit` take, and which are required?".
@@ -726,6 +733,7 @@ async fn main() -> Result<()> {
             CreateWhat::Inventory { path, force } => target::create_inventory(&path, force),
         },
         Cmd::Fmt { file, split, join } => fmt_cmd::run(&file, split.as_deref(), join),
+        Cmd::Facts { target } => facts_cmd::run(&target).await,
         Cmd::Types { name, json } => types_cmd::run(name.as_deref(), json),
         Cmd::Schema { file, output, to_stdout } => {
             schema_cmd::run(file.as_deref(), output.as_deref(), to_stdout)
