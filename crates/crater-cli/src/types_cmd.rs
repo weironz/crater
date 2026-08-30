@@ -24,7 +24,7 @@ pub fn run(name: Option<&str>, json: bool) -> Result<()> {
 // ---------------------------------------------------------------- 列表
 
 fn print_index() {
-    for kind in [Kind::Resource, Kind::Procedural, Kind::Probe] {
+    for kind in [Kind::Resource, Kind::Procedural, Kind::Probe, Kind::Declaration] {
         let group: Vec<&BuiltinType> = types::BUILTINS.iter().filter(|t| t.kind == kind).collect();
         if group.is_empty() {
             continue;
@@ -57,7 +57,9 @@ fn print_card(name: &str) -> Result<()> {
 
     println!("{} — {}", t.name, t.doc);
     println!("归类: {}", t.kind.label());
-    if crater_ir::builtins::get(t.name).is_none() {
+    // 声明段条目本就没有五动词实现,不该被说成"尚未实现" —— 那会把
+    // "这个类型还欠一份实现"和"这个类型根本不是资源"混为一谈。
+    if t.kind != Kind::Declaration && crater_ir::builtins::get(t.name).is_none() {
         println!("状态: **尚未实现**(lint 认得这种写法,但 apply 会失败)");
     }
     println!();
@@ -103,7 +105,10 @@ fn print_card(name: &str) -> Result<()> {
         }
     }
 
-    println!("\n元字段(所有条目通用): name / on / when / each / deps");
+    // 元字段只对资源/探针/过程条目成立;声明段条目没有 target/each/deps。
+    if t.kind != Kind::Declaration {
+        println!("\n元字段(所有条目通用): name / target / when / each / deps");
+    }
     if !t.see_also.is_empty() {
         println!(
             "另见: {}",
@@ -185,7 +190,8 @@ mod tests {
         let pending = crater_ir::builtins::pending();
         assert!(pending.is_empty(), "有登记未实现的类型:{pending:?}");
         // 机制本身仍须完好:真出现 pending 时,卡上必须写明。
-        for t in types::BUILTINS {
+        // 声明段条目除外 —— 它没有五动词可实现(见 Kind::Declaration)。
+        for t in types::BUILTINS.iter().filter(|t| t.kind != Kind::Declaration) {
             assert!(crater_ir::builtins::get(t.name).is_some(), "{} 没有实现", t.name);
         }
     }

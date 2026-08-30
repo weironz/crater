@@ -344,6 +344,24 @@ pub struct RunReq {
     /// 只对这些主机 / 组执行(`--limit`);空 = 整份 inventory。
     #[serde(default)]
     pub limit: Vec<String>,
+
+    // ── build 专属 ──
+    /// 闭包输出路径(`-o`);空 = 用 `<蓝图名>.closure.tar`。
+    #[serde(default)]
+    pub output: String,
+    /// 目标画像(`--for k=v`)。物料 URL 引用 `${substrate.arch}` 这类目标事实时,
+    /// 构建期没有机器可探,**必须**由人给出要烤哪个变体。
+    #[serde(default)]
+    pub for_profile: Vec<String>,
+    /// 限制打包的架构(`--arch`)。
+    #[serde(default)]
+    pub arch: String,
+    /// 制品 tag(`-t`)。
+    #[serde(default)]
+    pub tag: String,
+    /// 绕过构建缓存(`--no-cache`)。
+    #[serde(default)]
+    pub no_cache: bool,
 }
 
 pub async fn run(Json(req): Json<RunReq>) -> Response {
@@ -410,11 +428,42 @@ pub async fn run(Json(req): Json<RunReq>) -> Response {
     if req.verb == "destroy" {
         args.push("--yes".into());
     }
-    // build 的蓝图参数形状不同(-f)。
+    // build 的蓝图参数形状不同(-f),而且它**重建整个 args** ——
+    // 所以 build 自己的参数必须全部写在这里面,写在上面会被这一行丢掉。
     if req.verb == "build" {
         args = vec!["build".into(), "-f".into(), bp.display().to_string()];
+        for kv in &req.sets {
+            args.push("--set".into());
+            args.push(kv.clone());
+        }
+        for kv in &req.for_profile {
+            if !kv.contains('=') {
+                return err(StatusCode::BAD_REQUEST, format!("--for 要写成 k=v:{kv}"));
+            }
+            args.push("--for".into());
+            args.push(kv.clone());
+        }
+        if !req.arch.trim().is_empty() {
+            args.push("--arch".into());
+            args.push(req.arch.trim().into());
+        }
+        if !req.tag.trim().is_empty() {
+            args.push("-t".into());
+            args.push(req.tag.trim().into());
+        }
+        if req.no_cache {
+            args.push("--no-cache".into());
+        }
         args.push("-o".into());
-        args.push(format!("{}.closure.tar", bp.file_stem().unwrap_or_default().to_string_lossy()));
+        // 输出路径可指定;不指定沿用 `<蓝图名>.closure.tar`(仍落在工作区内)。
+        args.push(if req.output.trim().is_empty() {
+            format!("{}.closure.tar", bp.file_stem().unwrap_or_default().to_string_lossy())
+        } else {
+            match crate::ui_edit::confine(req.output.trim()) {
+                Ok(p) => p.display().to_string(),
+                Err((c, m)) => return err(c, m),
+            }
+        });
     }
     let title = format!(
         "{} {}{}",
@@ -722,10 +771,17 @@ pub async fn view_run() -> Html<&'static str> {
         <option value="lint">lint</option>
       </select></label>
     <label>蓝图 / 栈 <select id="r-bp"></select></label>
-    <label>inventory <select id="r-inv"><option value="">(不指定 —— 本机)</option></select></label>
-    <label>限定范围(不选 = 整份 inventory)
+    <label class="f-deploy">inventory <select id="r-inv"><option value="">(不指定 —— 本机)</option></select></label>
+    <label class="f-deploy">限定范围(不选 = 整份 inventory)
       <span id="r-limit" class="limitbox"><span class="hint">先选 inventory</span></span></label>
-    <label>闭包(可选)<input id="r-closure" placeholder="path/to/x.closure.tar"></label>
+    <label class="f-deploy">闭包(可选)<input id="r-closure" placeholder="path/to/x.closure.tar"></label>
+    <label class="f-build">输出到<input id="r-out" placeholder="留空 = <蓝图名>.closure.tar"></label>
+    <label class="f-build">目标画像 --for(每行一个 k=v)
+      <textarea id="r-for" rows="2" placeholder="arch=amd64&#10;distro=ubuntu"></textarea>
+      <span class="hint">物料 URL 里写了 ${substrate.arch} 这类目标事实时必填 —— 构建期没有机器可探,要烤哪个变体只能由你说</span></label>
+    <label class="f-build">限制架构 --arch<input id="r-arch" placeholder="amd64 或 amd64,arm64"></label>
+    <label class="f-build">制品 tag<input id="r-tag" placeholder="留空 = crater/<name>:<version>"></label>
+    <label class="f-build inline"><input type="checkbox" id="r-nocache"> 绕过构建缓存(上游 tag 移动过时用)</label>
     <label>--set(每行一个 k=v)<textarea id="r-sets" rows="3"></textarea></label>
     <button class="btn primary" onclick="launch()">启动</button>
     <span id="r-msg" class="ed-status"></span>
@@ -745,6 +801,9 @@ pub async fn view_run() -> Html<&'static str> {
   .limitbox label.grp{border-style:dashed}
   .limitbox input{display:none}
   .limitbox .hint{font-size:12px;color:var(--faint)}
+  .run-form .hint{font-size:11.5px;color:var(--faint);line-height:1.5}
+  .run-form label.inline{flex-direction:row;align-items:center;gap:7px;color:var(--text);font-size:13px}
+  .run-form label.inline input{width:auto}
 </style>
 <script>
 (function(){
@@ -775,6 +834,21 @@ pub async fn view_run() -> Html<&'static str> {
     }catch(e){ box.innerHTML = '<span class="hint">读取失败</span>'; }
   }
   invSel.addEventListener('change', fillLimit);
+
+  // 每个动词的参数面其实不同 —— 一张"通用表单"要么少字段(build 的 --for
+  // 就是这么丢的),要么把不相干的字段摆给你看。按动词显隐。
+  const verbSel = document.getElementById('r-verb');
+  function syncFields(){
+    const v = verbSel.value;
+    const isBuild = v === 'build';
+    const isLocalOnly = v === 'lint' || isBuild;   // 这两个动词不连机器
+    for (const el of document.querySelectorAll('.f-build'))
+      el.style.display = isBuild ? '' : 'none';
+    for (const el of document.querySelectorAll('.f-deploy'))
+      el.style.display = isLocalOnly ? 'none' : '';
+  }
+  verbSel.addEventListener('change', syncFields);
+  syncFields();
   window.launch = async () => {
     const verb = document.getElementById('r-verb').value;
     if ((verb === 'apply' || verb === 'destroy') &&
@@ -784,7 +858,12 @@ pub async fn view_run() -> Html<&'static str> {
       body: JSON.stringify({verb, blueprint: document.getElementById('r-bp').value,
         inventory: document.getElementById('r-inv').value,
         closure: document.getElementById('r-closure').value.trim(), sets,
-        limit: [...document.querySelectorAll('#r-limit input:checked')].map(x=>x.value)})});
+        limit: [...document.querySelectorAll('#r-limit input:checked')].map(x=>x.value),
+        output: document.getElementById('r-out').value.trim(),
+        for_profile: document.getElementById('r-for').value.split('\n').map(s=>s.trim()).filter(Boolean),
+        arch: document.getElementById('r-arch').value.trim(),
+        tag: document.getElementById('r-tag').value.trim(),
+        no_cache: document.getElementById('r-nocache').checked})});
     const d = await r.json();
     if (d.ok) htmx.ajax('GET', '/view/job/'+d.job, '#view');
     else document.getElementById('r-msg').textContent = d.error || '启动失败';

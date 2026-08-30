@@ -119,6 +119,65 @@ fn classify(p: &Path) -> &'static str {
     }
 }
 
+/// 建出 `rel` 的父目录,全程不越出工作区。
+fn ensure_parent(rel: &str) -> Result<(), (StatusCode, String)> {
+    let p = Path::new(rel);
+    if p.is_absolute()
+        || p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir))
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("上传路径必须是工作区内的相对路径,且不能含 `..`:{rel}"),
+        ));
+    }
+    let root = root().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(parent) = root.join(rel).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("建目录失败:{e}")))?;
+    }
+    Ok(())
+}
+
+/// `POST /api/upload?path=…` —— 把一个文件收进工作区(物料/模板/证书)。
+///
+/// 这是"全程在 UI 上完成"的最后一处硬断点:蓝图的 `src:`、模板物料、
+/// `files/*.service` 都是**随蓝图走的本地文件**,以前只能在服务器上放好,
+/// UI 无从参与。
+///
+/// 原始字节直接进 body(不用 multipart):浏览器 `fetch(url, {body: file})`
+/// 就能发,少一层解析、少一个依赖,而路径本来就该由服务端禁闭校验。
+pub async fn upload(Query(q): Query<PathQuery>, body: axum::body::Bytes) -> impl IntoResponse {
+    // 父目录按需创建 —— 物料惯例住在蓝图旁边的 `files/` / `templates/`,
+    // 让人先去建目录是没有道理的。
+    //
+    // 顺序不能反:`resolve` 靠 canonicalize 做禁闭,因而**要求父目录已存在**;
+    // 所以先做纯词法检查(拒绝绝对路径与 `..`)再建目录 —— 词法检查在前,
+    // 建目录就不可能越出工作区;建完再走 resolve 拿到真实禁闭校验。
+    if let Err((c, m)) = ensure_parent(&q.path) {
+        return (c, Json(json!({ "error": m }))).into_response();
+    }
+    let path = match resolve(&q.path) {
+        Ok(p) => p,
+        Err((c, m)) => return (c, Json(json!({ "error": m }))).into_response(),
+    };
+    if path.exists() {
+        let _ = std::fs::copy(&path, path.with_extension("bak"));
+    }
+    match std::fs::write(&path, &body) {
+        Ok(()) => Json(json!({
+            "ok": true, "path": q.path, "bytes": body.len(),
+            "sha256": crater_core::bundle::sha256_hex(&body),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 /// `GET /api/file?path=…`
 pub async fn file_get(Query(q): Query<PathQuery>) -> impl IntoResponse {
     let path = match resolve(&q.path) {
@@ -251,6 +310,8 @@ const EDIT_HTML: &str = r##"<section class="panel">
     <button class="btn" onclick="edSkeleton()">生成 inventory 骨架</button>
     <button class="btn" onclick="edNew('blueprint')">新建蓝图</button>
     <button class="btn" onclick="edNew('app')">新建 App</button>
+    <button class="btn" onclick="edUpload()">上传物料</button>
+    <input type="file" id="ed-file-input" style="display:none" onchange="edUploadGo(this)">
     <span id="ed-status" class="ed-status"></span>
   </div>
   <div id="ed-wiz" class="ed-wiz" style="display:none"></div>
@@ -449,6 +510,30 @@ const EDIT_HTML: &str = r##"<section class="panel">
   // ── 新建向导:蓝图(选类型拼骨架)/ App(绑定蓝图×机群×参数)──
   // 表单字段全部来自后端(/api/types、/api/files):UI 不硬编码任何类型名。
   window.edWizHide = function(){ document.getElementById('ed-wiz').style.display='none'; };
+
+  // 上传物料:蓝图的 src:/模板/单元文件都是随蓝图走的本地文件,
+  // 这是"全程在 UI 上完成"最后一处硬断点。
+  window.edUpload = function(){ document.getElementById('ed-file-input').click(); };
+  window.edUploadGo = async function(input){
+    const f = input.files[0]; if (!f) return;
+    // 默认收进当前蓝图旁边的 files/ —— 与库里的惯例一致。
+    const dir = cur.includes('/') ? cur.slice(0, cur.lastIndexOf('/')+1) : '';
+    const guess = dir + (f.name.endsWith('.j2') ? 'templates/' : 'files/') + f.name;
+    const dest = prompt('存到工作区的哪个路径?', guess);
+    input.value = '';
+    if (!dest) return;
+    status.textContent = '上传中 ' + f.name + ' …';
+    const r = await fetch('/api/upload?path='+encodeURIComponent(dest), {method:'POST', body:f});
+    const d = await r.json();
+    if (d.error){ status.textContent = '上传失败:'+d.error; return; }
+    status.textContent = '已上传 ' + d.path + '(' + d.bytes + ' 字节,sha256 ' + d.sha256.slice(0,12) + '…)';
+    // 顺手把可粘贴的物料声明放到诊断区 —— 上传完最常做的下一件事就是引用它。
+    const rel = dir && d.path.startsWith(dir) ? d.path.slice(dir.length) : d.path;
+    diag.innerHTML = '<div class="ed-ok">可粘进 materials: 的声明 ——</div>'
+      + '<pre style="font-size:12px">  - { name: '
+      + rel.replace(/.*\//,'').replace(/\.[^.]+$/,'').replace(/[^A-Za-z0-9_-]/g,'-')
+      + ', file: ' + rel + ', sha256: "' + d.sha256 + '" }</pre>';
+  };
   window.edNew = async function(kind){
     const wiz = document.getElementById('ed-wiz');
     wiz.style.display='flex';

@@ -84,6 +84,13 @@ pub enum Kind {
     Probe,
     /// 过程性原语:主要住在 `procedures:` 的步骤里。
     Procedural,
+    /// 声明段的条目:住在顶层的 `materials:` 这类段落里,不是资源、没有五动词。
+    ///
+    /// 登记它的理由与登记资源类型完全相同 —— 骨架生成、字段卡、lint、
+    /// JSON Schema 四个消费者都需要知道"这一段能写哪些键"。此前 material
+    /// 的字段在 parse.rs 的 known_keys、jsonschema.rs 的 material_def 各写了
+    /// 一遍,而编辑器与骨架完全不知道它的存在。
+    Declaration,
 }
 
 impl Kind {
@@ -92,6 +99,7 @@ impl Kind {
             Kind::Resource => "期望态资源",
             Kind::Probe => "只读探针",
             Kind::Procedural => "过程性原语",
+            Kind::Declaration => "声明段条目",
         }
     }
 }
@@ -180,6 +188,19 @@ macro_rules! t {
 
 /// 内建类型表。顺序即 `crater types` 的展示顺序。
 pub static BUILTINS: &[BuiltinType] = &[
+    // ---------------- 声明段 ----------------
+    t!("material", Declaration, "闭包物料的声明:这份字节从哪来、怎么校验", [
+        f!("name", Str, req, "物料名 —— resources 里用 `material:` 引用它"),
+        f!("file", Str, one_of "来源", "远端 URL,或随蓝图走的本地相对路径;可含 ${} 插值"),
+        f!("image", Str, one_of "来源", "容器镜像 ref"),
+        f!("os_package", Str, one_of "来源", "OS 包闭包(按 family 的包名表)"),
+        f!("sha256", Str, opt, "内容摘要;有它 plan 期才能内容寻址比对,没有只能退回\"上游变没变\"的粗判据"),
+        f!("unzip", Str, opt, "下载物是 zip 时,取其中这个成员作为物料本体(控制端解包)"),
+        f!("when", Str, opt, "条件纳入:决定该物料属于哪个 flavor 子闭包"),
+    ], note: "三种来源恰择其一。URL 里引用 `${substrate.arch}` 这类目标事实时,\
+              `crater build` 无从推断要烤哪个变体,必须用 `--for arch=amd64` 给出目标画像。",
+      see: ["copy", "template", "unarchive"]),
+
     // ---------------- 文件与内容 ----------------
     t!("file", Resource, "路径的期望态:目录 / 存在 / 不存在,含权限属主", [
         f!("path", Path, req, "目标路径"),
@@ -525,6 +546,7 @@ fn kind_key(k: Kind) -> &'static str {
         Kind::Resource => "resource",
         Kind::Probe => "probe",
         Kind::Procedural => "procedural",
+        Kind::Declaration => "declaration",
     }
 }
 

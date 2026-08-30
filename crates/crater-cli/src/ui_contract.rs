@@ -202,26 +202,68 @@ pub struct SkeletonReq {
 }
 
 pub async fn blueprint_skeleton(Json(req): Json<SkeletonReq>) -> impl IntoResponse {
-    use crater_ir::types::{self, Req as FReq};
-    let mut y = format!(
-        "# {} —— 蓝图骨架(由类型登记表生成)。\n# 每个字段的注释来自 `crater types <类型>`;必填项已留 TODO。\nname: {}\nversion: \"1\"\n\nresources:\n",
-        req.name, req.name
-    );
-    let mut missing: Vec<String> = Vec::new();
-    for tname in &req.types {
-        let Some(t) = types::builtin(tname) else {
-            missing.push(tname.clone());
-            continue;
-        };
-        y.push_str(&format!("\n  # ── {} —— {}\n", t.name, t.doc));
-        y.push_str(&format!("  - {}:\n", t.name));
+    use crater_ir::types::{self, Kind, Req as FReq};
+
+    // 一个条目的字段行(必填与择一进骨架,可选项交给字段卡去发现)。
+    fn entry(t: &types::BuiltinType, indent: &str) -> String {
+        let mut out = String::new();
         for f in t.fields {
             let (mark, val) = match f.req {
                 FReq::Required => ("必填", "TODO".to_string()),
                 FReq::OneOf(g) => ("择一", format!("TODO(互斥组 {g},恰选一个)")),
-                FReq::Optional => continue, // 可选项不进骨架 —— 骨架要短,字段卡负责发现
+                FReq::Optional => continue,
             };
-            y.push_str(&format!("      {}: {}   # [{}] {}\n", f.name, val, mark, f.doc));
+            out.push_str(&format!("{indent}{}: {}   # [{}] {}\n", f.name, val, mark, f.doc));
+        }
+        out
+    }
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut picked: Vec<&'static types::BuiltinType> = Vec::new();
+    for tname in &req.types {
+        match types::builtin(tname) {
+            Some(t) => picked.push(t),
+            None => missing.push(tname.clone()),
+        }
+    }
+    // 按段落分组:声明段条目住 `materials:`,其余住 `resources:`。
+    // 选了 material 却不给它一个段落,骨架就等于教人写错。
+    let (decls, res): (Vec<&types::BuiltinType>, Vec<&types::BuiltinType>) = picked
+        .into_iter()
+        .partition(|t| t.kind == Kind::Declaration);
+
+    let mut y = format!(
+        "# {} —— 蓝图骨架(由类型登记表生成)。\n# 每个字段的注释来自 `crater types <类型>`;必填项已留 TODO。\nname: {}\nversion: \"1\"\n",
+        req.name, req.name
+    );
+    // params 总是提一句:它是蓝图对外的输入契约,而骨架不提就没人想得起来。
+    y.push_str(
+        "\n# params:   # 对外的输入契约 —— UI 的参数表单、--set、app 文件都读它\n#   version: { default: \"1.0.0\", desc: \"说明\" }\n",
+    );
+    if !decls.is_empty() {
+        y.push_str("\nmaterials:\n");
+        for t in &decls {
+            y.push_str(&format!("\n  # ── {} —— {}\n", t.name, t.doc));
+            y.push_str("  - ");
+            let body = entry(t, "    ");
+            // 第一行接在 `- ` 后面,其余行对齐。
+            let mut lines = body.lines();
+            if let Some(first) = lines.next() {
+                y.push_str(first.trim_start());
+                y.push('\n');
+            }
+            for l in lines {
+                y.push_str(l);
+                y.push('\n');
+            }
+        }
+    }
+    if !res.is_empty() {
+        y.push_str("\nresources:\n");
+        for t in &res {
+            y.push_str(&format!("\n  # ── {} —— {}\n", t.name, t.doc));
+            y.push_str(&format!("  - {}:\n", t.name));
+            y.push_str(&entry(t, "      "));
         }
     }
     Json(json!({ "yaml": y, "unknown_types": missing }))
@@ -280,46 +322,92 @@ mod tests {
 // 认出 `key:` 前缀"这种启发式,恰恰在半成品文本上最有用 —— 坏输入降级
 // 成"不认识",永不报错(设计文档:坏输入降级)。
 
-/// 光标行属于哪个资源类型:向上找缩进更浅的 `- <type>:` 资源头。
+/// 光标行落在哪个类型上。
+///
+/// **先认段落,再认条目**。此前只会"向上找 `- <type>:` 资源头",于是
+/// `materials:` 下的 `- name: yq-bin` 被当成了名为 `name` 的自定义类型 ——
+/// 段落决定条目的种类,这一步不能跳过。
 fn locate(lines: &[&str], cur: usize) -> Option<(String, Option<String>)> {
     let line = lines.get(cur)?;
-    let indent = line.len() - line.trim_start().len();
-    // 光标行本身:`- type:`(资源头)或 `field:`(字段行)。
-    let head = |l: &str| -> Option<String> {
-        let t = l.trim_start();
-        let t = t.strip_prefix("- ")?;
-        let (name, _) = t.split_once(':')?;
-        (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'))
-            .then(|| name.to_string())
-    };
-    let field = |l: &str| -> Option<String> {
-        let t = l.trim_start().strip_prefix("- ").unwrap_or(l.trim_start());
-        let (name, _) = t.split_once(':')?;
-        (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'))
-            .then(|| name.to_string())
-    };
-    if let Some(ty) = head(line) {
-        return Some((ty, None));
+    if line.trim().is_empty() || line.trim_start().starts_with('#') {
+        return None;
     }
-    let f = field(line)?;
-    // 向上扫:第一个缩进更浅的资源头就是所属类型;
-    // 扫到顶级键(缩进 0 的 `resources:` 等)截止 —— 不跨区乱认。
+    let indent = line.len() - line.trim_start().len();
+    if indent == 0 {
+        return None; // 顶级键不冒充字段
+    }
+
+    // 向上找最近的顶层段落名(缩进 0 的 `xxx:`)。
+    let mut section = None;
     for i in (0..cur).rev() {
         let l = lines[i];
-        if l.trim().is_empty() {
+        if l.trim().is_empty() || l.trim_start().starts_with('#') {
             continue;
         }
-        let ind = l.len() - l.trim_start().len();
-        if ind < indent {
-            if let Some(ty) = head(l) {
-                return Some((ty, Some(f)));
-            }
-            if ind == 0 {
-                return None;
-            }
+        if l.len() - l.trim_start().len() == 0 {
+            section = l.trim_end().strip_suffix(':').map(str::to_string);
+            break;
         }
     }
-    None
+
+    let key_of = |l: &str| -> Option<String> {
+        let t = l.trim_start().strip_prefix("- ").unwrap_or(l.trim_start());
+        let (name, _) = t.split_once(':')?;
+        let name = name.trim();
+        (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'))
+            .then(|| name.to_string())
+    };
+    // `- <type>:` 形式的条目头(值为空 —— 后面跟的是它的字段)。
+    let head_of = |l: &str| -> Option<String> {
+        let t = l.trim_start().strip_prefix("- ")?;
+        let (name, rest) = t.split_once(':')?;
+        let name = name.trim();
+        (!name.is_empty()
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && rest.trim().is_empty())
+        .then(|| name.to_string())
+    };
+
+    match section.as_deref() {
+        // 声明段:条目的**类型由段落定**,行上的键就是字段。
+        Some("materials") => Some(("material".to_string(), key_of(line))),
+        // 资源/探针段:条目头是 `- <type>:`,类型由它定。
+        _ => {
+            // 光标就在条目头上 → 给类型卡。
+            if let Some(ty) = head_of(line) {
+                return Some((ty, None));
+            }
+            // 单行 flow 写法 `- copy: { dest: ... }`:类型仍在本行。
+            let t = line.trim_start();
+            if let Some(rest) = t.strip_prefix("- ") {
+                if let Some((name, tail)) = rest.split_once(':') {
+                    let name = name.trim();
+                    if !tail.trim().is_empty()
+                        && crater_ir::types::builtin(name).is_some()
+                    {
+                        return Some((name.to_string(), None));
+                    }
+                }
+            }
+            let f = key_of(line)?;
+            for i in (0..cur).rev() {
+                let l = lines[i];
+                if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                    continue;
+                }
+                let ind = l.len() - l.trim_start().len();
+                if ind < indent {
+                    if let Some(ty) = head_of(l) {
+                        return Some((ty, Some(f)));
+                    }
+                    if ind == 0 {
+                        return None;
+                    }
+                }
+            }
+            None
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -443,19 +531,19 @@ pub async fn patch(Json(req): Json<PatchReq>) -> axum::response::Response {
 mod projection_tests {
     use super::locate;
 
-    const BP: &str = "name: demo\nversion: \"1\"\n\nresources:\n  - package:\n      packages:\n        debian: [nginx]\n  - service:\n      name: nginx   # 服务名\n      enabled: true\n";
+    const BP: &str = "name: demo\nversion: \"1\"\n\nmaterials:\n  - name: yq-bin\n    file: \"https://x/yq\"\n\nresources:\n  - package:\n      packages:\n        debian: [nginx]\n  - service:\n      name: nginx   # 服务名\n      enabled: true\n";
 
     #[test]
     fn cursor_on_field_resolves_type_and_field() {
         let lines: Vec<&str> = BP.lines().collect();
-        // L9 `name: nginx` 属于 service
+        // `name: nginx` 属于 service
         assert_eq!(
-            locate(&lines, 8),
+            locate(&lines, 12),
             Some(("service".into(), Some("name".into())))
         );
-        // L6 `packages:` 属于 package
+        // `packages:` 属于 package
         assert_eq!(
-            locate(&lines, 5),
+            locate(&lines, 9),
             Some(("package".into(), Some("packages".into())))
         );
     }
@@ -463,7 +551,22 @@ mod projection_tests {
     #[test]
     fn cursor_on_resource_head_gives_type_card() {
         let lines: Vec<&str> = BP.lines().collect();
-        assert_eq!(locate(&lines, 4), Some(("package".into(), None)));
+        assert_eq!(locate(&lines, 8), Some(("package".into(), None)));
+    }
+
+    /// 回归:materials 下的 `- name: yq-bin` 曾被当成名为 `name` 的自定义类型。
+    /// 段落决定条目种类,不能靠"向上找 `- x:`"猜。
+    #[test]
+    fn materials_entries_resolve_to_the_material_type() {
+        let lines: Vec<&str> = BP.lines().collect();
+        assert_eq!(
+            locate(&lines, 4),
+            Some(("material".into(), Some("name".into())))
+        );
+        assert_eq!(
+            locate(&lines, 5),
+            Some(("material".into(), Some("file".into())))
+        );
     }
 
     #[test]

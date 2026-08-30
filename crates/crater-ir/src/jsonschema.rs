@@ -332,21 +332,39 @@ fn param_def() -> Value {
     })
 }
 
+/// 物料的 schema **从登记表生成**,不再手抄一份。
+///
+/// 这里曾经硬编码过一份字段表 —— 于是 `material` 的字段在 parse.rs 的
+/// known_keys、这里、以及(缺席的)字段卡三处各写各的。登记进 BUILTINS
+/// 之后,加一个物料字段只需改登记表一处。
 fn material_def() -> Value {
+    let t = types::builtin("material").expect("material 必须在登记表里");
+    let mut props = Map::new();
+    for f in t.fields {
+        let mut p = Map::new();
+        // when 是条件表达式,复用已有的 condition 定义(它有自己的校验)。
+        if f.name == "when" {
+            p.insert("$ref".into(), json!("#/$defs/condition"));
+        } else {
+            p.insert("type".into(), json!("string"));
+            if f.name == "sha256" {
+                p.insert("pattern".into(), json!("^[0-9a-f]{64}$"));
+            }
+        }
+        if !f.doc.is_empty() {
+            p.insert("description".into(), json!(f.doc));
+        }
+        props.insert(f.name.into(), Value::Object(p));
+    }
+    // os_package 是按 family 的包名表,不是字符串 —— 放开它的类型约束。
+    if let Some(Value::Object(p)) = props.get_mut("os_package") {
+        p.remove("type");
+    }
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["name"],
-        "properties": {
-            "name":   { "type": "string" },
-            "file":   { "type": "string", "description": "远端 URL,或随蓝图走的本地相对路径" },
-            "image":  { "type": "string", "description": "容器镜像 ref" },
-            "os_package": { "description": "OS 包闭包" },
-            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$",
-                        "description": "内容摘要;有它 plan 期才能内容寻址比对" },
-            "unzip":  { "type": "string", "description": "下载物是 zip 时取其中这个成员" },
-            "when":   { "$ref": "#/$defs/condition" },
-        }
+        "required": t.required(),
+        "properties": Value::Object(props),
     })
 }
 

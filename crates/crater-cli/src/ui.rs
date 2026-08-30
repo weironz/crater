@@ -202,6 +202,12 @@ pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
         .route("/view/edit", get(crate::ui_edit::view_edit))
         .route("/api/files", get(crate::ui_edit::files))
         .route("/api/file", get(crate::ui_edit::file_get).post(crate::ui_edit::file_put))
+        // 物料可能是几十 MB 的二进制,默认 2MB 的 body 上限挡不住它。
+        .route(
+            "/api/upload",
+            post(crate::ui_edit::upload)
+                .layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024)),
+        )
         // ---- 作业系统(阶段①:执行打通)----
         .route("/api/run", post(crate::ui_run::run))
         // ---- 对账看板(阶段②)----

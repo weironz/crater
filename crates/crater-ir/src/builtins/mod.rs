@@ -55,18 +55,24 @@ pub fn get(name: &str) -> Option<&'static dyn ResourceType> {
 
 /// 已实现五动词的类型名(与 `types.rs` 的登记表比对,得出"还欠多少")。
 pub fn implemented() -> Vec<&'static str> {
-    crate::types::BUILTINS
-        .iter()
-        .map(|t| t.name)
+    executable()
         .filter(|n| get(n).is_some())
         .collect()
 }
 
-/// 已登记但**还没有**五动词实现的类型 —— 差距要可见,不可含糊。
-pub fn pending() -> Vec<&'static str> {
+/// 需要有实现的类型 —— **声明段条目不在此列**:`material` 不是资源,
+/// 没有 observe/diff/apply 可言,它登记进表只为让骨架、字段卡、lint 与
+/// JSON Schema 认得它。
+fn executable() -> impl Iterator<Item = &'static str> {
     crate::types::BUILTINS
         .iter()
+        .filter(|t| t.kind != crate::types::Kind::Declaration)
         .map(|t| t.name)
+}
+
+/// 已登记但**还没有**五动词实现的类型 —— 差距要可见,不可含糊。
+pub fn pending() -> Vec<&'static str> {
+    executable()
         .filter(|n| get(n).is_none())
         .collect()
 }
@@ -91,7 +97,8 @@ mod tests {
         let pending = pending();
         assert_eq!(
             implemented().len() + pending.len(),
-            crate::types::BUILTINS.len()
+            executable().count(),
+            "差值只在**可执行**类型之间成立 —— 声明段条目本就没有实现"
         );
         // 登记表已全部有实现。这条断言是防倒退的:再登记新类型而不实现,
         // 它会立刻变红,逼人要么补实现、要么明确把它列进欠债。
