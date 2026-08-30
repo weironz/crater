@@ -567,7 +567,129 @@ pub async fn inv_create(Json(req): Json<InvCreate>) -> Response {
     Json(json!({ "ok": true, "path": file })).into_response()
 }
 
-// ───────────────────────────── 连通性探测 ─────────────────────────────
+// ───────────────────── 连通性:后台探测 + 存活缓存 ─────────────────────
+
+/// 存活缓存:键是**连接身份**(user@address:port),不是 inventory 里的名字。
+///
+/// 同一台机器常同时出现在好几份 inventory 里(库里的 k8s/middleware/rustfs
+/// 示例都指着同一批实验机);按连接身份缓存,探一次全都亮,而不是按文件
+/// 重复捅同一台机器。
+#[derive(Clone)]
+struct Live {
+    ok: bool,
+    detail: String,
+    /// 上次出结果的时刻(epoch 秒);0 = 还没有过结果。
+    ts: u64,
+    /// 已经有一个后台探测在飞 —— 去重靠它,否则每次轮询都会再开一批。
+    probing: bool,
+}
+
+fn cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, Live>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Live>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// 并发闸:实验机往往是同一台物理机上的几个虚机,SSH 并发拉满只会互相拖慢。
+fn gate() -> &'static tokio::sync::Semaphore {
+    static S: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    S.get_or_init(|| tokio::sync::Semaphore::new(8))
+}
+
+/// 结果多久算旧。比页面轮询间隔大一个数量级 —— 轮询是为了取结果,不是为了触发探测。
+const TTL: u64 = 45;
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn conn_key(h: &crater_core::spec::Host) -> String {
+    format!("{}@{}:{}", h.user, h.address, h.port)
+}
+
+/// 派一次后台探测(已在飞则不重复派)。**立刻返回** —— 调用方永远不等 SSH。
+fn kick(h: crater_core::spec::Host) {
+    let key = conn_key(&h);
+    // 本机不走 SSH:连自己还要握手一次是白费的,而且本机永远"在线"。
+    if h.is_local() {
+        let mut c = cache().lock().unwrap();
+        c.insert(key, Live { ok: true, detail: "本机".into(), ts: now(), probing: false });
+        return;
+    }
+    {
+        let mut c = cache().lock().unwrap();
+        let e = c.entry(key.clone()).or_insert(Live {
+            ok: false,
+            detail: String::new(),
+            ts: 0,
+            probing: false,
+        });
+        if e.probing {
+            return;
+        }
+        e.probing = true;
+    }
+    tokio::spawn(async move {
+        let _permit = gate().acquire().await;
+        // 超时兜住"连得上但不回话"的机器 —— 那种最耗时,也最该显示成不通。
+        let r = tokio::time::timeout(std::time::Duration::from_secs(8), probe_one(h)).await;
+        let (ok, detail) = match r {
+            Err(_) => (false, "超时(8s)".to_string()),
+            Ok(Err(e)) => (false, format!("{e:#}")),
+            Ok(Ok(s)) => (true, s),
+        };
+        let mut c = cache().lock().unwrap();
+        c.insert(key, Live { ok, detail, ts: now(), probing: false });
+    });
+}
+
+/// `GET /api/inventory/liveness?path=…` —— 读缓存 + 顺手补探过期的。
+///
+/// **永不阻塞在 SSH 上**:页面拿到的是此刻已知的结果(附年龄),同时后台
+/// 把过期的重探一遍,下一轮轮询就新了。没人看的 inventory 一次都不探 ——
+/// 全局定时扫全库会把实验机 SSH 打满,而那些结果没人看。
+pub async fn liveness(Query(q): Query<PathQ>) -> Response {
+    let text = match read_text(&q.path) {
+        Ok(t) => t,
+        Err((c, m)) => return err(c, m),
+    };
+    let mut spec: crater_core::spec::CraterSpec = match serde_yaml::from_str(&text) {
+        Ok(s) => s,
+        Err(e) => return err(StatusCode::CONFLICT, format!("inventory 解析失败:{e}")),
+    };
+    spec.inventory.resolve();
+    let n = now();
+    let mut out = serde_json::Map::new();
+    for h in &spec.inventory.hosts {
+        let key = conn_key(h);
+        let cur = cache().lock().unwrap().get(&key).cloned();
+        let stale = match &cur {
+            None => true,
+            Some(l) => !l.probing && n.saturating_sub(l.ts) > TTL,
+        };
+        if stale {
+            kick(h.clone());
+        }
+        // 重新读一次:本机那条在 kick 里就落定了。
+        let l = cache().lock().unwrap().get(&key).cloned();
+        out.insert(
+            h.name.clone(),
+            match l {
+                Some(l) if l.ts > 0 => json!({
+                    "state": if l.ok { "up" } else { "down" },
+                    "detail": l.detail,
+                    "age": n.saturating_sub(l.ts),
+                    "probing": l.probing,
+                }),
+                _ => json!({ "state": "unknown", "detail": "", "age": null, "probing": true }),
+            },
+        );
+    }
+    Json(json!({ "hosts": out })).into_response()
+}
 
 #[derive(Deserialize)]
 pub struct ProbeReq {
@@ -576,10 +698,10 @@ pub struct ProbeReq {
     pub name: String,
 }
 
-/// `POST /api/inventory/probe` —— 真连一次:新加的主机到底通不通。
+/// `POST /api/inventory/probe` —— 强制重探(把结果标旧,立刻派探测)。
 ///
-/// 这是 UI 相对于手改 YAML 的实质增量 —— 口令打错、端口不对、密钥没授权,
-/// 在这里花两秒知道,而不是在一次 apply 跑到一半时知道。
+/// 同样不等结果:点完按钮点亮的是"探测中",结果由下一轮 liveness 轮询接住。
+/// 只有一条探测代码路径(kick),按钮与自动刷新不会各走各的、给出不同答案。
 pub async fn probe(Json(req): Json<ProbeReq>) -> Response {
     let text = match read_text(&req.path) {
         Ok(t) => t,
@@ -599,19 +721,11 @@ pub async fn probe(Json(req): Json<ProbeReq>) -> Response {
     if targets.is_empty() {
         return err(StatusCode::NOT_FOUND, "没有匹配的主机");
     }
-    let mut results = Vec::new();
-    for h in targets {
-        let label = format!("{}@{}:{}", h.user, h.address, h.port);
-        // 探测是只读的一条命令,超时兜住"连得上但不回话"的机器。
-        let r = tokio::time::timeout(std::time::Duration::from_secs(12), probe_one(h.clone())).await;
-        let (ok, detail) = match r {
-            Err(_) => (false, "超时(12s)".to_string()),
-            Ok(Err(e)) => (false, format!("{e:#}")),
-            Ok(Ok(s)) => (true, s),
-        };
-        results.push(json!({ "name": h.name, "target": label, "ok": ok, "detail": detail }));
+    for h in &targets {
+        cache().lock().unwrap().remove(&conn_key(h));
+        kick(h.clone());
     }
-    Json(json!({ "results": results })).into_response()
+    Json(json!({ "ok": true, "kicked": targets.len() })).into_response()
 }
 
 async fn probe_one(h: crater_core::spec::Host) -> anyhow::Result<String> {
@@ -745,6 +859,14 @@ const INV_CSS: &str = r##"<style>
     color:var(--muted);font-size:11.5px;margin:0 3px 3px 0}
   .tag.ro{background:var(--unknown-bg);color:var(--unknown)}
   .ok-d{color:var(--ok)} .bad-d{color:var(--drift)}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;
+    vertical-align:middle;background:var(--unknown)}
+  .dot.up{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 22%,transparent)}
+  .dot.down{background:var(--drift)}
+  .dot.probing{background:var(--accent);animation:dpulse 1.1s ease-in-out infinite}
+  @keyframes dpulse{0%,100%{opacity:1}50%{opacity:.25}}
+  .st{white-space:nowrap;font-size:12.5px}
+  .st .why{color:var(--faint);font-size:11.5px}
   .inv-form{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;
     border:1px solid var(--border);border-radius:10px;padding:12px;background:var(--surface-2);margin:12px 0}
   .inv-form label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
@@ -793,7 +915,7 @@ const HOSTS_HTML: &str = r##"<section class="panel">
   <div class="inv-bar">
     <select id="inv-file"></select>
     <button class="btn" onclick="invCreate()">新建 inventory</button>
-    <button class="btn" onclick="probeAll()">探测全部</button>
+    <button class="btn" onclick="probeAll()">立即重探</button>
     <span id="inv-msg" class="inv-msg"></span>
   </div>
   <div class="inv-form">
@@ -828,7 +950,38 @@ const GROUPS_HTML: &str = r##"<section class="panel">
 
 const HOSTS_JS: &str = r##"
   const body = document.getElementById('inv-body');
-  let probes = {};
+  // 存活状态由后台探测供血,页面只读缓存 —— 点开就有,不必点任何按钮。
+  let live = {}, liveTimer = null;
+  function dot(h){
+    const l = live[h.name];
+    if (!l || l.state === 'unknown')
+      return '<span class="st"><span class="dot probing"></span>探测中…</span>';
+    if (l.probing && l.state !== 'unknown')
+      return '<span class="st"><span class="dot '+l.state+'"></span>重探中…</span>';
+    const age = l.age == null ? '' : (l.age < 60 ? l.age+'s 前' : Math.floor(l.age/60)+'m 前');
+    if (l.state === 'up')
+      return '<span class="st"><span class="dot up"></span>在线'
+        + '<span class="why"> · '+esc(l.detail).slice(0,26)+' · '+age+'</span></span>';
+    return '<span class="st" title="'+esc(l.detail)+'"><span class="dot down"></span>不通'
+      + '<span class="why"> · '+esc(l.detail).slice(0,30)+'</span></span>';
+  }
+  async function pollLive(){
+    // 页面被 htmx 换走就自行了断 —— 否则每切一次视图都留下一个定时器。
+    // 按**节点身份**判断,不按 id:主机组页也有一个 id="inv-body",
+    // 用 getElementById 会认成"我还在",于是切走之后照样在捅机器。
+    if (!document.contains(body)){ clearTimeout(liveTimer); return; }
+    if (sel.value){
+      try{
+        const d = await (await fetch('/api/inventory/liveness?path='+encodeURIComponent(sel.value))).json();
+        if (d.hosts){ live = d.hosts; paintDots(); }
+      }catch(e){ /* 存活是增益:拿不到就保持上一次的显示 */ }
+    }
+    liveTimer = setTimeout(pollLive, 3000);
+  }
+  function paintDots(){
+    for (const td of document.querySelectorAll('#inv-body td[data-live]'))
+      td.innerHTML = dot({name: td.dataset.live});
+  }
   window.load = async function(){
     if (!sel.value){ body.innerHTML = '<div class="inv-empty">工作区还没有 inventory 文件。<br><br>'
       + '点上面的【新建 inventory】开一份,再往里加主机。</div>'; return; }
@@ -838,23 +991,22 @@ const HOSTS_JS: &str = r##"
       body.innerHTML = '<div class="inv-empty">这份 inventory 还没有主机 —— 用上面的表单加第一台。</div>';
       return;
     }
-    body.innerHTML = '<table class="inv-t"><thead><tr><th>名字</th><th>地址</th><th>端口</th>'
-      + '<th>用户</th><th>认证</th><th>组</th><th>变量</th><th>探测</th><th></th></tr></thead><tbody>'
+    body.innerHTML = '<table class="inv-t"><thead><tr><th>状态</th><th>名字</th><th>地址</th><th>端口</th>'
+      + '<th>用户</th><th>认证</th><th>组</th><th>变量</th><th></th></tr></thead><tbody>'
       + d.hosts.map(h => {
-        const p = probes[h.name];
-        const pd = p ? '<span class="'+(p.ok?'ok-d':'bad-d')+'" title="'+esc(p.detail)+'">'
-          + (p.ok?'✓ ':'✗ ') + esc(p.detail).slice(0,28) + '</span>' : '';
+        const q = JSON.stringify(h.name).replace(/"/g,'&quot;');
         const vars = Object.entries(h.vars||{}).map(([k,v])=>'<span class="tag">'+esc(k)+'='+esc(v)+'</span>').join('');
         const del = h.editable
-          ? '<button class="btn" onclick="hostDel('+JSON.stringify(h.name).replace(/"/g,'&quot;')+')">删除</button>'
+          ? '<button class="btn" onclick="hostDel('+q+')">删除</button>'
           : '<span class="tag ro">块式条目,只读</span>';
-        return '<tr><td class="mono">'+esc(h.name)+'</td><td class="mono">'+esc(h.address)+'</td>'
+        return '<tr><td data-live="'+esc(h.name)+'"></td><td class="mono">'+esc(h.name)+'</td>'
+          + '<td class="mono">'+esc(h.address)+'</td>'
           + '<td>'+h.port+'</td><td>'+esc(h.user)+'</td><td>'+esc(h.auth)+'</td>'
           + '<td>'+(h.groups||[]).map(g=>'<span class="tag">'+esc(g)+'</span>').join('')+'</td>'
-          + '<td>'+vars+'</td><td>'+pd+'</td>'
-          + '<td><button class="btn" onclick="probeOne('+JSON.stringify(h.name).replace(/"/g,'&quot;')+')">探测</button> '
-          + del + '</td></tr>';
+          + '<td>'+vars+'</td>'
+          + '<td><button class="btn" onclick="probeOne('+q+')">重探</button> ' + del + '</td></tr>';
       }).join('') + '</tbody></table>';
+    paintDots();
   };
   window.hostAdd = async function(){
     const g = id => document.getElementById(id).value.trim();
@@ -880,25 +1032,19 @@ const HOSTS_JS: &str = r##"
       : '已删除,并从各组成员里摘掉');
     load();
   };
-  window.probeOne = async function(name){
-    say('探测 '+name+' …');
+  // 手动只是"催一下":标旧 + 立刻派探测,结果仍由轮询接住 ——
+  // 只有一条探测路径,按钮和自动刷新不会给出两种答案。
+  async function nudge(name){
     const d = await (await fetch('/api/inventory/probe',{method:'POST',
       headers:{'Content-Type':'application/json'},body:JSON.stringify({path:sel.value,name})})).json();
-    if (d.error){ say(d.error, true); return; }
-    for (const r of d.results) probes[r.name] = r;
-    say('探测完成'); load();
-  };
-  window.probeAll = async function(){
-    say('探测全部主机 …(逐台串行,慢一点)');
-    const d = await (await fetch('/api/inventory/probe',{method:'POST',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify({path:sel.value,name:''})})).json();
-    if (d.error){ say(d.error, true); return; }
-    for (const r of d.results) probes[r.name] = r;
-    const bad = d.results.filter(r=>!r.ok).length;
-    say(bad ? (d.results.length-bad)+' 通 / '+bad+' 不通' : '全部 '+d.results.length+' 台可达');
-    load();
-  };
-  fileList().then(load);
+    if (d.error){ say(d.error, true); return false; }
+    if (live[name]) live[name].probing = true; else for (const k in live) live[k].probing = true;
+    paintDots();
+    return true;
+  }
+  window.probeOne = async function(name){ if (await nudge(name)) say('重探 '+name+' …'); };
+  window.probeAll = async function(){ if (await nudge('')) say('重探全部 …'); };
+  fileList().then(load).then(pollLive);
 "##;
 
 const GROUPS_JS: &str = r##"

@@ -221,6 +221,7 @@ pub async fn serve(bind: &str, port: u16, token: Option<String>) -> Result<()> {
             "/api/inventory/group",
             post(crate::ui_inventory::group_set).delete(crate::ui_inventory::group_remove),
         )
+        .route("/api/inventory/liveness", get(crate::ui_inventory::liveness))
         .route("/api/inventory/probe", post(crate::ui_inventory::probe))
         .route("/api/context", post(crate::ui_contract::context))
         .route("/api/patch", post(crate::ui_contract::patch))
