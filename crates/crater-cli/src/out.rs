@@ -120,11 +120,15 @@ pub fn line(msg: &str) {
         format!("{:<w$}  {msg}", s.host, w = s.width)
     };
     // 颜色只上在终端那一份 —— 日志文件里留裸文本,grep 和 diff 才用得了。
-    let colored = if s.host.is_empty() {
-        paint(&prefixed, s.color)
+    //
+    // **先上色再拼前缀**,不要拼完再切开:切开要用 split_at(按字节),
+    // 而列宽是按字符算的 —— 空行会越界 panic,多字节主机名会切在字符中间。
+    // 前缀的对齐用 `{:<w$}` 作用在**未上色的主机名**上,宽度才算得准
+    // (转义序列会被当成普通字符,让 padding 全错)。
+    let colored = if msg.is_empty() || s.host.is_empty() {
+        paint(msg, s.color)
     } else {
-        let (h, body) = prefixed.split_at(s.width);
-        format!("{h}{}", paint(body, s.color))
+        format!("{:<w$}  {}", s.host, paint(msg, s.color), w = s.width)
     };
     let term = if s.stamp && !msg.is_empty() {
         format!("{} {colored}", hhmmss())
@@ -153,10 +157,15 @@ pub fn err(msg: &str) {
     } else {
         format!("{:<w$}  {msg}", s.host, w = s.width)
     };
-    eprintln!("{}", if s.stamp && !msg.is_empty() {
-        format!("{} {prefixed}", hhmmss())
+    let colored = if msg.is_empty() || s.host.is_empty() {
+        msg.to_string()
     } else {
-        prefixed.clone()
+        format!("{:<w$}  {msg}", s.host, w = s.width)
+    };
+    eprintln!("{}", if s.stamp && !msg.is_empty() {
+        format!("{} {colored}", hhmmss())
+    } else {
+        colored
     });
     if let Some(mut f) = s.file.as_ref() {
         let _ = writeln!(f, "{} {prefixed}", hhmmss());
@@ -187,6 +196,18 @@ mod tests {
         assert_eq!(t.len(), 8, "HH:MM:SS");
         assert_eq!(&t[2..3], ":");
         assert_eq!(&t[5..6], ":");
+    }
+
+    /// 回归:曾经"先拼前缀再 split_at 切开上色",于是空行(长度 0)越界 panic,
+    /// 多字节主机名还会切在字符中间。改成先上色再拼,两个问题一起没了。
+    #[test]
+    fn blank_lines_and_multibyte_hosts_do_not_panic() {
+        enter("控制面节点");
+        line("");                 // 空行:曾经在这里 panic
+        line("  ✓ copy /x");
+        line("changed copy");
+        leave();
+        line("");
     }
 
     /// 列宽要按**字符数**算,不是字节数 —— 否则中文主机名会把对齐撑歪。
