@@ -1453,7 +1453,7 @@ fn host_label(h: &Host) -> String {
     }
 }
 
-fn load(path: &Path) -> Result<Blueprint> {
+pub(crate) fn load(path: &Path) -> Result<Blueprint> {
     // path-aware:根文件声明的 `parts:` 在这里被并回来,对所有命令一视同仁。
     let bp = parse::blueprint_from_path(path).map_err(|e| anyhow::anyhow!("{e}"))?;
 

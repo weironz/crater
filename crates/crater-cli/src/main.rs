@@ -37,6 +37,7 @@ mod ui_app;
 mod ui_overview;
 mod events;
 mod out;
+mod ui_catalog;
 mod ui_inventory;
 mod ui_run;
 

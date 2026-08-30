@@ -234,6 +234,8 @@ pub async fn serve(
         .route("/api/lint-project", post(crate::ui_app::lint_project))
         .route("/api/app/create", post(crate::ui_app::create_app))
         .route("/api/blueprint/skeleton", post(crate::ui_contract::blueprint_skeleton))
+        .route("/api/catalog", get(crate::ui_catalog::catalog))
+        .route("/api/catalog/fit", get(crate::ui_catalog::fit))
         .route("/api/inventory/read", get(crate::ui_inventory::inv_read))
         .route("/api/inventory/create", post(crate::ui_inventory::inv_create))
         .route(
@@ -252,6 +254,7 @@ pub async fn serve(
         .route("/api/patch", post(crate::ui_contract::patch))
         .route("/api/file/trash", post(crate::ui_edit::file_trash))
         .route("/api/file/rename", post(crate::ui_edit::file_rename))
+        .route("/view/catalog", get(crate::ui_catalog::view_catalog))
         .route("/view/overview", get(crate::ui_overview::view_overview))
         .route("/api/record/{id}", axum::routing::delete(crate::ui_overview::delete_record))
         .route("/api/jobs", get(crate::ui_run::jobs_fragment))
@@ -390,6 +393,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
   <aside class="sidebar">
     <div class="brand"><span class="mark">▲</span> <span>crater</span></div>
     <div class="navlabel">Overview</div>
+    <a class="nav" onclick="nav(this)" hx-get="/view/catalog" hx-target="#view" hx-swap="innerHTML"><span class="ico">▦</span><span>目录</span></a>
     <a class="nav active" onclick="nav(this)" hx-get="/view/overview" hx-target="#view" hx-swap="innerHTML"><span class="ico">◎</span><span>对账</span></a>
     <a class="nav" onclick="nav(this)" hx-get="/view/dashboard" hx-target="#view" hx-swap="innerHTML"><span class="ico">◧</span><span>仪表盘</span></a>
     <div class="navlabel">Fleet</div>
