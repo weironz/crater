@@ -463,7 +463,18 @@ async fn run_on_targets(
     );
     // 机群汇总:每台一行,跑完一起给 —— 逐台的 `执行:...` 散在几百行中间,
     // 五台机器跑完根本拼不出全貌。
-    let mut recap: Vec<(String, String)> = Vec::new();
+    // 每台一行**固定列**的计数器(ansible PLAY RECAP 的形状)。
+    // 原先各分支各塞一句话("无变更" / "changed=1 ok=0" / "计划 +1 ~0"),
+    // 列对不齐、也没法横向比较 —— 汇总的全部价值就在能横着扫。
+    #[derive(Default, Clone)]
+    struct Tally {
+        ok: usize,
+        changed: usize,
+        warn: usize,
+        failed: usize,
+        drifted: usize,
+    }
+    let mut recap: Vec<(String, Tally)> = Vec::new();
     for host in &hosts {
         let transport = build_transport(host).await?;
         crate::out::enter(&host.name);
@@ -528,9 +539,21 @@ async fn run_on_targets(
                 let _ = store.save(&prev);
             }
             let failed = report_drift(&verdict, previous.as_ref());
+            let n_drift = match &verdict {
+                crater_ir::state::DriftVerdict::Drifted(d) => d.len(),
+                crater_ir::state::DriftVerdict::Indeterminate { drifted, .. } => drifted.len(),
+                _ => 0,
+            };
             recap.push((
                 host.name.clone(),
-                if failed { "漂移".into() } else { "符合期望".into() },
+                Tally {
+                    // 逐资源计数,而不是"这台漂没漂" —— 一台漂了 1 项和漂了 15 项
+                    // 是两回事,汇总要能一眼看出轻重。
+                    ok: plan.items.len().saturating_sub(n_drift),
+                    drifted: n_drift,
+                    failed: usize::from(failed && n_drift == 0), // 连不上之类
+                    ..Default::default()
+                },
             ));
             crate::events::emit(serde_json::json!({
                 "e": "host_done", "host": host.name,
@@ -550,7 +573,17 @@ async fn run_on_targets(
                 say!("跳过执行(无变更)");
                 // 未变更的机器**也要进汇总** —— 汇总缺了它们,就无法回答
                 // "这次到底覆盖了几台",而那正是多机部署后第一个要确认的事。
-                recap.push((host.name.clone(), "无变更".into()));
+                // 已是期望态 ≠ 什么都没发生:这些资源都被观察过、判定为符合。
+                // 报 ok=0 会让"全都对"和"一个都没查"看起来一样。
+                recap.push((
+                    host.name.clone(),
+                    Tally {
+                        ok: plan.items.iter()
+                            .filter(|i| matches!(i.change, crater_ir::verbs::Change::Ok))
+                            .count(),
+                        ..Default::default()
+                    },
+                ));
                 crate::events::emit(serde_json::json!({
                     "e": "host_done", "host": host.name, "result": "noop",
                 }));
@@ -567,7 +600,17 @@ async fn run_on_targets(
             match plan::converge_with(&bp, &scope, &ctx, &on_step) {
                 Ok(report) => {
                     print_report(&report);
-                    recap.push((host.name.clone(), report.summary()));
+                    recap.push((
+                        host.name.clone(),
+                        Tally {
+                            ok: report.ok(),
+                            changed: report.changed(),
+                            warn: report.steps.iter()
+                                .filter(|(_, o)| *o == crater_ir::verbs::Outcome::Warn)
+                                .count(),
+                            ..Default::default()
+                        },
+                    ));
                     dances.extend(report.procedures_needed.iter().cloned());
                     // 收敛后**重新观察一次**再记账:记录的是现实,不是意图。
                     match plan::plan(&bp, &scope, &ctx) {
@@ -604,7 +647,10 @@ async fn run_on_targets(
                 }
                 Err(e) => {
                     failures += 1;
-                    recap.push((host.name.clone(), format!("失败:{e}")));
+                    recap.push((
+                        host.name.clone(),
+                        Tally { failed: 1, ..Default::default() },
+                    ));
                     oops!("执行失败 —— {e}");
                     crate::events::emit(serde_json::json!({
                         "e": "host_done", "host": host.name, "result": "failed",
@@ -617,7 +663,19 @@ async fn run_on_targets(
                 "e": "host_done", "host": host.name, "result": "ok",
             }));
         } else {
-            recap.push((host.name.clone(), format!("计划 {}", plan.summary())));
+            // plan 不执行,但"有几项已符合"是它算出来的结论,该报。
+            recap.push((
+                host.name.clone(),
+                Tally {
+                    ok: plan.items.iter()
+                        .filter(|i| matches!(i.change, crater_ir::verbs::Change::Ok))
+                        .count(),
+                    changed: plan.items.iter()
+                        .filter(|i| !matches!(i.change, crater_ir::verbs::Change::Ok))
+                        .count(),
+                    ..Default::default()
+                },
+            ));
             crate::events::emit(serde_json::json!({
                 "e": "host_done", "host": host.name, "result": "planned",
             }));
@@ -628,9 +686,20 @@ async fn run_on_targets(
     crate::out::leave();
     if recap.len() > 1 {
         say!("── 汇总 ──");
-        let w = recap.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
-        for (name, s) in &recap {
-            say!("  {:<w$}  {s}", name, w = w);
+        let w = recap.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0).max(8);
+        for (name, t) in &recap {
+            // 固定列、恒定出现(哪怕是 0)—— 只在非零时才印的计数器,
+            // 会让"这次没有失败"和"这个字段忘了统计"看起来一模一样。
+            say!(
+                "  {:<w$} : ok={:<4} changed={:<4} warn={:<4} failed={:<4}{}",
+                name,
+                t.ok,
+                t.changed,
+                t.warn,
+                t.failed,
+                if mode == Mode::Verify { format!(" drifted={}", t.drifted) } else { String::new() },
+                w = w
+            );
         }
         say!();
     }

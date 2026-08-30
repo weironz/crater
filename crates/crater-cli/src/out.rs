@@ -21,12 +21,22 @@ struct Sink {
     host: String,
     /// 主机名列宽:各行的正文要对齐,否则加了前缀反而更难扫。
     width: usize,
+    /// 上色。只在真终端上开 —— 重定向到文件或管道时,转义序列是垃圾。
+    /// 同时尊重 NO_COLOR(https://no-color.org)。
+    color: bool,
 }
 
 fn sink() -> &'static Mutex<Sink> {
     static S: std::sync::OnceLock<Mutex<Sink>> = std::sync::OnceLock::new();
     S.get_or_init(|| {
-        Mutex::new(Sink { file: None, stamp: false, host: String::new(), width: 0 })
+        Mutex::new(Sink {
+            file: None,
+            stamp: false,
+            host: String::new(),
+            width: 0,
+            color: std::io::IsTerminal::is_terminal(&std::io::stdout())
+                && std::env::var_os("NO_COLOR").is_none(),
+        })
     })
 }
 
@@ -64,6 +74,30 @@ pub fn leave() {
     }
 }
 
+/// 状态 → 颜色。绿=没动、黄=改了、红=坏了、青=跳过、灰=说不清。
+///
+/// 与 ansible 的配色对齐是刻意的:一眼扫过去分辨 changed 和 ok,是这类
+/// 工具最高频的动作,没有理由让人重新学一套颜色。
+fn paint(msg: &str, color: bool) -> String {
+    if !color {
+        return msg.to_string();
+    }
+    let body = msg.trim_start();
+    let code = if body.starts_with("changed") || body.starts_with('~') || body.starts_with('+') {
+        "33" // 黄:动过
+    } else if body.starts_with("ok") || body.starts_with('✓') {
+        "32" // 绿:本就如此
+    } else if body.starts_with("warn") || body.starts_with('?') {
+        "90" // 灰:说不清
+    } else if body.starts_with("skipped") || body.starts_with('-') {
+        "36" // 青:跳过
+    } else {
+        return msg.to_string();
+    };
+    let indent = &msg[..msg.len() - body.len()];
+    format!("{indent}\x1b[{code}m{body}\x1b[0m")
+}
+
 fn hhmmss() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -85,10 +119,17 @@ pub fn line(msg: &str) {
     } else {
         format!("{:<w$}  {msg}", s.host, w = s.width)
     };
-    let term = if s.stamp && !msg.is_empty() {
-        format!("{} {prefixed}", hhmmss())
+    // 颜色只上在终端那一份 —— 日志文件里留裸文本,grep 和 diff 才用得了。
+    let colored = if s.host.is_empty() {
+        paint(&prefixed, s.color)
     } else {
-        prefixed.clone()
+        let (h, body) = prefixed.split_at(s.width);
+        format!("{h}{}", paint(body, s.color))
+    };
+    let term = if s.stamp && !msg.is_empty() {
+        format!("{} {colored}", hhmmss())
+    } else {
+        colored
     };
     println!("{term}");
     // 日志文件**恒带时间戳**:事后翻日志时"这步花了多久"是第一个问题。
