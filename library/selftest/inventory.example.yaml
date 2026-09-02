@@ -1,0 +1,19 @@
+# selftest 的机群示例。
+#
+# fleet-check 要的是 **≥3 台 controlplane + ≥2 台 worker** —— 少于这个数,
+# `first()` / `rest()` / `throttle` 那几条判据根本区分不出来:一台机器的
+# 机群里,"只落一台"与"全落"长得一模一样。
+#
+# 口令走 `${env:LAB_PASS}` 而不是写字面量:这个文件是要进版本库的,而
+# **git 历史删不掉** —— 一旦推上去,正确做法就变成"先换口令,再谈清理历史"。
+# 三条外置路径按优先级:`key:`(最好)> `password_file:` > `${env:VAR}`。
+inventory:
+  hosts:
+    - { name: cp1, address: 10.0.0.11, user: root, password: "${env:LAB_PASS}" }
+    - { name: cp2, address: 10.0.0.12, user: root, password: "${env:LAB_PASS}" }
+    - { name: cp3, address: 10.0.0.13, user: root, password: "${env:LAB_PASS}" }
+    - { name: w1,  address: 10.0.0.21, user: root, password: "${env:LAB_PASS}" }
+    - { name: w2,  address: 10.0.0.22, user: root, password: "${env:LAB_PASS}" }
+  groups:
+    controlplane: { hosts: [cp1, cp2, cp3] }
+    worker:       { hosts: [w1, w2] }

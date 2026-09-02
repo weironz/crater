@@ -1,12 +1,16 @@
-# yq:单二进制工具下发 —— 最小的蓝图长什么样。
+# yq —— 单二进制工具下发。最小交付包长什么样。
 name: yq
 version: "1"
-description: yq 命令行工具
+description: yq 命令行 YAML 处理器
 
 params:
-  version: { default: "4.44.3", stage: build }
+  # stage: build —— 这个参数在**烤闭包**时就要定死(它决定下载哪个 URL),
+  # 不是部署时才问。UI 的参数表单会据此标注。
+  version: { default: "4.44.3", stage: build, desc: "上游 release tag" }
 
 materials:
+  # ${substrate.arch} 是**目标事实**:构建期没有机器可探,所以离线打包时
+  # 必须 `--for arch=amd64` 告诉它烤哪个变体。
   - name: yq-bin
     file: "https://github.com/mikefarah/yq/releases/download/v${params.version}/yq_linux_${substrate.arch}"
 
