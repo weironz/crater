@@ -1,0 +1,29 @@
+# Windows 能不能编 —— 一次性探针,不是发版流程的一部分。
+#
+# 为什么要单独探:发版矩阵只有 musl。要不要给 Windows 写安装脚本,取决于
+# **有没有 Windows 二进制**,而那取决于它编不编得过。本机交叉编译卡在
+# aws-lc-sys 缺 mingw 上,那是本机环境的事,证明不了 Windows 本身不行。
+name: windows-probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # 不用 ./.github/actions/setup-rust:那个 action 覆盖 RUSTFLAGS 是为了
+      # 盖掉仓库 .cargo/config.toml 里给 **gnu target** 指定的 mold,而
+      # Windows 走的是 msvc target,那条配置本就不生效。
+      - name: 编 crater-cli
+        run: cargo build --release -p crater-cli
+
+      - name: 跑起来看看
+        run: |
+          .\target\release\crater.exe --version
+          .\target\release\crater.exe types | Select-Object -First 5
+          .\target\release\crater.exe lint library\yq\yq.blueprint.yaml
