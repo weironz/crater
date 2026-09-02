@@ -1903,3 +1903,33 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - 顺带还一笔文档债:storage-design.md 的"期望态 → git"补上更正 ——
   **crater 本身不依赖 git**(二进制零处调用、依赖里没有 git 库、镜像不含
   git),那一节讲的是文件该怎么管,不是运行时要求。初稿把两件事写混了。
+
+### D-123:包分发走 OCI 分层制品,搜索走索引文件(设计,未实现)
+
+详见 `docs/research/pkg-design.md`。
+
+- **起因**:「要不要做成 Helm chart 那种,YAML 打成 OCI,`crater search` /
+  `crater install` 一键安装?crater 有两个可分发物(蓝图包小、物料闭包大)
+  怎么办?」
+- **核心判断**:"从 OCI 只取 YAML"不是待验证的想法 —— 旧 task 管线 D-087 已
+  真机验证过(Docker Hub 瘦拉 16K,全量 9.6M)。它同时是协议原生能力(层独立
+  内容寻址)和行业惯例(Helm 自己跳过 `.prov` 层;KitOps / Ollama / timoni /
+  Flux `layerSelector` 都是"小配置层 + 大数据层按需拉")。**两个可分发物不是
+  问题,是分层的理由**:同一 manifest,蓝图层 + 物料层按 mediaType 区分;架构
+  用 image index `platform` 分变体,蓝图层跨架构同 digest。
+- **不照抄 Helm 的两处**:Helm 只有一个可分发物;`helm search repo` 在 OCI 上
+  根本不工作(OCI 无搜索、`_catalog` 不在规范里且 Docker Hub 禁用)。搜索走
+  Helm 经典 repo 那种静态 `index.yaml`,能随闭包进 U 盘。
+- **兼容性地板 = OCI 1.0 风格**:自定义 `config.mediaType` + 真实 config blob +
+  自定义层 mediaType。不依赖 `artifactType` + 空描述符(ACR 拒收,与本仓库
+  buildx provenance 撞的是同一堵墙)、referrers API(GHCR / Docker Hub 无)、
+  `_catalog`。版本发现只用 `tags/list`。
+- **config blob 就是 `crater inspect` 的契约**(参数 / 机群 / 物料清单):
+  `pkg inspect` 与 UI 远端目录只拉 manifest + config,零层下载。
+- **`install` 不省 plan 闸门**:pull → 契约 → fit → app 文件 → plan,停在闸门前,
+  `--yes` 才 apply。命令面归 `crater pkg` 子命令,不新增 `crater ls`(撞名)。
+- **分四阶段**:格式 + push/pull → 闭包层 + 多架构 → install → 索引与搜索;
+  阶段 4 在包不到十几个之前不做。第一阶段必须实测 **ACR 个人版收不收自定义
+  制品**(文档写的是企业版专属),不收就用 Docker Hub / zot。
+- **调研的局限**:四条线并行完成,交叉核对因配额只做了一部分;BuildKit
+  注解分变体的先例引用已更正为其 attestation storage 文档。
