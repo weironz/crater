@@ -629,6 +629,12 @@ pub fn resolve(name: &str, repo: Option<&str>) -> Result<String> {
         Some((a, b)) => (a, Some(b)),
         None => (name, None),
     };
+    // 范围写错要**当场报错**,不要退化成"精确匹配这串字符" —— 后者的表现是
+    // "仓库里没有 `^` 版",一条把人引向仓库而不是引向拼写的错误。
+    let req = want_ver
+        .map(crate::version_req::VersionReq::parse)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut found: Vec<(String, &Entry)> = Vec::new();
     let repos = cached();
     for (rn, idx) in &repos {
@@ -638,8 +644,10 @@ pub fn resolve(name: &str, repo: Option<&str>) -> Result<String> {
         let Some(versions) = idx.entries.get(n) else {
             continue;
         };
-        let pick = match want_ver {
-            Some(v) => versions.iter().find(|e| e.version == v),
+        // 版本可以是范围(`4.*` / `^4.44` / `>=4.44, <5`)。`versions` 已按
+        // semver 降序,所以第一个合格的就是最高的合格者。
+        let pick = match &req {
+            Some(r) => versions.iter().find(|e| r.matches(&e.version)),
             None => versions.first(),
         };
         if let Some(e) = pick {

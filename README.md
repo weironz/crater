@@ -104,6 +104,18 @@ crater pkg tags ghcr.io/acme/yq        # 远端有哪些版本(semver 序,最新
 crater pkg index oci://ghcr.io/acme/yq -o index.yaml   # 把它们做成可搜的索引
 ```
 
+**版本可以写范围**,直连引用和包名两条路都支持 —— 靠 `tags/list` 解析,
+不需要索引:
+
+```bash
+crater apply 'oci://ghcr.io/acme/yq:4.*'   # 4 这条线上的最新
+crater apply 'yq:^4.44'                    # >=4.44,不跨主版本
+crater apply 'yq:~4.44.1'                  # 只放行补丁号
+crater apply 'yq:>=4.10, <4.44'            # 逗号/空格分隔 = 全部满足
+```
+
+(引号别忘了 —— `*` 会被 shell 展开。)
+
 装过之后机群与参数都记在 `yq.app.yaml` 里,后面就是一个词:
 
 ```bash

@@ -57,6 +57,7 @@ mod ui_inventory;
 mod ui_overview;
 mod ui_run;
 mod update;
+mod version_req;
 
 use std::path::{Path, PathBuf};
 
@@ -172,6 +173,10 @@ enum Cmd {
     ///      `reg/ns/x:1`         同上,协议头可省
     ///   4. `yq` / `yq:4.44.3` → 包名,去已配仓库的索引里查
     ///
+    /// 版本位可以是**范围**,两条路都支持:`4.*`、`^4.44`、`~4.44.1`、
+    /// `>=4.10, <4.44`。不写版本就是最新。范围解析靠 registry 的 `tags/list`
+    /// —— 不需要索引,发现版本是 OCI 自带的能力。
+    ///
     /// 第 3、4 条就是 helm 的两种用法:引用直连,或先 `repo add` 再用名字。
     /// 索引只为回答"**有哪些包**" —— OCI 规范里没有搜索,所以那件事必须靠
     /// 一个索引文件,而它能随闭包一起进 U 盘。
@@ -186,6 +191,10 @@ enum Cmd {
 用法示例:
   # 直连 OCI 引用 —— 不需要配任何仓库
   crater apply oci://ghcr.io/acme/yq:4.44.3 -i inventory.yaml
+
+  # 版本范围:问 registry 有哪些版本,挑最高的合格者
+  crater apply 'oci://ghcr.io/acme/yq:4.*' -i inventory.yaml
+  crater apply 'yq:^4.44' -i inventory.yaml
 
   # 或者先订阅一个索引,之后用名字
   crater repo add lab https://example.com/index.yaml

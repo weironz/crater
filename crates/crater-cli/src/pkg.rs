@@ -896,6 +896,28 @@ fn compact(v: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// 切 tag 只能看**最后一段**里的冒号。
+    ///
+    /// `localhost:5000/ns/yq:4.*` 里第一个冒号是端口 —— 按第一个冒号切会得到
+    /// 仓库 `localhost`、tag `5000/ns/yq:4.*`,一个根本不存在的东西,而报错会是
+    /// "localhost 上没有匹配的版本",把人引向 registry 而不是引向这行代码。
+    #[test]
+    fn splitting_a_tag_must_not_trip_on_the_port_colon() {
+        assert_eq!(
+            super::split_tag("localhost:5000/ns/yq:4.*"),
+            Some(("localhost:5000/ns/yq", "4.*"))
+        );
+        assert_eq!(
+            super::split_tag("ghcr.io/acme/yq:0.0.*"),
+            Some(("ghcr.io/acme/yq", "0.0.*"))
+        );
+        // 带端口但**没写 tag** —— 不能把端口当成 tag
+        assert_eq!(super::split_tag("localhost:5000/ns/yq"), None);
+        assert_eq!(super::split_tag("ghcr.io/acme/yq"), None);
+        // 没有仓库路径的裸名字
+        assert_eq!(super::split_tag("yq:4.44.3"), Some(("yq", "4.44.3")));
+    }
+
     use super::*;
 
     #[test]
@@ -1303,6 +1325,50 @@ pub struct InstallOpts {
     pub force: bool,
 }
 
+/// 引用的 tag 位是范围时,去 registry 问版本、挑最高的合格者。
+///
+/// **精确 tag 直接返回,不问。** 少一次网络往返只是顺带的;真正的理由是
+/// 有些仓库只给 pull 权限、列不了 tag —— 精确引用在那种仓库上必须照样能用,
+/// 而"为了拉一个我已经指名道姓的 tag 先去列一遍目录"会让它平白失败。
+async fn resolve_ref_range(reference: &str) -> Result<String> {
+    let Some((repo_path, tag)) = split_tag(reference) else {
+        return Ok(reference.to_string()); // 没写 tag,交给下游按 latest 处理
+    };
+    let req = crate::version_req::VersionReq::parse(tag).map_err(|e| anyhow::anyhow!("{e}"))?;
+    if let Some(exact) = req.as_exact() {
+        let _ = exact;
+        return Ok(reference.to_string());
+    }
+    say!("{reference} —— 问 registry 有哪些版本");
+    let tags = ImageStore::list_tags(repo_path).await?;
+    let refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+    match req.best(refs) {
+        Some(v) => {
+            say!("  {tag} → {v}");
+            Ok(format!("{repo_path}:{v}"))
+        }
+        None => bail!(
+            "{repo_path} 上没有匹配 `{tag}` 的版本。\n现有:{}",
+            if tags.is_empty() {
+                "(一个都没有)".to_string()
+            } else {
+                tags.join(", ")
+            }
+        ),
+    }
+}
+
+/// 从引用里切出 `(仓库路径, tag)`。
+///
+/// 只认**最后一段**里的冒号 —— `localhost:5000/ns/yq` 的第一个冒号是端口,
+/// 按第一个冒号切会把主机名切断,得到一个根本不存在的仓库。
+fn split_tag(reference: &str) -> Option<(&str, &str)> {
+    let last = reference.rsplit('/').next()?;
+    let i = last.find(':')?;
+    let at = reference.len() - last.len() + i;
+    Some((&reference[..at], &reference[at + 1..]))
+}
+
 pub async fn install(
     source: &str,
     target: &crate::target::TargetOpts,
@@ -1321,6 +1387,13 @@ pub async fn install(
     let source = if !local.exists() && !source.contains('/') {
         resolved = crate::repo::resolve(source, repo)?;
         say!("{source} → {resolved}");
+        resolved.as_str()
+    } else if !local.exists() {
+        // 完整引用,但 tag 位可能是个**范围**(`reg/ns/yq:4.*`)。
+        // 这正是 helm#11000 里那个原例(`helm pull oci://… --version '0.0.*'`)
+        // —— 靠 `tags/list` 问出远端有哪些版本,再挑最高的合格者。
+        // 不需要索引:发现版本是 OCI 自带的能力,发现**有哪些包**才不是。
+        resolved = resolve_ref_range(source).await?;
         resolved.as_str()
     } else {
         source
