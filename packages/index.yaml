@@ -1,5 +1,5 @@
 apiVersion: crater.pkg/v1
-generated: 2026-09-02T16:01:38Z
+generated: 2026-09-02T16:05:22Z
 entries:
   yq:
   - version: 4.53.6

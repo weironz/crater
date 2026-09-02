@@ -9,10 +9,26 @@ params:
   version: { default: "4.53.6", stage: build, desc: "上游 release tag" }
 
 materials:
-  # ${substrate.arch} 是**目标事实**:构建期没有机器可探,所以离线打包时
-  # 必须 `--for arch=amd64` 告诉它烤哪个变体。
+  # 同名两条,靠 `when:` 分成变体 —— 每个架构有**自己的**摘要。
+  #
+  # 为什么不能只写一条带 `${substrate.arch}` 的 URL 再配一个 sha256:那个摘要
+  # 只对其中一个架构成立,另一个架构上会落地即失败。物料的变体机制就是为这个
+  # 存在的:同名多条,由目标侧事实判定用哪个。
+  #
+  # **摘要与 `version` 必须同时改。** 版本变了摘要就不对,而不对的表现是
+  # 落地失败 —— 那正是内容寻址该有的样子(与 library/k8s 同一条纪律)。
+  #
+  # 有了摘要,plan 期就能内容寻址比对:目标机上那份 yq 是不是这一版,
+  # crater 判得出来。没有它,换版本时 apply **什么都不会做**,而且会明说
+  # 自己判不出(D-135)—— 那正是 yq 此前的处境。
   - name: yq-bin
-    file: "https://github.com/mikefarah/yq/releases/download/v${params.version}/yq_linux_${substrate.arch}"
+    when: "substrate.arch == 'amd64'"
+    file: "https://github.com/mikefarah/yq/releases/download/v${params.version}/yq_linux_amd64"
+    sha256: "c5f056448f973ae7d39b5401949648a78f2dc1947d6a8eb65be60d5c504b9385"
+  - name: yq-bin
+    when: "substrate.arch == 'arm64'"
+    file: "https://github.com/mikefarah/yq/releases/download/v${params.version}/yq_linux_arm64"
+    sha256: "88a1016bc1d657375a35864e4f44b6f333df8ff97b559f51bba0adcb2169df09"
 
 resources:
   - copy: { material: yq-bin, dest: /usr/local/bin/yq, mode: "0755" }
