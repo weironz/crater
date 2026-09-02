@@ -16,30 +16,32 @@ use crater_core::spec::CraterSpec;
 /// subcommand's surface identical while defining the flags + resolver once.
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct TargetOpts {
-    /// Inventory file (its `inventory:` hosts) — large-fleet form, per-host
-    /// creds. A spec source carries its own inventory.
-    #[arg(short = 'i', long)]
+    /// 机群文件(它的 `inventory:` 列出主机)—— 大机群用这个,每台可以有
+    /// 各自的凭据。`crater create inventory` 生成一份骨架
+    #[arg(short = 'i', long, value_name = "FILE")]
     pub(crate) inventory: Option<PathBuf>,
-    /// Target host(s), comma-separated for a small fleet sharing one credential:
-    /// `--host 10.0.0.5,10.0.0.6`. Omit (and no `-i`) → local install.
-    #[arg(long)]
+    /// 目标机,逗号分隔 —— 少量机器共用一套凭据时用它:
+    /// `--host 10.0.0.5,10.0.0.6`。既不给它也不给 `-i` 就是装在本机
+    #[arg(long, value_name = "HOST")]
     pub(crate) host: Option<String>,
+    /// SSH 用户
     #[arg(long, default_value = "root")]
     pub(crate) user: String,
+    /// SSH 密码(与 `--key` 二选一)
     #[arg(long)]
     pub(crate) password: Option<String>,
-    /// SSH private-key file (alternative to --password), shared by all --host.
-    #[arg(long)]
+    /// SSH 私钥文件(`--password` 的替代),所有 `--host` 共用
+    #[arg(long, value_name = "FILE")]
     pub(crate) key: Option<PathBuf>,
+    /// SSH 端口
     #[arg(long, default_value_t = 22)]
     pub(crate) port: u16,
-    /// Offline closure (`crater build -f <blueprint> -o closure.tar`): materials
-    /// are pushed from these pre-fetched bytes instead of being downloaded by
-    /// the target. Required for air-gapped fleets. Blueprint pipeline only.
+    /// 离线闭包(`crater build -f <蓝图> -o closure.tar` 烤出来的)。物料从这
+    /// 份预取好的字节推过去,目标机不下载任何东西 —— 气隙机群必须给它
     #[arg(long, value_name = "FILE")]
     pub(crate) closure: Option<PathBuf>,
-    /// Fleet-wide concurrency: at most N hosts move at once within one step.
-    /// Default 1 (serial). A step's own `throttle` can only cap *below* this.
+    /// 机群并发:同一步里最多几台同时动。默认 1(串行)。
+    /// 单步自己的 `throttle` 只能把这个数**压得更低**,不能放大
     #[arg(long, default_value_t = 1, value_name = "N")]
     pub(crate) parallel: usize,
     /// 只对 inventory 里的一部分执行:主机名 / 组名,逗号分隔

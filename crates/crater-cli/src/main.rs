@@ -69,11 +69,79 @@ use crate::blueprint::StackMode;
 use crater_core::executor::{Executor, SshExecutor};
 use crater_core::store::ImageStore;
 
+/// 顶层命令清单,按用途分组。
+///
+/// clap 4 不支持给子命令分组(`{subcommands}` 只能平铺),27 条平铺出来没人
+/// 读得下去 —— 所以这里手写,并用 `grouped_listing_covers_every_command`
+/// 钉住:少一条、多一条、改个名,测试就红。手写清单会漂,**除非有东西盯着**。
+const COMMAND_GROUPS: &str = "\
+命令:
+
+  写蓝图
+    create       生成一份可改的起步文件(inventory 骨架)
+    types        列出内置资源类型及其字段
+    facts        列出 `substrate.*` 能用的事实
+    schema       生成 JSON Schema —— 编辑器补全与内联校验
+    lint         静态检查蓝图,不连机器
+    fmt          把一个顶层小节拆成单独文件(可逆)
+    inspect      看蓝图的输入契约:参数、需要的角色、物料
+
+  部署
+    plan         预演会变什么 —— 连机器跑只读探针,不执行
+    apply        收敛 —— 把蓝图声明的状态推到机群
+    verify       对账 —— 部署过的东西还是原来的样子吗
+    destroy      退场 —— 移除蓝图声明的一切(默认只预览)
+    procedure    跑蓝图声明的编排(跨主机的步骤)
+
+  打包与分发
+    pkg          把蓝图打成 OCI 制品:推、拉、看契约
+    install      一键装:拉包 → 读契约 → 对账机群 → 落文件 → plan
+    build        把蓝图烤成离线闭包文件
+    save         把本地制品导出成 oci-archive 文件
+    load         把 oci-archive 文件导入本地存储
+    repo         包仓库 —— 一个索引文件的地址
+    search       在已配仓库的索引里搜包(只查本地缓存)
+
+  本地存储
+    images       列出本地存储里的制品
+    pull         从 registry 拉制品进本地存储
+    push         把本地存储的制品推上 registry
+    tag          给制品加一个别名
+    rmi          删掉一个引用(blob 留给 gc 扫)
+    gc           清扫没人引用的 blob 与过期构建指纹
+    registry     registry 凭据
+
+  运维与排查
+    ui           浏览器看板:部署状态、历史、Verify/Heal
+    run          在目标机上跑一条临时命令
+    cp           往目标机拷一个文件(分块 base64,不需要 scp)
+    doctor       按内置离线规则诊断失败日志
+
+  crater 自己
+    update       把 crater 换成最新版
+";
+
+/// kubectl 的排版:先说这是什么,再列命令,最后才是 usage 与全局选项。
+/// `{subcommands}` 被刻意排除 —— 分组清单由 `COMMAND_GROUPS` 提供。
+const TOP_TEMPLATE: &str = "\
+{about-with-newline}
+{after-help}
+{usage-heading}
+  crater <命令> [选项]
+
+全局选项(所有命令都能用):
+{options}
+用 `crater <命令> --help` 看某条命令的详细说明与例子。";
+
 #[derive(Parser)]
 #[command(
     name = "crater",
     version,
-    about = "Deploy anything — declarative remote-execution engine (task model, online & offline)"
+    about = "crater —— 声明式远程执行引擎:一份蓝图,收敛整个机群",
+    help_template = TOP_TEMPLATE,
+    after_help = COMMAND_GROUPS,
+    next_line_help = true,
+    disable_help_subcommand = true
 )]
 struct Cli {
     /// 把终端输出**同时**写一份到这里,每行带时间戳。
@@ -90,70 +158,107 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Apply a task — one command for online & offline (D-020). `<source>`
-    /// auto-detects: a task `.yaml`, a named task (`tasks/<name>.yaml`), an image
-    /// reference, or an `.oci` artifact. `--host`/`-i`/none picks targets. Same
-    /// engine & idempotency online or offline (offline replays the artifact).
+    /// 收敛 —— 把蓝图声明的状态推到机群
+    ///
+    /// 读一份蓝图(或栈),连上目标机,把 `resources:` 里的每一条推到它声明的
+    /// 状态。已经对的不动,要改的才改 —— 重复跑同一条命令是安全的。
+    ///
+    /// 只认**蓝图**(`resources:`)或**栈**(`stack:` + `uses:`),按文件内容
+    /// 分辨,不看文件名。旧 task 管线(顶层 `actions:`)已删除。
+    ///
+    /// 想先看会变什么,用 `crater plan` —— 它连机器跑只读探针。`--dry-run`
+    /// 是不连机器的静态版本,只打印计划。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  # 收敛到一台机器
+  crater apply -f web.blueprint.yaml --host 10.0.0.5
+
+  # 收敛到一个机群(各自凭据)
+  crater apply -f web.blueprint.yaml -i inventory.yaml
+
+  # 不连机器,只打印静态计划
+  crater apply -f web.blueprint.yaml --dry-run
+
+  # 覆盖 apply 阶段的参数
+  crater apply -f web.blueprint.yaml -i inventory.yaml --set vip=10.0.0.9
+"
+    )]
     Apply {
-        /// `<source>`, or a `<name>` deployment label when a second positional
-        /// `<source>` follows: `crater apply yq-a yq -i invA` deploys task `yq`
-        /// under deployment `yq-a` (D-052: distinguishes independent rollouts of
-        /// the same task in `task list`; default deployment = task name).
-        arg1: Option<String>,
-        /// `<source>` (image ref | x.oci | spec.yaml | component) when the first
-        /// positional is a name.
-        arg2: Option<String>,
-        #[arg(short, long)]
+        /// 蓝图或栈文件 —— 与 `-f` 等价,写哪个都行
+        source: Option<String>,
+        /// 蓝图或栈文件(与位置参数等价)
+        #[arg(short, long, value_name = "FILE")]
         file: Option<PathBuf>,
         #[command(flatten)]
         target: TargetOpts,
-        /// Print the plan without executing.
+        /// 不连机器,只打印静态计划。要连机器的预演用 `crater plan`
         #[arg(long)]
         dry_run: bool,
-        /// Force the agentless shell executor instead of the default agent.
-        #[arg(long)]
-        shell: bool,
-        /// For an image/artifact `<source>`: pull the FULL closure (all material
-        /// layers) and replay it air-gapped (D-087). Default is thin-online —
-        /// pull only the recipe + self-authored files, fetch dependencies online
-        /// at apply. Ignored for `.oci` bundles (already full) and task files.
-        #[arg(long)]
-        offline: bool,
-        /// Override an **apply-stage** param (`stage: apply`, e.g. vip/subnet):
-        /// `--set vip=192.168.73.14`. Repeatable; highest priority (above
-        /// inventory vars). Build-stage params (e.g. version) are REJECTED here —
-        /// a built OCI is a frozen closure; rebuild with `crater build --set`
-        /// (D-093). `crater inspect <source>` shows each param's stage.
+        /// 覆盖一个 **apply 阶段**的参数(`stage: apply`,例如 vip/subnet):
+        /// `--set vip=10.0.0.9`。可重复,优先级最高(高于 inventory 变量)。
+        /// build 阶段的参数在这里会被**拒绝** —— 烤好的闭包是冻住的,要改就
+        /// `crater build --set` 重烤(D-093)。哪个参数属于哪个阶段,
+        /// `crater inspect` 会列出来。
         #[arg(long = "set", value_name = "KEY=VAL")]
         set: Vec<String>,
     },
-    /// Preview what an apply WOULD change (terraform-style, D-100): connect to
-    /// the targets, probe each step's read-only idempotency check, and report
-    /// ✓ ok / ~ would-change / ? unknown(no probe) / - skip(preflight/verify).
-    /// Executes nothing. (`apply --dry-run` is the offline/static variant —
-    /// it prints the plan without connecting.)
+    /// 预演会变什么 —— 连机器跑只读探针,不执行
+    ///
+    /// terraform 式的变更预演:连上目标机,对每一条资源跑它的只读幂等探针,
+    /// 然后报告
+    ///
+    ///   ✓ ok            已经是声明的样子,不会动
+    ///   ~ would-change  会被改
+    ///   ? unknown       **探不出来** —— 没有探针,不是"没问题"
+    ///   - skip          preflight / verify 这类不参与收敛的步骤
+    ///
+    /// 什么都不执行。`?` 与 `✓` 是两件事:前者是我们不知道,后者是我们知道
+    /// 它对 —— 把不知道报成没问题,是这类工具最容易骗人的地方。
+    ///
+    /// 不想连机器就用 `crater apply --dry-run`,它只打印静态计划。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  # 预演一个机群会变什么
+  crater plan -f web.blueprint.yaml -i inventory.yaml
+
+  # 只看一台
+  crater plan -f web.blueprint.yaml --host 10.0.0.5
+"
+    )]
     Plan {
-        /// `<source>` like apply: task.yaml | x.oci | image ref | named task/project.
+        /// 蓝图或栈文件 —— 与 `-f` 等价
         source: Option<String>,
-        #[arg(short, long)]
+        /// 蓝图或栈文件(与位置参数等价)
+        #[arg(short, long, value_name = "FILE")]
         file: Option<PathBuf>,
         #[command(flatten)]
         target: TargetOpts,
-        /// For an image/artifact source: probe against the FULL local closure.
-        #[arg(long)]
-        offline: bool,
-        /// Apply-stage param overrides, same gate as `apply --set` (D-093).
+        /// 覆盖 apply 阶段的参数,与 `apply --set` 同一道闸门(D-093)
         #[arg(long = "set", value_name = "KEY=VAL")]
         set: Vec<String>,
     },
-    /// Delete/uninstall a task's deployment by running its authored `teardown:`
-    /// (D-049). **Opt-in**: only a task that defines `teardown:` has this — there
-    /// is NO auto-inversion of `actions:` (real cleanup, e.g. kubeadm reset or
-    /// rm /var/lib/mysql, targets runtime state the install never created).
-    /// Inspect deployment state (D-051): what crater put where, and history.
-    /// Serve a web dashboard over the deployment state (D-054). Axum + htmx,
-    /// pure Rust, htmx embedded (works offline). Default binds localhost only.
-    /// Write actions (Verify/Heal, D-058) use `./inventory.yaml` when present.
+    /// 浏览器看板:部署状态、历史、Verify/Heal
+    ///
+    /// 起一个本地 web 看板,看 crater 把什么放在了哪、以及历次部署的历史。
+    /// Axum + htmx,htmx 是内嵌的 —— 气隙机器上照样打得开。
+    ///
+    /// **默认只绑 localhost。** 会写的动作(Verify / Heal)用当前目录的
+    /// `./inventory.yaml`,没有就只读。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  # 本机打开
+  crater ui
+
+  # 换端口
+  crater ui --port 8080
+"
+    )]
     Ui {
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
@@ -172,44 +277,56 @@ enum Cmd {
         #[arg(long, env = "CRATER_WORKSPACE", value_name = "DIR")]
         workspace: Option<PathBuf>,
     },
-    /// Build a task into a B 类 OCI artifact in the local store (like
-    /// `docker build`). Export to a file with `crater save`.
+    /// 把蓝图烤成离线闭包文件
+    ///
+    /// 把蓝图声明的全部物料抓下来、连同蓝图本身封进一个文件。这个文件带去
+    /// 断网机房,`crater apply -f <蓝图> --closure <文件>` 就能部署,全程
+    /// 不碰网络。
+    ///
+    /// 默认烤**每一个**声明的变体(不同架构、不同发行版)—— 气隙场景下,
+    /// 少烤一个变体等于到了现场才发现装不上。用得到哪个很确定时,`--for`
+    /// 可以只烤那个。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  # 烤全部变体(气隙最稳)
+  crater build -f k8s.blueprint.yaml -o k8s.closure.tar
+
+  # 只烤用得到的那个
+  crater build -f k8s.blueprint.yaml -o k8s.closure.tar --for arch=amd64
+
+  # 到了断网那头
+  crater apply -f k8s.blueprint.yaml --closure k8s.closure.tar -i inventory.yaml
+"
+    )]
     Build {
-        /// Task file to build (its `materials` are fetched and packed), or a
-        /// blueprint — a blueprint builds an **offline closure** to `--output`.
-        #[arg(short, long)]
+        /// 蓝图或栈文件
+        #[arg(short, long, value_name = "FILE")]
         file: PathBuf,
-        /// Blueprint pipeline: write the offline closure here (e.g. `k8s.closure.tar`).
-        /// Deploy it with `crater apply -f <blueprint> --closure <file>`.
-        #[arg(short, long)]
+        /// 闭包写到哪。不给就按蓝图名生成
+        #[arg(short, long, value_name = "FILE")]
         output: Option<PathBuf>,
-        /// Blueprint pipeline: bake only the variants matching this target
-        /// profile, e.g. `--for arch=amd64 --for distro=ubuntu`. Omit to bake
-        /// **every** declared variant (safest for air-gap).
+        /// 只烤匹配这个画像的变体,如 `--for arch=amd64`。可重复。
+        /// 不给就烤**全部**声明的变体
         #[arg(long = "for", value_name = "KEY=VAL")]
         profile: Vec<String>,
-        /// Reference (tag) for the artifact, e.g. `192.168.1.5:5000/yq:1.0`.
-        /// Defaults to `crater/<name>:<version>`.
-        #[arg(short = 't', long)]
-        tag: Option<String>,
-        /// Restrict packed material arches (D-048), e.g. `--arch amd64` or
-        /// `--arch amd64,arm64`. Default: pack every declared arch variant.
-        #[arg(long, value_delimiter = ',')]
-        arch: Vec<String>,
-        /// Bypass the build caches (D-096): re-fetch every material and rebuild
-        /// even if the ref exists with an unchanged source fingerprint. Use when
-        /// an upstream TAG moved (e.g. `latest`) — the fingerprint only sees the
-        /// declared source, not remote content.
-        #[arg(long)]
-        no_cache: bool,
-        /// Override a build-stage param without editing the yaml (D-089), e.g.
-        /// `--set version=4.55.1`. Repeatable. Overrides the param's `default`
-        /// (and the default tag's `<version>`), so a CI/justfile builds any
-        /// version from one source. Drives material URLs + the recipe baked in.
+        /// 覆盖一个 **build 阶段**的参数,如 `--set version=4.55.1`。可重复。
+        /// 它盖掉参数的 `default`,所以一份源能烤出任意版本(D-089)
         #[arg(long = "set", value_name = "KEY=VAL")]
         set: Vec<String>,
     },
-    /// Export a stored artifact/image to an oci-archive file (like `docker save`).
+    /// 把本地制品导出成 oci-archive 文件
+    ///
+    /// 像 `docker save`。导出来的文件可以用 U 盘搬到断网那头,再 `crater load`
+    /// 进去。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater save registry.example.com/ns/k8s:1.31 -o k8s.oci
+"
+    )]
     Save {
         /// Reference in the local store (`crater images` to list).
         reference: String,
@@ -217,19 +334,39 @@ enum Cmd {
         #[arg(short, long)]
         output: PathBuf,
     },
-    /// Inspect a task/OCI's input contract (D-081): params (description/default/
-    /// required/stage), the inventory roles it needs, and its materials. Reads a
-    /// task file's `params:` or an artifact's embedded (flattened) recipe.
+    /// 看蓝图的输入契约:参数、需要的角色、物料
+    ///
+    /// 拿到一份别人写的蓝图,第一个问题是"我得准备什么才能跑它"。这条命令
+    /// 回答的正是这个:有哪些参数(默认值、是否必填、属于 build 还是 apply
+    /// 阶段)、inventory 里要有哪些角色、要下载哪些物料(D-081)。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater inspect k8s.blueprint.yaml
+"
+    )]
     Inspect {
-        /// A task file (`tasks/x.yaml`) or a built artifact ref (`crater/k8s-ha:1.36.1`).
+        /// 蓝图或栈文件
         source: String,
-        /// Emit a starter inventory.yaml (required groups + apply-stage params).
-        #[arg(long)]
-        gen_inventory: bool,
     },
-    /// Move a whole top-level section out to its own file (or bring it back).
-    /// Mechanical and reversible — the merged result is equivalent to writing
-    /// everything in one file, which is what separates this from `include`.
+    /// 把一个顶层小节拆成单独文件(可逆)
+    ///
+    /// 蓝图长到几百行时,把 `resources:` 或 `substrate:` 拆出去单独放。
+    ///
+    /// **机械且可逆**:合起来的结果与写在一个文件里完全等价 —— 这正是它与
+    /// `include` 的区别,后者会引入求值顺序,拆分就不再是纯排版了。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  # 把 resources: 拆到 web.resources.yaml
+  crater fmt web.blueprint.yaml --split resources
+
+  # 全部收回根文件
+  crater fmt web.blueprint.yaml --join
+"
+    )]
     Fmt {
         /// The blueprint's root file.
         file: PathBuf,
@@ -240,9 +377,20 @@ enum Cmd {
         #[arg(long)]
         join: bool,
     },
-    /// Generate a JSON Schema for blueprints — editor completion, hover docs and
-    /// inline validation. Pass `-f` to self-specialise it to one blueprint
-    /// (its own material names and custom types become completions).
+    /// 生成 JSON Schema —— 编辑器补全与内联校验
+    ///
+    /// 让编辑器认识蓝图:补全字段、悬停看说明、写错当场标红。
+    ///
+    /// 给 `-f` 会**为某一份蓝图特化**:那份蓝图自己的物料名与自定义类型也变成
+    /// 补全项 —— 通用 schema 只知道内置类型,不知道你声明了什么。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater schema > crater.schema.json
+  crater schema -f web.blueprint.yaml > web.schema.json
+"
+    )]
     Schema {
         /// Blueprint to self-specialise against.
         #[arg(short, long)]
@@ -254,16 +402,39 @@ enum Cmd {
         #[arg(long = "stdout")]
         to_stdout: bool,
     },
-    /// 列出 `substrate.*` 能写哪些目标机事实;给了 `-i`/`--host` 就真去探一遍,
-    /// 摆成 事实 × 主机 的表 —— `when:` 不成立时,要看的正是"那这台到底是什么"。
+    /// 列出 `substrate.*` 能用的事实
+    ///
+    /// 不给目标就只列有哪些事实可写;给了 `-i`/`--host` 就**真去机器上探一遍**,
+    /// 摆成 事实 × 主机 的表。
+    ///
+    /// `when:` 条件不成立的时候,要看的正是"那这台到底是什么" —— 猜不如探。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater facts                          # 有哪些事实可用
+  crater facts -i inventory.yaml        # 这个机群实际是什么
+"
+    )]
     Facts {
         #[command(flatten)]
         target: TargetOpts,
     },
-    /// Show the built-in resource types and their fields — the answer to
-    /// "what fields does `systemd_unit` take, and which are required?".
-    /// Renders the same registry lint errors and the JSON Schema are generated
-    /// from, so the three can never contradict each other.
+    /// 列出内置资源类型及其字段
+    ///
+    /// 回答"`systemd_unit` 有哪些字段、哪些必填"。
+    ///
+    /// 它渲染的是**同一份注册表** —— lint 的报错和 `crater schema` 生成的
+    /// JSON Schema 也从这份表来,所以三者不可能互相矛盾。文档与实现分家才会
+    /// 出现"文档说有这个字段但引擎不认"。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater types                 # 全部 26 种
+  crater types systemd_unit    # 只看一种
+"
+    )]
     Types {
         /// A type name for the full field card; omit to list everything.
         name: Option<String>,
@@ -271,10 +442,21 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Lint blueprints — zero-connection static checks (D-107). Catches the whole
-    /// class of errors Ansible only surfaces after connecting and reaching that line:
-    /// misspelled module/argument/param names (with suggestions), out-of-scope CEL
-    /// variables, undeclared materials, unbalanced cross-host facts.
+    /// 静态检查蓝图,不连机器
+    ///
+    /// 零连接的静态检查(D-107)。它抓的是这样一类错:类型名/字段名/参数名拼错、
+    /// CEL 表达式里用了作用域外的变量、物料没声明、跨主机事实不配对。
+    ///
+    /// 这些错在 Ansible 里要等到**连上机器、跑到那一行**才会暴露 —— 也就是说
+    /// 在半个机群已经改过之后。这里在敲回车之前就报,还带拼写建议。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater lint web.blueprint.yaml
+  crater lint library/*/*.blueprint.yaml
+"
+    )]
     Lint {
         /// Files or directories to scan (recursively). Default: current directory.
         #[arg(default_value = ".")]
@@ -290,10 +472,18 @@ enum Cmd {
         #[arg(long)]
         stats: bool,
     },
-    /// Run a named procedure from a blueprint — the "dance" a blueprint declares
-    /// (bootstrap a cluster, roll an upgrade). Unlike `apply`, which converges
-    /// resources host-by-host, a procedure is fleet-level: its steps span hosts
-    /// and pass facts between them.
+    /// 跑蓝图声明的编排(跨主机的步骤)
+    ///
+    /// `apply` 是逐台收敛资源;procedure 是**机群级**的:它的步骤跨主机,而且
+    /// 步骤之间能传事实 —— 建集群、滚动升级这类"先在 A 上做完拿到 token,再拿
+    /// 去 B 上用"的动作,靠它。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater procedure bootstrap -f k8s.blueprint.yaml -i inventory.yaml
+"
+    )]
     Procedure {
         /// Procedure name (see `crater inspect`).
         name: String,
@@ -305,12 +495,24 @@ enum Cmd {
         #[arg(long = "set", value_name = "KEY=VAL")]
         set: Vec<String>,
     },
-    /// Retire a blueprint (or a stack, in reverse order) — remove every resource
-    /// it declares. **Previews by default**: without `--yes` it only prints what
-    /// would be removed and touches nothing.
+    /// 退场 —— 移除蓝图声明的一切(默认只预览)
     ///
-    /// There is no `teardown:` section in a blueprint — retirement is derived
-    /// from the five verbs, run in reverse declaration order.
+    /// **默认什么都不动**:不给 `--yes` 就只打印会移除什么。栈按声明的**倒序**
+    /// 退场。
+    ///
+    /// 蓝图里没有 `teardown:` 这一节 —— 退场是从五个动词推导出来的,倒着走一遍
+    /// 声明顺序。这意味着不必为"怎么卸载"再写一份、也不会漏。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  # 先看会移除什么(默认)
+  crater destroy -f web.blueprint.yaml -i inventory.yaml
+
+  # 确认后真的动手
+  crater destroy -f web.blueprint.yaml -i inventory.yaml --yes
+"
+    )]
     Destroy {
         /// Blueprint or stack file.
         #[arg(short, long)]
@@ -325,9 +527,19 @@ enum Cmd {
         #[arg(long = "set", value_name = "KEY=VAL")]
         set: Vec<String>,
     },
-    /// Verify a deployed blueprint — read-only drift check against the recorded
-    /// state. Answers "is reality still what we deployed?", which `plan` cannot:
-    /// without a record, "never deployed" and "drifted" look identical.
+    /// 对账 —— 部署过的东西还是原来的样子吗
+    ///
+    /// 拿现场与**记录下来的部署状态**比对,只读。回答的是 `plan` 答不了的
+    /// 那个问题:没有记录的话,"从来没部署过"和"部署完被人改了"长得一模一样。
+    ///
+    /// 报告用三态,`?` 与 `✓` 不混:探不出来就说探不出来。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater verify -f web.blueprint.yaml -i inventory.yaml
+"
+    )]
     Verify {
         /// Write a machine-readable verify report here (per-host verdicts).
         #[arg(long, value_name = "FILE")]
@@ -343,14 +555,28 @@ enum Cmd {
         #[arg(long = "set", value_name = "KEY=VAL")]
         set: Vec<String>,
     },
-    /// AI copilot: natural language -> a validated task yaml.
-    /// Configure via CRATER_AI_ENDPOINT / CRATER_AI_KEY / CRATER_AI_MODEL.
-    /// Diagnose failures with built-in offline rules (+ optional AI) (M5).
+    /// 按内置离线规则诊断失败日志
+    ///
+    /// 把一份失败日志(或一台机器上收来的诊断信息)对着内置故障特征库过一遍,
+    /// 匹配上就给出原因与可照做的修法。**全离线**:不联网、不调模型。
+    ///
+    /// 匹配不上时它明说"没有匹配的特征",不编一个原因出来。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  # 看一份本地日志
+  crater doctor --file deploy.log
+
+  # 去机器上收诊断信息
+  crater doctor --host 10.0.0.5 --password ***
+"
+    )]
     Doctor {
-        /// Analyze this local log/error file (fully offline, no SSH).
-        #[arg(long)]
+        /// 分析这份本地日志/错误文件(完全离线,不 SSH)
+        #[arg(long, value_name = "FILE")]
         file: Option<PathBuf>,
-        /// Or collect diagnostics from this host over SSH.
+        /// 或者去这台机器上收诊断信息
         #[arg(long)]
         host: Option<String>,
         #[arg(long, default_value = "root")]
@@ -359,11 +585,20 @@ enum Cmd {
         password: Option<String>,
         #[arg(long, default_value_t = 22)]
         port: u16,
-        /// Also ask the configured AI endpoint for deeper analysis, if set.
-        #[arg(long)]
-        ai: bool,
     },
-    /// Run an ad-hoc command on a target over SSH (ansible -m shell style).
+    /// 在目标机上跑一条临时命令
+    ///
+    /// `ansible -m shell` 那种用法:不写蓝图,直接在一台机器上执行一条命令。
+    ///
+    /// **它不进对账**:临时命令改出来的东西,`verify` 不知道、`destroy` 收不
+    /// 回来。要留下的改动请写进蓝图。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater run --host 10.0.0.5 --password *** -- systemctl status docker
+"
+    )]
     Run {
         #[arg(long)]
         host: String,
@@ -376,7 +611,17 @@ enum Cmd {
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
     },
-    /// Copy a local file to a target over SSH (chunked base64, no scp needed).
+    /// 往目标机拷一个文件
+    ///
+    /// 分块 base64 走 SSH —— 目标机上**不需要** scp/sftp,这也是 crater 敢说
+    /// "目标机零安装"的一部分。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater cp --host 10.0.0.5 --password *** --src ./app.conf --dst /etc/app.conf --chmod 0644
+"
+    )]
     Cp {
         #[arg(long)]
         host: String,
@@ -410,16 +655,48 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
-    /// List images in the local store (~/.crater/store).
+    /// 列出本地存储里的制品
+    ///
+    /// 本地存储在 `~/.crater/store`。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater images
+"
+    )]
     Images,
-    /// Pull an image from a registry into the local store.
+    /// 从 registry 拉制品进本地存储
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater pull registry.example.com/ns/k8s:1.31
+"
+    )]
     Pull {
         /// e.g. docker.io/library/busybox:latest
         reference: String,
     },
-    /// Push a stored image to a registry.
+    /// 把本地存储的制品推上 registry
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater push registry.example.com/ns/k8s:1.31
+"
+    )]
     Push { reference: String },
-    /// Import an oci-archive file (e.g. `crater save` output) into the store.
+    /// 把 oci-archive 文件导入本地存储
+    ///
+    /// `crater save` 的反向操作。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater load k8s.oci
+"
+    )]
     Load {
         /// Path to the .oci archive.
         file: PathBuf,
@@ -428,24 +705,53 @@ enum Cmd {
         #[arg(long = "as")]
         as_ref: Option<String>,
     },
-    /// Add a new reference (alias) to a stored image, like `docker tag`.
+    /// 给制品加一个别名
+    ///
+    /// 像 `docker tag`:同一份内容多一个引用,不复制字节。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater tag crater/k8s:1.31 registry.example.com/ns/k8s:1.31
+"
+    )]
     Tag {
         /// Existing reference in the local store.
         source: String,
         /// New reference to point at the same manifest (e.g. a registry address).
         target: String,
     },
-    /// Remove a reference from the local store, like `docker rmi` (D-097).
-    /// Blobs are content-addressed and possibly shared — they stay until
-    /// `crater gc` sweeps the unreferenced ones.
+    /// 删掉一个引用(blob 留给 gc 扫)
+    ///
+    /// 像 `docker rmi`,删的是**引用**不是字节。blob 是内容寻址的、可能被别的
+    /// 制品共享,所以它们留到 `crater gc` 才扫 —— 立刻删字节会误伤共享者。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater rmi crater/k8s:1.31
+"
+    )]
     Rmi {
         /// Reference to remove, e.g. `crater/yq:4.40.5`.
         reference: String,
     },
-    /// Garbage-collect crater storage (D-097): sweep store blobs nothing
-    /// references and stale build fingerprints. `--cache` also wipes the
-    /// download cache; `--host`/`-i` additionally clears the staged-blob cache
-    /// on TARGETS (`/var/lib/crater/blobs`, D-095 — re-staged on next apply).
+    /// 清扫没人引用的 blob 与过期构建指纹
+    ///
+    /// 扫本地存储里已经没有任何引用指向的 blob,以及过期的构建指纹(D-097)。
+    ///
+    /// `--cache` 连下载缓存一起清。给 `--host`/`-i` 还会清**目标机上**的暂存
+    /// blob(`/var/lib/crater/blobs`,D-095)—— 那份缓存下次 apply 会自己重建,
+    /// 清掉只是慢一次,不会坏。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater gc                          # 只清本地存储
+  crater gc --cache                  # 连下载缓存一起
+  crater gc -i inventory.yaml        # 顺带清目标机上的暂存
+"
+    )]
     Gc {
         /// Also wipe the download cache (~/.crater/cache/{file,ospkg}).
         #[arg(long)]
@@ -514,7 +820,16 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RegistryCmd,
     },
-    /// Generate a starter file to edit (e.g. a sample inventory).
+    /// 生成一份可改的起步文件
+    ///
+    /// 与其对着空文件发呆,不如先生成一份能跑的骨架再改。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater create inventory
+"
+    )]
     Create {
         #[command(subcommand)]
         what: CreateWhat,
@@ -725,17 +1040,14 @@ async fn main() -> Result<()> {
     out::init(cli.log_file.as_deref(), cli.timestamps);
     match cli.cmd {
         Cmd::Apply {
-            arg1,
-            arg2,
+            source,
             file,
             target,
             dry_run,
-            shell,
-            offline,
             set,
         } => {
-            // 新 IR blueprint 先分流(同 plan);其余走原管线。
-            let probe = arg2.clone().or_else(|| arg1.clone());
+            // 按文件形状分流:栈 → 逐蓝图;蓝图 → 五动词管线;都不是 → 说清楚。
+            let probe = source.clone();
             if let Some(p) = stack_source(&file, &probe) {
                 let m = if dry_run {
                     StackMode::Plan
@@ -750,21 +1062,18 @@ async fn main() -> Result<()> {
                 }
                 return blueprint::apply_blueprint(&p, &target, &set).await;
             }
-            let _ = (arg1, arg2, shell, offline);
             bail!(legacy_note("apply"))
         }
         Cmd::Plan {
             source,
             file,
             target,
-            offline,
             set,
         } => {
-            // 按文件格式分流:栈 → 逐蓝图;新 IR blueprint → 五动词管线;旧 task → 原管线。
+            // 与 apply 同一条分流,只是模式是 Plan。
             if let Some(p) = stack_source(&file, &source) {
                 return stack_cmd::run(&p, &target, &set, StackMode::Plan).await;
             }
-            let _ = offline;
             match blueprint_source(&file, &source) {
                 Some(p) => blueprint::plan_blueprint(&p, &target, &set).await,
                 None => bail!(legacy_note("plan")),
@@ -780,12 +1089,9 @@ async fn main() -> Result<()> {
             file,
             output,
             profile,
-            tag,
-            arch,
-            no_cache,
             set,
         } => {
-            // 与 apply/plan 同一条按文件格式分派的路子:栈/蓝图烤闭包,task 进 store。
+            // 与 apply/plan 同一条按文件形状分派的路子。
             if stack_cmd::is_stack_file(&file) {
                 let out = output.unwrap_or_else(|| default_closure_path(&file, ".stack"));
                 return closure::build_stack(&file, &out, &profile, &set).await;
@@ -794,22 +1100,11 @@ async fn main() -> Result<()> {
                 let out = output.unwrap_or_else(|| default_closure_path(&file, ".blueprint"));
                 return closure::build(&file, &out, &profile, &set).await;
             }
-            let _ = (tag, arch, no_cache);
             bail!(legacy_note("build"))
         }
-        Cmd::Inspect {
-            source,
-            gen_inventory,
-        } => {
-            // 与 apply/plan 同一条按文件格式分派:蓝图/栈走 IR 的输入契约视图,
-            // 其余(task 文件、OCI ref)仍走旧管线。
+        Cmd::Inspect { source } => {
             let p = PathBuf::from(&source);
             if p.is_file() && (blueprint::is_blueprint_file(&p) || stack_cmd::is_stack_file(&p)) {
-                if gen_inventory {
-                    anyhow::bail!(
-                        "`--gen-inventory` 暂只支持旧 task;蓝图请照 `需要的机群` 一节手写"
-                    );
-                }
                 return inspect_bp::run(&p);
             }
             bail!(legacy_note("inspect"))
@@ -987,8 +1282,7 @@ async fn main() -> Result<()> {
             user,
             password,
             port,
-            ai,
-        } => doctor(file, host, &user, password, port, ai).await,
+        } => doctor(file, host, &user, password, port).await,
         Cmd::Run {
             host,
             user,
@@ -1104,7 +1398,6 @@ async fn doctor(
     user: &str,
     password: Option<String>,
     port: u16,
-    use_ai: bool,
 ) -> Result<()> {
     use crater_core::diagnose;
 
@@ -1152,7 +1445,6 @@ async fn doctor(
 
     // `--ai` 那段深度分析随旧管线一起删了(D-151):它调的是
     // `crater_core::ai`,而那个模块生成的是**旧 task YAML**。
-    let _ = use_ai;
     Ok(())
 }
 
@@ -1169,4 +1461,102 @@ fn legacy_note(cmd: &str) -> String {
          里的一条声明(类型名基本同名)。`crater types` 列出全部 26 种类型\n\
          及其字段;例子在 `library/` 下,`library/_template/` 是最小骨架。"
     )
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// 分组清单是**手写**的(clap 4 不支持子命令分组),所以必须有东西盯着
+    /// 它:漏一条、多一条、改个名,这里就红。
+    ///
+    /// 没有这个测试,`COMMAND_GROUPS` 就是又一份"没人跑的文档" —— 而这个
+    /// 仓库今天已经因为同一种病修过三次(README 的 404、`update` 的版本号、
+    /// `ui` 那三段粘连的说明)。
+    #[test]
+    fn grouped_listing_covers_every_command() {
+        let cmd = Cli::command();
+        let real: std::collections::BTreeSet<String> = cmd
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect();
+
+        // 清单里每行形如 `    <名字>   <一句话>`,取首个词。
+        let listed: std::collections::BTreeSet<String> = COMMAND_GROUPS
+            .lines()
+            .filter(|l| l.starts_with("    ") && !l.starts_with("     "))
+            .filter_map(|l| l.split_whitespace().next())
+            .map(str::to_string)
+            .collect();
+
+        let missing: Vec<_> = real.difference(&listed).collect();
+        let stale: Vec<_> = listed.difference(&real).collect();
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "分组清单与真实命令对不上。\n  清单里少了:{missing:?}\n  清单里多了(已不存在):{stale:?}"
+        );
+    }
+
+    /// 每条命令都得有一句话说明 —— 空 about 在分组清单里是一行光秃秃的名字。
+    #[test]
+    fn every_command_has_a_one_line_summary() {
+        let cmd = Cli::command();
+        let naked: Vec<_> = cmd
+            .get_subcommands()
+            .filter(|c| c.get_about().is_none())
+            .map(|c| c.get_name().to_string())
+            .collect();
+        assert!(naked.is_empty(), "这些命令没有一句话说明:{naked:?}");
+    }
+
+    /// help 里写的每一条例子,都真拿去解析一遍。
+    ///
+    /// 这次重写里我自己编错了三条:`fmt --extract`(真名 `--split`)、
+    /// `cp` 写成位置参数(真的是 `--src/--dst`)、`load -f`(其实是位置参数)。
+    /// 三条都是**看着对**的。靠人逐条核会漏,靠这个不会 —— 标志改了名而例子
+    /// 没跟着改,这里立刻红。
+    #[test]
+    fn every_documented_example_actually_parses() {
+        let cmd = Cli::command();
+        let mut bad = Vec::new();
+        for sub in cmd.get_subcommands() {
+            let Some(help) = sub.get_after_help() else {
+                continue;
+            };
+            for line in help.to_string().lines() {
+                let line = line.trim();
+                if !line.starts_with("crater ") {
+                    continue;
+                }
+                // 例子里可能有 shell 重定向或行尾注释,那都不是 crater 的参数。
+                let line = line.split(" > ").next().unwrap_or(line);
+                let line = line.split(" #").next().unwrap_or(line).trim();
+                let argv: Vec<&str> = line.split_whitespace().collect();
+                if let Err(e) = Cli::command().try_get_matches_from(&argv) {
+                    // 缺必填值之类的解析失败才算错;`--help`/`--version` 那种
+                    // "正常提前退出"不算。
+                    use clap::error::ErrorKind;
+                    if !matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+                        bad.push(format!("{line}\n      → {}", e.kind()));
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "help 里这些例子解析不了:\n  {}",
+            bad.join("\n  ")
+        );
+    }
+
+    /// clap 的帮助模板出错是**运行时** panic,不是编译错 —— 没有这个测试,
+    /// 写错一个 `{}` 占位符要等到用户敲 `--help` 才发现。
+    #[test]
+    fn help_renders_without_panicking() {
+        let mut cmd = Cli::command();
+        let rendered = cmd.render_help().to_string();
+        assert!(rendered.contains("命令:"), "分组清单没渲染出来");
+        assert!(rendered.contains("crater <命令>"), "usage 行没渲染出来");
+    }
 }

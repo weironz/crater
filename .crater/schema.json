@@ -1,0 +1,4724 @@
+{
+  "$defs": {
+    "condition": {
+      "description": "条件(CEL 布尔表达式)。可用:params.* / substrate.* / facts.* / item\n注意:值位置的 ${} 只许纯引用 —— 条件写在这里,不要把三元塞进字符串",
+      "examples": [
+        "params.ha",
+        "has(params.cp_endpoint)",
+        "substrate.arch == 'amd64'"
+      ],
+      "type": "string"
+    },
+    "material_ref": {
+      "description": "materials: 里声明的物料名",
+      "type": "string"
+    },
+    "meta_each": {
+      "description": "循环展开:列表字面量,或求值为列表的 CEL 表达式"
+    },
+    "mode": {
+      "description": "权限:必须是带引号的八进制字符串,如 \"0755\"",
+      "examples": [
+        "0644",
+        "0755",
+        "0600"
+      ],
+      "pattern": "^0[0-7]{3,4}$",
+      "type": "string"
+    },
+    "probe": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "http": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_http"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "http"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "port_open": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_port_open"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "port_open"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "service_active": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_service_active"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "service_active"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cmd": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_cmd"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "cmd"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "resource": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "file": {
+              "$ref": "#/$defs/type_file"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "file"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "copy": {
+              "$ref": "#/$defs/type_copy"
+            },
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "copy"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "template": {
+              "$ref": "#/$defs/type_template"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "template"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "lineinfile": {
+              "$ref": "#/$defs/type_lineinfile"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "lineinfile"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "unarchive": {
+              "$ref": "#/$defs/type_unarchive"
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "unarchive"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "systemd_unit": {
+              "$ref": "#/$defs/type_systemd_unit"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "systemd_unit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "service": {
+              "$ref": "#/$defs/type_service"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "service"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "hostname": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_hostname"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "hostname"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "timezone": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_timezone"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "timezone"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "time_sync": {
+              "$ref": "#/$defs/type_time_sync"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "time_sync"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "swap": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_swap"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "swap"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "kernel_modules": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_kernel_modules"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "kernel_modules"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "sysctl": {
+              "$ref": "#/$defs/type_sysctl"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "sysctl"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "user": {
+              "$ref": "#/$defs/type_user"
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "user"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "group": {
+              "$ref": "#/$defs/type_group"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "group"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "mount": {
+              "$ref": "#/$defs/type_mount"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "mount"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cron": {
+              "$ref": "#/$defs/type_cron"
+            },
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "cron"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "package": {
+              "$ref": "#/$defs/type_package"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "package"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "image_present": {
+              "$ref": "#/$defs/type_image_present"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "image_present"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "container": {
+              "$ref": "#/$defs/type_container"
+            },
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "container"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "selector": {
+      "description": "定址:all | role.<组> | host.<名> | first(<sel>) | rest(<sel>) | <sel> where <CEL>",
+      "examples": [
+        "all",
+        "role.controlplane",
+        "first(role.controlplane)",
+        "rest(role.controlplane)"
+      ],
+      "type": "string"
+    },
+    "step": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "material": {
+              "$ref": "#/$defs/type_material"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "material"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "file": {
+              "$ref": "#/$defs/type_file"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "file"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "copy": {
+              "$ref": "#/$defs/type_copy"
+            },
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "copy"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "template": {
+              "$ref": "#/$defs/type_template"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "template"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "lineinfile": {
+              "$ref": "#/$defs/type_lineinfile"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "lineinfile"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "unarchive": {
+              "$ref": "#/$defs/type_unarchive"
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "unarchive"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "systemd_unit": {
+              "$ref": "#/$defs/type_systemd_unit"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "systemd_unit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "service": {
+              "$ref": "#/$defs/type_service"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "service"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "hostname": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_hostname"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "hostname"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "timezone": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_timezone"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "timezone"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "time_sync": {
+              "$ref": "#/$defs/type_time_sync"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "time_sync"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "swap": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_swap"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "swap"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "kernel_modules": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_kernel_modules"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "kernel_modules"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "sysctl": {
+              "$ref": "#/$defs/type_sysctl"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "sysctl"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "user": {
+              "$ref": "#/$defs/type_user"
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "user"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "group": {
+              "$ref": "#/$defs/type_group"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "group"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "mount": {
+              "$ref": "#/$defs/type_mount"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "mount"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cron": {
+              "$ref": "#/$defs/type_cron"
+            },
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "cron"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "package": {
+              "$ref": "#/$defs/type_package"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "package"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "image_present": {
+              "$ref": "#/$defs/type_image_present"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "image_present"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "container": {
+              "$ref": "#/$defs/type_container"
+            },
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "container"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cmd": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_cmd"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "cmd"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "shell": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_shell"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "shell"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "wait": {
+              "$ref": "#/$defs/type_wait"
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "wait"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "http": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_http"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "http"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "port_open": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_port_open"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "port_open"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deps": {
+              "description": "显式依赖;默认按声明顺序建边",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "each": {
+              "$ref": "#/$defs/meta_each"
+            },
+            "exports": {
+              "description": "步骤位:导出跨主机 fact(名 → 取值命令)",
+              "type": "object"
+            },
+            "id": {
+              "description": "显式 id;不写则按类型自动编号",
+              "type": "string"
+            },
+            "name": {
+              "description": "人类标签(纯注释,不参与语义)",
+              "type": "string"
+            },
+            "service_active": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/type_service_active"
+                },
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "array"
+                  ]
+                }
+              ]
+            },
+            "strategy": {
+              "additionalProperties": false,
+              "description": "步骤位:throttle / retries / ignore_errors",
+              "properties": {
+                "ignore_errors": {
+                  "type": "boolean"
+                },
+                "retries": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "throttle": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/selector"
+            },
+            "timeout": {
+              "description": "探针位:超时",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "when": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "service_active"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "type_cmd": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "argv"
+              ]
+            },
+            {
+              "required": [
+                "run"
+              ]
+            }
+          ]
+        }
+      ],
+      "description": "cmd — 结构化命令:argv 直达 execve,条件是 flag 条目的属性\n\n**按出现位置有两套用法**:动作位(procedures 步骤 / resources)用 argv+flags,可带 creates 幂等护栏;探针位(preflight / health / 自定义类型的 observe)用 run 或 argv,只读纪律由作者保证 —— 在探针位写会改变目标的命令,会让 plan 说谎。\n**条件 flag 的正规写法**:flags 条目带 when,条件为假的条目根本不出现,不留空串占位 —— 因此没有写三元表达式的动机(那会被 E310 拒绝)。flags[].name 禁插值,于是 lint 能静态枚举这条命令的全部展开形态。argv 逐 token 转义,注入与引号事故一并根治。",
+      "properties": {
+        "argv": {
+          "description": "命令与固定参数,如 [kubeadm, init]",
+          "type": "array"
+        },
+        "chdir": {
+          "description": "工作目录",
+          "type": "string"
+        },
+        "creates": {
+          "description": "幂等探针:此路径存在即跳过",
+          "type": "string"
+        },
+        "env": {
+          "description": "环境变量;探针与命令共享同一套",
+          "type": "object"
+        },
+        "expect": {
+          "description": "期望退出码,默认 0",
+          "type": "integer"
+        },
+        "flags": {
+          "description": "有序 flag 条目:{name, value?, when?}",
+          "type": "array"
+        },
+        "run": {
+          "description": "自由字符串(过 shell,可用管道);仅建议用于只读探针",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "type_container": {
+      "additionalProperties": false,
+      "description": "container — 目标运行时上的一个容器",
+      "properties": {
+        "args": {
+          "description": "镜像**之前**的 docker run 标志(逃生舱,如 --cap-add=…)",
+          "type": "array"
+        },
+        "command": {
+          "description": "镜像**之后**的参数 —— 给容器内的程序(如 --config.file=…)",
+          "type": "string"
+        },
+        "env": {
+          "description": "环境变量",
+          "type": "object"
+        },
+        "image": {
+          "description": "镜像引用;state: started 时必需",
+          "type": "string"
+        },
+        "name": {
+          "description": "容器名",
+          "type": "string"
+        },
+        "ports": {
+          "description": "端口映射,docker -p 语法",
+          "type": "array"
+        },
+        "restart_policy": {
+          "description": "--restart",
+          "type": "string"
+        },
+        "runtime": {
+          "description": "docker 兼容 CLI,默认 docker",
+          "type": "string"
+        },
+        "state": {
+          "description": "默认 started",
+          "enum": [
+            "started",
+            "stopped",
+            "absent"
+          ]
+        },
+        "volumes": {
+          "description": "挂载,docker -v 语法",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "type_copy": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "content"
+              ]
+            },
+            {
+              "required": [
+                "src"
+              ]
+            },
+            {
+              "required": [
+                "material"
+              ]
+            }
+          ]
+        }
+      ],
+      "description": "copy — 把内容放到目标路径;幂等靠内容寻址(sha256)而非时间戳\n\n三种来源恰择其一。用 material 时,若物料声明了 sha256 或是本地文件,plan 期即可内容寻址比对;远端且无 sha256 则只能退回\"上游变没变\"的粗判据。",
+      "properties": {
+        "content": {
+          "description": "内联文本,可含 ${} 插值",
+          "type": "string"
+        },
+        "dest": {
+          "description": "目标路径",
+          "type": "string"
+        },
+        "group": {
+          "description": "属组",
+          "type": "string"
+        },
+        "material": {
+          "$ref": "#/$defs/material_ref",
+          "description": "materials: 里声明的物料名"
+        },
+        "mode": {
+          "$ref": "#/$defs/mode",
+          "description": "权限,带引号八进制"
+        },
+        "owner": {
+          "description": "属主",
+          "type": "string"
+        },
+        "src": {
+          "description": "控制端文件(相对 blueprint 目录)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dest"
+      ],
+      "type": "object"
+    },
+    "type_cron": {
+      "additionalProperties": false,
+      "description": "cron — 定时任务",
+      "properties": {
+        "job": {
+          "description": "要执行的命令",
+          "type": "string"
+        },
+        "name": {
+          "description": "任务标识(注释行,用于幂等)",
+          "type": "string"
+        },
+        "schedule": {
+          "description": "cron 表达式,默认每日",
+          "type": "string"
+        },
+        "state": {
+          "description": "默认 present",
+          "enum": [
+            "present",
+            "absent"
+          ]
+        },
+        "user": {
+          "description": "以哪个用户运行",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "job"
+      ],
+      "type": "object"
+    },
+    "type_file": {
+      "additionalProperties": false,
+      "description": "file — 路径的期望态:目录 / 存在 / 不存在,含权限属主",
+      "properties": {
+        "group": {
+          "description": "属组",
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/mode",
+          "description": "权限,带引号八进制如 \"0750\";不写 = 不管理权限"
+        },
+        "owner": {
+          "description": "属主",
+          "type": "string"
+        },
+        "path": {
+          "description": "目标路径",
+          "type": "string"
+        },
+        "state": {
+          "description": "directory=目录;touch=文件存在;absent=不存在",
+          "enum": [
+            "directory",
+            "touch",
+            "absent"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "state"
+      ],
+      "type": "object"
+    },
+    "type_group": {
+      "additionalProperties": false,
+      "description": "group — 系统组",
+      "properties": {
+        "gid": {
+          "description": "固定 gid;不写则由系统分配",
+          "type": "integer"
+        },
+        "name": {
+          "description": "组名",
+          "type": "string"
+        },
+        "state": {
+          "description": "默认 present",
+          "enum": [
+            "present",
+            "absent"
+          ]
+        },
+        "system": {
+          "description": "系统组",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "type_hostname": {
+      "additionalProperties": false,
+      "description": "hostname — 目标主机名(kubeadm 等按 OS hostname 认节点)\n\nsubstrate.name 是 inventory 里的名字(身份);substrate.hostname 是当前 OS 主机名(现实)。退役时不动主机名 —— 没有\"原来的名字\"可以改回去。",
+      "properties": {
+        "name": {
+          "description": "期望的主机名,常写 ${substrate.name}",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "type_http": {
+      "additionalProperties": false,
+      "description": "http — HTTP 状态码探针",
+      "properties": {
+        "insecure": {
+          "description": "跳过 TLS 校验",
+          "type": "boolean"
+        },
+        "method": {
+          "description": "HTTP 方法",
+          "type": "string"
+        },
+        "status": {
+          "description": "期望状态码,默认 200",
+          "type": "integer"
+        },
+        "url": {
+          "description": "目标 URL",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
+    "type_image_present": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "material"
+              ]
+            },
+            {
+              "required": [
+                "materials"
+              ]
+            }
+          ]
+        }
+      ],
+      "description": "image_present — 容器镜像已在目标运行时里\n\n退役不删镜像:别的负载可能正用着,重新拉取代价也高。",
+      "properties": {
+        "material": {
+          "$ref": "#/$defs/material_ref",
+          "description": "单个镜像物料"
+        },
+        "materials": {
+          "description": "一批镜像物料名",
+          "type": "array"
+        },
+        "namespace": {
+          "description": "ctr/nerdctl 命名空间,如 k8s.io",
+          "type": "string"
+        },
+        "runtime": {
+          "description": "运行时 CLI,默认 docker",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "type_kernel_modules": {
+      "additionalProperties": false,
+      "description": "kernel_modules — 内核模块加载与持久化\n\n退役只撤持久化,不 rmmod —— 别的东西可能正用着这些模块。",
+      "properties": {
+        "load": {
+          "description": "要加载的模块名列表",
+          "type": "array"
+        },
+        "persist": {
+          "description": "写入 /etc/modules-load.d/,默认 true",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "load"
+      ],
+      "type": "object"
+    },
+    "type_lineinfile": {
+      "additionalProperties": false,
+      "description": "lineinfile — 确保某一行在文件里存在或不存在\n\n退役时只删这一行,不删整个文件 —— 那往往是别人的文件。",
+      "properties": {
+        "create": {
+          "description": "文件不存在时是否创建,默认 false",
+          "type": "boolean"
+        },
+        "line": {
+          "description": "期望的整行内容",
+          "type": "string"
+        },
+        "path": {
+          "description": "目标文件",
+          "type": "string"
+        },
+        "regexp": {
+          "description": "匹配待替换行的正则;不写则按整行字面匹配",
+          "type": "string"
+        },
+        "state": {
+          "description": "默认 present",
+          "enum": [
+            "present",
+            "absent"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "line"
+      ],
+      "type": "object"
+    },
+    "type_material": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "file"
+              ]
+            },
+            {
+              "required": [
+                "image"
+              ]
+            },
+            {
+              "required": [
+                "os_package"
+              ]
+            }
+          ]
+        }
+      ],
+      "description": "material — 闭包物料的声明:这份字节从哪来、怎么校验\n\n三种来源恰择其一。URL 里引用 `${substrate.arch}` 这类目标事实时,`crater build` 无从推断要烤哪个变体,必须用 `--for arch=amd64` 给出目标画像。",
+      "properties": {
+        "file": {
+          "description": "远端 URL,或随蓝图走的本地相对路径;可含 ${} 插值",
+          "type": "string"
+        },
+        "image": {
+          "description": "容器镜像 ref",
+          "type": "string"
+        },
+        "name": {
+          "description": "物料名 —— resources 里用 `material:` 引用它",
+          "type": "string"
+        },
+        "os_package": {
+          "description": "OS 包闭包(按 family 的包名表)",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "内容摘要;有它 plan 期才能内容寻址比对,没有只能退回\"上游变没变\"的粗判据",
+          "type": "string"
+        },
+        "unzip": {
+          "description": "下载物是 zip 时,取其中这个成员作为物料本体(控制端解包)",
+          "type": "string"
+        },
+        "when": {
+          "description": "条件纳入:决定该物料属于哪个 flavor 子闭包",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "type_mount": {
+      "additionalProperties": false,
+      "description": "mount — 挂载点",
+      "properties": {
+        "fstype": {
+          "description": "文件系统类型",
+          "type": "string"
+        },
+        "opts": {
+          "description": "挂载选项",
+          "type": "string"
+        },
+        "path": {
+          "description": "挂载点",
+          "type": "string"
+        },
+        "persist": {
+          "description": "写入 /etc/fstab",
+          "type": "boolean"
+        },
+        "src": {
+          "description": "设备或源",
+          "type": "string"
+        },
+        "state": {
+          "description": "默认 mounted",
+          "enum": [
+            "mounted",
+            "unmounted",
+            "absent"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "src",
+        "fstype"
+      ],
+      "type": "object"
+    },
+    "type_package": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "packages"
+              ]
+            },
+            {
+              "required": [
+                "material"
+              ]
+            }
+          ]
+        }
+      ],
+      "description": "package — OS 包(按 family 分叉:引擎只懂怎么装,装什么是数据)",
+      "properties": {
+        "material": {
+          "$ref": "#/$defs/material_ref",
+          "description": "os_package 类物料(离线闭包)"
+        },
+        "packages": {
+          "description": "按 family 的包名表 {debian: [...], rhel: [...]}",
+          "type": "object"
+        },
+        "state": {
+          "description": "默认 present",
+          "enum": [
+            "present",
+            "absent"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "type_port_open": {
+      "additionalProperties": false,
+      "description": "port_open — 端口可连通探针",
+      "properties": {
+        "host": {
+          "description": "默认 127.0.0.1",
+          "type": "string"
+        },
+        "port": {
+          "description": "端口",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "port"
+      ],
+      "type": "object"
+    },
+    "type_service": {
+      "additionalProperties": false,
+      "description": "service — systemd 服务的运行态与开机自启\n\n**传导**:在本条之前声明的 file/copy/template/systemd_unit/unarchive 若发生变更,本服务会被判定需要重启 —— 作者不写 notify,也就不会因为忘写而漏重启。`restarted` 表示每次都重启,永远不是 noop;想保持运行写 `started`。",
+      "properties": {
+        "enabled": {
+          "description": "开机自启;不写 = 不管理",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "服务名,可省 .service 后缀",
+          "type": "string"
+        },
+        "state": {
+          "description": "不写 = 不管理运行态",
+          "enum": [
+            "started",
+            "stopped",
+            "restarted"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "type_service_active": {
+      "additionalProperties": false,
+      "description": "service_active — systemd 服务正在运行",
+      "properties": {
+        "name": {
+          "description": "服务名",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "type_shell": {
+      "additionalProperties": false,
+      "description": "shell — 逃生舱:一条自由 shell 命令\n\n没有 check 就无法预演,plan 显示 `?` 并计入\"模型化欠债\" —— 接住,不羞辱,但可见。退役无逆操作(返回 warn);想要退役行为请写进 procedure。能用 cmd 的结构化形态就别用它。",
+      "properties": {
+        "chdir": {
+          "description": "工作目录",
+          "type": "string"
+        },
+        "check": {
+          "description": "幂等探针:退出 0 即视为已完成",
+          "type": "string"
+        },
+        "cmd": {
+          "description": "命令行(过 shell)",
+          "type": "string"
+        },
+        "creates": {
+          "description": "幂等探针:此路径存在即跳过",
+          "type": "string"
+        },
+        "env": {
+          "description": "环境变量;check 与 cmd 共享",
+          "type": "object"
+        }
+      },
+      "required": [
+        "cmd"
+      ],
+      "type": "object"
+    },
+    "type_swap": {
+      "additionalProperties": false,
+      "description": "swap — 交换分区的启用状态(k8s 要求关闭)\n\n只 swapoff 不改 fstab 是经典陷阱:重启后 swap 自己回来、k8s 再次拒绝启动。persist 让这一项在 plan 里**看得见**。退役时不擅自开回来 —— 原来什么样我们并不知道。",
+      "properties": {
+        "persist": {
+          "description": "同时注释掉 /etc/fstab 里的 swap 条目,默认 true",
+          "type": "boolean"
+        },
+        "state": {
+          "description": "期望状态",
+          "enum": [
+            "disabled",
+            "enabled"
+          ]
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "type_sysctl": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "set"
+              ]
+            },
+            {
+              "required": [
+                "from_material"
+              ]
+            }
+          ]
+        }
+      ],
+      "description": "sysctl — 内核参数\n\n逐键比对并逐键报差异;键在本机不存在(如模块未加载)时读作\"(未设置)\",不会把探针的 stderr 当成当前值。",
+      "properties": {
+        "from_material": {
+          "$ref": "#/$defs/material_ref",
+          "description": "整份 sysctl 配置来自物料"
+        },
+        "reload": {
+          "description": "写完是否 sysctl --system,默认 true",
+          "type": "boolean"
+        },
+        "set": {
+          "description": "键值表,如 {net.ipv4.ip_forward: 1}",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "type_systemd_unit": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "from_material"
+              ]
+            },
+            {
+              "required": [
+                "exec_start"
+              ]
+            }
+          ]
+        }
+      ],
+      "description": "systemd_unit — 安装 systemd unit 文件(自动 daemon-reload)\n\n字段化而非 copy 一坨 INI:能说出\"只有 ExecStart 变了\",且只比对我们写的那几项 —— 目标机上别人手加的 MemoryMax= 不算漂移。",
+      "properties": {
+        "after": {
+          "description": "[Unit] After",
+          "type": "array"
+        },
+        "description": {
+          "description": "[Unit] Description",
+          "type": "string"
+        },
+        "dropins": {
+          "description": "额外落到 <name>.service.d/ 的物料名",
+          "type": "array"
+        },
+        "environment_file": {
+          "description": "[Service] EnvironmentFile;自动加 - 前缀(缺文件不报错)",
+          "type": "string"
+        },
+        "exec_start": {
+          "description": "由字段渲染 unit 时的 ExecStart",
+          "type": "string"
+        },
+        "from_material": {
+          "$ref": "#/$defs/material_ref",
+          "description": "整份 unit 来自物料"
+        },
+        "limits": {
+          "description": "[Service] Limit* 如 {NOFILE: 1048576}",
+          "type": "object"
+        },
+        "name": {
+          "description": "unit 名,可省 .service 后缀",
+          "type": "string"
+        },
+        "restart": {
+          "description": "[Service] Restart,如 on-failure",
+          "type": "string"
+        },
+        "restart_sec": {
+          "description": "[Service] RestartSec",
+          "type": "integer"
+        },
+        "type": {
+          "description": "[Service] Type",
+          "type": "string"
+        },
+        "wanted_by": {
+          "description": "[Install] WantedBy,默认 multi-user.target",
+          "type": "string"
+        },
+        "wants": {
+          "description": "[Unit] Wants",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "type_template": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "material"
+              ]
+            },
+            {
+              "required": [
+                "src"
+              ]
+            }
+          ]
+        }
+      ],
+      "description": "template — 渲染一份模板物料到目标路径(纯替换,无条件无循环)\n\n模板只做替换 —— 条件与循环是藏逻辑的第一现场,一律不支持。需要结构化生成请用 file 的键值形式或 each:。",
+      "properties": {
+        "dest": {
+          "description": "目标路径",
+          "type": "string"
+        },
+        "group": {
+          "description": "属组",
+          "type": "string"
+        },
+        "material": {
+          "$ref": "#/$defs/material_ref",
+          "description": "作为模板的物料名"
+        },
+        "mode": {
+          "$ref": "#/$defs/mode",
+          "description": "权限,带引号八进制"
+        },
+        "owner": {
+          "description": "属主",
+          "type": "string"
+        },
+        "src": {
+          "description": "控制端模板文件",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dest"
+      ],
+      "type": "object"
+    },
+    "type_time_sync": {
+      "additionalProperties": false,
+      "description": "time_sync — 时钟同步(NTP)\n\n\"启用了同步\"和\"已经同步上\"是两件事,本类型分别观察 NTP 与 NTPSynchronized。只看前者会让一台刚开机、时钟还差几百毫秒的机器显示为绿灯 —— 而 etcd 的仲裁和证书有效期恰恰吃这几百毫秒。跨主机比时间戳的一切判据,精度下限都是它。实现走 systemd-timesyncd(Ubuntu/Debian 默认);退役时不关同步。",
+      "properties": {
+        "enabled": {
+          "description": "是否启用 NTP 同步,默认 true",
+          "type": "boolean"
+        },
+        "servers": {
+          "description": "NTP 服务器;留空用系统默认(境内建议 ntp.aliyun.com)",
+          "type": "array"
+        },
+        "wait": {
+          "description": "apply 时等到真正同步上再返回(最多 60s),默认 false",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "type_timezone": {
+      "additionalProperties": false,
+      "description": "timezone — 系统时区\n\n时区只影响**显示**,不影响时间本身 —— 真正影响 k8s 的是时钟是否同步,那是 time_sync 管的。但机群时区不一致会让跨机对日志变成一件苦差事,所以它值得是期望态而不是一条命令。退役时不动时区:没有\"原来的时区\"可以改回去。",
+      "properties": {
+        "name": {
+          "description": "IANA 时区名,如 Asia/Shanghai;`timedatectl list-timezones` 可列全",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "type_unarchive": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "material"
+              ]
+            },
+            {
+              "required": [
+                "from"
+              ]
+            }
+          ]
+        }
+      ],
+      "description": "unarchive — 把归档展开到目标目录\n\n不写 creates 就无法判断是否已展开,plan 会报 `?说不清`、每次都重跑 —— 引擎不猜\"哪个文件代表展开成功\",那是产品知识,必须由作者声明。退役只删 creates 指的产物:to 常是 /usr/local 这类共享目录,整个删会连累别人。",
+      "properties": {
+        "creates": {
+          "description": "幂等探针:此路径存在即视为已展开",
+          "type": "string"
+        },
+        "from": {
+          "description": "目标机上已有的归档路径",
+          "type": "string"
+        },
+        "material": {
+          "$ref": "#/$defs/material_ref",
+          "description": "归档物料名"
+        },
+        "strip": {
+          "description": "tar --strip-components",
+          "type": "integer"
+        },
+        "to": {
+          "description": "展开到哪个目录",
+          "type": "string"
+        }
+      },
+      "required": [
+        "to"
+      ],
+      "type": "object"
+    },
+    "type_user": {
+      "additionalProperties": false,
+      "description": "user — 系统用户\n\n`uid` / `gid` 值得固定:数据盘在机器间搬动、备份归档跨机还原时,属主靠的是数字而不是名字 —— 系统分配的 uid 各机不同,搬过去就成了一堆 `nobody`。主组用 `group:`(单数),附加组用 `groups:`(复数)。",
+      "properties": {
+        "group": {
+          "description": "主组名(-g);不写则由系统按发行版惯例决定",
+          "type": "string"
+        },
+        "groups": {
+          "description": "附加组(-G)",
+          "type": "array"
+        },
+        "home": {
+          "description": "家目录",
+          "type": "string"
+        },
+        "name": {
+          "description": "用户名",
+          "type": "string"
+        },
+        "shell": {
+          "description": "登录 shell",
+          "type": "string"
+        },
+        "state": {
+          "description": "默认 present",
+          "enum": [
+            "present",
+            "absent"
+          ]
+        },
+        "system": {
+          "description": "系统用户(--system)",
+          "type": "boolean"
+        },
+        "uid": {
+          "description": "固定 uid;不写则由系统分配",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "type_wait": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "port"
+              ]
+            },
+            {
+              "required": [
+                "path"
+              ]
+            }
+          ]
+        }
+      ],
+      "description": "wait — 阻塞直到条件满足(只读:它改变不了任何东西)\n\n等待成功报 ok 而非 changed —— 它没有改变世界。",
+      "properties": {
+        "delay": {
+          "description": "首次探测前等待秒数",
+          "type": "integer"
+        },
+        "host": {
+          "description": "配合 port,默认 127.0.0.1",
+          "type": "string"
+        },
+        "path": {
+          "description": "路径",
+          "type": "string"
+        },
+        "port": {
+          "description": "TCP 端口",
+          "type": "integer"
+        },
+        "state": {
+          "description": "期望方向,默认 started/present",
+          "enum": [
+            "started",
+            "stopped",
+            "present",
+            "absent"
+          ]
+        },
+        "timeout": {
+          "description": "秒,默认 30",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "cast": {
+      "additionalProperties": {
+        "$ref": "#/$defs/selector"
+      },
+      "description": "选角表:给 selector 起名字,单点定义、全篇 `target:` 引用",
+      "type": "object"
+    },
+    "description": {
+      "description": "一句话说明",
+      "type": "string"
+    },
+    "facts": {
+      "description": "派生事实:名字 → CEL 表达式(可调探针函数)。声明处做计算,资源里写 ${facts.名字} 保持名词",
+      "type": "object"
+    },
+    "fleet": {
+      "additionalProperties": false,
+      "description": "机群契约:蓝图要求哪些组、最少几台。plan 之前校验",
+      "properties": {
+        "groups": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "properties": {
+              "min": {
+                "description": "最少几台(缺省 1;写 0 表示允许为空组)",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "description": "组名 → 约束",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "health": {
+      "description": "只读健康探针:verify 与漂移检测的依据",
+      "items": {
+        "$ref": "#/$defs/probe"
+      },
+      "type": "array"
+    },
+    "materials": {
+      "description": "离线闭包物料",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "file": {
+            "description": "远端 URL,或随蓝图走的本地相对路径;可含 ${} 插值",
+            "type": "string"
+          },
+          "image": {
+            "description": "容器镜像 ref",
+            "type": "string"
+          },
+          "name": {
+            "description": "物料名 —— resources 里用 `material:` 引用它",
+            "type": "string"
+          },
+          "os_package": {
+            "description": "OS 包闭包(按 family 的包名表)"
+          },
+          "sha256": {
+            "description": "内容摘要;有它 plan 期才能内容寻址比对,没有只能退回\"上游变没变\"的粗判据",
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "unzip": {
+            "description": "下载物是 zip 时,取其中这个成员作为物料本体(控制端解包)",
+            "type": "string"
+          },
+          "when": {
+            "$ref": "#/$defs/condition",
+            "description": "条件纳入:决定该物料属于哪个 flavor 子闭包"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "name": {
+      "description": "蓝图名(制品标识)",
+      "type": "string"
+    },
+    "params": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "properties": {
+          "default": {
+            "description": "默认值;有 default 即非必填"
+          },
+          "desc": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "secret": {
+            "description": "孪生视图/日志/API 自动打码",
+            "type": "boolean"
+          },
+          "stage": {
+            "description": "build 期烤进制品;deploy 期部署时给",
+            "enum": [
+              "build",
+              "deploy"
+            ]
+          },
+          "type": {
+            "description": "string|int|bool|ip|cidr|port|version|[T]|{enum:[…]}"
+          }
+        },
+        "type": "object"
+      },
+      "description": "类型化参数契约",
+      "type": "object"
+    },
+    "preflight": {
+      "description": "只读准入断言:任一失败则整个部署不开始",
+      "type": "array"
+    },
+    "procedures": {
+      "additionalProperties": {
+        "properties": {
+          "params": {
+            "type": "object"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/$defs/step"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "description": "机群级工作流(舞):名 → 步骤列表",
+      "type": "object"
+    },
+    "requires": {
+      "description": "环境准入:支持的 distro/version/arch",
+      "type": "object"
+    },
+    "resources": {
+      "description": "期望态资源,按声明序收敛",
+      "items": {
+        "$ref": "#/$defs/resource"
+      },
+      "type": "array"
+    },
+    "types": {
+      "description": "自定义资源类型(L2):探针 + procedure 补齐五动词",
+      "type": "array"
+    },
+    "version": {
+      "description": "蓝图自身版本号",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "title": "crater blueprint",
+  "type": "object"
+}
