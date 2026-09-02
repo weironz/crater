@@ -582,6 +582,27 @@ enum PkgCmd {
     Tags { reference: String },
     /// 本地 store 里的蓝图包。
     Ls,
+    /// 把包连同全部物料导成一个 tar —— U 盘搬去断网机房。
+    ///
+    /// 和索引一起放同一个目录,对面 `pkg load` + `repo add` 就能搜能装:
+    ///
+    ///   crater pkg save reg/ns/yq:4.44.3 -o /media/usb/yq.pkg.tar
+    ///   crater pkg index --store -o /media/usb/index.yaml
+    Save {
+        /// 本地 store 里的引用(`crater pkg ls` 看有哪些)。
+        reference: String,
+        /// 输出文件,如 /media/usb/yq.pkg.tar
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// 把 `pkg save` 的 tar 收进本地 store —— 断网机上的第一步。
+    Load {
+        /// tar 的路径。
+        file: PathBuf,
+        /// 换一个引用存(默认用 tar 里带的那条)。
+        #[arg(long = "as")]
+        as_ref: Option<String>,
+    },
     /// 生成索引文件 —— 别人 `repo add` 它,就能 `search` 和 `install`。
     ///
     /// 只读 manifest + config,一层都不下载。**没有"扫一个 registry"这种
@@ -851,6 +872,8 @@ async fn main() -> Result<()> {
             PkgCmd::Inspect { reference } => pkg::inspect(&reference).await,
             PkgCmd::Tags { reference } => pkg::tags(&reference).await,
             PkgCmd::Ls => pkg::ls(),
+            PkgCmd::Save { reference, output } => pkg::save(&reference, &output),
+            PkgCmd::Load { file, as_ref } => pkg::load(&file, as_ref.as_deref()),
             PkgCmd::Index { sources, store, out, merge } => {
                 repo::index(&sources, store, &out, merge).await
             }

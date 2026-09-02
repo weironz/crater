@@ -51,6 +51,12 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub platforms: Vec<String>,
     /// 离线镜像时指向同目录的 `.pkg.tar`(相对路径)。
+    ///
+    /// **由 `pkg index` 照实填,不是人手写的。** 生成索引时扫一遍输出目录里的
+    /// `*.pkg.tar`,读出每个归档自报的引用,对得上才记 —— 记的是"这个 tar
+    /// 确实装着这条引用的字节",不是"这里大概应该有个 tar"。
+    /// 读它的是 [`resolve`]:U 盘上的包忘了 `pkg load` 时,把"连不上 registry"
+    /// 换成"这份字节就在你手上的哪个文件里"。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub urls: Vec<String>,
 }
@@ -232,6 +238,10 @@ pub async fn index(sources: &[String], from_store: bool, out: &std::path::Path, 
     if n == 0 {
         bail!("一个包都没收进来 —— 索引不写了(免得把已有的覆盖成空)");
     }
+    let tars = attach_local_tars(&mut idx, out);
+    if tars > 0 {
+        say!("  · 同目录 {tars} 个包 tar 已记进 urls —— 这份索引可以整个目录搬走");
+    }
     idx.generated = now_rfc3339();
     write_atomically(out, serde_yaml::to_string(&idx)?.as_bytes())?;
     say!();
@@ -246,6 +256,85 @@ pub async fn index(sources: &[String], from_store: bool, out: &std::path::Path, 
     }
     say!("托管到任意静态 HTTP,对方 `crater repo add <名> <地址>` 就能搜。");
     Ok(())
+}
+
+// ───────────────────────── 离线镜像:urls ─────────────────────────
+
+/// 一个 oci-archive 自报装着哪些引用。
+///
+/// 只流式读归档里的 `index.json`(几百字节)—— 一份包 tar 可以有几百兆,
+/// 为了问一句"你是谁"把它整个摊开是不必要的。
+fn refs_in_archive(tar: &std::path::Path) -> Vec<String> {
+    let Ok(f) = std::fs::File::open(tar) else { return Vec::new() };
+    let mut ar = tar::Archive::new(f);
+    let Ok(entries) = ar.entries() else { return Vec::new() };
+    for e in entries.flatten() {
+        let Ok(p) = e.path() else { continue };
+        if p.file_name().and_then(|n| n.to_str()) != Some("index.json") {
+            continue;
+        }
+        // `blobs/sha256/…` 里不会有 index.json,顶层那一份才是归档目录。
+        if p.components().count() != 2 && p.components().count() != 1 {
+            continue;
+        }
+        let Ok(idx) = serde_json::from_reader::<_, serde_json::Value>(e) else { return Vec::new() };
+        return idx["manifests"]
+            .as_array()
+            .map(|ms| {
+                ms.iter()
+                    .filter_map(|m| m["annotations"]["org.opencontainers.image.ref.name"].as_str())
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    Vec::new()
+}
+
+/// 把索引输出目录里的包 tar 记进对应条目的 `urls`,返回记上的 tar 个数。
+///
+/// **只记对得上的。** 匹配靠归档自报的引用,不靠文件名 —— `yq.pkg.tar` 里
+/// 装的是哪一版是它自己说了算,按名字猜会在同名不同版时把人指到错的文件上,
+/// 而那种错要到断网机上 load 完才看得出来。
+///
+/// 每次生成都先清空再重填:索引是派生数据,上一版记过的 tar 这一版可能已经
+/// 不在了,留着一条指向空气的路径比没有更糟。
+fn attach_local_tars(idx: &mut Index, out: &std::path::Path) -> usize {
+    for versions in idx.entries.values_mut() {
+        for e in versions.iter_mut() {
+            e.urls.clear();
+        }
+    }
+    let dir = out.parent().filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_path_buf());
+    let dir = dir.unwrap_or_else(|| std::path::PathBuf::from("."));
+    let Ok(rd) = std::fs::read_dir(&dir) else { return 0 };
+    let mut files: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            p.is_file() && (n.ends_with(".pkg.tar") || n.ends_with(".oci"))
+        })
+        .collect();
+    files.sort();
+    let mut used = 0usize;
+    for f in &files {
+        let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let carried = refs_in_archive(f);
+        let mut hit = false;
+        for versions in idx.entries.values_mut() {
+            for e in versions.iter_mut() {
+                if carried.iter().any(|r| r == &e.reference) && !e.urls.contains(&name) {
+                    e.urls.push(name.clone());
+                    hit = true;
+                }
+            }
+        }
+        if hit {
+            used += 1;
+        }
+    }
+    used
 }
 
 // ───────────────────────────── 仓库 ─────────────────────────────
@@ -493,7 +582,10 @@ pub fn resolve(name: &str, repo: Option<&str>) -> Result<String> {
             "仓库里没有 `{name}`{}。`crater search {n}` 看看有什么。",
             want_ver.map(|v| format!(" 的 {v} 版")).unwrap_or_default()
         ),
-        1 => Ok(found[0].1.reference.clone()),
+        1 => {
+            offline_hint(&found[0].0, found[0].1);
+            Ok(found[0].1.reference.clone())
+        }
         _ => {
             let rs: Vec<&str> = found.iter().map(|(r, _)| r.as_str()).collect();
             bail!(
@@ -501,6 +593,48 @@ pub fn resolve(name: &str, repo: Option<&str>) -> Result<String> {
                 found.len(),
                 rs.join(", ")
             )
+        }
+    }
+}
+
+/// 解析中了一条**离线镜像**的条目、而字节还没进本地 store 时,说清楚
+/// 那份字节就在哪个文件里。
+///
+/// 这是 `urls` 唯一的读处,也是它存在的理由。没有它,断网机上漏掉一步
+/// `pkg load` 的表现是 install 去连一个连不上的 registry —— 一次长超时,
+/// 外加一条把人引向防火墙和证书的报错。而正确的动作只是"把手边这个 tar
+/// 收进来"。
+///
+/// 只在**有 urls** 时开口:带 urls 的索引按定义是随包一起搬过来的离线镜像,
+/// 那种索引上字节不在本地就是漏了一步。在线仓库的条目没有 urls,不会被这
+/// 一条打扰。
+fn offline_hint(repo: &str, e: &Entry) {
+    if e.urls.is_empty() {
+        return;
+    }
+    if ImageStore::open().map(|s| s.has_all_layers(&e.reference)).unwrap_or(false) {
+        return; // 字节已经在了,没什么好说的
+    }
+    // urls 是相对索引文件的路径 —— 本地/U 盘索引才解得出绝对位置。
+    let base = load_repos()
+        .repos
+        .get(repo)
+        .filter(|u| !u.starts_with("http://") && !u.starts_with("https://"))
+        .map(|u| PathBuf::from(u.strip_prefix("file://").unwrap_or(u)))
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    crate::oops!("{} 的字节还不在本地。", e.reference);
+    for u in &e.urls {
+        match base.as_ref().map(|d| d.join(u)) {
+            // tar 在 → 就差一步 `pkg load`。
+            Some(p) if p.exists() => crate::oops!("  先收进来:crater pkg load {}", p.display()),
+            // 索引说有、盘上却没有 → **只拷了一半**。这是 U 盘搬运最常见的
+            // 那种错(拷了几百字节的索引,漏了几百兆的包),而它唯一的症状
+            // 本来是"install 连不上 registry" —— 指向完全错的方向。
+            Some(p) => crate::oops!(
+                "  仓库 {repo} 的索引说它在 {} —— 但那个文件不在。U 盘只拷了索引、漏了包?",
+                p.display()
+            ),
+            None => crate::oops!("  仓库 {repo} 说它在 {u}(相对索引所在目录)"),
         }
     }
 }
@@ -679,6 +813,79 @@ mod tests {
         let p = d.path().join("nope").join("index.yaml");
         let e = write_atomically(&p, b"x").unwrap_err();
         assert!(format!("{e:#}").contains("nope"), "错误没指出路径:{e:#}");
+    }
+
+    /// 造一个最小的 oci-archive tar:只有一份 index.json,自报装着 `refs`。
+    fn fake_archive(path: &std::path::Path, refs: &[&str]) {
+        let index = serde_json::json!({
+            "schemaVersion": 2,
+            "manifests": refs.iter().map(|r| serde_json::json!({
+                "digest": "sha256:0000",
+                "annotations": { "org.opencontainers.image.ref.name": r }
+            })).collect::<Vec<_>>()
+        });
+        let body = serde_json::to_vec(&index).unwrap();
+        let f = std::fs::File::create(path).unwrap();
+        let mut b = tar::Builder::new(f);
+        let mut h = tar::Header::new_gnu();
+        h.set_size(body.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, "index.json", &body[..]).unwrap();
+        b.finish().unwrap();
+    }
+
+    /// `urls` 记的是**归档自报的引用**对得上的那个 tar,不是名字像的那个。
+    ///
+    /// 按文件名猜会在同名不同版时把人指到错的包上,而那种错要到断网机上
+    /// load 完、装出一个别的版本来才看得见 —— 正是 D-128 那一类静默。
+    #[test]
+    fn urls_point_at_the_tar_that_really_carries_the_bytes() {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("index.yaml");
+
+        let mut idx = Index::default();
+        let mut a = e("4.44.3");
+        a.reference = "reg/t/yq:4.44.3".into();
+        let mut b = e("4.40.5");
+        b.reference = "reg/t/yq:4.40.5".into();
+        idx.upsert("yq", a);
+        idx.upsert("yq", b);
+
+        // 名字最像 4.44.3 的那个 tar 里装的其实是 4.40.5。
+        fake_archive(&d.path().join("yq.pkg.tar"), &["reg/t/yq:4.40.5"]);
+        // 无关的归档不该被记进任何条目。
+        fake_archive(&d.path().join("other.pkg.tar"), &["reg/t/rustfs:1.0"]);
+
+        assert_eq!(attach_local_tars(&mut idx, &out), 1, "只有一个 tar 对得上");
+        let by_ver = |v: &str| idx.entries["yq"].iter().find(|x| x.version == v).unwrap().urls.clone();
+        assert_eq!(by_ver("4.40.5"), vec!["yq.pkg.tar".to_string()], "按自报引用配对");
+        assert!(by_ver("4.44.3").is_empty(), "名字像不算数 —— 会把人指到错的版本上");
+    }
+
+    /// 重跑 `pkg index` 时旧的 `urls` 要**先清掉**。
+    ///
+    /// 索引是派生数据:上一版记过的 tar 这一版可能已经不在同一个目录了。
+    /// 留一条指向空气的路径,比没有这个字段更糟 —— 它会让人以为包就在手边。
+    #[test]
+    fn stale_urls_are_cleared_not_accumulated() {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("index.yaml");
+        let mut idx = Index::default();
+        let mut a = e("4.44.3");
+        a.reference = "reg/t/yq:4.44.3".into();
+        a.urls = vec!["上一版留下的.pkg.tar".into()];
+        idx.upsert("yq", a);
+
+        // 目录里一个 tar 都没有 → urls 应该被清空,而不是留着上一版那条。
+        assert_eq!(attach_local_tars(&mut idx, &out), 0);
+        assert!(idx.entries["yq"][0].urls.is_empty(), "旧 urls 没清掉");
+
+        // tar 出现后再记上,且不重复累积。
+        fake_archive(&d.path().join("yq.pkg.tar"), &["reg/t/yq:4.44.3"]);
+        attach_local_tars(&mut idx, &out);
+        attach_local_tars(&mut idx, &out);
+        assert_eq!(idx.entries["yq"][0].urls, vec!["yq.pkg.tar".to_string()]);
     }
 
     #[test]
