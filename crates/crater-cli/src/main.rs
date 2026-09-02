@@ -39,6 +39,7 @@ mod images;
 mod inspect_bp;
 mod lint;
 mod material_ctx;
+mod named;
 mod out;
 mod pkg;
 mod repo;
@@ -160,29 +161,39 @@ struct Cli {
 enum Cmd {
     /// 收敛 —— 把蓝图声明的状态推到机群
     ///
-    /// 读一份蓝图(或栈),连上目标机,把 `resources:` 里的每一条推到它声明的
-    /// 状态。已经对的不动,要改的才改 —— 重复跑同一条命令是安全的。
+    /// 读一份蓝图,连上目标机,把 `resources:` 里的每一条推到它声明的状态。
+    /// 已经对的不动,要改的才改 —— 重复跑同一条命令是安全的。
     ///
-    /// 只认**蓝图**(`resources:`)或**栈**(`stack:` + `uses:`),按文件内容
-    /// 分辨,不看文件名。旧 task 管线(顶层 `actions:`)已删除。
+    /// `<source>` 按这个顺序解,**先本地后远端**:
     ///
-    /// 想先看会变什么,用 `crater plan` —— 它连机器跑只读探针。`--dry-run`
-    /// 是不连机器的静态版本,只打印计划。
+    ///   1. 一个存在的文件  → 蓝图或栈(按内容分辨,不看文件名)
+    ///   2. `<名字>.app.yaml` → 已装的任务:蓝图、机群、参数都从它来
+    ///   3. 都不是,且像个名字 → 去已配仓库的索引里找,拉下来再跑
+    ///
+    /// 第 3 条就是 `crater apply yq` —— helm 那种用法。它会先印出计划再收敛:
+    /// 拉下来的字节是别人做的,而下一步要改的是生产机。
+    ///
+    /// 命令行给的 `-i` / `--set` **盖过** app 文件里记的。
     #[command(
         verbatim_doc_comment,
         after_help = "\
 用法示例:
-  # 收敛到一台机器
-  crater apply -f web.blueprint.yaml --host 10.0.0.5
+  # 最短的那条:从仓库拉一个包,装到机群上
+  crater repo add lab https://example.com/index.yaml
+  crater apply yq -i inventory.yaml
 
-  # 收敛到一个机群(各自凭据)
+  # 装过之后,机群与参数都记在 yq.app.yaml 里,不必再重复
+  crater apply yq
+
+  # 直接给蓝图文件
   crater apply -f web.blueprint.yaml -i inventory.yaml
+  crater apply -f web.blueprint.yaml --host 10.0.0.5
 
   # 不连机器,只打印静态计划
   crater apply -f web.blueprint.yaml --dry-run
 
-  # 覆盖 apply 阶段的参数
-  crater apply -f web.blueprint.yaml -i inventory.yaml --set vip=10.0.0.9
+  # 覆盖 apply 阶段的参数(盖过 app 文件里记的)
+  crater apply yq --set vip=10.0.0.9
 "
     )]
     Apply {
@@ -218,14 +229,21 @@ enum Cmd {
     /// 它对 —— 把不知道报成没问题,是这类工具最容易骗人的地方。
     ///
     /// 不想连机器就用 `crater apply --dry-run`,它只打印静态计划。
+    ///
+    /// `<source>` 与 `apply` 同一套解法:文件 → `<名字>.app.yaml` → 仓库索引。
+    /// `crater plan yq` 在本地没装过时会把包拉下来、印出计划,**停在那里**。
     #[command(
         verbatim_doc_comment,
         after_help = "\
 用法示例:
-  # 预演一个机群会变什么
-  crater plan -f web.blueprint.yaml -i inventory.yaml
+  # 已装的任务
+  crater plan yq
 
-  # 只看一台
+  # 仓库里的包:拉下来看计划,不收敛
+  crater plan yq -i inventory.yaml
+
+  # 一份蓝图文件
+  crater plan -f web.blueprint.yaml -i inventory.yaml
   crater plan -f web.blueprint.yaml --host 10.0.0.5
 "
     )]
@@ -507,9 +525,12 @@ enum Cmd {
         after_help = "\
 用法示例:
   # 先看会移除什么(默认)
-  crater destroy -f web.blueprint.yaml -i inventory.yaml
+  crater destroy yq
 
   # 确认后真的动手
+  crater destroy yq --yes
+
+  # 或者直接给蓝图
   crater destroy -f web.blueprint.yaml -i inventory.yaml --yes
 "
     )]
@@ -537,6 +558,7 @@ enum Cmd {
         verbatim_doc_comment,
         after_help = "\
 用法示例:
+  crater verify yq                              # 已装的任务
   crater verify -f web.blueprint.yaml -i inventory.yaml
 "
     )]
@@ -1021,6 +1043,69 @@ fn stack_source(file: &Option<PathBuf>, source: &Option<String>) -> Option<PathB
     (candidate.is_file() && stack_cmd::is_stack_file(&candidate)).then_some(candidate)
 }
 
+/// 四个动词共用的一步:把 `<source>` 解成"跑哪份蓝图、在哪跑、带什么参数"。
+///
+/// 顺序是刻意的 —— **文件优先,再本地任务,最后远端仓库**。同名的 `yq` 文件
+/// 和 `yq.app.yaml` 同时存在时,写了路径的那个人显然指的是文件;反过来猜会
+/// 让"我明明指定了文件"变成一件要 debug 的事。
+///
+/// 返回 `None` 有两种含义,由调用方区分:`<source>` 根本不像名字(那是错误
+/// 输入),或者它像名字但本地没有(那就该去仓库找)。用 `remote_name` 判。
+fn source_of(
+    file: &Option<PathBuf>,
+    source: &Option<String>,
+    target: &TargetOpts,
+    sets: &[String],
+) -> Result<Option<named::Resolved>> {
+    if let Some(p) = blueprint_source(file, source) {
+        return Ok(Some(named::Resolved {
+            blueprint: p,
+            target: target.clone(),
+            sets: sets.to_vec(),
+        }));
+    }
+    match source {
+        Some(s) if named::looks_like_a_name(s) => named::resolve(s, target, sets),
+        _ => Ok(None),
+    }
+}
+
+/// `<source>` 该不该拿去仓库里找。
+fn remote_name(file: &Option<PathBuf>, source: &Option<String>) -> Option<String> {
+    if file.is_some() {
+        return None; // 给了 `-f` 就是要一份文件,不该悄悄跑去联网
+    }
+    source
+        .as_deref()
+        .filter(|s| named::looks_like_a_name(s))
+        .map(str::to_string)
+}
+
+/// 本地没有这个名字 → 去仓库把包拉下来跑(helm 那种用法)。
+///
+/// 整条路复用 `pkg::install`:它已经把"名字 → 索引 → 拉包 → 参数契约 →
+/// 机群契约 → 落 app 文件 → 出计划"走通了,这里只决定**收不收敛**。
+///
+/// `converge=false`(`plan`,或 `apply --dry-run`)停在计划;`true` 时计划
+/// 照印,然后执行 —— 拉下来的字节是别人做的,而下一步要改的是生产机,
+/// 那一眼不能省。
+async fn from_repo(name: &str, target: &TargetOpts, sets: &[String], converge: bool) -> Result<()> {
+    say!("本地没有 {name}.app.yaml —— 去仓库找");
+    pkg::install(
+        name,
+        target,
+        sets,
+        None,
+        None,
+        pkg::InstallOpts {
+            yes: converge,
+            full: false,
+            force: false,
+        },
+    )
+    .await
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // ANSI only on a real terminal — keeps redirected/piped output and the
@@ -1056,11 +1141,14 @@ async fn main() -> Result<()> {
                 };
                 return stack_cmd::run(&p, &target, &set, m).await;
             }
-            if let Some(p) = blueprint_source(&file, &probe) {
+            if let Some(r) = source_of(&file, &probe, &target, &set)? {
                 if dry_run {
-                    return blueprint::plan_blueprint(&p, &target, &set).await;
+                    return blueprint::plan_blueprint(&r.blueprint, &r.target, &r.sets).await;
                 }
-                return blueprint::apply_blueprint(&p, &target, &set).await;
+                return blueprint::apply_blueprint(&r.blueprint, &r.target, &r.sets).await;
+            }
+            if let Some(n) = remote_name(&file, &probe) {
+                return from_repo(&n, &target, &set, !dry_run).await;
             }
             bail!(legacy_note("apply"))
         }
@@ -1074,9 +1162,12 @@ async fn main() -> Result<()> {
             if let Some(p) = stack_source(&file, &source) {
                 return stack_cmd::run(&p, &target, &set, StackMode::Plan).await;
             }
-            match blueprint_source(&file, &source) {
-                Some(p) => blueprint::plan_blueprint(&p, &target, &set).await,
-                None => bail!(legacy_note("plan")),
+            match source_of(&file, &source, &target, &set)? {
+                Some(r) => blueprint::plan_blueprint(&r.blueprint, &r.target, &r.sets).await,
+                None => match remote_name(&file, &source) {
+                    Some(n) => from_repo(&n, &target, &set, false).await,
+                    None => bail!(legacy_note("plan")),
+                },
             }
         }
         Cmd::Ui {
@@ -1248,12 +1339,11 @@ async fn main() -> Result<()> {
             if let Some(p) = stack_source(&file, &source) {
                 return stack_cmd::destroy(&p, &target, &set, yes).await;
             }
-            match blueprint_source(&file, &source) {
-                Some(p) => blueprint::destroy_blueprint(&p, &target, &set, yes).await,
-                None => anyhow::bail!(
-                    "`crater destroy` 只支持新 IR blueprint 与 stack;\
-                     旧 task 的删除用 `crater delete`"
-                ),
+            match source_of(&file, &source, &target, &set)? {
+                Some(r) => {
+                    blueprint::destroy_blueprint(&r.blueprint, &r.target, &r.sets, yes).await
+                }
+                None => bail!(local_only("destroy", &source)),
             }
         }
         Cmd::Verify {
@@ -1266,14 +1356,17 @@ async fn main() -> Result<()> {
             if let Some(p) = stack_source(&file, &source) {
                 return stack_cmd::run(&p, &target, &set, StackMode::Verify).await;
             }
-            match blueprint_source(&file, &source) {
-                Some(p) => {
-                    blueprint::verify_blueprint_json(&p, &target, &set, json.as_deref()).await
+            match source_of(&file, &source, &target, &set)? {
+                Some(r) => {
+                    blueprint::verify_blueprint_json(
+                        &r.blueprint,
+                        &r.target,
+                        &r.sets,
+                        json.as_deref(),
+                    )
+                    .await
                 }
-                None => anyhow::bail!(
-                    "`crater verify` 目前只支持新 IR blueprint 与 stack;\
-                     旧 task 的漂移检测用 `crater task list --verify`"
-                ),
+                None => bail!(local_only("verify", &source)),
             }
         }
         Cmd::Doctor {
@@ -1452,6 +1545,28 @@ async fn doctor(
 ///
 /// 说清三件事:这条路没了、新的怎么写、去哪找例子。只说"不支持"会让人以为
 /// 是自己写错了,然后去调参数 —— 而真相是这个形状的输入整个不再存在。
+/// `verify` / `destroy` 只认本地。
+///
+/// 对一个**从没装过**的名字谈"漂移"或"退役"没有意义:漂移是拿现场比记录,
+/// 退役是移除装过的东西 —— 两者都以"装过"为前提。为它去仓库拉一个包下来,
+/// 拉到的也只是"包长什么样",不是"这台机器上有什么"。
+fn local_only(cmd: &str, source: &Option<String>) -> String {
+    let name = source.as_deref().unwrap_or("<名字>");
+    let here = named::apps_in(Path::new("."));
+    let mut m = format!("这里没有 {name}.app.yaml —— `crater {cmd}` 只认本地已装的任务。\n");
+    if here.is_empty() {
+        m.push_str("\n这个目录下还没有任何任务。\n");
+    } else {
+        m.push_str(&format!("\n这个目录下有:{}\n", here.join("、")));
+    }
+    m.push_str(&format!(
+        "\n先装上再谈{}:\n  crater apply {name} -i inventory.yaml\n\n\
+         或者直接给蓝图文件:`crater {cmd} -f <蓝图>`。",
+        if cmd == "verify" { "对账" } else { "退役" }
+    ));
+    m
+}
+
 fn legacy_note(cmd: &str) -> String {
     format!(
         "`crater {cmd}` 现在只接受**蓝图**(`*.blueprint.yaml`)或**栈**\

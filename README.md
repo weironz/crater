@@ -83,38 +83,57 @@ scripts/build-musl.sh all        # 双架构 musl 静态 → dist/
 
 ## 🚀 快速开始
 
+**从仓库装一个包**(helm 那种用法):
+
 ```bash
-crater apply install-yq.yaml                              # 本机
-crater apply yq --host 10.0.0.5,10.0.0.6 --password ***   # 少量机器(共用凭据)
-crater apply yq -i inventory.yaml                         # 机群(各自凭据,crater create inventory 生成)
-crater plan yq -i inventory.yaml                          # 先看会变什么(零执行)
-crater delete yq -i inventory.yaml                        # 卸载(task 自带 teardown 才可用,opt-in)
+crater repo add lab https://example.com/index.yaml   # 一次性:订阅一个索引
+crater search yq                                     # 有什么
+crater apply yq -i inventory.yaml                    # 拉下来 → 印计划 → 收敛
 ```
 
-task 长这样——**纯数据**,没有模板逻辑:
+装过之后机群与参数都记在 `yq.app.yaml` 里,后面就是一个词:
+
+```bash
+crater apply yq        # 再收敛一次(幂等,已经对的不动)
+crater plan yq         # 先看会变什么,零执行
+crater verify yq       # 对账:还是我们部署的样子吗
+crater destroy yq      # 退役(默认只预览,--yes 才动手)
+```
+
+**直接给蓝图文件**也一样:
+
+```bash
+crater apply -f yq.blueprint.yaml -i inventory.yaml         # 机群(各自凭据)
+crater apply -f yq.blueprint.yaml --host 10.0.0.5,10.0.0.6  # 少量机器(共用凭据)
+crater apply -f yq.blueprint.yaml --dry-run                 # 不连机器,只打印计划
+```
+
+蓝图长这样——**纯数据**,没有模板逻辑:
 
 ```yaml
-name: install-yq
-hosts: all
-vars:
-  version: "4.44.3"
-materials:                       # 物料闭包:build 据此打离线包,不扫 actions
+name: yq
+version: "1"
+description: yq 命令行 YAML 处理器
+
+params:
+  # stage: build —— 这个参数在**烤闭包**时就要定死(它决定下载哪个 URL),
+  # 不是部署时才问
+  version: { default: "4.44.3", stage: build, desc: "上游 release tag" }
+
+materials:
+  # ${substrate.arch} 是**目标事实**:构建期没有机器可探,所以离线打包时
+  # 要 `--for arch=amd64` 告诉它烤哪个变体
   - name: yq-bin
-    kind: file
-    arch: amd64
-    url_tmpl: "https://github.com/mikefarah/yq/releases/download/v{{version}}/yq_linux_amd64"
-actions:
-  - id: install
-    action: copy                 # 三选一来源:content(内联)/ src(本地文件)/ material(物料)
-    material: yq-bin
-    dest: /usr/local/bin/yq
-    mode: "0755"
-  - id: verify
-    action: shell
-    phase: verify
-    cmd: "yq --version"
-    needs: [install]
+    file: "https://github.com/mikefarah/yq/releases/download/v${params.version}/yq_linux_${substrate.arch}"
+
+resources:
+  - copy: { material: yq-bin, dest: /usr/local/bin/yq, mode: "0755" }
+
+health:
+  - cmd: { run: "yq --version" }
 ```
+
+`crater types` 列出全部 26 种资源类型及其字段;`crater lint <蓝图>` 不连机器就能查出类型名/字段名拼错、CEL 变量越界、物料没声明这一类错。
 
 ## 📦 离线交付:整套环境一个文件
 
