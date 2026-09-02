@@ -185,12 +185,16 @@ impl BundleStage {
     /// (rustls), so no Docker/skopeo on the control machine.
     pub async fn pull_image(&self, reference: &str) -> crate::Result<ImageRef> {
         use oci_client::manifest as mt;
-        use oci_client::{client::ClientConfig, secrets::RegistryAuth, Client, Reference};
+        use oci_client::Reference;
 
         let r: Reference = reference
             .parse()
             .map_err(|e| anyhow::anyhow!("bad image ref '{reference}': {e}"))?;
-        let client = Client::new(ClientConfig::default());
+        // 与 `crater pull` 走同一套客户端与凭据:私有 registry 的镜像、
+        // 本地 HTTP registry(`$CRATER_INSECURE_REGISTRIES`)都要能烤进闭包。
+        // 早先这里写死匿名 + 默认配置,等于宣布"闭包只支持公开镜像"。
+        let client = crate::store::registry_client();
+        let auth = crate::store::auth_for(reference);
         let accepted = vec![
             mt::IMAGE_MANIFEST_MEDIA_TYPE,
             mt::IMAGE_MANIFEST_LIST_MEDIA_TYPE,
@@ -201,7 +205,7 @@ impl BundleStage {
             mt::IMAGE_DOCKER_CONFIG_MEDIA_TYPE,
         ];
         let img = client
-            .pull(&r, &RegistryAuth::Anonymous, accepted)
+            .pull(&r, &auth, accepted)
             .await
             .map_err(|e| anyhow::anyhow!("pull image '{reference}': {e}"))?;
 

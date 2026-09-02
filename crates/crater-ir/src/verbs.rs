@@ -160,6 +160,19 @@ pub trait Ctx: Send + Sync {
         Ok(None)
     }
 
+    /// 这份物料**渲染后的来源**(file 的 URL、image 的镜像 ref)。
+    ///
+    /// 为什么资源需要它:`image_present` 的期望态是"这几个镜像在不在",而
+    /// 蓝图里写的是**物料名**;名字到 ref 的映射要靠作用域求值(同名物料按
+    /// `when:` 分变体,各有各的 ref)。没有这条,observe 只能数一数目标机上
+    /// 有几个镜像 —— 那回答不了"我要的那几个在不在"。
+    ///
+    /// 与 [`Ctx::material_digest`] 同构:`None` = 这个上下文答不出来,
+    /// 调用方应如实报"说不清",不要猜。
+    fn material_source(&self, _name: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+
     /// 在**控制端**渲染这份物料(模板)→ 最终字节。
     ///
     /// 目标机零依赖是硬约束,所以渲染只能发生在这一侧。渲染完成后 `template`

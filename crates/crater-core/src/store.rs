@@ -842,7 +842,7 @@ fn accepted_media_types() -> Vec<&'static str> {
 
 /// An oci-client honoring `$CRATER_INSECURE_REGISTRIES` (comma-separated hosts
 /// served over plain HTTP, e.g. a temp zot at `192.168.73.5:5000`).
-fn registry_client() -> oci_client::Client {
+pub(crate) fn registry_client() -> oci_client::Client {
     use oci_client::client::{ClientConfig, ClientProtocol};
     let mut cfg = ClientConfig::default();
     if let Ok(list) = std::env::var("CRATER_INSECURE_REGISTRIES") {
@@ -994,7 +994,7 @@ pub fn save_login(registry: &str, username: &str, password: &str) -> crate::Resu
 /// skopeo、buildah)。让已经 `docker login` 过的人再跑一遍 `crater registry
 /// login`,等于要他把口令在第二个地方再写一遍 —— 而口令被抄写的次数,
 /// 就是它泄漏的机会次数。crater 只读不写那个文件。
-fn auth_for(reference: &str) -> oci_client::secrets::RegistryAuth {
+pub(crate) fn auth_for(reference: &str) -> oci_client::secrets::RegistryAuth {
     use oci_client::secrets::RegistryAuth;
     let reg = registry_of(reference);
     let f: Option<AuthFile> = std::fs::read(auth_path())

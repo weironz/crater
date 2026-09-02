@@ -2093,3 +2093,37 @@ application/vnd.crater.blueprint.config.v1+json
   避免反复拉同一个包,也避免覆盖本地改动。
 - 浏览器实测走通:远端卡片 → 拉进工作区 → 本地卡片 → 参数表单 → 机群对账
   `✓ storage:1 台(需要 ≥1)`。
+
+### D-131:容器镜像进闭包(issue #1)
+
+- **补的是什么**:`closure.rs` 此前只收 `MaterialKind::File`,镜像被 `skipped`
+  掉。后果很具体:离线装 k8s / docker 这类编排,二进制能带走、镜像带不走,
+  **现场装不上** —— 而"一个文件带走一切"是 crater 相对 ansible 的立身之本。
+  D-115 点名的"卡点全在物料与模板两处",模板那半早接上了,物料这半空到现在。
+- **共享 blob 池,不是一镜像一个 tar**:镜像的 config / 层 / manifest 按 sha256
+  落进闭包同一个池子(复用旧管线 D-018 的 `BundleStage::pull_image`)。k8s 那
+  十几个镜像共用基础层是常态,一镜像一个 tar 会把同一层存好几遍。
+- **archive 在部署时现合成**,而且只对**真的要装**的镜像合成。代价是控制端多
+  一次打包,换来闭包体积按内容去重。
+- **新增 `Ctx::material_source`**(与 `material_digest` 同构):`image_present`
+  的期望态是"这几个镜像在不在",而蓝图里写的是**物料名**;名字到 ref 的映射
+  要靠作用域求值,资源类型自己解析不出来。没有这条,observe 只能数一数目标机
+  上有几个镜像 —— 那回答不了"我要的那几个在不在"(旧实现正是如此)。
+- **`pull_image` 改用 crater 自己的凭据与客户端**。早先写死 `RegistryAuth::
+  Anonymous` + 默认配置,等于宣布"闭包只支持公开镜像";本地 HTTP registry 也
+  连不上,连测试都做不了。
+- **ref 比对按后缀归一**:docker 把 `docker.io/library/x:1` 显示成 `x:1`,ctr
+  保留全名。逐字比会让每次 apply 都重新导入一遍,而且**看起来是成功的**。
+- **三种运行时**:docker / ctr / nerdctl 各有各的 list 与 import 写法,
+  `namespace` 只对后两者有意义。
+- **验收(multipass 真虚机 w1,Ubuntu 24.04 + docker 29)**:
+  - 把 w1 用 `iptables -A OUTPUT --ctstate NEW -j REJECT` 断网,
+    `docker pull` 确认失败(`connection refused`)
+  - `crater apply --closure` 装成,`docker images` 看到镜像(6.81MB)
+  - plan 精确报出**缺哪个镜像**(`~ image_present / image: <ref>`),
+    不再是笼统的"镜像清单需在执行期比对"
+  - 重跑报"已是期望态,无需变更" —— 幂等
+  - **反证**:同一台机删掉镜像后不带 `--closure`,报"镜像不在闭包里 ——
+    断网现场装不上"并失败,不是静默跳过
+- **`crater pkg` 的物料层暂不收镜像**:那需要镜像树对应的层形态,不在
+  issue #1 范围内。收不了时如实跳过并报出来,不假装收了。

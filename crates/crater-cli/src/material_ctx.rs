@@ -24,6 +24,71 @@ use crater_ir::Blueprint;
 /// 名字对上了、摘要也对上了(那是**另一个变体的**摘要)。
 pub type BlobMap = BTreeMap<String, PathBuf>;
 
+/// 从闭包的共享 blob 池现合成一个 **OCI archive**(可 `ctr images import` /
+/// `nerdctl load` / `docker load`)。
+///
+/// 为什么是"现合成"而不是烘焙时就存好一个 tar:闭包里十几个 k8s 镜像共用
+/// 基础层,按 sha256 共享能省掉大半体积;一镜像一个 tar 会把同一层存好几遍。
+/// 代价是部署时多一次打包 —— 那发生在控制端,而且只对**真的要装**的镜像发生。
+fn oci_archive(img: &ClosureImage, reference: &str) -> Result<Vec<u8>> {
+    let read = |digest: &str| -> Result<Vec<u8>> {
+        let d = digest.trim_start_matches("sha256:");
+        std::fs::read(img.blobs_dir.join(d))
+            .with_context(|| format!("闭包里读不到 blob {d}"))
+    };
+    let mbytes = read(&img.manifest_digest)?;
+    let manifest: serde_json::Value = serde_json::from_slice(&mbytes)?;
+
+    let mut files: Vec<(String, Vec<u8>, u32)> = Vec::new();
+    let push_blob = |d: &str, files: &mut Vec<(String, Vec<u8>, u32)>| -> Result<u64> {
+        let data = read(d)?;
+        let n = data.len() as u64;
+        files.push((format!("blobs/sha256/{}", d.trim_start_matches("sha256:")), data, 0o644));
+        Ok(n)
+    };
+    let cfg_d = manifest["config"]["digest"].as_str().unwrap_or_default().to_string();
+    push_blob(&cfg_d, &mut files)?;
+    for l in manifest["layers"].as_array().into_iter().flatten() {
+        let d = l["digest"].as_str().unwrap_or_default().to_string();
+        push_blob(&d, &mut files)?;
+    }
+    files.push((
+        format!("blobs/sha256/{}", img.manifest_digest),
+        mbytes.clone(),
+        0o644,
+    ));
+    files.push((
+        "oci-layout".into(),
+        br#"{"imageLayoutVersion":"1.0.0"}"#.to_vec(),
+        0o644,
+    ));
+    // index.json 里带上 ref.name —— 导入后镜像才有名字,否则只能按 digest 引用,
+    // 而 kubelet 的 pod spec 引的是名字。
+    let index = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [{
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": format!("sha256:{}", img.manifest_digest),
+            "size": mbytes.len(),
+            "annotations": { "org.opencontainers.image.ref.name": reference }
+        }]
+    });
+    files.push(("index.json".into(), serde_json::to_vec(&index)?, 0o644));
+
+    // 不 gzip:里面的层本来就是压缩过的,再压一遍只换来 CPU 时间。
+    let mut b = tar::Builder::new(Vec::new());
+    for (path, data, mode) in &files {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(data.len() as u64);
+        h.set_mode(*mode);
+        h.set_mtime(0);
+        h.set_cksum();
+        b.append_data(&mut h, path, data.as_slice())?;
+    }
+    Ok(b.into_inner()?)
+}
+
 /// source 是远端 URL 还是随 blueprint 走的本地路径。
 fn is_remote(source: &str) -> bool {
     ["http://", "https://", "file://", "ftp://", "oci://"]
@@ -37,8 +102,22 @@ pub struct MaterialCtx<'a> {
     bp: &'a Blueprint,
     scope: Scope,
     blobs: BlobMap,
+    /// 闭包里的容器镜像(D-131)。与 `blobs` 分开,因为镜像**不是一份字节**:
+    /// 它是 config + 若干层 + manifest,共享同一个 blob 池(k8s 那十几个镜像
+    /// 共用基础层是常态)。落到目标机时才现合成一个 archive。
+    images: ImageMap,
     /// blueprint 文件所在目录 —— 本地物料(`file: files/x.service`)相对它解析。
     base_dir: PathBuf,
+}
+
+/// 镜像 ref → 从闭包合成它的 archive 所需的一切。
+pub type ImageMap = BTreeMap<String, ClosureImage>;
+
+/// 闭包里的一个镜像:manifest 摘要 + blob 池目录。
+#[derive(Debug, Clone)]
+pub struct ClosureImage {
+    pub manifest_digest: String,
+    pub blobs_dir: PathBuf,
 }
 
 impl<'a> MaterialCtx<'a> {
@@ -49,7 +128,14 @@ impl<'a> MaterialCtx<'a> {
         blobs: BlobMap,
         base_dir: PathBuf,
     ) -> Self {
-        MaterialCtx { inner, bp, scope, blobs, base_dir }
+        MaterialCtx { inner, bp, scope, blobs, images: ImageMap::new(), base_dir }
+    }
+
+    /// 挂上闭包里的镜像。分成单独一个方法而不是加进 `new`:调用点有十来处,
+    /// 其中绝大多数(测试、无镜像的蓝图)与镜像无关,不该被迫写一个空 map。
+    pub fn with_images(mut self, images: ImageMap) -> Self {
+        self.images = images;
+        self
     }
 
     /// 控制端读、推过去 —— 用于**作者手写**的物料(systemd unit、配置、模板)。
@@ -154,6 +240,14 @@ impl Ctx for MaterialCtx<'_> {
         self.inner.write_bytes(path, content)
     }
 
+    /// 物料名 → 渲染后的来源(image 的 ref、file 的 URL)。
+    ///
+    /// 求值发生在**这一侧**,因为同名物料按 `when:` 分变体、各有各的 ref ——
+    /// 资源类型拿不到作用域,自己解析不出来。
+    fn material_source(&self, name: &str) -> Result<Option<String>> {
+        Ok(materials::resolve(self.bp, name, &self.scope).ok().map(|p| p.source))
+    }
+
     /// 三种情形,按可信度排序:
     /// 1. blueprint 声明了 `sha256:` → 直接用(内容寻址的权威答案);
     /// 2. 本地文件 / 已备好的 blob → 控制端读出来现算;
@@ -223,6 +317,22 @@ impl Ctx for MaterialCtx<'_> {
 
     fn place_material(&self, name: &str, dest: &str) -> Result<()> {
         let plan = materials::resolve(self.bp, name, &self.scope).map_err(|e| anyhow::anyhow!("{e}"))?;
+        // 镜像:把闭包里那棵 OCI 树打成一个 archive 推过去,由 `image_present`
+        // 导入运行时。**只有闭包里有才走这条** —— 没有就让调用方自己去在线拉,
+        // 与 file 类物料的两条路同构。
+        if plan.kind == MaterialKind::Image {
+            let Some(img) = self.images.get(&plan.source) else {
+                bail!(
+                    "镜像 `{}`({})不在闭包里 —— 断网现场装不上。\n\
+                     用 `crater build -f <蓝图> -o <闭包>` 把它烤进去。",
+                    name,
+                    plan.source
+                );
+            };
+            let tar = oci_archive(img, &plan.source)
+                .with_context(|| format!("为镜像 `{name}` 合成 archive"))?;
+            return self.inner.write_bytes(dest, &tar);
+        }
         if plan.kind != MaterialKind::File {
             bail!(
                 "物料 `{name}` 是 {:?} 类型 —— 只有 `file` 能被 copy 落到路径上",

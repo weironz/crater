@@ -150,6 +150,66 @@ fn packages_for(ctx: &dyn Ctx, args: &ResolvedArgs) -> Result<Vec<String>> {
     })
 }
 
+/// `runtime` 与 `namespace` 两个参数的默认值,一处定义。
+fn runtime_of<'a>(args: &'a ResolvedArgs) -> (&'a str, Option<&'a str>) {
+    (arg_str_opt(args, "runtime").unwrap_or("docker"), arg_str_opt(args, "namespace"))
+}
+
+/// `material:` 与 `materials:` 两种写法归一成一串名字。
+fn material_names(args: &ResolvedArgs) -> Vec<String> {
+    if let Some(one) = arg_str_opt(args, "material") {
+        return vec![one.to_string()];
+    }
+    args.get("materials")
+        .and_then(Yaml::as_sequence)
+        .map(|xs| xs.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// 列出目标运行时里的镜像 ref,一行一个。
+///
+/// 三种运行时的写法不同,而 `docker images` 默认输出是带表头的宽表 ——
+/// 早先那版数的是行数,回答不了"我要的那几个在不在"。
+fn list_images_cmd(runtime: &str, ns: Option<&str>) -> String {
+    let n = ns.map(|x| format!(" -n {}", sh(x))).unwrap_or_default();
+    match runtime {
+        "ctr" => format!("ctr{n} images ls -q 2>/dev/null"),
+        "nerdctl" => format!("nerdctl{n} images --format '{{{{.Repository}}}}:{{{{.Tag}}}}' 2>/dev/null"),
+        other => format!("{other} images --format '{{{{.Repository}}}}:{{{{.Tag}}}}' 2>/dev/null"),
+    }
+}
+
+fn import_cmd(runtime: &str, ns: Option<&str>, tar: &str) -> String {
+    let n = ns.map(|x| format!(" -n {}", sh(x))).unwrap_or_default();
+    match runtime {
+        "ctr" => format!("ctr{n} images import --all-platforms {}", sh(tar)),
+        "nerdctl" => format!("nerdctl{n} load -i {}", sh(tar)),
+        other => format!("{other} load -i {}", sh(tar)),
+    }
+}
+
+/// 两个 ref 指不指同一个镜像。
+///
+/// 目标机上的写法未必与蓝图里逐字相同:docker 会把 `docker.io/library/x:1`
+/// 显示成 `x:1`,ctr 则保留全名。按后缀比对而不是逐字相等 —— 逐字比会让
+/// 每次 apply 都重新导入一遍(而且看起来"成功了")。
+fn same_image(have: &str, want: &str) -> bool {
+    if have == want {
+        return true;
+    }
+    let norm = |s: &str| {
+        s.trim_start_matches("docker.io/")
+            .trim_start_matches("library/")
+            .to_string()
+    };
+    norm(have) == norm(want)
+}
+
+/// ref → 可用作文件名的字符串。
+fn sanitize(reference: &str) -> String {
+    reference.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+
 /// `image_present` —— 容器镜像在目标运行时里在不在。
 pub struct ImagePresent;
 
@@ -162,23 +222,75 @@ impl ResourceType for ImagePresent {
         Some("镜像可能被别的东西用着,不擅自删")
     }
     fn observe(&self, ctx: &dyn Ctx, args: &ResolvedArgs) -> Result<Observed> {
-        let runtime = arg_str_opt(args, "runtime").unwrap_or("docker");
-        let (code, out) = ctx.probe(&format!("{runtime} images 2>/dev/null | tail -n +2 | wc -l"))?;
+        let (runtime, ns) = runtime_of(args);
+        let (code, out) = ctx.probe(&list_images_cmd(runtime, ns))?;
         if code != 0 {
             return Ok(Observed::default()); // 运行时都没有 —— 说不清
         }
-        Ok(Observed::present([("count", out.trim().to_string())]))
+        let have: Vec<&str> = out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+
+        // 期望的是**镜像 ref**,而蓝图里写的是物料名 —— 映射要靠作用域求值,
+        // 只有执行层答得出来(D-131)。答不出来时如实报"说不清",不猜。
+        let mut missing = Vec::new();
+        let mut unresolved = 0usize;
+        for name in material_names(args) {
+            match ctx.material_source(&name)? {
+                Some(r) => {
+                    if !have.iter().any(|h| same_image(h, &r)) {
+                        missing.push(r);
+                    }
+                }
+                None => unresolved += 1,
+            }
+        }
+        if unresolved > 0 {
+            return Ok(Observed::present([("unresolved", unresolved.to_string())]));
+        }
+        Ok(Observed::present([
+            ("missing", missing.join(",")),
+            ("count", have.len().to_string()),
+        ]))
     }
     fn diff(&self, input: &DiffInput) -> Change {
         if !input.observed.present {
             return Change::Unknown("目标上没有可用的容器运行时".into());
         }
-        // 镜像清单来自 materials,与实际 tag 的比对要等闭包解析 —— 如实说明而非猜。
-        Change::Unknown("镜像清单需在执行期与 OCI 闭包比对".into())
+        if let Some(n) = input.observed.get("unresolved") {
+            return Change::Unknown(format!("{n} 个镜像物料解析不出 ref —— 说不清"));
+        }
+        match input.observed.get("missing") {
+            Some(m) if !m.is_empty() => Change::Update(
+                m.split(',').map(|r| FieldDiff::set("image", r.to_string())).collect(),
+            ),
+            _ => Change::Ok,
+        }
     }
     fn apply(&self, ctx: &dyn Ctx, args: &ResolvedArgs, _c: &Change) -> Result<Outcome> {
-        let _ = (ctx, args);
-        anyhow::bail!("image_present:镜像导入需 OCI 闭包支持(尚未接入新管线)")
+        let (runtime, ns) = runtime_of(args);
+        let mut done = 0usize;
+        for name in material_names(args) {
+            let Some(reference) = ctx.material_source(&name)? else {
+                anyhow::bail!("镜像物料 `{name}`:解析不出 ref");
+            };
+            // 已经在目标上就跳过 —— 幂等,而且导入一个 GB 级镜像不便宜。
+            let (code, out) = ctx.probe(&list_images_cmd(runtime, ns))?;
+            if code == 0 && out.lines().any(|h| same_image(h.trim(), &reference)) {
+                continue;
+            }
+            // 落一个 archive 再导入。路径带 pid 免得两次并发 apply 互相踩。
+            let tar = format!("/tmp/crater-image-{}.tar", sanitize(&reference));
+            ctx.place_material(&name, &tar)?;
+            let cmd = import_cmd(runtime, ns, &tar);
+            let (code, out) = ctx.run(&cmd)?;
+            // 无论成败都清掉临时文件:GB 级的 tar 留在 /tmp 里,几次部署就把
+            // 磁盘吃光,而那时的表现是**别的**东西失败。
+            let _ = ctx.run(&format!("rm -f {}", sh(&tar)));
+            if code != 0 {
+                anyhow::bail!("导入镜像 {reference} 失败(exit {code}):{}", out.trim());
+            }
+            done += 1;
+        }
+        Ok(if done > 0 { Outcome::Changed } else { Outcome::Ok })
     }
     fn destroy(&self, _c: &dyn Ctx, _a: &ResolvedArgs, _o: &Observed) -> Result<Outcome> {
         // 不删镜像:别的负载可能正用着,而且重新拉取代价高。

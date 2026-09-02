@@ -290,8 +290,11 @@ async fn assemble(
         profile.push(format!("arch={a}"));
         say!();
         say!("── {a} ──");
-        let (baked, skip) =
-            crate::closure::bake_bytes(&bp_file, &profile, &Default::default(), &mut seen).await?;
+        // 传 None:包的物料层是"一份字节一层",镜像那棵树还没有对应的层形态
+        // (issue #1 只解决闭包这一侧)。收不了就如实跳过并报出来。
+        let (baked, _imgs, skip) =
+            crate::closure::bake_bytes(&bp_file, &profile, &Default::default(), &mut seen, None)
+                .await?;
         for s in &skip {
             say!("  · 跳过 {s}");
         }

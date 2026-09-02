@@ -32,6 +32,7 @@ use crate::material_ctx::BlobMap;
 struct Baker {
     stage: BundleStage,
     blobs: Vec<crater_core::bundle::BlobEntry>,
+    images: Vec<crater_core::bundle::ImageRef>,
     seen: BTreeMap<String, ()>,
     skipped: Vec<String>,
 }
@@ -41,6 +42,7 @@ impl Baker {
         Ok(Baker {
             stage: BundleStage::new(root)?,
             blobs: Vec::new(),
+            images: Vec::new(),
             seen: BTreeMap::new(),
             skipped: Vec::new(),
         })
@@ -56,9 +58,11 @@ impl Baker {
         profile: &[String],
         extra_params: &BTreeMap<String, serde_yaml::Value>,
     ) -> Result<usize> {
-        let (baked, skipped) = bake_bytes(bp_path, profile, extra_params, &mut self.seen).await?;
+        let (baked, images, skipped) =
+            bake_bytes(bp_path, profile, extra_params, &mut self.seen, Some(&self.stage)).await?;
         self.skipped.extend(skipped);
-        let taken = baked.len();
+        let taken = baked.len() + images.len();
+        self.images.extend(images);
         for b in baked {
             let entry = self.stage.store_blob(&b.source, &b.bytes)?;
             println!("  ✓ {:<28} {:>9}  {}", b.name, human(entry.size), &entry.sha256[..12]);
@@ -72,17 +76,18 @@ impl Baker {
         for s in &self.skipped {
             println!("  · 跳过 {s}");
         }
-        if self.blobs.is_empty() {
-            bail!("没有一个物料被烤进闭包 —— 检查 `materials:` 是否都是 image/os_package 类型");
+        if self.blobs.is_empty() && self.images.is_empty() {
+            bail!("没有一个物料被烤进闭包 —— 检查 `materials:` 是不是都是 os_package 类型");
         }
         let total: u64 = self.blobs.iter().map(|b| b.size).sum();
         let count = self.blobs.len();
+        let nimg = self.images.len();
         self.stage.write_manifest(&Manifest {
             format_version: bundle::BUNDLE_FORMAT_VERSION,
             name: name.to_string(),
             components: Vec::new(),
             blobs: self.blobs,
-            images: Vec::new(),
+            images: self.images,
             rootfs: Vec::new(),
         })?;
         if let Some(dir) = out.parent() {
@@ -91,7 +96,8 @@ impl Baker {
             }
         }
         bundle::pack(self.stage.root.as_path(), out)?;
-        println!("\n闭包 → {} ({count} 份物料,{})", out.display(), human(total));
+        let imgs = if nimg > 0 { format!(",{nimg} 个镜像") } else { String::new() };
+        println!("\n闭包 → {} ({count} 份物料{imgs},{})", out.display(), human(total));
         println!("现场用法:crater apply -f <蓝图或栈> --closure {}", out.display());
         Ok(())
     }
@@ -144,7 +150,7 @@ pub async fn build_stack(stack_path: &Path, out: &Path, profile: &[String], sets
 /// 按名字索引会让"多架构"这个最常见的场景取到错误的字节 —— 而且是**静默**取错。
 ///
 /// 返回的 `TempDir` 必须活到部署结束:blob 就在里面。
-pub fn load(path: &Path) -> Result<(tempfile::TempDir, BlobMap)> {
+pub fn load(path: &Path) -> Result<(tempfile::TempDir, BlobMap, crate::material_ctx::ImageMap)> {
     let tmp = tempfile::tempdir()?;
     let stage = bundle::unpack(path, tmp.path())
         .with_context(|| format!("解包闭包 {}", path.display()))?;
@@ -159,7 +165,21 @@ pub fn load(path: &Path) -> Result<(tempfile::TempDir, BlobMap)> {
         .iter()
         .map(|b| (b.source_url.clone(), stage.blob_path(&b.sha256)))
         .collect();
-    Ok((tmp, map))
+    // 镜像按 **ref** 索引(不是物料名):同名物料按 `when:` 分变体,各有各的 ref。
+    let images: crate::material_ctx::ImageMap = manifest
+        .images
+        .iter()
+        .map(|i| {
+            (
+                i.reference.clone(),
+                crate::material_ctx::ClosureImage {
+                    manifest_digest: i.manifest_digest.clone(),
+                    blobs_dir: stage.blobs_dir(),
+                },
+            )
+        })
+        .collect();
+    Ok((tmp, map, images))
 }
 
 /// `--set k=v` → 参数覆盖。
@@ -192,6 +212,10 @@ pub(crate) struct Baked {
     pub bytes: Vec<u8>,
 }
 
+// 镜像烤出来就是一个 `bundle::ImageRef`(reference + manifest 摘要)。
+// 不再包一层:`ImageRef.reference` 已经是部署侧查找用的键,物料名在那一侧
+// 用不上 —— 同名物料按 `when:` 分变体,各有各的 ref,按名字查会取错。
+
 /// 烤一份蓝图在某个画像下引用到的全部物料字节。
 ///
 /// `seen` 由调用方持有并跨调用复用 —— 栈里多份蓝图共用 containerd 是常态,
@@ -201,7 +225,8 @@ pub(crate) async fn bake_bytes(
     profile: &[String],
     extra_params: &BTreeMap<String, serde_yaml::Value>,
     seen: &mut BTreeMap<String, ()>,
-) -> Result<(Vec<Baked>, Vec<String>)> {
+    stage: Option<&BundleStage>,
+) -> Result<(Vec<Baked>, Vec<crater_core::bundle::ImageRef>, Vec<String>)> {
     let bp = crater_ir::parse::blueprint_from_path(bp_path)?;
     let base = bp_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let mut scope = bake_scope(&bp, profile)?;
@@ -212,6 +237,7 @@ pub(crate) async fn bake_bytes(
     println!("烘焙 `{}` —— {} 个物料变体", bp.name, items.len());
 
     let mut out = Vec::new();
+    let mut images = Vec::new();
     let mut skipped = Vec::new();
     for item in &items {
         let plan = match &item.plan {
@@ -225,7 +251,26 @@ pub(crate) async fn bake_bytes(
                 item.label()
             ),
         };
-        // 镜像与系统包不是"一份字节":前者要整棵 OCI 树,后者根本在 apt/yum 那边。
+        // 镜像:整棵 OCI 树进闭包的共享 blob 池(D-131)。没有 stage 的调用方
+        // (`crater pkg` 的物料层)暂时收不了镜像 —— 如实跳过而不是假装收了。
+        if plan.kind == MaterialKind::Image {
+            let Some(stage) = stage else {
+                skipped.push(format!("{}(镜像:此出口尚不支持)", item.label()));
+                continue;
+            };
+            if seen.insert(plan.source.clone(), ()).is_some() {
+                println!("  ↩ {:<28} (已在闭包中)", item.name);
+                continue;
+            }
+            let img = stage
+                .pull_image(&plan.source)
+                .await
+                .with_context(|| format!("烘焙镜像 {}({})", item.label(), plan.source))?;
+            println!("  ✓ {:<28} {:>9}  {}", item.name, "镜像", &img.manifest_digest[..12]);
+            images.push(img);
+            continue;
+        }
+        // 系统包还在 apt/yum 那边,不是一份可寻址的字节(见 issue #2)。
         if plan.kind != MaterialKind::File {
             skipped.push(format!("{} ({:?} 类型)", item.label(), plan.kind));
             continue;
@@ -262,7 +307,7 @@ pub(crate) async fn bake_bytes(
         };
         out.push(Baked { name: item.name.clone(), source: plan.source.clone(), bytes });
     }
-    Ok((out, skipped))
+    Ok((out, images, skipped))
 }
 
 /// 构建期的求值作用域:参数默认值 ⊕ `--for` 给出的目标画像。
@@ -364,7 +409,7 @@ mod tests {
     async fn a_closure_carries_every_variant_so_the_field_can_never_miss_one() {
         // 构建期不知道要装到哪台 —— 两个架构的字节都得在里面。
         let (_d, _bp, out) = bake_fixture().await;
-        let (_tmp, map) = load(&out).unwrap();
+        let (_tmp, map, _imgs) = load(&out).unwrap();
         assert_eq!(map.len(), 2, "变体没带全:{map:?}");
         assert!(map.keys().any(|k| k.ends_with("tool.bin")));
         assert!(map.keys().any(|k| k.ends_with("arm.bin")));
@@ -374,7 +419,7 @@ mod tests {
     async fn the_blobs_are_keyed_by_source_url_not_by_material_name() {
         // 按名字索引会让一台 arm64 机器静默拿到 amd64 的字节。
         let (_d, _bp, out) = bake_fixture().await;
-        let (_tmp, map) = load(&out).unwrap();
+        let (_tmp, map, _imgs) = load(&out).unwrap();
         assert!(!map.contains_key("tool"), "键成了物料名:{map:?}");
     }
 
@@ -382,7 +427,7 @@ mod tests {
     async fn binary_bytes_survive_the_round_trip_intact() {
         // 闭包运的就是二进制。少一个字节,现场装上的就是坏文件。
         let (_d, _bp, out) = bake_fixture().await;
-        let (_tmp, map) = load(&out).unwrap();
+        let (_tmp, map, _imgs) = load(&out).unwrap();
         let blob = map.values().find(|p| std::fs::read(p).unwrap().len() == 5).unwrap();
         assert_eq!(std::fs::read(blob).unwrap(), vec![0u8, 1, 2, 255, 0]);
     }
@@ -472,7 +517,7 @@ mod tests {
         let d = stack_fixture();
         let out = d.path().join("c.tar");
         build_stack(&d.path().join("s.stack.yaml"), &out, &[], &[]).await.unwrap();
-        let (_tmp, map) = load(&out).unwrap();
+        let (_tmp, map, _imgs) = load(&out).unwrap();
         // shared + a 自己的 + b 自己的 = 3,而不是 4。
         assert_eq!(map.len(), 3, "共用物料被存了不止一份:{map:?}");
         assert_eq!(map.keys().filter(|k| k.contains("shared")).count(), 1);
@@ -485,7 +530,7 @@ mod tests {
         let d = stack_fixture();
         let out = d.path().join("c.tar");
         build_stack(&d.path().join("s.stack.yaml"), &out, &[], &[]).await.unwrap();
-        let (_tmp, map) = load(&out).unwrap();
+        let (_tmp, map, _imgs) = load(&out).unwrap();
         assert!(
             map.keys().any(|k| k.ends_with("v-2.0.bin")),
             "栈的 version=2.0 没进 URL:{map:?}"
@@ -581,7 +626,7 @@ mod unzip_tests {
         .unwrap();
         let out = dir.path().join("c.tar");
         build(&bp, &out, &[], &[]).await.unwrap();
-        let (_tmp, map) = load(&out).unwrap();
+        let (_tmp, map, _imgs) = load(&out).unwrap();
         let blob = map.values().next().unwrap();
         assert_eq!(
             std::fs::read(blob).unwrap(),
@@ -618,7 +663,7 @@ mod unzip_tests {
         .unwrap();
         let out = dir.path().join("c.tar");
         build(&bp, &out, &[], &[]).await.expect("zip 摘要对得上就该烤成");
-        let (_tmp, map) = load(&out).unwrap();
+        let (_tmp, map, _imgs) = load(&out).unwrap();
         assert_eq!(std::fs::read(map.values().next().unwrap()).unwrap(), b"payload");
     }
 }

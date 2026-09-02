@@ -163,7 +163,7 @@ pub(crate) async fn destroy_lensed(
     let fleet = build_fleet(&all_hosts, target.declared_groups()).remap(&lens.groups);
     // 退役**不**校验机群契约:契约问的是"够不够装",而拆东西不需要够 ——
     // 一个只剩一台 master 的残破集群,恰恰是最需要拆掉的那种。
-    let (_closure_dir, blobs) = open_closure(target)?;
+    let (_closure_dir, blobs, images) = open_closure(target)?;
 
     let mut failures = 0usize;
     let mut removed_any = false;
@@ -173,7 +173,7 @@ pub(crate) async fn destroy_lensed(
     // containerd/kubelet,etcd 里那个成员就成了永远清不掉的孤儿。
     if yes {
         let targets =
-            connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs)
+            connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs, &images)
                 .await?;
         let dances = {
             let first = fleet.members.first().map(|m| m.name.clone());
@@ -213,7 +213,8 @@ pub(crate) async fn destroy_lensed(
         scope.substrate = facts;
         scope.fleet = Some(fleet.clone());
         scope.identify(&fleet_name(host), &host.roles);
-        let ctx = MaterialCtx::new(transport, &bp, scope.clone(), blobs.clone(), base_dir(path));
+        let ctx = MaterialCtx::new(transport, &bp, scope.clone(), blobs.clone(), base_dir(path))
+            .with_images(images.clone());
 
         let plan = plan::plan_destroy(&bp, &scope, &ctx)
             .with_context(|| format!("{}:求退役计划", host_label(host)))?;
@@ -442,7 +443,7 @@ async fn run_on_targets(
     enforce_contract(&bp, &fleet)?;
     // 闭包在**连机器之前**装载并校验:字节坏了要在这里知道,不是推到一半。
     // `_closure_dir` 必须活到本函数结束 —— blob 就在那个临时目录里。
-    let (_closure_dir, blobs) = open_closure(target)?;
+    let (_closure_dir, blobs, images) = open_closure(target)?;
 
     let mut failures = 0usize;
     // 自定义类型(L2)的弥合是机群级的舞:逐台 converge 只记下"需要跳哪支",
@@ -450,7 +451,7 @@ async fn run_on_targets(
     let mut dances: std::collections::BTreeSet<String> = Default::default();
     // linear 策略走另一条执行路径:资源在外层、机器在内层。
     if target.strategy == crate::target::Strategy::Linear && mode == Mode::Apply {
-        return run_linear(&bp, &hosts, &fleet, &overrides, path, target, &blobs, &store).await;
+        return run_linear(&bp, &hosts, &fleet, &overrides, path, target, &blobs, &images, &store).await;
     }
 
     // 前缀列宽按本轮全体主机定,各行正文才对得齐。
@@ -541,7 +542,8 @@ async fn run_on_targets(
         scope.identify(&fleet_name(host), &host.roles);
 
         // 再包上物料解析能力 —— 传输层不该知道"物料"是什么。
-        let ctx = MaterialCtx::new(transport, &bp, scope.clone(), blobs.clone(), base_dir(path));
+        let ctx = MaterialCtx::new(transport, &bp, scope.clone(), blobs.clone(), base_dir(path))
+            .with_images(images.clone());
 
         // 审计语境不传播上游变更 —— verify 要回答"哪里漂了",不是"该重启什么"。
         let intent = if mode == Mode::Verify {
@@ -798,7 +800,7 @@ async fn run_on_targets(
     }
     // 逐台收敛之后再跳机群级的舞(顺序不能反:舞往往依赖资源已就位)。
     if converge && !dances.is_empty() && failures == 0 {
-        let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs).await?;
+        let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs, &images).await?;
         for name in &dances {
             say!("── procedure {name} ──");
             crate::events::emit(serde_json::json!({ "e": "proc_start", "name": name }));
@@ -903,6 +905,7 @@ async fn run_linear(
     path: &Path,
     target: &TargetOpts,
     blobs: &BlobMap,
+    images: &crate::material_ctx::ImageMap,
     store: &FileStore,
 ) -> Result<()> {
     use crater_ir::verbs::Outcome as O;
@@ -936,7 +939,7 @@ async fn run_linear(
     let batch_fail_before = failures;
     // 只连**这一批** —— 滚动的前提是没轮到的机器一根手指都不碰。
     let targets =
-        connect_fleet(bp, hosts, fleet, overrides, &base_dir(path), target.parallel, blobs).await?;
+        connect_fleet(bp, hosts, fleet, overrides, &base_dir(path), target.parallel, blobs, images).await?;
 
     // 每台各求各的计划:资源集合可以不同(选择器 / when / each)。
     let mut plans: BTreeMap<String, plan::Plan> = BTreeMap::new();
@@ -1231,6 +1234,7 @@ async fn connect_fleet<'a>(
     base: &Path,
     parallel: usize,
     blobs: &BlobMap,
+    images: &crate::material_ctx::ImageMap,
 ) -> Result<FleetTargets<'a>> {
     let mut transports = Vec::new();
     for host in hosts {
@@ -1249,7 +1253,8 @@ async fn connect_fleet<'a>(
         scope.identify(&name, &host.roles);
         ctxs.insert(
             name.clone(),
-            MaterialCtx::new(transport, bp, scope.clone(), blobs.clone(), base.to_path_buf()),
+            MaterialCtx::new(transport, bp, scope.clone(), blobs.clone(), base.to_path_buf())
+                .with_images(images.clone()),
         );
         scopes.insert(name, scope);
     }
@@ -1332,8 +1337,8 @@ pub async fn run_procedure(
     let hosts = target.hosts()?;
     let fleet = build_fleet(&hosts, target.declared_groups());
     enforce_contract(&bp, &fleet)?;
-    let (_closure_dir, blobs) = open_closure(target)?;
-    let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs).await?;
+    let (_closure_dir, blobs, images) = open_closure(target)?;
+    let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs, &images).await?;
 
     say!("procedure {proc_name} —— {} 台目标\n", targets.fleet.members.len());
     // `--set` 既是 deploy 期参数覆盖,也是过程参数(`--set to=1.37.0`)。
@@ -1403,20 +1408,23 @@ fn base_dir(path: &Path) -> PathBuf {
 ///
 /// 返回的 `TempDir` 必须被调用方**持有到部署结束** —— blob 就在里面,
 /// 提前 drop 会让所有物料在推送时凭空消失。
-fn open_closure(target: &TargetOpts) -> Result<(Option<tempfile::TempDir>, BlobMap)> {
+fn open_closure(
+    target: &TargetOpts,
+) -> Result<(Option<tempfile::TempDir>, BlobMap, crate::material_ctx::ImageMap)> {
     let Some(path) = &target.closure else {
-        return Ok((None, BlobMap::new()));
+        return Ok((None, BlobMap::new(), Default::default()));
     };
     // `oci://<ref>`:物料就是包里的层,已在本地 store 里按 sha256 躺着。
     // 不解包、不复制,直接把路径交出去 —— 于是没有临时目录要守着。
     if let Some(r) = path.to_string_lossy().strip_prefix("oci://") {
         let map = crate::pkg::blobs_of(r)?;
         say!("离线闭包 {r}(包内物料)—— {} 份物料已备好\n", map.len());
-        return Ok((None, map));
+        return Ok((None, map, Default::default()));
     }
-    let (dir, map) = crate::closure::load(path)?;
-    say!("离线闭包 {} —— {} 份物料已备好\n", path.display(), map.len());
-    Ok((Some(dir), map))
+    let (dir, map, images) = crate::closure::load(path)?;
+    let imgs = if images.is_empty() { String::new() } else { format!(",{} 个镜像", images.len()) };
+    say!("离线闭包 {} —— {} 份物料{imgs}已备好\n", path.display(), map.len());
+    Ok((Some(dir), map, images))
 }
 
 /// 机群契约在**一切之前**校验:没连机器、没跑 preflight、更没改任何东西。
