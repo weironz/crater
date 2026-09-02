@@ -70,7 +70,7 @@ jobs:
             if [ "${{ inputs.dry_run }}" = "true" ]; then
               echo "(dry-run)会推 $REGISTRY/$name:$ver"
             else
-              ./target/release/crater pkg push "$dir" "$REGISTRY/$name:$ver"
+              ./target/release/crater push "$dir" "$REGISTRY/$name:$ver"
             fi
             echo "::endgroup::"
           done
@@ -86,13 +86,13 @@ jobs:
             name=$(basename "$dir")
             case "$name" in _*) continue ;; esac
             # 远端没有这个包就跳过 —— 不是错误,只是还没发过
-            if ./target/release/crater pkg tags "$REGISTRY/$name" >/dev/null 2>&1; then
+            if ./target/release/crater tags "$REGISTRY/$name" >/dev/null 2>&1; then
               srcs="$srcs oci://$REGISTRY/$name"
             fi
           done
           [ -n "$srcs" ] || { echo "::error::registry 上一个包都没有"; exit 1; }
           echo "来源:$srcs"
-          ./target/release/crater pkg index $srcs -o packages/index.yaml
+          ./target/release/crater index $srcs -o packages/index.yaml
 
       - name: 提交索引(有变化才提交)
         if: inputs.dry_run != true

@@ -116,7 +116,7 @@ pub fn resolve(bp: &Blueprint, name: &str, scope: &Scope) -> Result<MaterialPlan
 /// 换版本时 URL 变了而摘要没变,落地必然摘要不符。两者本就是一对(某个版本
 /// 的字节 + 那份字节的摘要),只让其中一个可参数化,等于让它们**必然**走散。
 ///
-/// 这也是 `crater pkg push --set version=…` 能真正发出别的版本的前提
+/// 这也是 `crater push --set version=…` 能真正发出别的版本的前提
 /// (issue #25):版本与摘要一起 `--set`,包才是自洽的。
 fn render_sha(scope: &Scope, raw: &Option<Value>) -> Result<Option<String>, ResolveError> {
     match raw {

@@ -103,8 +103,8 @@ crater apply ghcr.io/weironz/crater/yq:4.44.3 -i inventory.yaml
 `tags/list` 就够:
 
 ```bash
-crater pkg tags ghcr.io/weironz/crater/yq   # 远端有哪些版本(semver 序,最新在前)
-crater pkg index oci://ghcr.io/weironz/crater/yq -o index.yaml  # 做成可搜的索引
+crater tags ghcr.io/weironz/crater/yq   # 远端有哪些版本(semver 序,最新在前)
+crater index oci://ghcr.io/weironz/crater/yq -o index.yaml  # 做成可搜的索引
 ```
 
 **版本可以写范围**,直连引用和包名两条路都支持 —— 靠 `tags/list` 解析,
@@ -186,11 +186,11 @@ crater apply -f platform.stack.yaml --closure platform.closure.tar -i inventory.
 crater destroy -f platform.stack.yaml -i inventory.yaml --yes    # 逆序退场
 ```
 
-包也能整个搬走 —— `pkg save` 连物料导成一个 tar,对面 `pkg load` 收进来:
+包也能整个搬走 —— `save` 连物料导成一个 tar,对面 `load` 收进来:
 
 ```bash
-crater pkg save ghcr.io/<你>/pkgs/redis:7.2 -o /media/usb/redis.pkg.tar
-crater pkg index --store -o /media/usb/index.yaml     # 索引一起带,对面照样能搜
+crater save ghcr.io/<你>/pkgs/redis:7.2 -o /media/usb/redis.pkg.tar
+crater index --store -o /media/usb/index.yaml     # 索引一起带,对面照样能搜
 ```
 
 ## 🧰 命令总览

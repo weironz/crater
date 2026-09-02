@@ -88,7 +88,7 @@ pub(crate) async fn list_images() -> Result<()> {
         .unwrap_or(0)
         .max("REFERENCE".len());
     println!(
-        "{:<refw$} {:<16} {:>11} {:>13}",
+        "{:<refw$} {:<16} {:>11} {:>13}  说明",
         "REFERENCE", "DIGEST", "DISK USAGE", "CONTENT SIZE"
     );
     for i in imgs {
@@ -98,8 +98,12 @@ pub(crate) async fn list_images() -> Result<()> {
             .chars()
             .take(12)
             .collect::<String>();
+        // crater 包多给一列说明;普通制品(闭包用的容器镜像等)那列是空的。
+        // 此前这是两条命令(`images` 与 `pkg ls`),而"同一个 store 要看两遍"
+        // 本身就是分裂的信号 —— 一条命令列全部,能多说的就多说一句。
+        let note = crate::pkg::describe(&store, &i.reference);
         println!(
-            "{:<refw$} {:<16} {:>11} {:>13}",
+            "{:<refw$} {:<16} {:>11} {:>13}  {note}",
             i.reference,
             short,
             human_size(i.disk_usage),

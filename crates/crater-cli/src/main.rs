@@ -18,7 +18,7 @@
 //!
 //! 打包与分发
 //!   crater build -f <蓝图> -o <闭包>    烤离线闭包(--for arch= 选变体)
-//!   crater pkg push/pull/ls/inspect     蓝图打成 OCI 制品
+//!   crater push/pull/ls/inspect     蓝图打成 OCI 制品
 //!   crater repo add/update, crater search  索引文件:有哪些包
 //!
 //! 其它
@@ -87,7 +87,6 @@ const COMMAND_GROUPS: &str = "\
     schema       生成 JSON Schema —— 编辑器补全与内联校验
     lint         静态检查蓝图,不连机器
     fmt          把一个顶层小节拆成单独文件(可逆)
-    inspect      看蓝图的输入契约:参数、需要的角色、物料
 
   部署
     plan         预演会变什么 —— 连机器跑只读探针,不执行
@@ -96,22 +95,24 @@ const COMMAND_GROUPS: &str = "\
     destroy      退场 —— 移除蓝图声明的一切(默认只预览)
     procedure    跑蓝图声明的编排(跨主机的步骤)
 
-  打包与分发
-    pkg          把蓝图打成 OCI 制品:推、拉、看契约
-    install      一键装:拉包 → 读契约 → 对账机群 → 落文件 → plan
-    build        把蓝图烤成离线闭包文件
-    save         把本地制品导出成 oci-archive 文件
-    load         把 oci-archive 文件导入本地存储
-    repo         包仓库 —— 一个索引文件的地址
-    search       在已配仓库的索引里搜包(只查本地缓存)
-
-  本地存储
+  包(像 docker 那套动词)
+    build        构建 —— 出一个 OCI 包(-t)或离线闭包文件(-o)
+    push         推上 registry(`push <目录> <引用>` 组装再推)
+    pull         从 registry 拉下来(是包就摊回文件)
+    save         连同物料导成一个文件 —— U 盘搬去断网机房
+    load         把 save 的文件收进本地存储
+    tags         远端有哪些版本(不需要索引)
+    inspect      看契约 —— 蓝图文件或远端的包
     images       列出本地存储里的制品
-    pull         从 registry 拉制品进本地存储
-    push         把本地存储的制品推上 registry
     tag          给制品加一个别名
     rmi          删掉一个引用(blob 留给 gc 扫)
     gc           清扫没人引用的 blob 与过期构建指纹
+
+  分发
+    install      一键装:拉包 → 读契约 → 对账机群 → 落文件 → plan
+    index        生成索引文件 —— 别人 repo add 它就能 search
+    repo         包仓库 —— 一个索引文件的地址
+    search       在已配仓库的索引里搜包(只查本地缓存)
     registry     registry 凭据
 
   运维与排查
@@ -315,7 +316,7 @@ enum Cmd {
         #[arg(long, env = "CRATER_WORKSPACE", value_name = "DIR")]
         workspace: Option<PathBuf>,
     },
-    /// 把蓝图烤成离线闭包文件
+    /// 构建 —— 出一个 OCI 包(`-t`),或一个离线闭包文件(`-o`)
     ///
     /// 把蓝图声明的全部物料抓下来、连同蓝图本身封进一个文件。这个文件带去
     /// 断网机房,`crater apply -f <蓝图> --closure <文件>` 就能部署,全程
@@ -324,6 +325,12 @@ enum Cmd {
     /// 默认烤**每一个**声明的变体(不同架构、不同发行版)—— 气隙场景下,
     /// 少烤一个变体等于到了现场才发现装不上。用得到哪个很确定时,`--for`
     /// 可以只烤那个。
+    ///
+    /// **`-t` 与 `-o` 恰择其一**:
+    ///
+    ///   -t <引用>  → 组装成 OCI 包进本地存储(像 `docker build -t`),
+    ///                之后 `crater push <引用>` 推上去
+    ///   -o <文件>  → 烤成一个离线闭包文件,`apply --closure <文件>` 用
     #[command(
         verbatim_doc_comment,
         after_help = "\
@@ -336,12 +343,23 @@ enum Cmd {
 
   # 到了断网那头
   crater apply -f k8s.blueprint.yaml --closure k8s.closure.tar -i inventory.yaml
+
+  # 组装成 OCI 包(像 docker build -t),之后 crater push 推上去
+  crater build library/yq -t ghcr.io/acme/yq:4.53.6
 "
     )]
     Build {
-        /// 蓝图或栈文件
+        /// 蓝图目录或文件(用 `-t` 组装成包时给这个)
+        path: Option<PathBuf>,
+        /// 蓝图或栈文件(烤闭包时用)
         #[arg(short, long, value_name = "FILE")]
-        file: PathBuf,
+        file: Option<PathBuf>,
+        /// 组装成 OCI 包并打上这个引用,进本地存储
+        #[arg(short = 't', long = "tag", value_name = "REF")]
+        tag: Option<String>,
+        /// 把物料也烤进包。可给多次 = 多架构,一个 tag 装下所有架构
+        #[arg(long, value_name = "ARCH")]
+        arch: Vec<String>,
         /// 闭包写到哪。不给就按蓝图名生成
         #[arg(short, long, value_name = "FILE")]
         output: Option<PathBuf>,
@@ -354,38 +372,46 @@ enum Cmd {
         #[arg(long = "set", value_name = "KEY=VAL")]
         set: Vec<String>,
     },
-    /// 把本地制品导出成 oci-archive 文件
+    /// 把制品连同物料导成一个文件 —— U 盘搬去断网机房
     ///
-    /// 像 `docker save`。导出来的文件可以用 U 盘搬到断网那头,再 `crater load`
-    /// 进去。
+    /// 像 `docker save`,但多做一件事:**导出前检查闭包完不完整**。
+    ///
+    /// 为什么要检查:瘦包的蓝图层是齐的,于是 save 会成功、tar 会生成、
+    /// 对面 load 也会成功 —— 一直到断网机上取物料时才报错,而那时 U 盘已经
+    /// 在另一栋楼里了。要带物料,推包时给 `--arch`,或 `pull --full`。
     #[command(
         verbatim_doc_comment,
         after_help = "\
 用法示例:
-  crater save registry.example.com/ns/k8s:1.31 -o k8s.oci
+  crater save ghcr.io/acme/yq:4.53.6 -o /media/usb/yq.tar
+  crater index --store -o /media/usb/index.yaml    # 索引一起带,对面能搜
 "
     )]
     Save {
-        /// Reference in the local store (`crater images` to list).
+        /// 本地存储里的引用(`crater images` 看有哪些)
         reference: String,
-        /// Output file, e.g. yq.oci
+        /// 输出文件,如 /media/usb/yq.tar
         #[arg(short, long)]
         output: PathBuf,
     },
     /// 看蓝图的输入契约:参数、需要的角色、物料
     ///
-    /// 拿到一份别人写的蓝图,第一个问题是"我得准备什么才能跑它"。这条命令
-    /// 回答的正是这个:有哪些参数(默认值、是否必填、属于 build 还是 apply
-    /// 阶段)、inventory 里要有哪些角色、要下载哪些物料(D-081)。
+    /// 拿到一份别人写的蓝图或包,第一个问题是"我得准备什么才能跑它"。这条
+    /// 命令回答的正是这个:有哪些参数(默认值、是否必填、属于 build 还是
+    /// apply 阶段)、inventory 里要有哪些角色、要下载哪些物料(D-081)。
+    ///
+    /// 给文件就看那份蓝图;给引用就问远端那个包 —— 后者**只拉 manifest +
+    /// config,一层都不下载**,几百字节就能回答"这东西要我给什么"。
     #[command(
         verbatim_doc_comment,
         after_help = "\
 用法示例:
-  crater inspect k8s.blueprint.yaml
+  crater inspect k8s.blueprint.yaml           # 本地蓝图
+  crater inspect ghcr.io/acme/yq:4.53.6       # 远端的包
 "
     )]
     Inspect {
-        /// 蓝图或栈文件
+        /// 蓝图/栈文件,或一个 OCI 引用
         source: String,
     },
     /// 把一个顶层小节拆成单独文件(可逆)
@@ -697,6 +723,49 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
+    /// 远端有哪些版本
+    ///
+    /// 走 `/v2/<repo>/tags/list` —— OCI 唯一的内容发现端点,**不需要索引**。
+    /// 按 semver 排序,最新在前。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater tags ghcr.io/acme/yq
+"
+    )]
+    Tags {
+        /// 不带 tag 的仓库地址,如 ghcr.io/acme/yq
+        reference: String,
+    },
+    /// 生成索引文件 —— 别人 `repo add` 它,就能 `search` 和装
+    ///
+    /// 只读 manifest + config,一层都不下载。**没有"扫一个 registry"这种
+    /// 来源** —— 那正是 OCI 问不出来的东西(`_catalog` 不在规范里)。
+    ///
+    /// 索引要**从 registry 生成**,不要手写:手写迟早和 registry 不一致,
+    /// 而不一致的表现是装下去不是你以为的东西(D-159)。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  crater index oci://ghcr.io/acme/yq -o index.yaml
+  crater index --store -o /media/usb/index.yaml
+  crater index oci://ghcr.io/acme/nginx --merge -o index.yaml
+"
+    )]
+    Index {
+        /// `oci://reg/ns/name`(不带 tag → 收全部版本)或带 tag 只收一版
+        sources: Vec<String>,
+        /// 把本地存储里的蓝图包也收进来
+        #[arg(long)]
+        store: bool,
+        #[arg(short = 'o', long, default_value = "index.yaml")]
+        out: PathBuf,
+        /// 并入已有索引而不是重写(增量发布)
+        #[arg(long)]
+        merge: bool,
+    },
     /// 列出本地存储里的制品
     ///
     /// 本地存储在 `~/.crater/store`。
@@ -708,42 +777,95 @@ enum Cmd {
 "
     )]
     Images,
-    /// 从 registry 拉制品进本地存储
+    /// 从 registry 拉下来
+    ///
+    /// 是 crater 包就**摊回文件**(一个可读可改可 git 的目录);不是包就只
+    /// 收进本地存储(普通 OCI 制品,如闭包要用的容器镜像)。
+    ///
+    /// 默认瘦拉:物料层留在 registry —— 在线部署时目标机自己按 URL 取,
+    /// 控制机不必先扛几百兆。离线现场用 `--full`。
     #[command(
         verbatim_doc_comment,
         after_help = "\
 用法示例:
-  crater pull registry.example.com/ns/k8s:1.31
+  crater pull ghcr.io/acme/yq:4.53.6              # 摊成 yq/
+  crater pull ghcr.io/acme/yq:4.53.6 --into ./x   # 摊到指定目录
+  crater pull ghcr.io/acme/yq:4.53.6 --full       # 连物料一起(离线要)
 "
     )]
     Pull {
-        /// e.g. docker.io/library/busybox:latest
+        /// 如 ghcr.io/acme/yq:4.53.6
         reference: String,
+        /// 摊到哪个目录(默认:当前目录下以包名新建)
+        #[arg(long)]
+        into: Option<PathBuf>,
+        /// 连物料层一起拉 —— 离线现场才需要
+        #[arg(long)]
+        full: bool,
     },
-    /// 把本地存储的制品推上 registry
+    /// 推上 registry
+    ///
+    /// 两种用法,按位置参数个数分辨(与 `docker push` 同名同位):
+    ///
+    ///   crater push <引用>          推本地存储里已有的那个
+    ///   crater push <目录> <引用>   从蓝图目录**组装再推**(省掉一步 build)
+    ///
+    /// 第二种是常用的那个 —— 它把 `build` + `push` 合成一条。
     #[command(
         verbatim_doc_comment,
         after_help = "\
 用法示例:
-  crater push registry.example.com/ns/k8s:1.31
+  # 从蓝图目录组装并推
+  crater push library/yq ghcr.io/acme/yq:4.53.6
+
+  # 连物料一起烤进去(离线现场要)
+  crater push library/yq ghcr.io/acme/yq:4.53.6 --arch amd64
+
+  # 发别的版本(源文件不动)
+  crater push library/yq ghcr.io/acme/yq:4.44.3 --set version=4.44.3
+
+  # 推已经 build 好的
+  crater push ghcr.io/acme/yq:4.53.6
 "
     )]
-    Push { reference: String },
-    /// 把 oci-archive 文件导入本地存储
+    Push {
+        /// `<引用>`,或 `<目录> <引用>` 里的目录
+        arg1: String,
+        /// 给了两个位置参数时,这个是引用
+        arg2: Option<String>,
+        /// 把物料字节也烤进包(离线现场需要)。可给多次 = 多架构,
+        /// 产出一个 image index,一个 tag 装下所有架构
+        #[arg(long, value_name = "ARCH")]
+        arch: Vec<String>,
+        /// 烘焙用的其它目标事实,`k=v`,与每个 `--arch` 合并
+        #[arg(long = "for", value_name = "K=V")]
+        fors: Vec<String>,
+        /// 覆盖一个参数的默认值,如 `--set version=4.44.3`。可重复。
+        ///
+        /// 覆盖值**烤进包里的那份蓝图**,不是另存一处 —— 解包出来的蓝图
+        /// 自己就说自己是这一版,不会"写着一套装的是另一套"。
+        ///
+        /// 注意物料上钉的 `sha256:` 不会跟着变:换了版本而摘要没换,落地时
+        /// 会摘要不符(那正是内容寻址该有的样子)。要发别的版本,把对应的
+        /// 摘要也一起 `--set`。
+        #[arg(long = "set", value_name = "KEY=VAL")]
+        set: Vec<String>,
+    },
+    /// 把 `crater save` 的文件收进本地存储 —— 断网机上的第一步
     ///
-    /// `crater save` 的反向操作。
+    /// 收进来会报告每个架构的物料齐不齐。齐了就能装,而且**不用连网**。
     #[command(
         verbatim_doc_comment,
         after_help = "\
 用法示例:
-  crater load k8s.oci
+  crater load /media/usb/yq.tar
+  crater install ghcr.io/acme/yq:4.53.6 --full -i inventory.yaml
 "
     )]
     Load {
-        /// Path to the .oci archive.
+        /// tar 的路径
         file: PathBuf,
-        /// Tag to store it under (default: the archive's embedded ref.name, e.g.
-        /// from `build -t`), e.g. 192.168.73.5:5000/yq:4.53.2
+        /// 换一个引用存(默认用 tar 里带的那条)
         #[arg(long = "as")]
         as_ref: Option<String>,
     },
@@ -849,14 +971,6 @@ enum Cmd {
         #[arg(default_value = "")]
         query: String,
     },
-    /// 蓝图包 —— 把一份蓝图打成 OCI 制品,推上去、拉下来、看契约(D-123)。
-    ///
-    /// 与 `crater images` 的分工:那条管旧 task 制品与普通镜像,这条只管
-    /// 蓝图包(config 类型是 `vnd.crater.blueprint.config.v1+json`)。
-    Pkg {
-        #[command(subcommand)]
-        cmd: PkgCmd,
-    },
     /// Registry credentials.
     Registry {
         #[command(subcommand)]
@@ -875,108 +989,6 @@ enum Cmd {
     Create {
         #[command(subcommand)]
         what: CreateWhat,
-    },
-}
-
-#[derive(Subcommand)]
-enum PkgCmd {
-    /// 组装并推到 registry。仓库名取蓝图 name,tag 取 version(同 Helm)。
-    Push {
-        /// 蓝图文件或它所在的目录(目录会连模板、静态文件一起打包)。
-        path: PathBuf,
-        /// 目标引用,如 registry.example.com/ns/rustfs:1.0
-        reference: String,
-        /// 把物料字节也烤进包(离线现场需要)。可给多次 = 多架构,
-        /// 产出一个 image index,一个 tag 装下所有架构。
-        #[arg(long, value_name = "ARCH")]
-        arch: Vec<String>,
-        /// 烘焙用的其它目标事实,`k=v`,与每个 `--arch` 合并。
-        #[arg(long = "for", value_name = "K=V")]
-        fors: Vec<String>,
-        /// 覆盖一个参数的默认值,如 `--set version=4.44.3`。可重复。
-        ///
-        /// 覆盖值**烤进包里的那份蓝图**,不是另存一处 —— 解包出来的蓝图
-        /// 自己就说自己是这一版,不会"写着一套装的是另一套"。
-        ///
-        /// 注意物料上钉的 `sha256:` 不会跟着变:换了版本而摘要没换,落地时
-        /// 会摘要不符(那正是内容寻址该有的样子)。要发别的版本,把对应的
-        /// 摘要也一起 `--set`,或者让作者把摘要也做成参数。
-        #[arg(long = "set", value_name = "KEY=VAL")]
-        set: Vec<String>,
-    },
-    /// 只组装进本地 store,不推 —— 想先看看包成什么样时用。
-    Build {
-        path: PathBuf,
-        #[arg(short = 't', long = "tag")]
-        reference: String,
-        #[arg(long, value_name = "ARCH")]
-        arch: Vec<String>,
-        #[arg(long = "for", value_name = "K=V")]
-        fors: Vec<String>,
-        /// 覆盖一个参数的默认值,如 `--set version=4.44.3`。可重复。
-        ///
-        /// 覆盖值**烤进包里的那份蓝图**,不是另存一处 —— 解包出来的蓝图
-        /// 自己就说自己是这一版,不会"写着一套装的是另一套"。
-        ///
-        /// 注意物料上钉的 `sha256:` 不会跟着变:换了版本而摘要没换,落地时
-        /// 会摘要不符(那正是内容寻址该有的样子)。要发别的版本,把对应的
-        /// 摘要也一起 `--set`,或者让作者把摘要也做成参数。
-        #[arg(long = "set", value_name = "KEY=VAL")]
-        set: Vec<String>,
-    },
-    /// 拉下来并摊回文件。默认瘦拉(物料层留在 registry,在线部署用不到)。
-    Pull {
-        reference: String,
-        /// 摊到哪个目录(默认:当前目录下以包名新建)。
-        #[arg(long)]
-        into: Option<PathBuf>,
-        /// 连物料层一起拉 —— 离线现场才需要。
-        #[arg(long)]
-        full: bool,
-    },
-    /// 看契约:要给什么参数、要什么样的机群。只拉 manifest + config,
-    /// **一层都不下载** —— 几百字节就能回答"这东西要我给什么"。
-    Inspect { reference: String },
-    /// 远端有哪些版本(`/v2/<repo>/tags/list`,OCI 唯一的内容发现端点)。
-    Tags { reference: String },
-    /// 本地 store 里的蓝图包。
-    Ls,
-    /// 把包连同全部物料导成一个 tar —— U 盘搬去断网机房。
-    ///
-    /// 和索引一起放同一个目录,对面 `pkg load` + `repo add` 就能搜能装:
-    ///
-    ///   crater pkg save reg/ns/yq:4.44.3 -o /media/usb/yq.pkg.tar
-    ///   crater pkg index --store -o /media/usb/index.yaml
-    Save {
-        /// 本地 store 里的引用(`crater pkg ls` 看有哪些)。
-        reference: String,
-        /// 输出文件,如 /media/usb/yq.pkg.tar
-        #[arg(short, long)]
-        output: PathBuf,
-    },
-    /// 把 `pkg save` 的 tar 收进本地 store —— 断网机上的第一步。
-    Load {
-        /// tar 的路径。
-        file: PathBuf,
-        /// 换一个引用存(默认用 tar 里带的那条)。
-        #[arg(long = "as")]
-        as_ref: Option<String>,
-    },
-    /// 生成索引文件 —— 别人 `repo add` 它,就能 `search` 和 `install`。
-    ///
-    /// 只读 manifest + config,一层都不下载。**没有"扫一个 registry"这种
-    /// 来源** —— 那正是 OCI 问不出来的东西(`_catalog` 不在规范里)。
-    Index {
-        /// `oci://reg/ns/name`(不带 tag → 收全部版本)或带 tag 只收一版。
-        sources: Vec<String>,
-        /// 把本地 store 里的蓝图包也收进来。
-        #[arg(long)]
-        store: bool,
-        #[arg(short = 'o', long, default_value = "index.yaml")]
-        out: PathBuf,
-        /// 并入已有索引而不是重写(增量发布)。
-        #[arg(long)]
-        merge: bool,
     },
 }
 
@@ -1239,11 +1251,29 @@ async fn main() -> Result<()> {
             workspace,
         } => ui::serve(&bind, port, token, workspace).await,
         Cmd::Build {
+            path,
             file,
+            tag,
+            arch,
             output,
             profile,
             set,
         } => {
+            // `-t` = 组装成 OCI 包(像 `docker build -t`);否则 = 烤闭包文件。
+            // 两条路的产物完全不同,所以**恰择其一**,不给默认 —— 猜错的表现
+            // 是"跑完了,但产物不是我要的那个"。
+            if let Some(t) = tag {
+                if output.is_some() {
+                    bail!("`-t`(出 OCI 包)与 `-o`(出闭包文件)只能给一个");
+                }
+                let src = path
+                    .or(file)
+                    .ok_or_else(|| anyhow!("`crater build -t <引用>` 还要给蓝图目录或文件"))?;
+                return pkg::build(&src, &t, &arch, &profile, &set).await;
+            }
+            let file = path
+                .or(file)
+                .ok_or_else(|| anyhow!("`crater build` 要给蓝图或栈文件(或用 `-t` 组装成包)"))?;
             // 与 apply/plan 同一条按文件形状分派的路子。
             if stack_cmd::is_stack_file(&file) {
                 let out = output.unwrap_or_else(|| default_closure_path(&file, ".stack"));
@@ -1260,13 +1290,13 @@ async fn main() -> Result<()> {
             if p.is_file() && (blueprint::is_blueprint_file(&p) || stack_cmd::is_stack_file(&p)) {
                 return inspect_bp::run(&p);
             }
+            // 不是文件就当引用 —— 与 apply 同一套判据。
+            if named::remote_ref(&source).is_some() {
+                return pkg::inspect(&source).await;
+            }
             bail!(legacy_note("inspect"))
         }
-        Cmd::Save { reference, output } => {
-            ImageStore::open()?.export_oci_archive(&reference, &output)?;
-            info!("saved {reference} → {}", output.display());
-            Ok(())
-        }
+        Cmd::Save { reference, output } => pkg::save(&reference, &output),
         Cmd::Cp {
             host,
             user,
@@ -1278,6 +1308,13 @@ async fn main() -> Result<()> {
         } => push_file(&host, &user, password, port, &src, &dst, chmod).await,
         Cmd::Update { version, check } => update::run(version, check).await,
         Cmd::Images => images::list_images().await,
+        Cmd::Tags { reference } => pkg::tags(&reference).await,
+        Cmd::Index {
+            sources,
+            store,
+            out,
+            merge,
+        } => repo::index(&sources, store, &out, merge).await,
         Cmd::Install {
             source,
             name,
@@ -1299,38 +1336,6 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Cmd::Pkg { cmd } => match cmd {
-            PkgCmd::Push {
-                path,
-                reference,
-                arch,
-                fors,
-                set,
-            } => pkg::push(&path, &reference, &arch, &fors, &set).await,
-            PkgCmd::Build {
-                path,
-                reference,
-                arch,
-                fors,
-                set,
-            } => pkg::build(&path, &reference, &arch, &fors, &set).await,
-            PkgCmd::Pull {
-                reference,
-                into,
-                full,
-            } => pkg::pull(&reference, into.as_deref(), full).await,
-            PkgCmd::Inspect { reference } => pkg::inspect(&reference).await,
-            PkgCmd::Tags { reference } => pkg::tags(&reference).await,
-            PkgCmd::Ls => pkg::ls(),
-            PkgCmd::Save { reference, output } => pkg::save(&reference, &output),
-            PkgCmd::Load { file, as_ref } => pkg::load(&file, as_ref.as_deref()),
-            PkgCmd::Index {
-                sources,
-                store,
-                out,
-                merge,
-            } => repo::index(&sources, store, &out, merge).await,
-        },
         Cmd::Repo { cmd } => match cmd {
             RepoCmd::Add { name, url } => repo::add(&name, &url).await,
             RepoCmd::Update { name } => repo::update(name.as_deref()).await,
@@ -1338,13 +1343,44 @@ async fn main() -> Result<()> {
             RepoCmd::Remove { name } => repo::remove(&name),
         },
         Cmd::Search { query } => repo::search(&query),
-        Cmd::Pull { reference } => images::pull_image(&reference).await,
-        Cmd::Push { reference } => images::push_image(&reference).await,
-        Cmd::Load { file, as_ref } => {
-            let r = ImageStore::open()?.import_oci_archive(&file, as_ref.as_deref())?;
-            info!("loaded {} → {r}", file.display());
-            Ok(())
+        Cmd::Pull {
+            reference,
+            into,
+            full,
+        } => {
+            // 先按 crater 包拉(摊回文件);不是包就退回"只收进本地存储" ——
+            // 闭包要用的容器镜像走的正是后一条。
+            match pkg::pull(&reference, into.as_deref(), full).await {
+                Ok(()) => Ok(()),
+                Err(e) if is_not_a_crater_package(&e) => {
+                    say!("{reference} 不是 crater 包 —— 只收进本地存储");
+                    images::pull_image(&reference).await
+                }
+                Err(e) => Err(e),
+            }
         }
+        Cmd::Push {
+            arg1,
+            arg2,
+            arch,
+            fors,
+            set,
+        } => match arg2 {
+            // 两个位置参数 = `<目录> <引用>`:组装再推(常用的那条)
+            Some(reference) => pkg::push(Path::new(&arg1), &reference, &arch, &fors, &set).await,
+            // 一个 = 推本地存储里已有的那个(像 `docker push`)
+            None => {
+                if !arch.is_empty() || !fors.is_empty() || !set.is_empty() {
+                    bail!(
+                        "`--arch` / `--for` / `--set` 是**组装**时用的,\n\
+                         而这里只给了一个引用(= 推已有的那个)。\n\
+                         要从蓝图组装再推:crater push <目录> {arg1} …"
+                    );
+                }
+                images::push_image(&arg1).await
+            }
+        },
+        Cmd::Load { file, as_ref } => pkg::load(&file, as_ref.as_deref()),
         Cmd::Rmi { reference } => images::remove_image(&reference),
         Cmd::Gc {
             cache,
@@ -1661,6 +1697,16 @@ fn read_password(from_arg: Option<String>, from_stdin: bool) -> Result<String> {
     bail!(
         "没给口令。用管道从标准输入给,令牌就不会留在 `ps` 和 shell 历史里:\n  echo <令牌> | crater registry login <registry> -u <用户名> --password-stdin"
     )
+}
+
+/// 这个错是不是"它压根不是 crater 包"。
+///
+/// 判据放在一处而不是散在调用点:`pull` 要靠它决定退不退回"普通制品",
+/// 而**判错的两个方向都很糟** —— 判宽了会把真正的网络错误吞掉、然后拿一条
+/// 无关的路径重试;判窄了会让"拉一个容器镜像"变成一条报错。
+fn is_not_a_crater_package(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}");
+    s.contains("不是 crater 蓝图包") || s.contains("不是 crater 包")
 }
 
 fn legacy_note(cmd: &str) -> String {

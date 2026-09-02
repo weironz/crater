@@ -7,13 +7,13 @@
 //!
 //! 走索引文件另有两处便宜:
 //!
-//! - **断网也成立。** 索引可以和 `pkg save` 的 tar 一起塞进 U 盘;registry API
+//! - **断网也成立。** 索引可以和 `save` 的 tar 一起塞进 U 盘;registry API
 //!   在断网机房里根本调不到。
 //! - **任何静态 HTTP 都能托管**,包括 rustfs 这类 S3 —— 与 storage-design 的
 //!   分层一致:registry 管不可变字节,索引管列举。
 //!
 //! 索引是**派生数据**,随时能从 registry 重算,所以永远不手改:谁推包谁重跑
-//! `crater pkg index`。
+//! `crater index`。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -52,10 +52,10 @@ pub struct Entry {
     pub platforms: Vec<String>,
     /// 离线镜像时指向同目录的 `.pkg.tar`(相对路径)。
     ///
-    /// **由 `pkg index` 照实填,不是人手写的。** 生成索引时扫一遍输出目录里的
+    /// **由 `index` 照实填,不是人手写的。** 生成索引时扫一遍输出目录里的
     /// `*.pkg.tar`,读出每个归档自报的引用,对得上才记 —— 记的是"这个 tar
     /// 确实装着这条引用的字节",不是"这里大概应该有个 tar"。
-    /// 读它的是 [`resolve`]:U 盘上的包忘了 `pkg load` 时,把"连不上 registry"
+    /// 读它的是 [`resolve`]:U 盘上的包忘了 `load` 时,把"连不上 registry"
     /// 换成"这份字节就在你手上的哪个文件里"。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub urls: Vec<String>,
@@ -87,7 +87,7 @@ impl Default for Index {
 }
 
 impl Index {
-    /// 并入一条,同名同版本则替换 —— 重跑 `pkg index` 是幂等的。
+    /// 并入一条,同名同版本则替换 —— 重跑 `index` 是幂等的。
     fn upsert(&mut self, name: &str, e: Entry) {
         let v = self.entries.entry(name.to_string()).or_default();
         v.retain(|x| x.version != e.version);
@@ -143,7 +143,7 @@ fn entry_of(
     (name, e)
 }
 
-/// `crater pkg index <来源>… [-o out] [--merge]`
+/// `crater index <来源>… [-o out] [--merge]`
 ///
 /// 来源两种:`oci://reg/ns/name`(不带 tag → 走 `tags/list` 收全部版本)、
 /// `--store`(本地 store 里的全部蓝图包)。**没有"扫一个 registry"这一种**
@@ -165,14 +165,14 @@ pub async fn index(
             // 上复现过。
             //
             // 拦得住是因为**空索引根本不该存在**:下面那道 `n == 0` 的闸决定
-            // 了 `pkg index` 自己永远写不出一份零个包的索引。所以磁盘上出现
+            // 了 `index` 自己永远写不出一份零个包的索引。所以磁盘上出现
             // 一份,只可能是写坏了或放错了文件。
             //
             // 这条只管 merge 这一处,不下沉进 load_index_file —— 别人发布的
             // 空索引拉回来缓存着是合法的,`repo list` 不该因此报未同步。
             if existing.entries.is_empty() {
                 bail!(
-                    "{} 是一份零个包的索引 —— `pkg index` 写不出这种东西,\
+                    "{} 是一份零个包的索引 —— `index` 写不出这种东西,\
                      多半是写了一半被打断或放错了文件。并进去会把历史清空,不干了",
                     out.display()
                 );
@@ -482,7 +482,7 @@ pub fn list() -> Result<()> {
     let r = load_repos();
     if r.repos.is_empty() {
         say!("还没有配仓库。`crater repo add <名> <索引地址>`");
-        say!("索引由 `crater pkg index` 生成,托管在任意静态 HTTP 或 U 盘上。");
+        say!("索引由 `crater index` 生成,托管在任意静态 HTTP 或 U 盘上。");
         return Ok(());
     }
     let w = r.repos.keys().map(|k| k.chars().count()).max().unwrap_or(0);
@@ -613,7 +613,7 @@ pub fn search(query: &str) -> Result<()> {
     }
     say!();
     say!(
-        "{} 个包。`crater pkg inspect <ref>` 看契约,`crater install <名>` 装。",
+        "{} 个包。`crater inspect <ref>` 看契约,`crater install <名>` 装。",
         hits.len()
     );
     Ok(())
@@ -682,7 +682,7 @@ pub fn resolve(name: &str, repo: Option<&str>) -> Result<String> {
 /// 那份字节就在哪个文件里。
 ///
 /// 这是 `urls` 唯一的读处,也是它存在的理由。没有它,断网机上漏掉一步
-/// `pkg load` 的表现是 install 去连一个连不上的 registry —— 一次长超时,
+/// `load` 的表现是 install 去连一个连不上的 registry —— 一次长超时,
 /// 外加一条把人引向防火墙和证书的报错。而正确的动作只是"把手边这个 tar
 /// 收进来"。
 ///
@@ -709,8 +709,8 @@ fn offline_hint(repo: &str, e: &Entry) {
     crate::oops!("{} 的字节还不在本地。", e.reference);
     for u in &e.urls {
         match base.as_ref().map(|d| d.join(u)) {
-            // tar 在 → 就差一步 `pkg load`。
-            Some(p) if p.exists() => crate::oops!("  先收进来:crater pkg load {}", p.display()),
+            // tar 在 → 就差一步 `load`。
+            Some(p) if p.exists() => crate::oops!("  先收进来:crater load {}", p.display()),
             // 索引说有、盘上却没有 → **只拷了一半**。这是 U 盘搬运最常见的
             // 那种错(拷了几百字节的索引,漏了几百兆的包),而它唯一的症状
             // 本来是"install 连不上 registry" —— 指向完全错的方向。
@@ -800,7 +800,7 @@ mod tests {
 
     #[test]
     fn upsert_is_idempotent_and_keeps_newest_first() {
-        // 索引是派生数据,重跑 `pkg index` 必须幂等 —— 否则每跑一次条目翻倍。
+        // 索引是派生数据,重跑 `index` 必须幂等 —— 否则每跑一次条目翻倍。
         let mut i = Index::default();
         i.upsert("x", e("1.2.0"));
         i.upsert("x", e("1.10.0"));
@@ -1008,7 +1008,7 @@ mod tests {
         );
     }
 
-    /// 重跑 `pkg index` 时旧的 `urls` 要**先清掉**。
+    /// 重跑 `index` 时旧的 `urls` 要**先清掉**。
     ///
     /// 索引是派生数据:上一版记过的 tar 这一版可能已经不在同一个目录了。
     /// 留一条指向空气的路径,比没有这个字段更糟 —— 它会让人以为包就在手边。

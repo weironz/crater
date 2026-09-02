@@ -1,4 +1,4 @@
-//! `crater pkg` —— 把一份蓝图打成 OCI 制品,推上去、拉下来、看契约(D-123)。
+//! `crater build/push/pull` —— 把一份蓝图打成 OCI 制品,推上去、拉下来、看契约(D-123)。
 //!
 //! 这不是新造一套制品语法,是把旧 task 管线**已经真机验证过**的那套接给
 //! 蓝图管线:自定义层类型过线保真(D-033)、按 digest 增量拉(D-078)、
@@ -11,7 +11,7 @@
 //!   写法,要配空的 config 描述符,而阿里云 ACR 会拒收 —— 与本仓库 buildx
 //!   provenance 撞的是同一堵墙。1.0 写法五家 registry 全通。
 //! - **config blob 就是契约本身**(参数/机群/物料清单)。于是"这东西要我给
-//!   什么"只需 manifest + config 几百字节,一层都不用下载 —— `pkg inspect`
+//!   什么"只需 manifest + config 几百字节,一层都不用下载 —— `inspect`
 //!   与 UI 的远端目录都走这条。
 //! - **凭据永远不进包。** inventory 是操作者侧的数据,而包是要推到 registry
 //!   上给别人拉的。打包时全数排除并逐个报出来,余下的文件再扫一遍字面口令,
@@ -228,7 +228,7 @@ fn locate(path: &Path) -> Result<(PathBuf, PathBuf)> {
 /// 组装制品并落进本地 store。
 ///
 /// 落本地再推,而不是边算边推:于是"推上去的"和"本地留着的"是同一份字节,
-/// `pkg ls` 看见的就是对方会拉到的。
+/// `images` 看见的就是对方会拉到的。
 ///
 /// `archs` 非空即带闭包:每个架构烤一遍物料,做成各自的层。**蓝图层与
 /// config 跨架构是同一个 digest** —— registry 按内容寻址,只存一份,
@@ -444,7 +444,7 @@ async fn assemble(
 
 // ───────────────────────────── 命令 ─────────────────────────────
 
-/// `crater pkg build <路径> -t <ref>` —— 只组装,不推。
+/// `crater build <路径> -t <ref>` —— 只组装,不推。
 pub async fn build(
     path: &Path,
     reference: &str,
@@ -453,11 +453,11 @@ pub async fn build(
     sets: &[String],
 ) -> Result<()> {
     let digest = assemble(path, reference, archs, fors, sets).await?;
-    say!("已入本地 store(sha256:{digest})—— `crater pkg push {reference}` 推上去");
+    say!("已入本地 store(sha256:{digest})—— `crater push {reference}` 推上去");
     Ok(())
 }
 
-/// `crater pkg push <路径> <ref>` —— 组装并推。
+/// `crater push <路径> <ref>` —— 组装并推。
 pub async fn push(
     path: &Path,
     reference: &str,
@@ -479,7 +479,7 @@ pub async fn push(
 // `blob_source::oci::OciSource` —— 它是 D-119 说的第二个 blob 后端,现在与 tar
 // 闭包同在一个 `BlobSource` 后面,而四个方法仍然是四个方法。
 
-/// `crater pkg pull <ref> [--into DIR] [--full]` —— 拉下来并摊回文件。
+/// `crater pull <ref> [--into DIR] [--full]` —— 拉下来并摊回文件。
 ///
 /// 默认**瘦拉**:manifest + config + 蓝图层。物料层(第二阶段)留在 registry,
 /// 部署时目标机自己按 URL 取 —— 在线部署根本用不到那几百兆。
@@ -535,7 +535,7 @@ pub async fn pull(reference: &str, into: Option<&Path>, full: bool) -> Result<()
     Ok(())
 }
 
-/// `crater pkg inspect <ref>` —— 只拉 manifest + config,一层都不下载。
+/// `crater inspect <ref>` —— 只拉 manifest + config,一层都不下载。
 pub async fn inspect(reference: &str) -> Result<()> {
     // 本地有就读本地,省一次往返;没有才问 registry。
     let store = ImageStore::open()?;
@@ -558,7 +558,7 @@ pub async fn inspect(reference: &str) -> Result<()> {
     Ok(())
 }
 
-/// `crater pkg tags <ref>` —— 远端有哪些版本。
+/// `crater tags <ref>` —— 远端有哪些版本。
 pub async fn tags(reference: &str) -> Result<()> {
     let mut tags = ImageStore::list_tags(reference).await?;
     if tags.is_empty() {
@@ -573,72 +573,48 @@ pub async fn tags(reference: &str) -> Result<()> {
     }
     say!();
     say!(
-        "{} 个版本。`crater pkg inspect <ref>:<版本>` 看契约。",
+        "{} 个版本。`crater inspect <ref>:<版本>` 看契约。",
         tags.len()
     );
     Ok(())
 }
 
-/// `crater pkg ls` —— 本地 store 里的蓝图包。
-pub fn ls() -> Result<()> {
-    let store = ImageStore::open()?;
-    let all = store.list()?;
-    let mut rows: Vec<(String, String, String, u64, usize)> = Vec::new();
-    for img in &all {
-        let Ok(top) = store.resolve_manifest(&img.reference) else {
-            continue;
-        };
-        // 多架构包的契约在子清单里 —— 不折这一下,`pkg ls` 看不见它们。
-        let m = platform_manifest(&store, &top).unwrap_or(top);
-        if m["config"]["mediaType"].as_str() != Some(MT_PKG_CONFIG) {
-            continue; // 不是蓝图包(旧 task 制品、普通镜像)—— `crater images` 管那些
-        }
-        let cfg = read_config(&store, &m).unwrap_or(json!({}));
-        let mats = m["layers"]
-            .as_array()
-            .map(|ls| {
-                ls.iter()
-                    .filter(|l| l["mediaType"].as_str() == Some(MT_MATERIAL))
-                    .count()
-            })
-            .unwrap_or(0);
-        rows.push((
-            img.reference.clone(),
-            cfg["name"].as_str().unwrap_or("").to_string(),
-            cfg["description"].as_str().unwrap_or("").to_string(),
-            img.content_size,
-            if store.has_all_layers(&img.reference) {
-                mats
-            } else {
-                usize::MAX
-            },
-        ));
+/// `crater images` —— 本地 store 里的蓝图包。
+/// 这个引用在 `crater images` 里该附一句什么说明。
+///
+/// 是 crater 包就给"描述(物料几份)";普通制品(闭包用的容器镜像等)返回
+/// 空串。此前这是一条独立命令 `pkg ls`,而"同一个 store 要看两遍"本身就是
+/// 分裂的信号 —— 现在 `images` 列全部,能多说的就多说一句。
+pub fn describe(store: &ImageStore, reference: &str) -> String {
+    let Ok(top) = store.resolve_manifest(reference) else {
+        return String::new();
+    };
+    // 多架构包的契约在子清单里 —— 不折这一下就看不见它们。
+    let m = platform_manifest(store, &top).unwrap_or(top);
+    if m["config"]["mediaType"].as_str() != Some(MT_PKG_CONFIG) {
+        return String::new();
     }
-    if rows.is_empty() {
-        say!(
-            "本地还没有蓝图包。`crater pkg push <蓝图目录> <ref>` 做一个,\
-              或 `crater pkg pull <ref>` 拉一个。"
-        );
-        return Ok(());
+    let cfg = read_config(store, &m).unwrap_or(json!({}));
+    let desc = cfg["description"].as_str().unwrap_or("").to_string();
+    let mats = m["layers"]
+        .as_array()
+        .map(|ls| {
+            ls.iter()
+                .filter(|l| l["mediaType"].as_str() == Some(MT_MATERIAL))
+                .count()
+        })
+        .unwrap_or(0);
+    match (desc.is_empty(), mats) {
+        (true, 0) => "(crater 包)".into(),
+        (true, n) => format!("(crater 包,闭包 {n} 份)"),
+        (false, 0) => desc,
+        (false, n) => format!("{desc}(闭包 {n} 份)"),
     }
-    rows.sort();
-    let w = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0);
-    for (r, _n, desc, size, mats) in &rows {
-        // 瘦拉的包照样能在线部署(蓝图层全在),标注只是说"物料层还在
-        // registry" —— 断网现场要的是另一种。
-        let mark = match *mats {
-            usize::MAX => "  (瘦)".to_string(),
-            0 => String::new(),
-            n => format!("  (闭包 {n} 份)"),
-        };
-        say!("  {:<w$}  {:>9}{}  {}", r, human(*size), mark, desc, w = w);
-    }
-    Ok(())
 }
 
 // ─────────────────────────── 离线搬运(U 盘) ───────────────────────────
 
-/// `crater pkg save <ref> -o <包>.pkg.tar`
+/// `crater save <ref> -o <包>.pkg.tar`
 ///
 /// 与裸 `crater save` 的区别全在**说清楚搬走的是什么**:几个架构、几份物料、
 /// 多大。断网机房里包不对的代价是白跑一趟,而 tar 里缺没缺东西在甲机上是
@@ -647,7 +623,7 @@ pub fn save(reference: &str, out: &Path) -> Result<()> {
     let store = ImageStore::open()?;
     let top = store
         .resolve_manifest(reference)
-        .with_context(|| format!("{reference} 不在本地 store(`crater pkg ls` 看有哪些)"))?;
+        .with_context(|| format!("{reference} 不在本地 store(`crater images` 看有哪些)"))?;
 
     // **瘦包不该被当成离线包搬走。** 蓝图层齐了就能在线部署,于是 save 会
     // 成功、tar 会生成、`load` 会成功 —— 一直到断网机上 apply 去取物料时才
@@ -660,7 +636,7 @@ pub fn save(reference: &str, out: &Path) -> Result<()> {
     if !store.has_all_layers(reference) {
         bail!(
             "{reference} 的闭包不完整 —— 物料层还在 registry,tar 里不会有字节。\n\
-             搬到断网机上装不了。先补齐:`crater pkg pull {reference} --full`,再 save。"
+             搬到断网机上装不了。先补齐:`crater pull {reference} --full`,再 save。"
         );
     }
 
@@ -683,7 +659,7 @@ pub fn save(reference: &str, out: &Path) -> Result<()> {
     say!();
     say!("索引也放同一个目录,对面就能搜:");
     say!(
-        "  crater pkg index --store -o {}/index.yaml",
+        "  crater index --store -o {}/index.yaml",
         out.parent()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| ".".into())
@@ -691,7 +667,7 @@ pub fn save(reference: &str, out: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `crater pkg load <包>.pkg.tar`
+/// `crater load <包>.pkg.tar`
 ///
 /// 收进来之后**当场复核闭包**。`import` 只保证"归档里有的都进来了";
 /// 这里回答的是断网机上唯一要紧的那个问题 —— 装得了装不了。
@@ -714,7 +690,7 @@ pub fn load(file: &Path, as_ref: Option<&str>) -> Result<()> {
     if !store.has_all_layers(&reference) {
         bail!(
             "{reference} 收进来了,但闭包不完整 —— 装不了。\n\
-             回联网机上 `crater pkg pull {reference} --full` 再 `crater pkg save`。"
+             回联网机上 `crater pull {reference} --full` 再 `crater save`。"
         );
     }
     say!();
@@ -775,8 +751,8 @@ fn arch_layers(store: &ImageStore, top: &serde_json::Value) -> Vec<(String, usiz
 /// 一条本地清单折到**带 config 的那一份**上。
 ///
 /// 单架构包原样返回;多架构包的顶层是 image index —— 它没有 config,契约在
-/// 子清单里。不折这一下,`pkg ls` 与 `pkg index --store` 会把每一个多架构包
-/// 当成"不是 crater 包"跳过:`pkg ls` 说"本地还没有蓝图包",`pkg index
+/// 子清单里。不折这一下,`images` 与 `pkg index --store` 会把每一个多架构包
+/// 当成"不是 crater 包"跳过:`images` 说"本地还没有蓝图包",`pkg index
 /// --store` 把它**静默**漏在索引外(store 里只有它时才会撞上"一个包都没收
 /// 进来"那道闸,否则连个响都没有)。issue #3。
 pub(crate) fn platform_manifest(
@@ -855,7 +831,7 @@ fn warn_if_newer(cfg: &serde_json::Value) {
 ///
 /// 两处不显然的地方:主版本段**补齐到四位**,否则 `1.2` 会排在 `1.2.0`
 /// 之前(短的 Vec 更小);预发布段在正式版**之后**读到一个哨兵,于是
-/// `1.2.0-rc1 < 1.2.0` —— 少了这一条,`pkg tags` 会把 rc 当成最新版推荐。
+/// `1.2.0-rc1 < 1.2.0` —— 少了这一条,`tags` 会把 rc 当成最新版推荐。
 pub(crate) fn semver_key(v: &str) -> Vec<i64> {
     let v = v.trim_start_matches('v');
     let (core, pre) = match v.find(['-', '+', '_']) {
@@ -1324,7 +1300,7 @@ fn upgrade_gate(prev_dir: &Path, prev_ref: &str, source: &str, force: bool) -> R
                 "先决定这些改动怎么办 —— 一台机器都没碰:\n  \
                  要带过去:装完后把它们套到新目录再 `crater apply`\n  \
                  不带过去:加 `--force` 重跑(旧目录不删,随时能回去看)\n  \
-                 要看差别:diff {} 与 `crater pkg pull {prev_ref} --into <临时目录>`",
+                 要看差别:diff {} 与 `crater pull {prev_ref} --into <临时目录>`",
                 prev_dir.display()
             )
         }
@@ -1336,7 +1312,7 @@ fn upgrade_gate(prev_dir: &Path, prev_ref: &str, source: &str, force: bool) -> R
             }
             bail!(
                 "判不出就不猜 —— 一台机器都没碰。二选一:\n  \
-                 把原样字节取回来再判:`crater pkg pull {prev_ref} --into <临时目录>`\n  \
+                 把原样字节取回来再判:`crater pull {prev_ref} --into <临时目录>`\n  \
                  不在乎旧目录里有什么:加 `--force` 重跑"
             )
         }
@@ -1545,7 +1521,7 @@ pub async fn install(
             match stamped(&dir) {
                 Some(prev) if prev != source => bail!(
                     "{} 里是 `{prev}`,这次要装的是 `{source}` —— 同名同版本、来源不同。\n\
-                     换个位置:`crater pkg pull {source} --into <目录>`,\n\
+                     换个位置:`crater pull {source} --into <目录>`,\n\
                      或先把 {} 移开。",
                     dir.display(),
                     dir.display()
@@ -1630,7 +1606,7 @@ pub async fn install(
         if !bad.is_empty() {
             bail!(
                 "机群不满足契约,一台机器都没碰:\n  {}\n\
-                 改 {} 里的组,或用 `crater pkg inspect` 再看一遍契约。",
+                 改 {} 里的组,或用 `crater inspect` 再看一遍契约。",
                 bad.join("\n  "),
                 inv_path.display()
             );

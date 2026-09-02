@@ -30,7 +30,7 @@ crater apply redis -i inventory.yaml
 **一条命令,不需要索引,不需要 CI。**
 
 ```bash
-crater pkg push ./my-redis ghcr.io/<你>/pkgs/redis:7.2
+crater push ./my-redis ghcr.io/<你>/pkgs/redis:7.2
 ```
 
 对方装它:
@@ -45,7 +45,7 @@ crater apply ghcr.io/<你>/pkgs/redis:7.2 -i inventory.yaml
 版本发现也不需要索引 —— OCI 自带 `tags/list`:
 
 ```bash
-crater pkg tags ghcr.io/<你>/pkgs/redis      # 有哪些版本
+crater tags ghcr.io/<你>/pkgs/redis      # 有哪些版本
 crater apply 'ghcr.io/<你>/pkgs/redis:7.*'    # 范围解析
 ```
 
@@ -58,7 +58,7 @@ crater apply 'ghcr.io/<你>/pkgs/redis:7.*'    # 范围解析
 
 | 什么时候给 | 命令 | 覆盖的是 |
 | --- | --- | --- |
-| 打包时 | `crater pkg push … --set k=v` | `stage: build` 的参数(定死在包里) |
+| 打包时 | `crater push … --set k=v` | `stage: build` 的参数(定死在包里) |
 | 部署时 | `crater apply … --set k=v` | `stage: apply` 的参数(每次部署可不同) |
 
 分两段的理由很实在:`version` 决定**下载哪个 URL**,而物料要在打包时就抓下来
@@ -66,8 +66,8 @@ crater apply 'ghcr.io/<你>/pkgs/redis:7.*'    # 范围解析
 
 ```bash
 # 同一份蓝图,发两个版本;源文件一个字不改
-crater pkg push ./my-redis reg/ns/redis:7.2 --set version=7.2 --set sha_amd64=…
-crater pkg push ./my-redis reg/ns/redis:7.4 --set version=7.4 --set sha_amd64=…
+crater push ./my-redis reg/ns/redis:7.2 --set version=7.2 --set sha_amd64=…
+crater push ./my-redis reg/ns/redis:7.4 --set version=7.4 --set sha_amd64=…
 ```
 
 覆盖值**烤进包里的那份蓝图**,不是另存一处 —— 解包出来的蓝图自己就说自己是
@@ -95,7 +95,7 @@ materials:
 只有这一档需要索引,而它**仍然只是一条命令**:
 
 ```bash
-crater pkg index oci://ghcr.io/<你>/pkgs/redis \
+crater index oci://ghcr.io/<你>/pkgs/redis \
                  oci://ghcr.io/<你>/pkgs/nginx \
                  -o index.yaml
 ```
@@ -119,7 +119,7 @@ crater search redis
 
 ### 索引要从 registry 生成,不要手写
 
-`pkg index` 去 registry 问"实际有哪些 tag",再逐个读它们的契约。手写、或者
+`index` 去 registry 问"实际有哪些 tag",再逐个读它们的契约。手写、或者
 "照着我记得发过什么"写,迟早会与 registry 不一致 —— 而不一致的表现是**装
 下去不是你以为的东西**。
 

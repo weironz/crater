@@ -29,8 +29,8 @@ body:
         **可执行的判据**,不是"跑起来没问题"。命令 + 期望输出最好,
         真机/真 registry 上跑得出来的更好。反证(什么情况下它该失败)加分。
       placeholder: |
-        - `crater pkg save yq:1 -o /tmp/x.tar && crater pkg load /tmp/x.tar` 后
-          `crater pkg ls` 能看见 yq:1
+        - `crater save yq:1 -o /tmp/x.tar && crater load /tmp/x.tar` 后
+          `crater images` 能看见 yq:1
         - 反证:损坏 tar 后 load 报错且不写入 store
     validations: { required: true }
   - type: textarea

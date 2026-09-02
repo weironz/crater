@@ -14,7 +14,7 @@ use std::process::{Command, Output};
 
 fn index(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_crater"))
-        .args(["pkg", "index"])
+        .args(["index"])
         .args(args)
         .current_dir(dir)
         // 别碰开发机上真的 ~/.crater。

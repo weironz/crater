@@ -58,7 +58,7 @@ impl OciSource {
         if !missing.is_empty() {
             bail!(
                 "{reference} 的 {} 份物料不在本地(瘦拉的包只有蓝图层)。\n\
-                 先 `crater pkg pull {reference} --full`。缺:{}",
+                 先 `crater pull {reference} --full`。缺:{}",
                 missing.len(),
                 missing.join(", ")
             );
@@ -73,7 +73,7 @@ impl OciSource {
             blobs,
             manifest,
             // 报错与日志里要说得出"从哪拿的":包里的层与 tar 闭包不是一回事,
-            // 找不到物料时这两个字决定了人该去 `pkg pull` 还是去重烤闭包。
+            // 找不到物料时这两个字决定了人该去 `pull` 还是去重烤闭包。
             origin: format!("{reference}(包内物料)"),
         })
     }

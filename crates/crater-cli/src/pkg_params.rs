@@ -1,4 +1,4 @@
-//! 打包时覆盖参数默认值 —— `crater pkg push … --set version=4.44.3`(issue #25)。
+//! 打包时覆盖参数默认值 —— `crater push … --set version=4.44.3`(issue #25)。
 //!
 //! **为什么是改写文本,而不是把覆盖值另存一处。**
 //!

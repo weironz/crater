@@ -43,7 +43,7 @@ pub(crate) fn yaml_to_json(v: &serde_yaml::Value) -> serde_json::Value {
 
 /// 一张蓝图在目录里的样子。
 ///
-/// 主体直接取包的契约([`crate::pkg::contract`])—— 目录卡片、`pkg inspect`
+/// 主体直接取包的契约([`crate::pkg::contract`])—— 目录卡片、`inspect`
 /// 与远端 registry 上那份 config blob 因此是同一份数据。前端已有的字段名
 /// (`groups` 与几个计数)在这里做一次映射,不去动线上契约的形状。
 fn entry(path: &Path) -> Option<serde_json::Value> {
@@ -302,7 +302,7 @@ pub async fn repo_pull(Json(q): Json<RepoPullReq>) -> Response {
         )
             .into_response();
     };
-    // 目录名取包名:与 CLI 的 `pkg pull` 一致,人在两边看到的是同一棵树。
+    // 目录名取包名:与 CLI 的 `pull` 一致,人在两边看到的是同一棵树。
     let name = q
         .reference
         .rsplit('/')
@@ -445,7 +445,7 @@ const CATALOG_HTML: &str = r##"<section class="panel">
     const rw = document.getElementById('rp-wall');
     if (!remote.length){
       rw.innerHTML = '<div class="cat-empty">还没有可浏览的包。<br><br>'
-        + '包的作者用 <code>crater pkg index</code> 生成索引文件,托管在任意静态 HTTP 上;'
+        + '包的作者用 <code>crater index</code> 生成索引文件,托管在任意静态 HTTP 上;'
         + '你「添加仓库」填那个地址即可。<br>'
         + 'OCI 本身没有搜索接口,所以「有哪些包」由索引文件回答 —— 它也能随闭包进 U 盘。</div>';
       return;
@@ -477,7 +477,7 @@ const CATALOG_HTML: &str = r##"<section class="panel">
   };
 
   window.repoAddUI = async function(){
-    const url = prompt('索引地址(http(s):// 或本地路径,由 crater pkg index 生成)');
+    const url = prompt('索引地址(http(s):// 或本地路径,由 crater index 生成)');
     if (!url) return;
     const name = prompt('给它起个名字', 'lab');
     if (!name) return;

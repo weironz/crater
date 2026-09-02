@@ -8,7 +8,7 @@ params:
   # 不是部署时才问。UI 的参数表单会据此标注。
   version: { default: "4.53.6", stage: build, desc: "上游 release tag" }
   # 摘要也是参数,和 version 成对 —— 这样一份蓝图能发出任意版本的包:
-  #   crater pkg push library/yq <ref>:4.44.3 \
+  #   crater push library/yq <ref>:4.44.3 \
   #     --set version=4.44.3 --set sha_amd64=… --set sha_arm64=…
   # 只 --set 版本而不换摘要,落地时会摘要不符 —— 那是**对的**,内容寻址
   # 就该在这里拦住(实测过)。

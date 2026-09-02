@@ -2,7 +2,7 @@
 
 > 这份索引只管 crater **自己发的**那几个包。
 > 想发你自己的包?看 [发布你自己的 crater 包](../docs/publishing.md) ——
-> 绝大多数情况下**一条 `crater pkg push` 就够,不需要索引、不需要 CI**。
+> 绝大多数情况下**一条 `crater push` 就够,不需要索引、不需要 CI**。
 
 `packages/index.yaml` 是 crater 的官方包索引。订阅它:
 
@@ -21,7 +21,7 @@ crater apply yq -i inventory.yaml
 **不是**:版本发现的必需品。远端有哪些版本,`tags/list` 就能问出来:
 
 ```bash
-crater pkg tags ghcr.io/weironz/crater/yq       # 不需要索引
+crater tags ghcr.io/weironz/crater/yq       # 不需要索引
 crater apply 'ghcr.io/weironz/crater/yq:4.*'         # 范围解析也不需要
 ```
 
@@ -30,10 +30,10 @@ crater apply 'ghcr.io/weironz/crater/yq:4.*'         # 范围解析也不需要
 推完新版本之后重新生成:
 
 ```bash
-crater pkg index oci://ghcr.io/weironz/crater/yq -o packages/index.yaml
+crater index oci://ghcr.io/weironz/crater/yq -o packages/index.yaml
 ```
 
 多个包就多给几个来源,或者加 `--merge` 并进现有索引。
 
-**`pkg index` 会重写整个文件**,包括抹掉注释 —— 所以说明写在这份 README 里,
+**`index` 会重写整个文件**,包括抹掉注释 —— 所以说明写在这份 README 里,
 不写进索引本身。

@@ -225,7 +225,7 @@ fn parse_params(sets: &[String]) -> Result<BTreeMap<String, serde_yaml::Value>> 
 
 /// 烤好的一份物料 —— 字节还在手里,放哪由调用方决定。
 ///
-/// 闭包把它落进 `BundleStage`,`crater pkg` 把它做成一个 OCI 层。两条出口
+/// 闭包把它落进 `BundleStage`,`crater build/push/pull` 把它做成一个 OCI 层。两条出口
 /// 共用这一次下载与这一次校验:摘要核对写两遍,迟早会有一遍写松。
 pub(crate) struct Baked {
     pub name: String,
@@ -273,7 +273,7 @@ pub(crate) async fn bake_bytes(
             ),
         };
         // 镜像:整棵 OCI 树进闭包的共享 blob 池(D-131)。没有 stage 的调用方
-        // (`crater pkg` 的物料层)暂时收不了镜像 —— 如实跳过而不是假装收了。
+        // (`crater build/push/pull` 的物料层)暂时收不了镜像 —— 如实跳过而不是假装收了。
         if plan.kind == MaterialKind::Image {
             let Some(stage) = stage else {
                 skipped.push(format!("{}(镜像:此出口尚不支持)", item.label()));

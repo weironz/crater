@@ -52,26 +52,26 @@ library/yq/yq.blueprint.yaml: ✓ yq (1 资源, 2 物料)
 检查 1 个文件:0 error, 0 warn
 ```
 
-## 一、构建 —— `pkg build`
+## 一、构建 —— `build`
 
 只组装进本地 store,**不推**。想先看看包成什么样时用:
 
 ```console
-$ crater pkg build library/yq -t localhost:5000/demo/yq:4.53.6
+$ crater build library/yq -t localhost:5000/demo/yq:4.53.6
 包 localhost:5000/demo/yq:4.53.6 —— 2 个文件,1.5 K
   · tag `4.53.6` 与蓝图 version `1` 不同 —— 索引与 install 按 tag 走
-已入本地 store(sha256:2bd636dc…)—— `crater pkg push …` 推上去
+已入本地 store(sha256:2bd636dc…)—— `crater push …` 推上去
 ```
 
 那句"tag 与蓝图 version 不同"是**提醒不是错误**:蓝图的 `version: "1"` 是它
 自己的修订号,而包的 tag 该是 yq 的版本。索引与 install 都按 tag 走。
 
-## 二、推送 —— `pkg push`
+## 二、推送 —— `push`
 
 ### 在线包(默认):只装蓝图,不装物料
 
 ```console
-$ crater pkg push library/yq localhost:5000/demo/yq:4.53.6
+$ crater push library/yq localhost:5000/demo/yq:4.53.6
 包 localhost:5000/demo/yq:4.53.6 —— 2 个文件,1.5 K
 推送完成 → localhost:5000/demo/yq:4.53.6
   digest  sha256:687dcd84…
@@ -83,7 +83,7 @@ registry 里不必躺着几百兆。
 ### 离线包:`--arch` 把物料也烤进去
 
 ```console
-$ crater pkg push library/yq localhost:5000/demo/yq:4.53.6-full --arch amd64
+$ crater push library/yq localhost:5000/demo/yq:4.53.6-full --arch amd64
 ── amd64 ──
 烘焙 `yq` —— 1 个物料变体
   ✓ yq-bin                          13.5 M  c5f056448f97
@@ -100,7 +100,7 @@ $ crater pkg push library/yq localhost:5000/demo/yq:4.53.6-full --arch amd64
 源文件一个字不动:
 
 ```console
-$ crater pkg push library/yq <ref>:4.44.3 \
+$ crater push library/yq <ref>:4.44.3 \
     --set version=4.44.3 \
     --set sha_amd64=a2c09718… --set sha_arm64=0e7e1524…
   · --set version=4.44.3 已烤进包里的蓝图
@@ -117,12 +117,12 @@ Error: 1/1 台目标执行失败
 **这是对的。** 内容寻址就该在这里拦住 —— 而且它删掉了已落地的文件,机器上不会
 留下一个"来路不明"的二进制。
 
-## 三、看一眼 —— `pkg inspect` / `pkg tags`
+## 三、看一眼 —— `inspect` / `tags`
 
 拿到别人的包,先问"我要准备什么":
 
 ```console
-$ crater pkg inspect localhost:5000/demo/yq:4.53.6
+$ crater inspect localhost:5000/demo/yq:4.53.6
 蓝图 yq  v1
 yq 命令行 YAML 处理器
 
@@ -137,7 +137,7 @@ yq 命令行 YAML 处理器
 远端有哪些版本 —— 走 OCI 的 `tags/list`,**不需要索引**:
 
 ```console
-$ crater pkg tags localhost:5000/demo/yq
+$ crater tags localhost:5000/demo/yq
   4.53.6
   4.53.6-full
 
@@ -185,13 +185,13 @@ localhost  计划 +1 ~0 -0 ✓0
 
 ## 五、离线:U 盘搬到断网机房
 
-**联网这头**(包必须在本地 store 里,所以先 `pkg build`/`push` 或
-`pkg pull --full`):
+**联网这头**(包必须在本地 store 里,所以先 `build`/`push` 或
+`pull --full`):
 
 ```console
-$ crater pkg save localhost:5000/demo/yq:4.53.6-full -o /media/usb/yq.pkg.tar
+$ crater save localhost:5000/demo/yq:4.53.6-full -o /media/usb/yq.pkg.tar
 索引也放同一个目录,对面就能搜:
-  crater pkg index --store -o /media/usb/index.yaml
+  crater index --store -o /media/usb/index.yaml
 ```
 
 导出来 14 M —— 蓝图加 13.5 M 的 yq 二进制,全在里面。
@@ -199,7 +199,7 @@ $ crater pkg save localhost:5000/demo/yq:4.53.6-full -o /media/usb/yq.pkg.tar
 **断网那头**:
 
 ```console
-$ crater pkg load /media/usb/yq.pkg.tar
+$ crater load /media/usb/yq.pkg.tar
   -          物料 1/1 份在本地
 
 闭包完整,不用连网:
@@ -253,7 +253,7 @@ $ crater destroy yq                 # 默认只预览,--yes 才动手
 规范里没有搜索端点:
 
 ```bash
-crater pkg index oci://localhost:5000/demo/yq -o index.yaml
+crater index oci://localhost:5000/demo/yq -o index.yaml
 # 扔到任意静态 HTTP,对方:
 crater repo add demo https://…/index.yaml
 crater search yq

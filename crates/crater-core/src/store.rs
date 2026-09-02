@@ -349,8 +349,8 @@ impl ImageStore {
         };
         anyhow::anyhow!(
             "{reference}:{hint},而 registry 也够不着({e})。\n\
-             断网现场先把包搬进来:`crater pkg save {reference} -o <包>.pkg.tar`(联网机)\n\
-             → 拷过去 → `crater pkg load <包>.pkg.tar`(本机),再重来。"
+             断网现场先把包搬进来:`crater save {reference} -o <包>.pkg.tar`(联网机)\n\
+             → 拷过去 → `crater load <包>.pkg.tar`(本机),再重来。"
         )
     }
 
@@ -359,7 +359,7 @@ impl ImageStore {
 
         // **字节已经全在本地就不连 registry。**
         //
-        // 断网机房里这一条是成立与否的分界:`crater pkg load yq.pkg.tar` 之后
+        // 断网机房里这一条是成立与否的分界:`crater load yq.pkg.tar` 之后
         // 闭包就在盘上了,而 install 仍然无条件先去拉一次 manifest —— 在断网
         // 机上那是一次长超时,然后失败。字节是内容寻址的,本地那份和 registry
         // 那份按定义相同,这一趟网络除了失败没有别的产出(issue #3)。
@@ -546,7 +546,7 @@ impl ImageStore {
         self.store_raw(data)
     }
 
-    /// 存下一份 manifest 并打上引用 —— `pkg push` 之前把制品落进本地 store,
+    /// 存下一份 manifest 并打上引用 —— `push` 之前把制品落进本地 store,
     /// 于是"推上去的"与"本地留着的"是同一份字节,而不是各算一遍。
     pub fn put_manifest(&self, reference: &str, manifest: &[u8]) -> crate::Result<String> {
         let (d, sz) = self.store_raw(manifest)?;
@@ -556,7 +556,7 @@ impl ImageStore {
 
     /// 只取 manifest 与 config,**一层都不下载**,也不写本地 store。
     ///
-    /// `pkg inspect` 与 UI 的远端目录靠它:契约(参数/机群/物料清单)全在
+    /// `inspect` 与 UI 的远端目录靠它:契约(参数/机群/物料清单)全在
     /// config 里,几百字节就能回答"这东西要我给什么"。多架构时按 platform
     /// 挑一份子 manifest —— 契约与架构无关,取哪份都一样。
     /// 返回 (子 manifest, config 字节, 支持的 `os/arch` 清单)。
@@ -799,7 +799,7 @@ impl ImageStore {
     /// 同 [`Self::import_oci_archive`],外加归档的**根清单摘要**。
     ///
     /// 多架构包收进来之后引用是 tag 在子清单上的(与在线 `pull` 一致),
-    /// 于是"这个 tar 里装了几个架构"就只剩根清单知道 —— `pkg load` 要把它
+    /// 于是"这个 tar 里装了几个架构"就只剩根清单知道 —— `load` 要把它
     /// 报出来,不然搬错架构要到目标机上才发现。
     pub fn import_oci_archive_rooted(
         &self,
@@ -902,7 +902,7 @@ impl ImageStore {
             if !c.unreadable.is_empty() {
                 anyhow::bail!(
                     "{r}:本地缺 {} 份清单({})—— 导出的会是个残包。\n\
-                     先 `crater pkg pull {r} --full` 补齐再 save。",
+                     先 `crater pull {r} --full` 补齐再 save。",
                     c.unreadable.len(),
                     c.unreadable
                         .iter()
@@ -1240,7 +1240,7 @@ pub(crate) fn registry_client() -> crate::Result<oci_client::Client> {
             cur = c.source();
         }
         let hint = if chain.contains("CA certificate") {
-"\n这台机器上没有 CA 证书。装 `ca-certificates`,\n或者本来就该走离线:`crater pkg pull --full` 在有网的机器上备好包,\n搬过去 `crater pkg load`,再 `--closure` 部署。"
+"\n这台机器上没有 CA 证书。装 `ca-certificates`,\n或者本来就该走离线:`crater pull --full` 在有网的机器上备好包,\n搬过去 `crater load`,再 `--closure` 部署。"
         } else {
             ""
         };
