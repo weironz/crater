@@ -1199,10 +1199,6 @@ pub(crate) fn find_yaml_under(dir: &Path, name: &str) -> Option<PathBuf> {
     subdirs.into_iter().find_map(|d| find_yaml_under(&d, name))
 }
 
-// ---------------------------------------------------------------------------
-// M4: AI copilot — natural language -> validated crater.yaml
-// ---------------------------------------------------------------------------
-
 pub(crate) fn print_plan(plan: &[Op]) {
     for (i, op) in plan.iter().enumerate() {
         println!("{:>2}. [{:?}] {}", i + 1, op.phase(), op.describe());
