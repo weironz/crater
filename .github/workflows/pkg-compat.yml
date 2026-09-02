@@ -24,6 +24,12 @@ on:
         description: "tag"
         default: probe
 
+env:
+  # 覆盖仓库 .cargo/config.toml 的 -fuse-ld=mold(D-079 本地提速)——
+  # runner 上没有 mold,不覆盖直接链接失败(release.yml 同此)。
+  # RUSTFLAGS 环境变量的优先级高于 config.toml 的 target.*.rustflags。
+  RUSTFLAGS: ""
+
 jobs:
   compat:
     runs-on: ubuntu-22.04
