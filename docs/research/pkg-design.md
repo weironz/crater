@@ -30,8 +30,9 @@
    而且索引文件能随闭包进 U 盘。
 5. **兼容性地板是 OCI 1.0 风格**(实测基线:Docker Hub 与 zot 均通过):自定义 `config.mediaType` + 真实 config blob +
    自定义层 mediaType。**不要**依赖 OCI 1.1 的 `artifactType` + 空描述符(ACR 拒收,
-   与本仓库 buildx 那次撞的是同一堵墙)、**不要**依赖 referrers API(GHCR / Docker
-   Hub 没有)、**不要**依赖 `_catalog`。版本发现只用 `tags/list`(dist-spec 1.0 必选)。
+   与本仓库 buildx 那次撞的是同一堵墙)、**不要**依赖 `_catalog`;referrers
+   API 可以**主用 + 回退**(Docker Hub 与 zot 实测都支持,GHCR 未测,规范强制
+   tag schema 回退,见 §3.6)。版本发现只用 `tags/list`(dist-spec 1.0 必选)。
 6. **一键安装不绕过 plan 闸门。** `crater install` = 拉蓝图包 → 读契约 → 对账机群
    → 生成 app 文件 → plan → 停在闸门前;`--yes` 才 apply。"一键"省的是找包、填参、
    对账那几步,不是省"先看 diff 再动手"。
@@ -123,7 +124,7 @@ registry 内解决**,全部外包给 ArtifactHub、registry UI 或 Git。
 | --- | --- | --- | --- | --- |
 | **zot** | 无白名单,纯 OCI | 原生(dist-spec 1.1.1 参考实现) | 有 | 另有 GraphQL 搜索扩展 `/v2/_zot/ext/search`(专有,只能当锦上添花) |
 | **Harbor** | 2.0+ 任意制品(按 `config.mediaType` 识别) | ≥2.9(保守按 ≥2.10) | 有 | |
-| **Docker Hub** | 2022-10-31 起 | **无**(仍停在 dist-spec 1.0.1) | **有意禁用** | 仓库列举只能走私有 hub API |
+| **Docker Hub** | 2022-10-31 起 | **有**(2026-09-02 实测推翻了初稿的"无",见 §3.6) | **有意禁用** | 仓库列举只能走私有 hub API |
 | **GHCR** | 接受 | **无**(2025-10 社区讨论确认) | — | 收 subject 但查不到 |
 | **阿里云 ACR** | **企业版专属**;官方示例本身是 1.0 写法(`--manifest-config /dev/null:<type>`) | 仅 2024-04 后新建企业版 | — | 拒收 `vnd.oci.empty.v1+json` 空描述符 —— 与本仓库 buildx provenance 撞的是同一堵墙 |
 
@@ -135,6 +136,25 @@ registry 内解决**,全部外包给 ArtifactHub、registry UI 或 Git。
 > 实测表明这句话站不住 —— **阿里云 ACR 个人版根本收不了任何自定义制品**,
 > 它不在地板上,而在地板**之下**。兼容地板应当是 **Docker Hub**(已实测通过)。
 > 详见 §3.5。
+
+### 3.6 更正:Docker Hub 支持 referrers API(2026-09-02 实测)
+
+初稿的表格写「Docker Hub 无 referrers,仍停在 dist-spec 1.0.1」,那是从社区
+讨论里读来的,**没有实测**。做包签名 spike(D-137)时顺手验了一次,结论相反:
+
+| 判据 | 结果 |
+| --- | --- |
+| `GET /v2/<repo>/referrers/<digest>`(无关联时) | **200** + 空 index(不是 404) |
+| 推带 `subject` 的 manifest | **201** |
+| 推完再查 referrers | **200,1 条**,注解原样带回 |
+| `?artifactType=` 过滤 | **200,1 条** |
+| tag schema(`sha256-<hex>` 作 tag) | **201**,读回来自定义层类型原样保留 |
+
+于是"制品关联"这件事从"必须自己维护一套 tag 约定"变成"主用 referrers、
+回退 tag schema",而**两条都实测过**。详见 `pkg-signing.md` §3。
+
+**教训**:兼容性结论只有实测算数。这张表里没打过实测标记的格子,都该按
+"待验证"读。
 
 ## 四、两个可分发物:设计答案
 

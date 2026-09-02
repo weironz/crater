@@ -30,6 +30,9 @@ use serde_json::json;
 use crate::say;
 
 const MT_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
+// 预留给包签名(D-137):`org.crater.signature.*` 注解前缀与
+// `application/vnd.crater.signature.*` 两个 mediaType,现在起不作他用。
+// 只是**不关门** —— 实现时零成本,而占用了再腾出来要动已发布的包。
 const MT_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 
 // ───────────────────────── 契约(config blob 的内容) ─────────────────────────
@@ -220,7 +223,7 @@ async fn assemble(
     reference: &str,
     archs: &[String],
     fors: &[String],
-) -> Result<()> {
+) -> Result<String> {
     let (bp_file, root) = locate(path)?;
     let bp = crate::blueprint::load(&bp_file)?;
     let (files, skipped) = collect(&root)?;
@@ -276,8 +279,7 @@ async fn assemble(
             "schemaVersion": 2, "mediaType": MT_MANIFEST,
             "config": cfg_desc, "layers": [bp_layer], "annotations": ann
         });
-        store.put_manifest(reference, &serde_json::to_vec(&m)?)?;
-        return Ok(());
+        return store.put_manifest(reference, &serde_json::to_vec(&m)?);
     }
 
     // 带闭包:逐架构烤。`seen` 跨架构复用 —— 两个架构共用的物料(证书、
@@ -331,10 +333,10 @@ async fn assemble(
 
     if per_arch.len() == 1 {
         let (_, m) = per_arch.remove(0);
-        store.put_manifest(reference, &serde_json::to_vec(&m)?)?;
+        let d = store.put_manifest(reference, &serde_json::to_vec(&m)?)?;
         say!();
         say!("闭包 {} —— 一份 manifest", human(total_mat));
-        return Ok(());
+        return Ok(d);
     }
 
     // 多架构 → image index。`platform` 是 OCI 定义的变体选择字段,
@@ -354,27 +356,30 @@ async fn assemble(
         "schemaVersion": 2, "mediaType": MT_INDEX,
         "manifests": entries, "annotations": ann
     });
-    store.put_manifest(reference, &serde_json::to_vec(&index)?)?;
+    let d = store.put_manifest(reference, &serde_json::to_vec(&index)?)?;
     say!();
     say!("闭包 {} —— {} 个架构,index 一个 tag 装下", human(total_mat), per_arch.len());
-    Ok(())
+    Ok(d)
 }
 
 // ───────────────────────────── 命令 ─────────────────────────────
 
 /// `crater pkg build <路径> -t <ref>` —— 只组装,不推。
 pub async fn build(path: &Path, reference: &str, archs: &[String], fors: &[String]) -> Result<()> {
-    assemble(path, reference, archs, fors).await?;
-    say!("已入本地 store —— `crater pkg push {reference}` 推上去");
+    let digest = assemble(path, reference, archs, fors).await?;
+    say!("已入本地 store(sha256:{digest})—— `crater pkg push {reference}` 推上去");
     Ok(())
 }
 
 /// `crater pkg push <路径> <ref>` —— 组装并推。
 pub async fn push(path: &Path, reference: &str, archs: &[String], fors: &[String]) -> Result<()> {
-    assemble(path, reference, archs, fors).await?;
+    let digest = assemble(path, reference, archs, fors).await?;
     let store = ImageStore::open()?;
     store.push(reference).await?;
     say!("推送完成 → {reference}");
+    // 报出 manifest digest(D-137):tag 可变、digest 不可变,"按 digest 钉住"
+    // 与将来的验签都以它为坐标。不印出来的话,人得再查一次 registry 才拿得到。
+    say!("  digest  sha256:{digest}");
     Ok(())
 }
 

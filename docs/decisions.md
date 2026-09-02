@@ -2278,3 +2278,32 @@ application/vnd.crater.blueprint.config.v1+json
   - E310 仍然拦住值位置的函数调用(`${iface_in(...)}` 报 error)
   - `facts.b: "facts.a"` 报 error
   - `facts.arch` 与 `substrate.arch` 撞名报 warn
+
+### D-137:包签名 spike —— 现在只"不关门",不做实现(issue #6)
+
+设计见 `docs/research/pkg-signing.md`。
+
+- **洞是真的**:`crater install` 从 registry 拉包然后在生产机上执行。谁能往那个
+  registry 写,谁就能让你的机器执行任意东西。**但威胁模型只有一条**:registry
+  被投毒。签名证明"是他发的",不证明"是好的";传输中被改由 TLS + 内容寻址管住。
+- **实测推翻了一条调研结论**:D-123 §3.4 写的"Docker Hub 无 referrers API"是
+  错的。实测:推带 `subject` 的 manifest → 201,查 referrers → **200 + 1 条**,
+  注解原样带回,`?artifactType=` 过滤也生效。tag schema 同样可用(201,自定义
+  层类型保留)。于是存放方案是**主用 referrers、回退 tag schema,两条都验过**。
+- **自己犯的错值得记**:第一次测 tag schema 报 `MANIFEST_BLOB_UNKNOWN`,差点
+  写成"Docker Hub 不支持"。真因是我用了单步 blob 上传,Docker Hub 返回 202
+  开了会话却没提交;改成两步就是 201。**registry 说"不行"时,先怀疑自己的请求。**
+- **设计取向**:照 cosign 的**布局**存(格式兼容白拿:别人用 cosign 也能验),
+  但**不 exec cosign 二进制**(与静态单二进制冲突,而我们要的是格式不是进程);
+  不做 keyless/Fulcio(要联公共服务,与 air-gap 冲突);不做 TUF/证书链。
+  **签的是 manifest digest 不是 tag** —— tag 可变,签可变的东西等于没签。
+- **现在不实现**:价值与"有多少人拉你的包"成正比,而现在是零;做早了要背着
+  一套密钥管理走很久。**但两件"不关门"的事现在做完了**(实现时零成本、补救
+  时很贵):
+  1. 预留 `org.crater.signature.*` 注解前缀与 `application/vnd.crater.signature.*`
+     两个 mediaType;
+  2. `pkg push` / `pkg build` 报出 **manifest digest**(取自 `put_manifest` 的
+     返回值,不重新序列化 —— 重算出来的字节未必逐字相同,那会印出一个**错的**
+     digest)。实测与 zot 报的 `Docker-Content-Digest` 逐字一致。
+- **触发条件**:有第二方开始拉包 / 放到公开 registry / 有合规要求。任一成立
+  就启动实现,估计两天,**最大的不确定性(存放路径)已经被实测消掉**。
