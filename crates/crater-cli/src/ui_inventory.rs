@@ -121,12 +121,15 @@ fn read_text(rel: &str) -> Result<String, (StatusCode, String)> {
 }
 
 /// 写回:与编辑器保存同款,旧版留 `.bak`(误操作要能拖回来)。
-fn write_text(rel: &str, text: &str) -> Result<(), (StatusCode, String)> {
+///
+/// `action` 只为了给 git 记录一句人话("改主机 n1")—— inventory 的五个写
+/// handler 全从这里出去,动作名在这一层要不到,只能由调用者带下来。
+fn write_text(rel: &str, text: &str, action: &str) -> Result<(), (StatusCode, String)> {
     let path = crate::ui_edit::confine(rel)?;
     if let Ok(old) = std::fs::read(&path) {
         let _ = std::fs::write(path.with_extension("bak"), old);
     }
-    std::fs::write(&path, text)
+    crate::ui_edit::write_file(&path, text.as_bytes(), action)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("写入失败:{e}")))
 }
 
@@ -366,7 +369,11 @@ pub async fn host_add(Json(req): Json<HostAdd>) -> Response {
             out.insert(b.key_line + 1, entry);
         }
     }
-    match write_text(&req.path, &join(&out, text.ends_with('\n'))) {
+    match write_text(
+        &req.path,
+        &join(&out, text.ends_with('\n')),
+        &format!("新增主机 {}", req.f.name),
+    ) {
         Ok(()) => Json(json!({ "ok": true, "host": req.f.name })).into_response(),
         Err((c, m)) => err(c, m),
     }
@@ -433,7 +440,11 @@ pub async fn host_update(Json(req): Json<HostUpdate>) -> Response {
             out[j] = rename_member(&out[j], &req.old_name, &host.name);
         }
     }
-    match write_text(&req.path, &join(&out, text.ends_with('\n'))) {
+    match write_text(
+        &req.path,
+        &join(&out, text.ends_with('\n')),
+        &format!("改主机 {}", host.name),
+    ) {
         Ok(()) => Json(json!({ "ok": true, "host": host.name, "manual_groups": manual }))
             .into_response(),
         Err((c, m)) => err(c, m),
@@ -536,7 +547,11 @@ pub async fn host_remove(Json(req): Json<HostDel>) -> Response {
         }
         out[j] = drop_member(&l, &req.name);
     }
-    match write_text(&req.path, &join(&out, text.ends_with('\n'))) {
+    match write_text(
+        &req.path,
+        &join(&out, text.ends_with('\n')),
+        &format!("删除主机 {}", req.name),
+    ) {
         Ok(()) => Json(json!({
             "ok": true,
             "manual_groups": manual,   // 块式组没自动摘,如实说
@@ -662,7 +677,11 @@ pub async fn group_set(Json(req): Json<GroupSet>) -> Response {
             }
         }
     }
-    match write_text(&req.path, &join(&out, text.ends_with('\n'))) {
+    match write_text(
+        &req.path,
+        &join(&out, text.ends_with('\n')),
+        &format!("设置组 {}", req.name),
+    ) {
         Ok(()) => Json(json!({ "ok": true, "group": req.name })).into_response(),
         Err((c, m)) => err(c, m),
     }
@@ -692,7 +711,11 @@ pub async fn group_remove(Json(req): Json<GroupDel>) -> Response {
     }
     let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
     out.remove(i);
-    match write_text(&req.path, &join(&out, text.ends_with('\n'))) {
+    match write_text(
+        &req.path,
+        &join(&out, text.ends_with('\n')),
+        &format!("删除组 {}", req.name),
+    ) {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
         Err((c, m)) => err(c, m),
     }
@@ -732,7 +755,7 @@ pub async fn inv_create(Json(req): Json<InvCreate>) -> Response {
         "    # 组名要与蓝图的 fleet.groups 对得上(对不上时 app 的 lint 会报)。\n",
         "    # all: { hosts: [n1] }\n",
     );
-    if let Err(e) = std::fs::write(&abs, body) {
+    if let Err(e) = crate::ui_edit::write_file(&abs, body.as_bytes(), "新建 inventory") {
         return err(StatusCode::INTERNAL_SERVER_ERROR, format!("写入失败:{e}"));
     }
     Json(json!({ "ok": true, "path": file })).into_response()

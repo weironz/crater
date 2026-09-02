@@ -178,6 +178,9 @@ pub async fn serve(
     };
     crate::ui_edit::set_workspace(ws.clone());
     println!("工作区 {}", ws.display());
+    // git 记录的探测**必须在横幅里说出来**:记不记是这个工作区的一条长期性质,
+    // 人只有在启动这一刻会去看它。等到出事时才发现"原来一直没记",就晚了。
+    println!("{}", crate::ui_git::init(&ws));
     // Validate the DB is openable up front; handlers re-open per request so they
     // always see the latest writes from the CLI process (Turso cross-process
     // visibility — a fresh handle reads committed state, D-056).

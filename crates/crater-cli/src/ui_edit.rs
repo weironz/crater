@@ -43,6 +43,26 @@ pub(crate) fn root() -> std::io::Result<PathBuf> {
     }
 }
 
+/// **工作区写入的唯一落点。**
+///
+/// 收敛到一处不是洁癖:本仓库这一轮已经三次栽在"同一件事在两处各写一遍、
+/// 漏一处"上(D-132/D-135/D-136)。写入之后要记 git、以后可能要发事件、
+/// 要刷缓存 —— 每加一件就在七个 handler 里各补一遍,漏掉的那个永远是静默的。
+/// 所以 `ui_*` 里**任何**改工作区文件的地方都必须走这两个函数。
+pub(crate) fn write_file(path: &Path, bytes: &[u8], action: &str) -> std::io::Result<()> {
+    std::fs::write(path, bytes)?;
+    crate::ui_git::record(&[path], action);
+    Ok(())
+}
+
+/// 移动(改名 / 移入回收站)的唯一落点。两端都要报给 git —— 只报新路径,
+/// 历史里就会留下一个永远删不掉的旧文件。
+pub(crate) fn move_file(from: &Path, to: &Path, action: &str) -> std::io::Result<()> {
+    std::fs::rename(from, to)?;
+    crate::ui_git::record(&[from, to], action);
+    Ok(())
+}
+
 /// 把请求里的相对路径解析成绝对路径,并确认它**确实**落在根内。
 ///
 /// 对尚不存在的文件(新建),canonicalize 会失败 —— 这时改为核对它的父目录,
@@ -179,7 +199,7 @@ pub async fn upload(Query(q): Query<PathQuery>, body: axum::body::Bytes) -> impl
     if path.exists() {
         let _ = std::fs::copy(&path, path.with_extension("bak"));
     }
-    match std::fs::write(&path, &body) {
+    match write_file(&path, &body, "上传") {
         Ok(()) => Json(json!({
             "ok": true, "path": q.path, "bytes": body.len(),
             "sha256": crater_core::bundle::sha256_hex(&body),
@@ -217,7 +237,7 @@ pub async fn file_put(Query(q): Query<PathQuery>, body: String) -> impl IntoResp
     if path.exists() {
         let _ = std::fs::copy(&path, path.with_extension("yaml.bak"));
     }
-    match std::fs::write(&path, body.as_bytes()) {
+    match write_file(&path, body.as_bytes(), "保存") {
         Ok(()) => Json(json!({ "ok": true, "path": q.path, "bytes": body.len() })).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -266,7 +286,7 @@ pub async fn file_trash(Query(q): Query<PathQuery>) -> impl IntoResponse {
         "{}.{stamp}",
         path.file_name().unwrap_or_default().to_string_lossy()
     ));
-    match std::fs::rename(&path, &dest) {
+    match move_file(&path, &dest, "删除") {
         Ok(()) => Json(json!({ "ok": true, "trashed_to": dest.display().to_string() })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
     }
@@ -298,7 +318,7 @@ pub async fn file_rename(Query(q): Query<PathQuery>, body: String) -> impl IntoR
     if to.exists() {
         return (StatusCode::CONFLICT, Json(json!({ "error": "目标已存在" }))).into_response();
     }
-    match std::fs::rename(&from, &to) {
+    match move_file(&from, &to, "改名") {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
     }
