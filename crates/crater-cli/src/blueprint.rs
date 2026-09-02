@@ -704,14 +704,34 @@ async fn run_on_targets(
                             if let Err(e) = store.save(&rec) {
                                 oops!("(记账失败,不影响本次部署:{e})");
                             }
-                            // 自定义类型此刻本就还没弥合(舞在逐台循环之后才跳),
-                            // 不该当成"收敛失败"吓人;其余项才是真的没达成。
+                            // 两类不该算进"没达成",理由不同:
+                            //
+                            // - **自定义类型**:舞在逐台循环之后才跳,此刻本就
+                            //   还没弥合,当成收敛失败是吓人。
+                            // - **`Unknown`**:那是"判不出",不是"没达成"
+                            //   (D-135)。物料没声明 sha256 又没有闭包时,复观察
+                            //   照样说不清 —— 而此时文件**已经正确地放好了**。
+                            //   真机上的表现是:`changed=1` 紧跟着一句"仍有 1 项
+                            //   未达期望态",而目标机上那个二进制明明是对的。
+                            //   D-135 把"判不出 ≠ 一致"说清了,这里漏的是它的
+                            //   另一半:**判不出 ≠ 没达成**。
                             let stuck = after
                                 .changing()
                                 .filter(|i| bp.custom_type(&i.ty).is_none())
+                                .filter(|i| !matches!(i.change, crater_ir::verbs::Change::Unknown(_)))
                                 .count();
                             if stuck > 0 {
                                 say!("注意:收敛后仍有 {stuck} 项未达期望态 —— 见上方 plan");
+                            }
+                            // 说不清的单独说一句 —— 它既不是成功也不是失败,
+                            // 混进上面那句会让人以为部署坏了,只字不提又会让
+                            // "其实没验过"变成隐形的。
+                            let unsure = after
+                                .changing()
+                                .filter(|i| matches!(i.change, crater_ir::verbs::Change::Unknown(_)))
+                                .count();
+                            if unsure > 0 {
+                                say!("({unsure} 项收敛后仍判不出 —— 已按计划执行,只是无从复核)");
                             }
                         }
                         Err(e) => oops!("(收敛后复观察失败:{e})"),
