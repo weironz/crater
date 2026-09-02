@@ -1,7 +1,12 @@
 apiVersion: crater.pkg/v1
-generated: 2026-09-02T15:29:34Z
+generated: 2026-09-02T16:01:38Z
 entries:
   yq:
+  - version: 4.53.6
+    blueprint_version: '1'
+    reference: ghcr.io/weironz/crater/yq:4.53.6
+    description: yq 命令行 YAML 处理器
+    params: 1
   - version: 4.44.3
     blueprint_version: '1'
     reference: ghcr.io/weironz/crater/yq:4.44.3
