@@ -11,7 +11,7 @@
 | `docker/` | blueprint | Docker + containerd,官方静态二进制 |
 | `mysql/` | blueprint | MySQL(发行版包) |
 | `zot/` | blueprint | OCI 镜像仓库 |
-| `yq/` | blueprint | 单二进制工具下发 —— 最小蓝图示例 |
+| `yq/` | blueprint | 单二进制工具下发 —— 最小蓝图示例,**并附一个包的完整生命周期走查**([README](yq/README.md):构建 → 推送 → 拉取使用 → 离线 → 升降级) |
 | `selftest/` | blueprint | 机群机制自检(选择器/exports/throttle/并发),附判据表 |
 | `_examples/` `_template/` | **Legacy** | 旧 task 管线示例与模板,勿新增 |
 

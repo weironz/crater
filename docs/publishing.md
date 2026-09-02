@@ -149,5 +149,7 @@ crater search redis
 
 ## 相关
 
+- [`library/yq/README.md`](../library/yq/README.md) —— **一个包的完整生命周期走查**,
+  每条输出都是真跑出来的
 - [`packages/README.md`](../packages/README.md) —— crater 官方索引怎么订阅
 - D-123(包分发设计)、D-128(索引与搜索)、D-159(为什么索引必须由机器生成)

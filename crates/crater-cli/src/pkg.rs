@@ -718,7 +718,12 @@ pub fn load(file: &Path, as_ref: Option<&str>) -> Result<()> {
         );
     }
     say!();
-    say!("闭包完整,不用连网。`crater install {reference} -i <机群>` 就能装。");
+    // **`--full` 不能省。** 没有它 install 走瘦拉,物料仍然按 URL 去下载 ——
+    // 而这条提示恰恰是给断网现场看的:在那里它必然失败,报"下载失败 exit 127"。
+    // 提示里漏一个开关,等于把人送进一个与提示内容相反的结论。实测踩过。
+    say!("闭包完整,不用连网:");
+    say!("  crater install {reference} --full -i <机群>");
+    say!("  (`--full` 是关键 —— 少了它会去下载物料,断网现场必失败)");
     Ok(())
 }
 
