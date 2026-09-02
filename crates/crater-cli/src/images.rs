@@ -257,6 +257,14 @@ async fn ensure_pulled(store: &ImageStore, local: &str, remote: &str, offline: b
 /// Materialize ONE crater task artifact from the store and run it through the
 /// task pipeline. `graceful_no_teardown`: project plays skip teardown-less
 /// tasks (D-098 semantics); a direct single-ref delete stays a hard error.
+// 参数确实构成一个整体,而那个整体已经有名字了:`RunOpts`(见 #20)。
+// 问题不是"参数多",是它在管线深处才被组装 —— 全仓 7 处各自拼一遍,
+// 五个入口手抄散装参数往下传。
+//
+// 留 allow 而不是现在就抽:这是 D-106 降级的旧 task 管线,而且这五个函数
+// **零直接测试覆盖**,把 RunOpts 从 CLI 边界穿下去是一次没有安全网的重构。
+// #20 的第一步是补端到端测试,不是改签名。
+#[allow(clippy::too_many_arguments)]
 async fn apply_task_artifact(
     store: &ImageStore,
     reference: &str,
@@ -331,6 +339,14 @@ async fn apply_task_artifact(
 /// (materials feed the recipe offline). A project artifact → registry/store-
 /// direct play orchestration (D-101). A plain container image → extract its
 /// rootfs layers to `/` on each host (parallel). crater-native, no runtime.
+// 参数确实构成一个整体,而那个整体已经有名字了:`RunOpts`(见 #20)。
+// 问题不是"参数多",是它在管线深处才被组装 —— 全仓 7 处各自拼一遍,
+// 五个入口手抄散装参数往下传。
+//
+// 留 allow 而不是现在就抽:这是 D-106 降级的旧 task 管线,而且这五个函数
+// **零直接测试覆盖**,把 RunOpts 从 CLI 边界穿下去是一次没有安全网的重构。
+// #20 的第一步是补端到端测试,不是改签名。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_image_ref(
     reference: &str,
     hosts: Vec<crater_core::spec::Host>,

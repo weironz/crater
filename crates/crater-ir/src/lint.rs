@@ -187,10 +187,12 @@ pub fn lint(bp: &Blueprint) -> Vec<Diagnostic> {
             &mut push,
         );
         lint_scope_of(
-            &r.args,
-            r.when.as_ref(),
-            &r.on,
-            r.each.is_some(),
+            Scoped {
+                args: &r.args,
+                when: r.when.as_ref(),
+                on: &r.on,
+                has_each: r.each.is_some(),
+            },
             &at,
             r.line,
             &param_names,
@@ -250,10 +252,12 @@ pub fn lint(bp: &Blueprint) -> Vec<Diagnostic> {
                 &mut push,
             );
             lint_scope_of(
-                &s.args,
-                s.when.as_ref(),
-                &s.on,
-                s.each.is_some(),
+                Scoped {
+                    args: &s.args,
+                    when: s.when.as_ref(),
+                    on: &s.on,
+                    has_each: s.each.is_some(),
+                },
                 &at,
                 s.line,
                 &proc_params,
@@ -513,17 +517,32 @@ fn lint_type_and_args(
     }
 }
 
+/// 一条**被作用域检查的声明** —— 资源与 procedure 的步骤各有一份同形状的字段。
+///
+/// 抽出来不是为了让 clippy 闭嘴:这四项本就来自同一个声明,而且两个调用点
+/// 各自把它们拆开传了一遍。散着传的代价是**位置耦合** —— `on` 与 `when` 都是
+/// 引用、`has_each` 是个裸 `bool`,顺序写反了编译器未必拦得住。
+struct Scoped<'a> {
+    args: &'a Args,
+    when: Option<&'a CelExpr>,
+    on: &'a Selector,
+    has_each: bool,
+}
+
 /// CEL 作用域检查:根变量必须在白名单内;`item` 只在 `each:` 下合法。
 fn lint_scope_of(
-    args: &Args,
-    when: Option<&CelExpr>,
-    on: &Selector,
-    has_each: bool,
+    d: Scoped<'_>,
     at: &str,
     line: Option<usize>,
     params: &BTreeSet<&str>,
     push: &mut impl FnMut(Severity, String, Option<usize>, String),
 ) {
+    let Scoped {
+        args,
+        when,
+        on,
+        has_each,
+    } = d;
     let mut roots = BTreeSet::new();
     for v in args.values() {
         v.roots(&mut roots);

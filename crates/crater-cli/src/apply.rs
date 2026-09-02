@@ -23,6 +23,14 @@ use crate::{agent, deployments, images};
 /// Auto-detect the source kind and route; the execution engine (idempotency,
 /// tracing, agent/shell) is shared — online vs offline differ only in where
 /// artifacts come from.
+// 参数确实构成一个整体,而那个整体已经有名字了:`RunOpts`(见 #20)。
+// 问题不是"参数多",是它在管线深处才被组装 —— 全仓 7 处各自拼一遍,
+// 五个入口手抄散装参数往下传。
+//
+// 留 allow 而不是现在就抽:这是 D-106 降级的旧 task 管线,而且这五个函数
+// **零直接测试覆盖**,把 RunOpts 从 CLI 边界穿下去是一次没有安全网的重构。
+// #20 的第一步是补端到端测试,不是改签名。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_source(
     name: Option<String>,
     source: Option<String>,
@@ -172,6 +180,14 @@ pub(crate) async fn apply_source(
 /// A barrier between plays (each `apply_task` completes first), so ordering like
 /// host-init → k8s → cni holds. All plays share one deployment label (the project
 /// name, or `--name`), so `task list` groups them.
+// 参数确实构成一个整体,而那个整体已经有名字了:`RunOpts`(见 #20)。
+// 问题不是"参数多",是它在管线深处才被组装 —— 全仓 7 处各自拼一遍,
+// 五个入口手抄散装参数往下传。
+//
+// 留 allow 而不是现在就抽:这是 D-106 降级的旧 task 管线,而且这五个函数
+// **零直接测试覆盖**,把 RunOpts 从 CLI 边界穿下去是一次没有安全网的重构。
+// #20 的第一步是补端到端测试,不是改签名。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_project(
     path: &Path,
     name: Option<&str>,
@@ -975,6 +991,14 @@ pub(crate) fn forks_limit() -> usize {
 /// inventory from CLI), set `Artifacts::Offline`, and run `run_pipeline`. So
 /// offline gets the same host grouping / parallelism / register / idempotency —
 /// the only difference is where artifacts come from (the bundle, on control).
+// 参数确实构成一个整体,而那个整体已经有名字了:`RunOpts`(见 #20)。
+// 问题不是"参数多",是它在管线深处才被组装 —— 全仓 7 处各自拼一遍,
+// 五个入口手抄散装参数往下传。
+//
+// 留 allow 而不是现在就抽:这是 D-106 降级的旧 task 管线,而且这五个函数
+// **零直接测试覆盖**,把 RunOpts 从 CLI 边界穿下去是一次没有安全网的重构。
+// #20 的第一步是补端到端测试,不是改签名。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_oci_bundle(
     bundle_file: &Path,
     hosts: Vec<crater_core::spec::Host>,

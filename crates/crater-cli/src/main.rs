@@ -921,15 +921,14 @@ async fn main() -> Result<()> {
             force,
             target,
         } => {
+            let opts = pkg::InstallOpts { yes, full, force };
             pkg::install(
                 &source,
                 &target,
                 &set,
                 name.as_deref(),
                 repo.as_deref(),
-                yes,
-                full,
-                force,
+                opts,
             )
             .await
         }

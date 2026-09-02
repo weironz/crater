@@ -1285,16 +1285,33 @@ fn warn_if_undecidable(bp: &Blueprint, source: &str, have_bytes: bool) {
 /// 顺序是刻意的:**契约与机群都在本地对完账,才连第一台机器**。参数少给一个、
 /// 组名写错一个,在 SSH 之前就该说清楚 —— 那时候纠正的代价是改一行命令,
 /// 连上之后再发现就已经在改机器了。
+/// `install` 的三个开关。
+///
+/// 抽出来不是为了让 clippy 闭嘴,是因为它们**确实构成一个整体**:三个都在
+/// 回答"这次安装允许越过哪道闸",而且三道闸互不替代 ——
+/// `yes` 是"计划我看过了",`force` 是"上一版目录里的本地改动我不要了",
+/// `full` 是"连物料一起拉"。三个 `bool` 挨着传,调用点上是三个裸 `true`/
+/// `false`,谁是谁全靠位置记 —— 而记错的后果分别是"没看计划就执行"和
+/// "手工改动被丢掉"。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InstallOpts {
+    /// 过闸执行,而不只是看计划。
+    pub yes: bool,
+    /// 连物料层一起拉(离线现场)。
+    pub full: bool,
+    /// 上一版目录里有本地改动也照旧升级。**`yes` 跨不过它。**
+    pub force: bool,
+}
+
 pub async fn install(
     source: &str,
     target: &crate::target::TargetOpts,
     sets: &[String],
     name: Option<&str>,
     repo: Option<&str>,
-    yes: bool,
-    full: bool,
-    force: bool,
+    opts: InstallOpts,
 ) -> Result<()> {
+    let InstallOpts { yes, full, force } = opts;
     // ① 取到蓝图 —— 本地路径就地用,否则当成 registry 引用拉下来。
     let local = Path::new(source);
     // `crater install mysql` 里的 `mysql` 不是引用,是包名 —— 去仓库索引里
