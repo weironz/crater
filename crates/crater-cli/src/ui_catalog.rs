@@ -68,13 +68,18 @@ fn entry(path: &Path) -> Option<serde_json::Value> {
 /// `GET /api/catalog` —— 工作区里所有蓝图的契约。
 pub async fn catalog() -> Response {
     let Ok(root) = crate::ui_edit::root() else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "工作区不可读" })))
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "工作区不可读" })),
+        )
             .into_response();
     };
     let mut items = Vec::new();
     let mut walk = vec![root.clone()];
     while let Some(dir) = walk.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
             let name = e.file_name().to_string_lossy().into_owned();
@@ -122,7 +127,10 @@ pub async fn fit(Query(q): Query<FitQ>) -> Response {
     let bp = match crate::blueprint::load(&bpp) {
         Ok(b) => b,
         Err(e) => {
-            return (StatusCode::CONFLICT, Json(json!({ "error": format!("蓝图解析失败:{e}") })))
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": format!("蓝图解析失败:{e}") })),
+            )
                 .into_response()
         }
     };
@@ -133,14 +141,20 @@ pub async fn fit(Query(q): Query<FitQ>) -> Response {
     let text = match std::fs::read_to_string(&invp) {
         Ok(t) => t,
         Err(e) => {
-            return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("读不到机群:{e}") })))
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("读不到机群:{e}") })),
+            )
                 .into_response()
         }
     };
     let spec: crater_core::spec::CraterSpec = match serde_yaml::from_str(&text) {
         Ok(s) => s,
         Err(e) => {
-            return (StatusCode::CONFLICT, Json(json!({ "error": format!("机群解析失败:{e}") })))
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": format!("机群解析失败:{e}") })),
+            )
                 .into_response()
         }
     };
@@ -247,7 +261,11 @@ pub struct RepoAddReq {
 pub async fn repo_add(Json(q): Json<RepoAddReq>) -> Response {
     match crate::repo::add(&q.name, &q.url).await {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => (StatusCode::CONFLICT, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -255,7 +273,11 @@ pub async fn repo_add(Json(q): Json<RepoAddReq>) -> Response {
 pub async fn repo_update() -> Response {
     match crate::repo::update(None).await {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => (StatusCode::CONFLICT, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -274,7 +296,10 @@ pub struct RepoPullReq {
 /// 它只负责"把东西弄进来",不负责"怎么装"。
 pub async fn repo_pull(Json(q): Json<RepoPullReq>) -> Response {
     let Ok(root) = crate::ui_edit::root() else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "工作区不可读" })))
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "工作区不可读" })),
+        )
             .into_response();
     };
     // 目录名取包名:与 CLI 的 `pkg pull` 一致,人在两边看到的是同一棵树。
@@ -288,7 +313,11 @@ pub async fn repo_pull(Json(q): Json<RepoPullReq>) -> Response {
     let dir = root.join(&name);
     match crate::pkg::pull(&q.reference, Some(&dir), q.full).await {
         Ok(()) => Json(json!({ "ok": true, "dir": name })).into_response(),
-        Err(e) => (StatusCode::CONFLICT, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 

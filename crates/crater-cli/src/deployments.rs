@@ -26,15 +26,16 @@ pub(crate) struct DepRow {
 /// the control DB, or — when a target is given — the authoritative markers read
 /// off the hosts (D-051). With `verify`, re-run each deployment's verify phase
 /// on the target to detect drift (D-055; requires `--host`/`-i`).
-pub(crate) async fn gather_deployments(
-    target: &TargetOpts,
-    verify: bool,
-) -> Result<Vec<DepRow>> {
+pub(crate) async fn gather_deployments(target: &TargetOpts, verify: bool) -> Result<Vec<DepRow>> {
     use crater_core::state::Deployment;
     if target.inventory.is_some() || target.host.is_some() {
         let hosts = target.hosts()?;
         // Persist verify results so the read-only UI can show drift (D-055).
-        let store = if verify { state::TursoStore::open().await.ok() } else { None };
+        let store = if verify {
+            state::TursoStore::open().await.ok()
+        } else {
+            None
+        };
         let now = state::now_epoch();
         let mut out = Vec::new();
         for h in &hosts {
@@ -58,7 +59,11 @@ pub(crate) async fn gather_deployments(
                     dep: Deployment {
                         host: h.name.clone(),
                         name: m.name.clone(),
-                        deployment: if m.deployment.is_empty() { m.name } else { m.deployment },
+                        deployment: if m.deployment.is_empty() {
+                            m.name
+                        } else {
+                            m.deployment
+                        },
                         version: m.version,
                         source: m.source,
                         applied_at: m.applied_at,
@@ -101,12 +106,19 @@ pub(crate) fn resolve_task_path(source: &str) -> Option<PathBuf> {
 }
 
 pub(crate) async fn verify_on_host(exec: &dyn Executor, source: &str) -> Option<bool> {
-    use crater_core::engine::{self, Op, PlanContext, Phase};
+    use crater_core::engine::{self, Op, Phase, PlanContext};
     use crater_core::task::TaskFile;
     let path = resolve_task_path(source)?;
     let task = TaskFile::from_yaml_file(&path).ok()?;
-    let spec_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-    let ver = task.effective_vars().get("version").cloned().unwrap_or_else(|| "latest".into());
+    let spec_dir = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let ver = task
+        .effective_vars()
+        .get("version")
+        .cloned()
+        .unwrap_or_else(|| "latest".into());
     let mut ctx = PlanContext::new(os::detect_via(exec).await, ver, spec_dir);
     ctx.target_arch = arch::detect_via(exec).await;
     for (k, v) in &task.effective_vars() {
@@ -203,9 +215,15 @@ pub(crate) async fn task_list(target: TargetOpts, verify: bool) -> Result<()> {
         }
     };
     if verify {
-        println!("{:<16} {:<12} {:<14} {:>6}  {:<14} LAST APPLIED (UTC)", "DEPLOYMENT", "TASK", "VERSION", "HOSTS", "STATUS");
+        println!(
+            "{:<16} {:<12} {:<14} {:>6}  {:<14} LAST APPLIED (UTC)",
+            "DEPLOYMENT", "TASK", "VERSION", "HOSTS", "STATUS"
+        );
     } else {
-        println!("{:<16} {:<12} {:<14} {:>6}  LAST APPLIED (UTC)", "DEPLOYMENT", "TASK", "VERSION", "HOSTS");
+        println!(
+            "{:<16} {:<12} {:<14} {:>6}  LAST APPLIED (UTC)",
+            "DEPLOYMENT", "TASK", "VERSION", "HOSTS"
+        );
     }
     for (dep, a) in by_dep {
         if verify {
@@ -216,12 +234,21 @@ pub(crate) async fn task_list(target: TargetOpts, verify: bool) -> Result<()> {
             };
             println!(
                 "{:<16} {:<12} {:<14} {:>6}  {:<14} {}",
-                dep, join_or_mixed(a.tasks), join_or_mixed(a.versions), a.hosts, status, state::fmt_epoch(a.last)
+                dep,
+                join_or_mixed(a.tasks),
+                join_or_mixed(a.versions),
+                a.hosts,
+                status,
+                state::fmt_epoch(a.last)
             );
         } else {
             println!(
                 "{:<16} {:<12} {:<14} {:>6}  {}",
-                dep, join_or_mixed(a.tasks), join_or_mixed(a.versions), a.hosts, state::fmt_epoch(a.last)
+                dep,
+                join_or_mixed(a.tasks),
+                join_or_mixed(a.versions),
+                a.hosts,
+                state::fmt_epoch(a.last)
             );
         }
     }
@@ -243,19 +270,34 @@ pub(crate) async fn task_show(name: &str, target: TargetOpts, verify: bool) -> R
         return Ok(());
     }
     if verify {
-        println!("{:<16} {:<12} {:<10} {:<8} {:<20} SOURCE", "HOST", "TASK", "VERSION", "STATUS", "APPLIED (UTC)");
+        println!(
+            "{:<16} {:<12} {:<10} {:<8} {:<20} SOURCE",
+            "HOST", "TASK", "VERSION", "STATUS", "APPLIED (UTC)"
+        );
         for r in rows {
             println!(
                 "{:<16} {:<12} {:<10} {:<8} {:<20} {}",
-                r.dep.host, r.dep.name, r.dep.version, status_label(r.status), state::fmt_epoch(r.dep.applied_at), r.dep.source
+                r.dep.host,
+                r.dep.name,
+                r.dep.version,
+                status_label(r.status),
+                state::fmt_epoch(r.dep.applied_at),
+                r.dep.source
             );
         }
     } else {
-        println!("{:<16} {:<12} {:<10} {:<20} SOURCE", "HOST", "TASK", "VERSION", "APPLIED (UTC)");
+        println!(
+            "{:<16} {:<12} {:<10} {:<20} SOURCE",
+            "HOST", "TASK", "VERSION", "APPLIED (UTC)"
+        );
         for r in rows {
             println!(
                 "{:<16} {:<12} {:<10} {:<20} {}",
-                r.dep.host, r.dep.name, r.dep.version, state::fmt_epoch(r.dep.applied_at), r.dep.source
+                r.dep.host,
+                r.dep.name,
+                r.dep.version,
+                state::fmt_epoch(r.dep.applied_at),
+                r.dep.source
             );
         }
     }
@@ -270,11 +312,19 @@ pub(crate) async fn task_history(limit: usize) -> Result<()> {
         info!("no history recorded in the control DB (~/.crater/state.db)");
         return Ok(());
     }
-    println!("{:<20} {:<8} {:<14} {:<12} {:<16} RESULT", "WHEN (UTC)", "ACTION", "DEPLOYMENT", "TASK", "HOST");
+    println!(
+        "{:<20} {:<8} {:<14} {:<12} {:<16} RESULT",
+        "WHEN (UTC)", "ACTION", "DEPLOYMENT", "TASK", "HOST"
+    );
     for r in runs {
         println!(
             "{:<20} {:<8} {:<14} {:<12} {:<16} {}",
-            state::fmt_epoch(r.ts), r.action, r.deployment, r.task, r.host, r.result
+            state::fmt_epoch(r.ts),
+            r.action,
+            r.deployment,
+            r.task,
+            r.host,
+            r.result
         );
     }
     Ok(())
@@ -292,7 +342,11 @@ pub(crate) async fn record_deployments(
         return Ok(());
     }
     let store = state::TursoStore::open().await?;
-    let ver = task.effective_vars().get("version").cloned().unwrap_or_else(|| "latest".into());
+    let ver = task
+        .effective_vars()
+        .get("version")
+        .cloned()
+        .unwrap_or_else(|| "latest".into());
     let ts = state::now_epoch();
     for h in hosts {
         if teardown {

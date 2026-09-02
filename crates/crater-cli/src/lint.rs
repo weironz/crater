@@ -128,29 +128,50 @@ fn check_one(path: PathBuf, explicit: bool) -> FileReport {
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) => {
-            return FileReport { path, outcome: Outcome::ParseFailed(format!("读文件失败:{e}")) }
+            return FileReport {
+                path,
+                outcome: Outcome::ParseFailed(format!("读文件失败:{e}")),
+            }
         }
     };
     // 旧格式先认出来,免得把"还没迁移"报成"写错了"。
     if is_legacy_task(&text) {
-        return FileReport { path, outcome: Outcome::LegacyTask };
+        return FileReport {
+            path,
+            outcome: Outcome::LegacyTask,
+        };
     }
     // 栈:检查引用解析得开、参数名与组名对得上那份蓝图。
     if crate::stack_cmd::is_stack_file(&path) {
         return match crate::stack_cmd::lint(&path) {
-            Ok(st) => FileReport { path, outcome: Outcome::Stack(st.name, st.uses.len()) },
-            Err(e) => FileReport { path, outcome: Outcome::ParseFailed(e.to_string()) },
+            Ok(st) => FileReport {
+                path,
+                outcome: Outcome::Stack(st.name, st.uses.len()),
+            },
+            Err(e) => FileReport {
+                path,
+                outcome: Outcome::ParseFailed(e.to_string()),
+            },
         };
     }
     if !explicit && !looks_like_blueprint(&text) {
-        return FileReport { path, outcome: Outcome::NotABlueprint };
+        return FileReport {
+            path,
+            outcome: Outcome::NotABlueprint,
+        };
     }
     match parse::blueprint_from_path(&path) {
         Ok(bp) => {
             let diags = lint::lint(&bp);
-            FileReport { path, outcome: Outcome::Parsed(Box::new(Parsed { bp, diags })) }
+            FileReport {
+                path,
+                outcome: Outcome::Parsed(Box::new(Parsed { bp, diags })),
+            }
         }
-        Err(e) => FileReport { path, outcome: Outcome::ParseFailed(e.to_string()) },
+        Err(e) => FileReport {
+            path,
+            outcome: Outcome::ParseFailed(e.to_string()),
+        },
     }
 }
 
@@ -159,10 +180,19 @@ fn looks_like_blueprint(text: &str) -> bool {
     let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(text) else {
         return false;
     };
-    let Some(m) = v.as_mapping() else { return false };
-    ["resources", "procedures", "types", "materials", "preflight", "health"]
-        .iter()
-        .any(|k| m.contains_key(serde_yaml::Value::from(*k)))
+    let Some(m) = v.as_mapping() else {
+        return false;
+    };
+    [
+        "resources",
+        "procedures",
+        "types",
+        "materials",
+        "preflight",
+        "health",
+    ]
+    .iter()
+    .any(|k| m.contains_key(serde_yaml::Value::from(*k)))
 }
 
 /// 旧版 task:顶层 `actions:`(新 DSL 用 `resources:`)。
@@ -170,7 +200,9 @@ fn is_legacy_task(text: &str) -> bool {
     let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(text) else {
         return false;
     };
-    let Some(m) = v.as_mapping() else { return false };
+    let Some(m) = v.as_mapping() else {
+        return false;
+    };
     m.contains_key(serde_yaml::Value::from("actions"))
         || m.contains_key(serde_yaml::Value::from("plays"))
 }
@@ -371,5 +403,9 @@ fn relative(p: &Path) -> PathBuf {
 }
 
 fn render_paths(paths: &[PathBuf]) -> String {
-    paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+    paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }

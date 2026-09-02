@@ -105,7 +105,11 @@ impl std::fmt::Display for Selector {
 
 fn ident(s: &str) -> Result<String, String> {
     let s = s.trim();
-    if s.is_empty() || !s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+    if s.is_empty()
+        || !s
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
         return Err(format!("非法组/主机名 `{s}`"));
     }
     Ok(s.to_string())
@@ -148,7 +152,8 @@ fn find_top_level_where(s: &str) -> Option<usize> {
             (None, 'w') if depth == 0 => {
                 let word: String = b[i..].iter().take(5).collect();
                 let prev_space = i > 0 && b[i - 1].is_whitespace();
-                if prev_space && word == "where" && b.get(i + 5).is_some_and(|c| c.is_whitespace()) {
+                if prev_space && word == "where" && b.get(i + 5).is_some_and(|c| c.is_whitespace())
+                {
                     return Some(byte);
                 }
             }
@@ -170,15 +175,24 @@ mod tests {
             Selector::parse("role.controlplane").unwrap(),
             Selector::Role("controlplane".into())
         );
-        assert_eq!(Selector::parse("host.n11").unwrap(), Selector::Host("n11".into()));
+        assert_eq!(
+            Selector::parse("host.n11").unwrap(),
+            Selector::Host("n11".into())
+        );
     }
 
     #[test]
     fn parses_first_and_rest() {
         let s = Selector::parse("first(role.controlplane)").unwrap();
-        assert_eq!(s, Selector::First(Box::new(Selector::Role("controlplane".into()))));
+        assert_eq!(
+            s,
+            Selector::First(Box::new(Selector::Role("controlplane".into())))
+        );
         assert_eq!(s.roles(), vec!["controlplane"]);
-        assert!(matches!(Selector::parse("rest(role.cp)").unwrap(), Selector::Rest(_)));
+        assert!(matches!(
+            Selector::parse("rest(role.cp)").unwrap(),
+            Selector::Rest(_)
+        ));
     }
 
     #[test]

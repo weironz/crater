@@ -276,7 +276,9 @@ health:
     #[test]
     fn splitting_a_section_that_is_not_there_is_refused() {
         let (_d, root) = setup();
-        let err = run(&root, Some("preflight"), false).unwrap_err().to_string();
+        let err = run(&root, Some("preflight"), false)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("没有 `preflight:`"), "{err}");
     }
 
@@ -284,7 +286,10 @@ health:
     fn splitting_a_non_splittable_section_lists_what_is_allowed() {
         let (_d, root) = setup();
         let err = run(&root, Some("params"), false).unwrap_err().to_string();
-        assert!(err.contains("不能外置 `params`") && err.contains("可外置:"), "{err}");
+        assert!(
+            err.contains("不能外置 `params`") && err.contains("可外置:"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -295,7 +300,11 @@ health:
         let part = parse::part_path(&root, "procedures");
         std::fs::write(&part, "已有内容\n").unwrap();
         assert!(run(&root, Some("procedures"), false).is_err());
-        assert_eq!(std::fs::read_to_string(&part).unwrap(), "已有内容\n", "原文件必须原封不动");
+        assert_eq!(
+            std::fs::read_to_string(&part).unwrap(),
+            "已有内容\n",
+            "原文件必须原封不动"
+        );
     }
 
     #[test]
@@ -308,7 +317,10 @@ health:
         let root_before = std::fs::read_to_string(&root).unwrap();
         std::fs::write(&part, "{{{ 这不是合法 YAML\n").unwrap();
 
-        assert!(run(&root, None, true).is_err(), "坏的 part 必须让 join 失败");
+        assert!(
+            run(&root, None, true).is_err(),
+            "坏的 part 必须让 join 失败"
+        );
         assert!(part.exists(), "失败时不能删 part");
         assert_eq!(
             std::fs::read_to_string(&root).unwrap(),
@@ -323,7 +335,11 @@ health:
         // 手改了 part 文件,那是他的合法编辑 —— fmt 不该、也无法把它当成错误。
         let (_d, root) = setup();
         run(&root, Some("procedures"), false).unwrap();
-        std::fs::write(parse::part_path(&root, "procedures"), "boot:\n  steps: []\n").unwrap();
+        std::fs::write(
+            parse::part_path(&root, "procedures"),
+            "boot:\n  steps: []\n",
+        )
+        .unwrap();
 
         run(&root, None, true).unwrap();
         let bp = parse::blueprint_from_path(&root).unwrap();

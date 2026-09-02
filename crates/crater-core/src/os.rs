@@ -117,7 +117,10 @@ pub async fn detect_info_via(exec: &dyn crate::executor::Executor) -> OsInfo {
 
 /// Parse `/etc/os-release` into the full [`OsInfo`].
 pub fn info_from_os_release(content: &str) -> OsInfo {
-    let mut info = OsInfo { family: family_from_os_release(content), ..Default::default() };
+    let mut info = OsInfo {
+        family: family_from_os_release(content),
+        ..Default::default()
+    };
     for line in content.lines() {
         if let Some(v) = line.strip_prefix("ID=") {
             info.distro = unquote(v).to_lowercase();

@@ -54,12 +54,12 @@ const ROOT_SCOPES: &[&str] = &["params", "env", "substrate", "item", "facts", "o
 /// CEL 里可调的函数 —— **封闭集合**(D-117/A),全部只读,实现见
 /// `eval.rs::add_probes`。
 const PROBE_FUNCS: &[&str] = &[
-    "port_owner",   // 谁在监听这个端口(空串 = 没人)
+    "port_owner", // 谁在监听这个端口(空串 = 没人)
     "path_exists",
-    "cmd_ok",       // 只读命令退出码为 0
+    "cmd_ok", // 只读命令退出码为 0
     "service_state",
-    "iface_in",     // 持有该网段地址的网卡名(D-136)
-    "has",          // CEL 标准宏
+    "iface_in", // 持有该网段地址的网卡名(D-136)
+    "has",      // CEL 标准宏
     "size",
 ];
 
@@ -108,7 +108,11 @@ fn remote_source(v: &Value) -> bool {
     match v {
         Value::Lit(y) => y
             .as_str()
-            .map(|s| ["http://", "https://", "ftp://"].iter().any(|p| s.starts_with(p)))
+            .map(|s| {
+                ["http://", "https://", "ftp://"]
+                    .iter()
+                    .any(|p| s.starts_with(p))
+            })
             .unwrap_or(false),
         _ => false,
     }
@@ -136,7 +140,12 @@ pub fn lint(bp: &Blueprint) -> Vec<Diagnostic> {
     let mut d = Vec::new();
     // 所有诊断都经这一个出口,保证 at/line 成对出现。
     let mut push = |severity, at: String, line: Option<usize>, msg: String| {
-        d.push(Diagnostic { severity, at, line, msg })
+        d.push(Diagnostic {
+            severity,
+            at,
+            line,
+            msg,
+        })
     };
 
     let material_names: BTreeSet<&str> = bp.materials.iter().map(|m| m.name.as_str()).collect();
@@ -147,7 +156,12 @@ pub fn lint(bp: &Blueprint) -> Vec<Diagnostic> {
     for (name, p) in &bp.params {
         if let Some(def) = &p.default {
             if let Err(e) = p.ty.check(def) {
-                push(Severity::Error, format!("params.{name}"), None, format!("default {e}"));
+                push(
+                    Severity::Error,
+                    format!("params.{name}"),
+                    None,
+                    format!("default {e}"),
+                );
             }
         }
         if p.required && p.default.is_some() {
@@ -163,9 +177,24 @@ pub fn lint(bp: &Blueprint) -> Vec<Diagnostic> {
     // ---- 资源 ----
     for r in &bp.resources {
         let at = format!("resources.{}", r.id);
-        lint_type_and_args(&r.ty, &r.args, &custom_types, &material_names, &at, r.line, &mut push);
+        lint_type_and_args(
+            &r.ty,
+            &r.args,
+            &custom_types,
+            &material_names,
+            &at,
+            r.line,
+            &mut push,
+        );
         lint_scope_of(
-            &r.args, r.when.as_ref(), &r.on, r.each.is_some(), &at, r.line, &param_names, &mut push,
+            &r.args,
+            r.when.as_ref(),
+            &r.on,
+            r.each.is_some(),
+            &at,
+            r.line,
+            &param_names,
+            &mut push,
         );
     }
 
@@ -173,7 +202,12 @@ pub fn lint(bp: &Blueprint) -> Vec<Diagnostic> {
     for t in &bp.types {
         let at = format!("types.{}", t.name);
         if crate::types::is_builtin(&t.name) {
-            push(Severity::Error, at.clone(), None, format!("`{}` 与内建类型重名", t.name));
+            push(
+                Severity::Error,
+                at.clone(),
+                None,
+                format!("`{}` 与内建类型重名", t.name),
+            );
         }
         for (field, target) in [
             ("apply", Some(&t.apply)),
@@ -181,7 +215,10 @@ pub fn lint(bp: &Blueprint) -> Vec<Diagnostic> {
             ("upgrade", t.upgrade.as_ref()),
         ] {
             if let Some(p) = target {
-                if !bp.procedures.contains_key(p.trim_start_matches("procedure ").trim()) {
+                if !bp
+                    .procedures
+                    .contains_key(p.trim_start_matches("procedure ").trim())
+                {
                     push(
                         Severity::Error,
                         at.clone(),
@@ -203,9 +240,24 @@ pub fn lint(bp: &Blueprint) -> Vec<Diagnostic> {
         proc_params.extend(p.params.keys().map(|s| s.as_str()));
         for s in &p.steps {
             let at = format!("procedures.{pname}.{}", s.id);
-            lint_type_and_args(&s.ty, &s.args, &custom_types, &material_names, &at, s.line, &mut push);
+            lint_type_and_args(
+                &s.ty,
+                &s.args,
+                &custom_types,
+                &material_names,
+                &at,
+                s.line,
+                &mut push,
+            );
             lint_scope_of(
-                &s.args, s.when.as_ref(), &s.on, s.each.is_some(), &at, s.line, &proc_params, &mut push,
+                &s.args,
+                s.when.as_ref(),
+                &s.on,
+                s.each.is_some(),
+                &at,
+                s.line,
+                &proc_params,
+                &mut push,
             );
             exported.extend(s.exports.keys().cloned());
             collect_fact_refs(&s.args, &mut consumed);
@@ -294,7 +346,14 @@ pub fn lint(bp: &Blueprint) -> Vec<Diagnostic> {
         // 作用域:可以引用 params / substrate / env,**不能引用 facts 自己**。
         // 允许 facts 互相引用就要定义求值顺序,而顺序一旦可见,作者迟早会
         // 依赖它 —— 那是一条不该开的口子。要串联就写成一个表达式。
-        check_scope(e, &format!("facts.{name}"), None, &param_names, false, &mut push);
+        check_scope(
+            e,
+            &format!("facts.{name}"),
+            None,
+            &param_names,
+            false,
+            &mut push,
+        );
         if e.roots().contains("facts") {
             push(
                 Severity::Error,
@@ -322,11 +381,26 @@ pub fn lint(bp: &Blueprint) -> Vec<Diagnostic> {
 
     // ---- 断言与健康探针 ----
     for (i, a) in bp.preflight.iter().enumerate() {
-        check_scope(&a.expr, &format!("preflight[{i}]"), a.line, &param_names, false, &mut push);
+        check_scope(
+            &a.expr,
+            &format!("preflight[{i}]"),
+            a.line,
+            &param_names,
+            false,
+            &mut push,
+        );
     }
     for h in &bp.health {
         let at = format!("health.{}", h.ty);
-        lint_type_and_args(&h.ty, &h.args, &custom_types, &material_names, &at, h.line, &mut push);
+        lint_type_and_args(
+            &h.ty,
+            &h.args,
+            &custom_types,
+            &material_names,
+            &at,
+            h.line,
+            &mut push,
+        );
     }
 
     d.sort_by_key(|x| (x.severity, x.line.unwrap_or(usize::MAX)));
@@ -361,12 +435,21 @@ fn lint_type_and_args(
     };
     for req in b.required() {
         if !args.contains_key(req) {
-            push(Severity::Error, at.into(), line, format!("缺少必填参数 `{req}`"));
+            push(
+                Severity::Error,
+                at.into(),
+                line,
+                format!("缺少必填参数 `{req}`"),
+            );
         }
     }
     // 互斥组逐组判定 —— 一个类型可以有多组(如 cmd 的"形态"组)。
     for (group, members) in b.one_of_groups() {
-        let hits: Vec<&str> = members.iter().copied().filter(|k| args.contains_key(*k)).collect();
+        let hits: Vec<&str> = members
+            .iter()
+            .copied()
+            .filter(|k| args.contains_key(*k))
+            .collect();
         match hits.len() {
             1 => {}
             0 => push(
@@ -419,7 +502,12 @@ fn lint_type_and_args(
         for it in items {
             if let Value::Lit(serde_yaml::Value::String(name)) = it {
                 if !materials.contains(name.as_str()) {
-                    push(Severity::Error, at.into(), line, format!("引用了未声明的物料 `{name}`"));
+                    push(
+                        Severity::Error,
+                        at.into(),
+                        line,
+                        format!("引用了未声明的物料 `{name}`"),
+                    );
                 }
             }
         }
@@ -454,7 +542,10 @@ fn lint_scope_of(
                 Severity::Error,
                 at.into(),
                 line,
-                format!("表达式引用了作用域外的 `{r}`(可用:{})", ROOT_SCOPES.join(", ")),
+                format!(
+                    "表达式引用了作用域外的 `{r}`(可用:{})",
+                    ROOT_SCOPES.join(", ")
+                ),
             );
         }
         if r == "item" && !has_each {
@@ -497,7 +588,12 @@ fn check_scope(
             );
         }
         if r == "item" && !has_each {
-            push(Severity::Error, at.into(), line, "用了 `item` 但这一条没有 `each:`".into());
+            push(
+                Severity::Error,
+                at.into(),
+                line,
+                "用了 `item` 但这一条没有 `each:`".into(),
+            );
         }
     }
     check_param_names(e.src(), at, line, params, push);
@@ -520,8 +616,12 @@ fn check_param_refs(
                 }
             }
         }
-        Value::List(items) => items.iter().for_each(|i| check_param_refs(i, at, line, params, push)),
-        Value::Map(m) => m.values().for_each(|i| check_param_refs(i, at, line, params, push)),
+        Value::List(items) => items
+            .iter()
+            .for_each(|i| check_param_refs(i, at, line, params, push)),
+        Value::Map(m) => m
+            .values()
+            .for_each(|i| check_param_refs(i, at, line, params, push)),
         Value::Lit(_) => {}
     }
 }

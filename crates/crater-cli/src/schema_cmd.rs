@@ -12,9 +12,9 @@ use anyhow::{Context, Result};
 pub fn run(file: Option<&Path>, out: Option<&Path>, to_stdout: bool) -> Result<()> {
     // 给了蓝图就**自特化**:物料名、自定义类型进枚举,补全只提示你自己有的东西。
     let bp = match file {
-        Some(p) => Some(
-            crater_ir::parse::blueprint_from_path(p).map_err(|e| anyhow::anyhow!("{e}"))?,
-        ),
+        Some(p) => {
+            Some(crater_ir::parse::blueprint_from_path(p).map_err(|e| anyhow::anyhow!("{e}"))?)
+        }
         None => None,
     };
     let schema = crater_ir::jsonschema::generate(bp.as_ref());
@@ -31,14 +31,26 @@ pub fn run(file: Option<&Path>, out: Option<&Path>, to_stdout: bool) -> Result<(
     }
     std::fs::write(&path, &text).with_context(|| format!("写 {}", path.display()))?;
 
-    println!("已写入 {} ({} 类型)", path.display(), crater_ir::types::BUILTINS.len());
+    println!(
+        "已写入 {} ({} 类型)",
+        path.display(),
+        crater_ir::types::BUILTINS.len()
+    );
     if let Some(b) = &bp {
-        println!("已按 `{}` 自特化:{} 个物料名、{} 个自定义类型进入补全", b.name, b.materials.len(), b.types.len());
+        println!(
+            "已按 `{}` 自特化:{} 个物料名、{} 个自定义类型进入补全",
+            b.name,
+            b.materials.len(),
+            b.types.len()
+        );
     } else {
         println!("通用 schema。加 `-f <blueprint>` 可按该蓝图自特化(补全你自己的物料名与类型)");
     }
     println!("\n在蓝图首行加上这一句即可接入编辑器:");
-    println!("{}", crater_ir::jsonschema::language_server_hint(&display_ref(&path, file)));
+    println!(
+        "{}",
+        crater_ir::jsonschema::language_server_hint(&display_ref(&path, file))
+    );
     Ok(())
 }
 

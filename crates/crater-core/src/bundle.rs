@@ -366,7 +366,8 @@ impl BundleStage {
 
     /// The fs-layer blob digest of a stored image manifest (for `load`/extract).
     pub fn layer_of(&self, manifest_digest: &str) -> crate::Result<String> {
-        let m: serde_json::Value = serde_json::from_slice(&fs::read(self.blob_path(manifest_digest))?)?;
+        let m: serde_json::Value =
+            serde_json::from_slice(&fs::read(self.blob_path(manifest_digest))?)?;
         let d = m["layers"][0]["digest"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("image manifest {manifest_digest} has no layer"))?;
@@ -431,8 +432,14 @@ impl BundleStage {
         let index = json!({
             "schemaVersion": 2, "mediaType": MT_INDEX, "manifests": manifests
         });
-        fs::write(self.root.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
-        fs::write(self.root.join("oci-layout"), br#"{"imageLayoutVersion":"1.0.0"}"#)?;
+        fs::write(
+            self.root.join("index.json"),
+            serde_json::to_vec_pretty(&index)?,
+        )?;
+        fs::write(
+            self.root.join("oci-layout"),
+            br#"{"imageLayoutVersion":"1.0.0"}"#,
+        )?;
         Ok(())
     }
 
@@ -459,8 +466,14 @@ impl BundleStage {
             })
             .collect();
         let index = json!({"schemaVersion": 2, "mediaType": MT_INDEX, "manifests": manifests});
-        fs::write(self.root.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
-        fs::write(self.root.join("oci-layout"), br#"{"imageLayoutVersion":"1.0.0"}"#)?;
+        fs::write(
+            self.root.join("index.json"),
+            serde_json::to_vec_pretty(&index)?,
+        )?;
+        fs::write(
+            self.root.join("oci-layout"),
+            br#"{"imageLayoutVersion":"1.0.0"}"#,
+        )?;
         Ok(())
     }
 
@@ -470,7 +483,9 @@ impl BundleStage {
             serde_json::from_slice(&fs::read(self.root.join("index.json"))?)?;
         let ann = index["manifests"][0]["annotations"][ANN_CRATER_MANIFEST]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("index.json missing {ANN_CRATER_MANIFEST} annotation"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("index.json missing {ANN_CRATER_MANIFEST} annotation")
+            })?;
         let digest = ann.strip_prefix("sha256:").unwrap_or(ann);
         let bytes = fs::read(self.blob_path(digest))
             .map_err(|e| anyhow::anyhow!("read crater-manifest blob {digest}: {e}"))?;
@@ -628,7 +643,12 @@ pub fn materialize_component(
             }
         }
     }
-    Ok(Some(MaterializedComponent { name, version, blobmap, reference: String::new() }))
+    Ok(Some(MaterializedComponent {
+        name,
+        version,
+        blobmap,
+        reference: String::new(),
+    }))
 }
 
 /// Read the project artifact out of an unpacked bundle, if present (D-098):
@@ -638,17 +658,23 @@ pub fn read_artifact_project(bundle_root: &Path) -> crate::Result<Option<crate::
     let blobs_dir = bundle_root.join("blobs").join("sha256");
     let index: serde_json::Value =
         serde_json::from_slice(&fs::read(bundle_root.join("index.json"))?)?;
-    let Some(ms) = index["manifests"].as_array() else { return Ok(None) };
+    let Some(ms) = index["manifests"].as_array() else {
+        return Ok(None);
+    };
     for m in ms {
         if m["artifactType"].as_str() != Some(AT_PROJECT) {
             continue;
         }
         let d = m["digest"].as_str().unwrap_or("");
-        let manifest: serde_json::Value =
-            serde_json::from_slice(&fs::read(blobs_dir.join(d.strip_prefix("sha256:").unwrap_or(d)))?)?;
+        let manifest: serde_json::Value = serde_json::from_slice(&fs::read(
+            blobs_dir.join(d.strip_prefix("sha256:").unwrap_or(d)),
+        )?)?;
         let recipe = manifest["layers"]
             .as_array()
-            .and_then(|ls| ls.iter().find(|l| l["mediaType"].as_str() == Some(MT_RECIPE)))
+            .and_then(|ls| {
+                ls.iter()
+                    .find(|l| l["mediaType"].as_str() == Some(MT_RECIPE))
+            })
             .and_then(|l| l["digest"].as_str())
             .ok_or_else(|| anyhow::anyhow!("project artifact has no recipe layer"))?;
         let bytes = fs::read(blobs_dir.join(recipe.strip_prefix("sha256:").unwrap_or(recipe)))?;
@@ -677,7 +703,8 @@ pub fn read_artifact_components(
             let d = m["digest"].as_str().unwrap_or("");
             let mblob = fs::read(blobs_dir.join(d.strip_prefix("sha256:").unwrap_or(d)))?;
             let manifest: serde_json::Value = serde_json::from_slice(&mblob)?;
-            if let Some(mut mc) = materialize_component(&manifest, &blobs_dir, out_components_dir)? {
+            if let Some(mut mc) = materialize_component(&manifest, &blobs_dir, out_components_dir)?
+            {
                 // The bundle index knows the ref — projects look tasks up by it.
                 mc.reference = m["annotations"]["org.opencontainers.image.ref.name"]
                     .as_str()
@@ -733,8 +760,7 @@ mod tests {
 
     #[test]
     fn pack_unpack_roundtrip() {
-        let tmp =
-            std::env::temp_dir().join(format!("crater-bundle-test-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("crater-bundle-test-{}", std::process::id()));
         let stage_root = tmp.join("stage");
         let stage = BundleStage::new(stage_root.clone()).unwrap();
         let blob = stage
@@ -809,16 +835,25 @@ mod project_tests {
 
         let task_recipe = b"name: yq\nactions:\n  - action: shell\n    cmd: \"true\"\n";
         let t = stage
-            .store_component_artifact("crater/yq:1.0", "yq", "1.0", "task", task_recipe, &[
-                ("bin".into(), false, b"BIN".to_vec()),
-            ])
+            .store_component_artifact(
+                "crater/yq:1.0",
+                "yq",
+                "1.0",
+                "task",
+                task_recipe,
+                &[("bin".into(), false, b"BIN".to_vec())],
+            )
             .unwrap();
         let locked = "name: demo\nplays:\n  - source: crater/yq:1.0\n    hosts: all\n";
-        let p = stage.store_project_artifact("crater/demo:latest", "demo", locked.as_bytes()).unwrap();
+        let p = stage
+            .store_project_artifact("crater/demo:latest", "demo", locked.as_bytes())
+            .unwrap();
         stage.write_artifact_index(&[p, t]).unwrap();
 
         // Project comes back parsed and locked.
-        let project = read_artifact_project(&root).unwrap().expect("project artifact");
+        let project = read_artifact_project(&root)
+            .unwrap()
+            .expect("project artifact");
         assert_eq!(project.name, "demo");
         assert_eq!(project.plays[0].source, "crater/yq:1.0");
 
@@ -832,10 +867,11 @@ mod project_tests {
         assert!(out.join("yq").join("component.yaml").is_file());
 
         // A task-only bundle has no project.
-        stage.write_artifact_index(&[stage
-            .store_component_artifact("crater/yq:1.0", "yq", "1.0", "task", task_recipe, &[])
-            .unwrap()])
-        .unwrap();
+        stage
+            .write_artifact_index(&[stage
+                .store_component_artifact("crater/yq:1.0", "yq", "1.0", "task", task_recipe, &[])
+                .unwrap()])
+            .unwrap();
         assert!(read_artifact_project(&root).unwrap().is_none());
 
         let _ = std::fs::remove_dir_all(&root);

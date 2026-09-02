@@ -110,8 +110,11 @@ impl Inventory {
     /// [`Inventory::derive_roles`] (it reads `host.roles`).
     pub fn resolve_host_vars(&mut self) {
         let global = self.vars.clone();
-        let group_vars: BTreeMap<String, BTreeMap<String, String>> =
-            self.groups.iter().map(|(k, g)| (k.clone(), g.vars.clone())).collect();
+        let group_vars: BTreeMap<String, BTreeMap<String, String>> = self
+            .groups
+            .iter()
+            .map(|(k, g)| (k.clone(), g.vars.clone()))
+            .collect();
         for host in &mut self.hosts {
             let mut merged = global.clone();
             let mut groups: Vec<&String> = host.roles.iter().collect();

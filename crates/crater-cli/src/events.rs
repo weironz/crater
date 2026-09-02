@@ -11,8 +11,14 @@ static SINK: Mutex<Option<std::fs::File>> = Mutex::new(None);
 
 /// 进程启动时调一次;通道打不开就静默作罢(事件流是增益,不是依赖)。
 pub fn init_from_env() {
-    let Ok(p) = std::env::var("CRATER_EVENTS") else { return };
-    if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+    let Ok(p) = std::env::var("CRATER_EVENTS") else {
+        return;
+    };
+    if let Ok(f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p)
+    {
         if let Ok(mut g) = SINK.lock() {
             *g = Some(f);
         }

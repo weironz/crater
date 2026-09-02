@@ -98,9 +98,16 @@ impl ResourceType for Package {
         if !observed.present {
             return Change::Ok;
         }
-        let declared: usize = observed.get("declared").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let declared: usize = observed
+            .get("declared")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         let missing = observed.get("missing").unwrap_or_default();
-        let missing_n = if missing.is_empty() { 0 } else { missing.split(',').count() };
+        let missing_n = if missing.is_empty() {
+            0
+        } else {
+            missing.split(',').count()
+        };
         if declared > 0 && missing_n >= declared {
             Change::Ok
         } else {
@@ -174,8 +181,7 @@ fn pkg_cmd(install: bool, pkgs: &[String]) -> String {
 ///
 /// 公开是因为物料层要用同一句:`os_package` 物料按家族分包名表,两处各写
 /// 一遍判定迟早会漂,而漂了之后的表现是"装了另一族的包名"。
-pub const FAMILY_PROBE: &str =
-    "if command -v apt-get >/dev/null 2>&1; then echo debian; \
+pub const FAMILY_PROBE: &str = "if command -v apt-get >/dev/null 2>&1; then echo debian; \
      elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then echo rhel; \
      else echo unknown; fi";
 
@@ -184,9 +190,7 @@ fn packages_for(ctx: &dyn Ctx, args: &ResolvedArgs) -> Result<Vec<String>> {
     // (D-132)。判定用名字、安装用字节,两者出自同一份声明,不会各说各话。
     if let Some(name) = arg_str_opt(args, "material") {
         return Ok(match ctx.material_source(name)? {
-            Some(list) if !list.is_empty() => {
-                list.split(',').map(str::to_string).collect()
-            }
+            Some(list) if !list.is_empty() => list.split(',').map(str::to_string).collect(),
             _ => Vec::new(),
         });
     }
@@ -203,7 +207,10 @@ fn packages_for(ctx: &dyn Ctx, args: &ResolvedArgs) -> Result<Vec<String>> {
 
 /// `runtime` 与 `namespace` 两个参数的默认值,一处定义。
 fn runtime_of(args: &ResolvedArgs) -> (&str, Option<&str>) {
-    (arg_str_opt(args, "runtime").unwrap_or("docker"), arg_str_opt(args, "namespace"))
+    (
+        arg_str_opt(args, "runtime").unwrap_or("docker"),
+        arg_str_opt(args, "namespace"),
+    )
 }
 
 /// `material:` 与 `materials:` 两种写法归一成一串名字。
@@ -213,7 +220,11 @@ fn material_names(args: &ResolvedArgs) -> Vec<String> {
     }
     args.get("materials")
         .and_then(Yaml::as_sequence)
-        .map(|xs| xs.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .map(|xs| {
+            xs.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -225,7 +236,9 @@ fn list_images_cmd(runtime: &str, ns: Option<&str>) -> String {
     let n = ns.map(|x| format!(" -n {}", sh(x))).unwrap_or_default();
     match runtime {
         "ctr" => format!("ctr{n} images ls -q 2>/dev/null"),
-        "nerdctl" => format!("nerdctl{n} images --format '{{{{.Repository}}}}:{{{{.Tag}}}}' 2>/dev/null"),
+        "nerdctl" => {
+            format!("nerdctl{n} images --format '{{{{.Repository}}}}:{{{{.Tag}}}}' 2>/dev/null")
+        }
         other => format!("{other} images --format '{{{{.Repository}}}}:{{{{.Tag}}}}' 2>/dev/null"),
     }
 }
@@ -258,7 +271,10 @@ fn same_image(have: &str, want: &str) -> bool {
 
 /// ref → 可用作文件名的字符串。
 fn sanitize(reference: &str) -> String {
-    reference.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+    reference
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// `image_present` —— 容器镜像在目标运行时里在不在。
@@ -278,7 +294,11 @@ impl ResourceType for ImagePresent {
         if code != 0 {
             return Ok(Observed::default()); // 运行时都没有 —— 说不清
         }
-        let have: Vec<&str> = out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        let have: Vec<&str> = out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
 
         // 期望的是**镜像 ref**,而蓝图里写的是物料名 —— 映射要靠作用域求值,
         // 只有执行层答得出来(D-131)。答不出来时如实报"说不清",不猜。
@@ -311,7 +331,9 @@ impl ResourceType for ImagePresent {
         }
         match input.observed.get("missing") {
             Some(m) if !m.is_empty() => Change::Update(
-                m.split(',').map(|r| FieldDiff::set("image", r.to_string())).collect(),
+                m.split(',')
+                    .map(|r| FieldDiff::set("image", r.to_string()))
+                    .collect(),
             ),
             _ => Change::Ok,
         }
@@ -341,7 +363,11 @@ impl ResourceType for ImagePresent {
             }
             done += 1;
         }
-        Ok(if done > 0 { Outcome::Changed } else { Outcome::Ok })
+        Ok(if done > 0 {
+            Outcome::Changed
+        } else {
+            Outcome::Ok
+        })
     }
     fn destroy(&self, _c: &dyn Ctx, _a: &ResolvedArgs, _o: &Observed) -> Result<Outcome> {
         // 不删镜像:别的负载可能正用着,而且重新拉取代价高。
@@ -365,8 +391,10 @@ impl ResourceType for Wait {
         Ok(Observed::present([("satisfied", (code == 0).to_string())]))
     }
     fn diff(&self, input: &DiffInput) -> Change {
-        let want_positive =
-            !matches!(arg_str_opt(input.args, "state"), Some("stopped") | Some("absent"));
+        let want_positive = !matches!(
+            arg_str_opt(input.args, "state"),
+            Some("stopped") | Some("absent")
+        );
         let satisfied = input.observed.get("satisfied") == Some("true");
         if satisfied == want_positive {
             Change::Ok
@@ -397,7 +425,10 @@ fn wait_probe(args: &ResolvedArgs) -> String {
     if let Some(path) = arg_str_opt(args, "path") {
         return format!("test -e {}", sh(path));
     }
-    let port = args.get("port").map(crate::eval::scalar_to_string).unwrap_or_default();
+    let port = args
+        .get("port")
+        .map(crate::eval::scalar_to_string)
+        .unwrap_or_default();
     let host = arg_str_opt(args, "host").unwrap_or("127.0.0.1");
     // nc → bash /dev/tcp,覆盖主流与 busybox。
     format!(
@@ -556,7 +587,10 @@ probe_type!(Http, "http", |a| {
 });
 
 probe_type!(PortOpen, "port_open", |a| {
-    let port = a.get("port").map(crate::eval::scalar_to_string).unwrap_or_default();
+    let port = a
+        .get("port")
+        .map(crate::eval::scalar_to_string)
+        .unwrap_or_default();
     let host = arg_str_opt(a, "host").unwrap_or("127.0.0.1");
     format!(
         "if command -v nc >/dev/null 2>&1; then nc -z {host} {port}; \
@@ -565,7 +599,10 @@ probe_type!(PortOpen, "port_open", |a| {
 });
 
 probe_type!(ServiceActive, "service_active", |a| {
-    format!("systemctl is-active --quiet {}", sh(arg_str_opt(a, "name").unwrap_or_default()))
+    format!(
+        "systemctl is-active --quiet {}",
+        sh(arg_str_opt(a, "name").unwrap_or_default())
+    )
 });
 
 probe_type!(CmdProbe, "cmd", |a| { render_cmd(a) });
@@ -586,7 +623,10 @@ pub(crate) fn render_cmd(a: &ResolvedArgs) -> String {
         return run.to_string();
     }
     let mut parts: Vec<String> = match a.get("argv") {
-        Some(Yaml::Sequence(items)) => items.iter().map(|v| sh(&crate::eval::scalar_to_string(v))).collect(),
+        Some(Yaml::Sequence(items)) => items
+            .iter()
+            .map(|v| sh(&crate::eval::scalar_to_string(v)))
+            .collect(),
         _ => Vec::new(),
     };
     // flags 已在求值期按 when 筛选;这里只负责拼接与转义。
@@ -610,29 +650,46 @@ mod tests {
     use crate::ctx::FakeCtx;
 
     fn args(pairs: &[(&str, Yaml)]) -> ResolvedArgs {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
     }
     fn diff<T: ResourceType>(t: &T, a: &ResolvedArgs, o: &Observed) -> Change {
-        t.diff(&DiffInput { args: a, observed: o, upstream_changed: false })
+        t.diff(&DiffInput {
+            args: a,
+            observed: o,
+            upstream_changed: false,
+        })
     }
 
     #[test]
     fn package_picks_the_list_for_the_targets_family() {
         // 引擎只懂"怎么装";"装什么"是数据(D-017)。
-        let ctx = FakeCtx::new().on("echo debian", 0, "debian\n").on("dpkg -s", 1, "");
+        let ctx = FakeCtx::new()
+            .on("echo debian", 0, "debian\n")
+            .on("dpkg -s", 1, "");
         let a = args(&[(
             "packages",
             serde_yaml::from_str("{debian: [socat, conntrack], rhel: [socat]}").unwrap(),
         )]);
         let obs = Package.observe(&ctx, &a).unwrap();
         assert_eq!(obs.get("missing"), Some("socat,conntrack"));
-        assert_eq!(diff(&Package, &a, &obs).fields()[0].to_string(), "install: socat,conntrack");
+        assert_eq!(
+            diff(&Package, &a, &obs).fields()[0].to_string(),
+            "install: socat,conntrack"
+        );
     }
 
     #[test]
     fn package_all_installed_is_a_noop() {
-        let ctx = FakeCtx::new().on("echo debian", 0, "debian\n").on("dpkg -s", 0, "");
-        let a = args(&[("packages", serde_yaml::from_str("{debian: [socat]}").unwrap())]);
+        let ctx = FakeCtx::new()
+            .on("echo debian", 0, "debian\n")
+            .on("dpkg -s", 0, "");
+        let a = args(&[(
+            "packages",
+            serde_yaml::from_str("{debian: [socat]}").unwrap(),
+        )]);
         let obs = Package.observe(&ctx, &a).unwrap();
         assert_eq!(diff(&Package, &a, &obs), Change::Ok);
     }
@@ -647,19 +704,32 @@ mod tests {
 
     #[test]
     fn shell_with_a_check_becomes_idempotent() {
-        let a = args(&[("cmd", Yaml::from("kubeadm init")), ("check", Yaml::from("test -f /x"))]);
+        let a = args(&[
+            ("cmd", Yaml::from("kubeadm init")),
+            ("check", Yaml::from("test -f /x")),
+        ]);
         assert_eq!(
-            diff(&Shell, &a, &Observed::present([("check", "satisfied".into())])),
+            diff(
+                &Shell,
+                &a,
+                &Observed::present([("check", "satisfied".into())])
+            ),
             Change::Ok
         );
-        assert!(matches!(diff(&Shell, &a, &Observed::absent()), Change::Create(_)));
+        assert!(matches!(
+            diff(&Shell, &a, &Observed::absent()),
+            Change::Create(_)
+        ));
     }
 
     #[test]
     fn a_bare_shell_is_unknown_and_its_command_is_truncated_in_the_plan() {
         let long = "x".repeat(200);
         let a = args(&[("cmd", Yaml::from(long.as_str()))]);
-        assert!(matches!(diff(&Shell, &a, &Observed::default()), Change::Unknown(_)));
+        assert!(matches!(
+            diff(&Shell, &a, &Observed::default()),
+            Change::Unknown(_)
+        ));
         assert!(truncate(&long).chars().count() <= 60);
     }
 
@@ -699,7 +769,9 @@ mod tests {
     fn shell_destroy_warns_because_there_is_no_inverse() {
         let ctx = FakeCtx::new();
         assert_eq!(
-            Shell.destroy(&ctx, &args(&[]), &Observed::present([])).unwrap(),
+            Shell
+                .destroy(&ctx, &args(&[]), &Observed::present([]))
+                .unwrap(),
             Outcome::Warn
         );
     }
@@ -718,14 +790,20 @@ mod tests {
     fn wait_stopped_inverts_the_condition() {
         let a = args(&[("port", Yaml::from(9000)), ("state", Yaml::from("stopped"))]);
         let obs = Observed::present([("satisfied", "true".into())]);
-        assert!(!diff(&Wait, &a, &obs).is_noop(), "端口开着但期望关着 → 要等");
+        assert!(
+            !diff(&Wait, &a, &obs).is_noop(),
+            "端口开着但期望关着 → 要等"
+        );
     }
 
     #[test]
     fn wait_probe_falls_back_from_nc_to_dev_tcp() {
         let a = args(&[("port", Yaml::from(9000))]);
         let probe = wait_probe(&a);
-        assert!(probe.contains("nc -z") && probe.contains("/dev/tcp"), "{probe}");
+        assert!(
+            probe.contains("nc -z") && probe.contains("/dev/tcp"),
+            "{probe}"
+        );
     }
 
     #[test]
@@ -739,7 +817,10 @@ mod tests {
 
     #[test]
     fn http_probe_compares_the_status_code() {
-        let a = args(&[("url", Yaml::from("http://x/health")), ("status", Yaml::from(200))]);
+        let a = args(&[
+            ("url", Yaml::from("http://x/health")),
+            ("status", Yaml::from(200)),
+        ]);
         let ctx = FakeCtx::new().on("curl", 0, "200\n");
         let obs = Http.observe(&ctx, &a).unwrap();
         assert_eq!(diff(&Http, &a, &obs), Change::Ok);
@@ -763,9 +844,10 @@ mod tests {
     fn a_flag_filtered_out_upstream_simply_is_not_there() {
         // 这是"没有地方写三元"的另一半:条件为假的 flag **根本不出现**,
         // 作者不需要用空字符串占位,也就没有把逻辑塞进字符串的动机。
-        let a: ResolvedArgs =
-            serde_yaml::from_str("argv: [kubeadm, init]\nflags: [{name: --pod-network-cidr, value: x}]\n")
-                .unwrap();
+        let a: ResolvedArgs = serde_yaml::from_str(
+            "argv: [kubeadm, init]\nflags: [{name: --pod-network-cidr, value: x}]\n",
+        )
+        .unwrap();
         let rendered = render_cmd(&a);
         assert!(!rendered.contains("upload-certs"), "{rendered}");
         assert!(!rendered.contains("''"), "不该留下空串占位:{rendered}");

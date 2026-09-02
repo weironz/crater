@@ -94,7 +94,11 @@ fn directory_scan_skips_non_blueprints_but_still_reads_named_ones() {
     // 仓库里绝大多数 YAML 不是 blueprint(inventory / CI 配置 / manifest)。
     // 扫描时静默跳过,点名时照常解析并报错 —— 否则 `lint .` 全是噪音。
     let scan = lint(&["library/rustfs"]);
-    assert!(scan.status.success(), "目录扫描不该被 inventory 绊倒:{}", stdout(&scan));
+    assert!(
+        scan.status.success(),
+        "目录扫描不该被 inventory 绊倒:{}",
+        stdout(&scan)
+    );
     assert!(!stdout(&scan).contains("解析失败"), "{}", stdout(&scan));
 
     let named = lint(&["library/rustfs/inventory.example.yaml"]);

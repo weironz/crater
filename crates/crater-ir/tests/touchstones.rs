@@ -15,7 +15,10 @@ fn assert_clean(name: &str, bp: &crater_ir::Blueprint) {
     assert!(
         errs.is_empty(),
         "{name} lint 有 error:\n{}",
-        errs.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n")
+        errs.iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 
@@ -30,7 +33,10 @@ fn rustfs_parses_and_lints_clean() {
     assert_eq!(bp.health.len(), 2);
     // 双 arch 物料同名,靠 `when:` 区分成两个 flavor —— 闭包 = f(values)。
     assert_eq!(bp.materials.len(), 2);
-    assert!(bp.materials.iter().all(|m| m.name == "rustfs-bin" && m.when.is_some()));
+    assert!(bp
+        .materials
+        .iter()
+        .all(|m| m.name == "rustfs-bin" && m.when.is_some()));
     // secret 参数被标记 → 孪生/日志/API 打码的依据。
     assert!(bp.params["secret_key"].secret);
     assert!(!bp.params["access_key"].secret);
@@ -70,14 +76,22 @@ fn k8s_selectors_express_first_and_rest() {
     let boot = &bp.procedures["bootstrap"];
 
     // 旧模型只能"全组跑 + check 守卫跳过首台";这里直说 first / rest。
-    let init = boot.steps.iter().find(|s| s.exports.contains_key("join")).unwrap();
+    let init = boot
+        .steps
+        .iter()
+        .find(|s| s.exports.contains_key("join"))
+        .unwrap();
     assert!(matches!(init.on, Selector::First(_)));
     let cp_join = boot
         .steps
         .iter()
         .find(|s| matches!(s.on, Selector::Rest(_)))
         .expect("应有 rest(role.controlplane) 的 join 步");
-    assert_eq!(cp_join.strategy.throttle, Some(1), "cp join 必须逐台护 etcd");
+    assert_eq!(
+        cp_join.strategy.throttle,
+        Some(1),
+        "cp join 必须逐台护 etcd"
+    );
     assert_eq!(init.on.roles(), vec!["controlplane"]);
 }
 
@@ -92,9 +106,16 @@ fn k8s_facts_are_declared_next_to_their_producer() {
         vec!["certkey", "join"]
     );
     // 产销平衡由 lint 保证(见 lint 单测),这里确认消费方确实引用了它们。
-    let consumer = boot.steps.iter().find(|s| matches!(s.on, crater_ir::selector::Selector::Rest(_))).unwrap();
+    let consumer = boot
+        .steps
+        .iter()
+        .find(|s| matches!(s.on, crater_ir::selector::Selector::Rest(_)))
+        .unwrap();
     let cmd = format!("{:?}", consumer.args.get("cmd").unwrap());
-    assert!(cmd.contains("facts.join") && cmd.contains("facts.certkey"), "{cmd}");
+    assert!(
+        cmd.contains("facts.join") && cmd.contains("facts.certkey"),
+        "{cmd}"
+    );
 }
 
 #[test]
@@ -104,9 +125,16 @@ fn k8s_custom_type_carries_the_dance() {
     // 状态在资源(用户写 `cluster_member: {role: ...}`),舞封装在 procedure 里。
     assert_eq!(t.apply, "bootstrap");
     assert_eq!(t.destroy.as_deref(), Some("reset"));
-    assert!(t.observe.cmd.contains("kubelet.conf"), "observe 必须是只读探针");
+    assert!(
+        t.observe.cmd.contains("kubelet.conf"),
+        "observe 必须是只读探针"
+    );
     // 用户面对的是名词:资源列表里出现两条 cluster_member,没有 init/join 字样。
-    let members: Vec<_> = bp.resources.iter().filter(|r| r.ty == "cluster_member").collect();
+    let members: Vec<_> = bp
+        .resources
+        .iter()
+        .filter(|r| r.ty == "cluster_member")
+        .collect();
     assert_eq!(members.len(), 2);
 }
 

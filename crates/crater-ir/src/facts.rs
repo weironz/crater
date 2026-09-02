@@ -113,7 +113,10 @@ pub struct Facts<'a> {
 
 impl<'a> Facts<'a> {
     pub fn new(ctx: &'a dyn Ctx) -> Self {
-        Facts { ctx, cache: RefCell::new(BTreeMap::new()) }
+        Facts {
+            ctx,
+            cache: RefCell::new(BTreeMap::new()),
+        }
     }
 
     /// 白名单里的全部事实名。
@@ -141,7 +144,11 @@ impl<'a> Facts<'a> {
         let (code, out) = self.ctx.probe(spec.cmd)?;
         // 探不到不是错误(容器里可能没有 /etc/os-release):记空串,
         // 让 `when:` 条件自然不成立,而不是整个 plan 崩掉。
-        let value = if code == 0 { (spec.normalize)(&out) } else { String::new() };
+        let value = if code == 0 {
+            (spec.normalize)(&out)
+        } else {
+            String::new()
+        };
         let y = Yaml::String(value);
         self.cache.borrow_mut().insert(name.to_string(), y.clone());
         Ok(Some(y))
@@ -173,7 +180,11 @@ mod tests {
     fn gathering_is_read_only() {
         let ctx = FakeCtx::new().on("", 0, "x86_64");
         Facts::new(&ctx).gather_all().unwrap();
-        assert!(ctx.writes().is_empty(), "事实采集期间发生了写:{:?}", ctx.writes());
+        assert!(
+            ctx.writes().is_empty(),
+            "事实采集期间发生了写:{:?}",
+            ctx.writes()
+        );
     }
 
     #[test]
@@ -188,7 +199,10 @@ mod tests {
     fn a_failing_probe_yields_an_empty_value_not_an_error() {
         // 容器里常常没有 /etc/os-release —— 条件自然不成立即可,不该整盘崩。
         let ctx = FakeCtx::new(); // 一切未注册 → 退出码 1
-        assert_eq!(Facts::new(&ctx).get("distro").unwrap(), Some(Yaml::from("")));
+        assert_eq!(
+            Facts::new(&ctx).get("distro").unwrap(),
+            Some(Yaml::from(""))
+        );
     }
 
     #[test]

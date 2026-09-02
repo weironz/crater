@@ -78,18 +78,25 @@ pub(crate) enum Strategy {
 ///
 /// 百分比向上取整且至少 1 台 —— `--serial 10%` 在 5 台上得到 1,
 /// 而不是 0(那会让整条命令什么都不做,还看不出是为什么)。
-pub(crate) fn batches(hosts: &[crater_core::spec::Host], spec: Option<&str>) -> Result<Vec<Vec<crater_core::spec::Host>>> {
+pub(crate) fn batches(
+    hosts: &[crater_core::spec::Host],
+    spec: Option<&str>,
+) -> Result<Vec<Vec<crater_core::spec::Host>>> {
     let Some(spec) = spec.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(vec![hosts.to_vec()]);
     };
     let size = if let Some(pct) = spec.strip_suffix('%') {
-        let pct: usize = pct.trim().parse().map_err(|_| anyhow::anyhow!("--serial 百分比要写成整数,如 25%:{spec}"))?;
+        let pct: usize = pct
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("--serial 百分比要写成整数,如 25%:{spec}"))?;
         if pct == 0 || pct > 100 {
             anyhow::bail!("--serial 百分比要在 1..=100:{spec}");
         }
         ((hosts.len() * pct) as f64 / 100.0).ceil() as usize
     } else {
-        spec.parse::<usize>().map_err(|_| anyhow::anyhow!("--serial 要写成台数或百分比:{spec}"))?
+        spec.parse::<usize>()
+            .map_err(|_| anyhow::anyhow!("--serial 要写成台数或百分比:{spec}"))?
     };
     let size = size.max(1);
     Ok(hosts.chunks(size).map(|c| c.to_vec()).collect())
@@ -298,20 +305,31 @@ pub(crate) fn apply_limit(
     // 组名靠 host.roles 匹配 —— roles 由组成员关系派生(D-077),已经是传递闭包。
     let picked: Vec<crater_core::spec::Host> = all
         .iter()
-        .filter(|h| wanted.iter().any(|w| h.name == *w || h.roles.iter().any(|r| r == w)))
+        .filter(|h| {
+            wanted
+                .iter()
+                .any(|w| h.name == *w || h.roles.iter().any(|r| r == w))
+        })
         .cloned()
         .collect();
     if picked.is_empty() {
         // 报错要**把可选项列出来**:打错一个组名与"这组本来就空"是两回事,
         // 而只说"没选中"会让人反复猜。
         let names: Vec<&str> = all.iter().map(|h| h.name.as_str()).collect();
-        let mut groups: Vec<&str> = all.iter().flat_map(|h| h.roles.iter().map(|r| r.as_str())).collect();
+        let mut groups: Vec<&str> = all
+            .iter()
+            .flat_map(|h| h.roles.iter().map(|r| r.as_str()))
+            .collect();
         groups.sort_unstable();
         groups.dedup();
         anyhow::bail!(
             "--limit `{spec}` 没选中任何主机\n  可选主机:{}\n  可选组:{}",
             names.join(", "),
-            if groups.is_empty() { "(inventory 没有分组)".into() } else { groups.join(", ") }
+            if groups.is_empty() {
+                "(inventory 没有分组)".into()
+            } else {
+                groups.join(", ")
+            }
         );
     }
     Ok(picked)
@@ -340,7 +358,8 @@ fn resolve_secrets(hosts: &mut [crater_core::spec::Host]) -> Result<()> {
             h.password = Some(raw.trim_end_matches(['\n', '\r']).to_string());
         }
         if let Some(k) = h.key.take() {
-            let expanded = expand_env(&k.to_string_lossy()).with_context(|| format!("主机 {}", h.name))?;
+            let expanded =
+                expand_env(&k.to_string_lossy()).with_context(|| format!("主机 {}", h.name))?;
             h.key = Some(PathBuf::from(expanded));
         }
     }
@@ -359,8 +378,9 @@ fn expand_env(s: &str) -> Result<String> {
             anyhow::bail!("`${{env:` 没有闭合的 `}}`:{s}");
         };
         let name = &after[..j];
-        let v = std::env::var(name)
-            .map_err(|_| anyhow::anyhow!("环境变量 `{name}` 没设(inventory 里引用了 ${{env:{name}}})"))?;
+        let v = std::env::var(name).map_err(|_| {
+            anyhow::anyhow!("环境变量 `{name}` 没设(inventory 里引用了 ${{env:{name}}})")
+        })?;
         out.push_str(&v);
         rest = &after[j + 1..];
     }
@@ -399,7 +419,10 @@ fn warn_literal_passwords(hosts: &[crater_core::spec::Host], path: &Path) {
             return;
         }
     }
-    eprintln!("提醒:{} 已被 git 跟踪,其中 {n} 台写着字面口令 —— git 历史删不掉。", path.display());
+    eprintln!(
+        "提醒:{} 已被 git 跟踪,其中 {n} 台写着字面口令 —— git 历史删不掉。",
+        path.display()
+    );
     eprintln!("      改用 `key:`、`password_file:` 或 `password: \"${{env:VAR}}\"`。");
 }
 
@@ -440,7 +463,7 @@ pub(crate) fn target_hosts(
                 user: user.to_string(),
                 port,
                 password: password.clone(),
-                password_file: None,   // --host 是命令行直给,没有文件那一层
+                password_file: None, // --host 是命令行直给,没有文件那一层
                 key: key.clone(),
                 roles: vec![],
                 vars: BTreeMap::new(),
@@ -456,7 +479,6 @@ pub(crate) fn target_hosts(
     }
 }
 
-
 #[cfg(test)]
 mod batch_tests {
     use super::batches;
@@ -464,7 +486,10 @@ mod batch_tests {
 
     fn hosts(n: usize) -> Vec<Host> {
         (0..n)
-            .map(|i| Host { name: format!("n{i}"), ..Host::local() })
+            .map(|i| Host {
+                name: format!("n{i}"),
+                ..Host::local()
+            })
             .collect()
     }
 
@@ -503,14 +528,17 @@ mod batch_tests {
     }
 }
 
-
 #[cfg(test)]
 mod secret_tests {
     use super::{expand_env, resolve_secrets};
     use crater_core::spec::Host;
 
     fn host() -> Host {
-        Host { name: "n1".into(), address: "10.0.0.1".into(), ..Host::local() }
+        Host {
+            name: "n1".into(),
+            address: "10.0.0.1".into(),
+            ..Host::local()
+        }
     }
 
     #[test]
@@ -518,7 +546,10 @@ mod secret_tests {
         std::env::set_var("CRATER_TEST_PW", "s3cret");
         assert_eq!(expand_env("${env:CRATER_TEST_PW}").unwrap(), "s3cret");
         // 前后缀保留:`${env:X}` 只是值的一部分也算数。
-        assert_eq!(expand_env("pre-${env:CRATER_TEST_PW}-post").unwrap(), "pre-s3cret-post");
+        assert_eq!(
+            expand_env("pre-${env:CRATER_TEST_PW}-post").unwrap(),
+            "pre-s3cret-post"
+        );
         assert_eq!(expand_env("没有引用").unwrap(), "没有引用");
     }
 
@@ -527,7 +558,10 @@ mod secret_tests {
     #[test]
     fn a_missing_variable_is_an_error_not_an_empty_string() {
         let e = expand_env("${env:CRATER_TEST_DEFINITELY_UNSET}").unwrap_err();
-        assert!(e.to_string().contains("CRATER_TEST_DEFINITELY_UNSET"), "{e}");
+        assert!(
+            e.to_string().contains("CRATER_TEST_DEFINITELY_UNSET"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -541,7 +575,10 @@ mod secret_tests {
         let f = d.path().join("pw");
         // `echo secret > f` 的必然产物 —— 换行不该被当成口令的一部分。
         std::fs::write(&f, "s3cret\n").unwrap();
-        let mut hs = vec![Host { password_file: Some(f), ..host() }];
+        let mut hs = vec![Host {
+            password_file: Some(f),
+            ..host()
+        }];
         resolve_secrets(&mut hs).unwrap();
         assert_eq!(hs[0].password.as_deref(), Some("s3cret"));
     }

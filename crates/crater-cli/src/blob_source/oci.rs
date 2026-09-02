@@ -34,8 +34,13 @@ impl OciSource {
             if l["mediaType"].as_str() != Some(MT_MATERIAL) {
                 continue;
             }
-            let Some(src) = l["annotations"][ANN_MATERIAL_SOURCE].as_str() else { continue };
-            let d = l["digest"].as_str().unwrap_or_default().trim_start_matches("sha256:");
+            let Some(src) = l["annotations"][ANN_MATERIAL_SOURCE].as_str() else {
+                continue;
+            };
+            let d = l["digest"]
+                .as_str()
+                .unwrap_or_default()
+                .trim_start_matches("sha256:");
             let p = store.blob_path(d);
             // 瘦拉过的包物料层不在本地。报出来而不是静默少一条 —— 少一条的表现
             // 是"部署时目标机自己去联网下载",在断网现场就是装不上。

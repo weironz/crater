@@ -39,7 +39,10 @@ pub fn topo_sort(nodes: &[DepNode]) -> crate::Result<Vec<String>> {
         indegree.entry(n.name.clone()).or_insert(0);
         for dep in &n.requires {
             *indegree.entry(n.name.clone()).or_insert(0) += 1;
-            dependents.entry(dep.clone()).or_default().push(n.name.clone());
+            dependents
+                .entry(dep.clone())
+                .or_default()
+                .push(n.name.clone());
         }
     }
 

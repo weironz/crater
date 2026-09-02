@@ -42,8 +42,13 @@ fn sink() -> &'static Mutex<Sink> {
 
 /// 进程启动时调一次。日志文件打不开就静默作罢 —— 落盘是增益,不该拦住部署。
 pub fn init(log_file: Option<&std::path::Path>, stamp: bool) {
-    let f = log_file
-        .and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok());
+    let f = log_file.and_then(|p| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+            .ok()
+    });
     if let Ok(mut s) = sink().lock() {
         s.file = f;
         s.stamp = stamp;
@@ -162,11 +167,14 @@ pub fn err(msg: &str) {
     } else {
         format!("{:<w$}  {msg}", s.host, w = s.width)
     };
-    eprintln!("{}", if s.stamp && !msg.is_empty() {
-        format!("{} {colored}", hhmmss())
-    } else {
-        colored
-    });
+    eprintln!(
+        "{}",
+        if s.stamp && !msg.is_empty() {
+            format!("{} {colored}", hhmmss())
+        } else {
+            colored
+        }
+    );
     if let Some(mut f) = s.file.as_ref() {
         let _ = writeln!(f, "{} {prefixed}", hhmmss());
         let _ = f.flush();
@@ -203,7 +211,7 @@ mod tests {
     #[test]
     fn blank_lines_and_multibyte_hosts_do_not_panic() {
         enter("控制面节点");
-        line("");                 // 空行:曾经在这里 panic
+        line(""); // 空行:曾经在这里 panic
         line("  ✓ copy /x");
         line("changed copy");
         leave();

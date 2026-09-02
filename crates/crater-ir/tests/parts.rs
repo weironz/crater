@@ -32,7 +32,10 @@ fn an_externalised_section_is_merged_back() {
 
     let bp = blueprint_from_path(&root).unwrap();
     assert_eq!(bp.resources.len(), 1);
-    assert!(bp.procedures.contains_key("boot"), "外置的 procedures 应已并入");
+    assert!(
+        bp.procedures.contains_key("boot"),
+        "外置的 procedures 应已并入"
+    );
 }
 
 #[test]
@@ -70,7 +73,10 @@ fn a_declared_part_that_is_missing_names_the_expected_filename() {
     let root = write(d.path(), "demo.blueprint.yaml", ROOT);
     let err = blueprint_from_path(&root).unwrap_err().to_string();
     assert!(err.contains("E120"), "{err}");
-    assert!(err.contains("demo.procedures.yaml"), "要说清该叫什么名字:{err}");
+    assert!(
+        err.contains("demo.procedures.yaml"),
+        "要说清该叫什么名字:{err}"
+    );
 }
 
 #[test]
@@ -79,7 +85,11 @@ fn a_ghost_part_file_is_refused_rather_than_silently_ignored() {
     let d = tempfile::tempdir().unwrap();
     let root = write(d.path(), "demo.blueprint.yaml", ROOT);
     write(d.path(), "demo.procedures.yaml", PROCS);
-    write(d.path(), "demo.types.yaml", "thing:\n  observe: { cmd: x }\n");
+    write(
+        d.path(),
+        "demo.types.yaml",
+        "thing:\n  observe: { cmd: x }\n",
+    );
 
     let err = blueprint_from_path(&root).unwrap_err().to_string();
     assert!(err.contains("E122"), "{err}");
@@ -104,7 +114,11 @@ fn defining_a_section_twice_is_refused() {
 fn parts_cannot_nest() {
     let d = tempfile::tempdir().unwrap();
     let root = write(d.path(), "demo.blueprint.yaml", ROOT);
-    write(d.path(), "demo.procedures.yaml", "parts: [types]\nboot:\n  steps: []\n");
+    write(
+        d.path(),
+        "demo.procedures.yaml",
+        "parts: [types]\nboot:\n  steps: []\n",
+    );
     let err = blueprint_from_path(&root).unwrap_err().to_string();
     assert!(err.contains("外置只有一层"), "{err}");
 }
@@ -112,7 +126,11 @@ fn parts_cannot_nest() {
 #[test]
 fn only_whole_top_level_sections_may_be_externalised() {
     let d = tempfile::tempdir().unwrap();
-    let root = write(d.path(), "demo.blueprint.yaml", "name: demo\nparts: [params]\n");
+    let root = write(
+        d.path(),
+        "demo.blueprint.yaml",
+        "name: demo\nparts: [params]\n",
+    );
     let err = blueprint_from_path(&root).unwrap_err().to_string();
     assert!(err.contains("不能外置 `params`"), "{err}");
     assert!(err.contains("可外置:"), "要列出可外置的节:{err}");
@@ -121,7 +139,11 @@ fn only_whole_top_level_sections_may_be_externalised() {
 #[test]
 fn a_misspelled_section_gets_a_suggestion() {
     let d = tempfile::tempdir().unwrap();
-    let root = write(d.path(), "demo.blueprint.yaml", "name: demo\nparts: [procedure]\n");
+    let root = write(
+        d.path(),
+        "demo.blueprint.yaml",
+        "name: demo\nparts: [procedure]\n",
+    );
     let err = blueprint_from_path(&root).unwrap_err().to_string();
     assert!(err.contains("是不是想写 `procedures`"), "{err}");
 }
@@ -129,7 +151,11 @@ fn a_misspelled_section_gets_a_suggestion() {
 #[test]
 fn a_plain_single_file_blueprint_still_loads_from_path() {
     let d = tempfile::tempdir().unwrap();
-    let root = write(d.path(), "solo.yaml", "name: solo\nresources:\n  - file: { path: /x, state: directory }\n");
+    let root = write(
+        d.path(),
+        "solo.yaml",
+        "name: solo\nresources:\n  - file: { path: /x, state: directory }\n",
+    );
     let bp = blueprint_from_path(&root).unwrap();
     assert_eq!(bp.name, "solo");
 }

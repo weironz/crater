@@ -22,7 +22,11 @@ impl CelExpr {
     pub fn compile(src: &str) -> Result<Self, String> {
         let program = cel::Program::compile(src).map_err(|e| e.to_string())?;
         let refs = program.references();
-        let roots = refs.variables().into_iter().map(|s| s.to_string()).collect();
+        let roots = refs
+            .variables()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         // CEL 把运算符也算函数:中缀是 `_+_` / `_==_`,**前缀是 `!_` / `-_`**。
         // 早先只挡了 `_` 与 `@` 开头,于是 `!path_exists(x)` 里的逻辑非被报成
         // 「未知探针函数 `!_()`」—— 任何在 `when:` 里写 `!` 的蓝图都过不了 lint。
@@ -35,7 +39,11 @@ impl CelExpr {
             .filter(|f| is_ident(f))
             .map(|s| s.to_string())
             .collect();
-        Ok(CelExpr { src: src.to_string(), roots, funcs })
+        Ok(CelExpr {
+            src: src.to_string(),
+            roots,
+            funcs,
+        })
     }
 
     pub fn src(&self) -> &str {
@@ -186,7 +194,11 @@ mod tests {
         let e = CelExpr::compile("port_owner(9000) in ['', 'rustfs.service']").unwrap();
         assert!(e.funcs().contains("port_owner"), "funcs={:?}", e.funcs());
         let plain = CelExpr::compile("params.a + params.b").unwrap();
-        assert!(plain.funcs().is_empty(), "运算符不该算探针函数: {:?}", plain.funcs());
+        assert!(
+            plain.funcs().is_empty(),
+            "运算符不该算探针函数: {:?}",
+            plain.funcs()
+        );
         // **前缀**运算符也是函数(`!_` / `-_`)—— 早先只挡了 `_`/`@` 开头,
         // 于是任何写了 `!` 的蓝图都被报成「未知探针函数 `!_()`」(D-134)。
         let neg = CelExpr::compile("!path_exists('/x') && -1 < 0").unwrap();
@@ -201,7 +213,13 @@ mod tests {
     #[test]
     fn pure_reference_accepts_only_nouns() {
         // 值位置只许名词 —— 这是 A4 限权的执行者。
-        for ok in ["params.port", "item", "facts.arch", "self.role", "exports.join_command"] {
+        for ok in [
+            "params.port",
+            "item",
+            "facts.arch",
+            "self.role",
+            "exports.join_command",
+        ] {
             assert!(CelExpr::compile(ok).unwrap().is_pure_ref(), "{ok} 该被接受");
         }
     }
@@ -213,11 +231,11 @@ mod tests {
             r#"params.ha ? "--upload-certs" : """#, // 三元 —— D-115 里真实出现过
             "params.a + params.b",                  // 拼接/算术
             "params.port + 1",
-            "has(params.x)",                        // 函数(它属于 when,不属于值位)
+            "has(params.x)", // 函数(它属于 when,不属于值位)
             "size(params.dirs)",
-            "params.dirs[0]",                       // 下标
-            "params.a == params.b",                 // 比较
-            "'literal'",                            // 字面量
+            "params.dirs[0]",       // 下标
+            "params.a == params.b", // 比较
+            "'literal'",            // 字面量
             "params.a || params.b",
             "!params.ha",
         ];
@@ -240,9 +258,13 @@ mod tests {
     #[test]
     fn a_condition_keeps_full_cel_expressiveness() {
         // 限权只针对插值位;`when:` 位置一切照旧 —— 这正是留用 CEL 的意义。
-        let cond = CelExpr::compile("has(params.cp_endpoint) && params.ha || size(params.dirs) > 0")
-            .unwrap();
-        assert!(!cond.is_pure_ref(), "它当然不是纯引用 —— 但在 when: 里完全合法");
+        let cond =
+            CelExpr::compile("has(params.cp_endpoint) && params.ha || size(params.dirs) > 0")
+                .unwrap();
+        assert!(
+            !cond.is_pure_ref(),
+            "它当然不是纯引用 —— 但在 when: 里完全合法"
+        );
         assert!(cond.roots().contains("params"));
     }
 

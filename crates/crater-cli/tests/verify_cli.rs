@@ -97,7 +97,10 @@ fn drift_after_a_successful_deploy_is_detected_and_exits_nonzero() {
     assert!(out.contains("mode: 777 → 0750"), "要指到字段:{out}");
     assert!(out.contains("漂移 "), "已知资源应标为漂移:{out}");
     let err = String::from_utf8_lossy(&o.stderr);
-    assert!(err.contains("未通过核对"), "verify 的失败不是'执行失败':{err}");
+    assert!(
+        err.contains("未通过核对"),
+        "verify 的失败不是'执行失败':{err}"
+    );
 }
 
 #[test]
@@ -174,12 +177,18 @@ fn the_record_is_human_readable_and_survives_reapply() {
 
     crater(&home, &["apply", "-f", bp]);
     let dir = home.join(".crater").join("state");
-    let files: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
+    let files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
     assert_eq!(files.len(), 1, "一次部署一条记录");
     let text = std::fs::read_to_string(files[0].path()).unwrap();
     assert!(text.contains("blueprint: verify-demo"), "{text}");
     assert!(text.contains("version: '1.0'"), "{text}");
-    assert!(text.contains("observed:"), "记录的是**现实**,不是意图:{text}");
+    assert!(
+        text.contains("observed:"),
+        "记录的是**现实**,不是意图:{text}"
+    );
 
     // 重复 apply 不该产生第二条记录
     crater(&home, &["apply", "-f", bp]);

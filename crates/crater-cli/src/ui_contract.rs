@@ -140,7 +140,11 @@ pub async fn inventory_skeleton(body: String) -> impl IntoResponse {
     let bp = match crater_ir::parse::blueprint_from_str(&body) {
         Ok(bp) => bp,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response()
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
         }
     };
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -213,7 +217,10 @@ pub async fn blueprint_skeleton(Json(req): Json<SkeletonReq>) -> impl IntoRespon
                 FReq::OneOf(g) => ("择一", format!("TODO(互斥组 {g},恰选一个)")),
                 FReq::Optional => continue,
             };
-            out.push_str(&format!("{indent}{}: {}   # [{}] {}\n", f.name, val, mark, f.doc));
+            out.push_str(&format!(
+                "{indent}{}: {}   # [{}] {}\n",
+                f.name, val, mark, f.doc
+            ));
         }
         out
     }
@@ -287,7 +294,10 @@ mod tests {
     fn the_catalog_covers_every_registered_type() {
         // UI 的字段面板完全由它驱动;少一个类型就等于 UI 里凭空少一种能力。
         let v = crater_ir::types::catalog_json();
-        assert_eq!(v.as_array().unwrap().len(), crater_ir::types::BUILTINS.len());
+        assert_eq!(
+            v.as_array().unwrap().len(),
+            crater_ir::types::BUILTINS.len()
+        );
     }
 
     #[test]
@@ -393,9 +403,7 @@ fn locate(lines: &[&str], cur: usize) -> Option<(String, Option<String>)> {
             if let Some(rest) = t.strip_prefix("- ") {
                 if let Some((name, tail)) = rest.split_once(':') {
                     let name = name.trim();
-                    if !tail.trim().is_empty()
-                        && crater_ir::types::builtin(name).is_some()
-                    {
+                    if !tail.trim().is_empty() && crater_ir::types::builtin(name).is_some() {
                         return Some((name.to_string(), None));
                     }
                 }
@@ -511,16 +519,27 @@ pub async fn patch(Json(req): Json<PatchReq>) -> axum::response::Response {
     let lines: Vec<&str> = req.text.lines().collect();
     let idx = req.line.saturating_sub(1);
     let Some(&line) = lines.get(idx) else {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "行号越界" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "行号越界" })),
+        )
+            .into_response();
     };
     let Some(colon) = line.find(':') else {
-        return (StatusCode::CONFLICT, Json(json!({ "error": "这一行不是 `key: value`" }))).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "这一行不是 `key: value`" })),
+        )
+            .into_response();
     };
     let (prefix, rest) = line.split_at(colon + 1);
     let rest_trim = rest.trim_start();
     // 降级只读的形态:锚点(&)/别名(*)/flow 集合({ [)/块标量(| >)/空值(嵌套父键)。
     if rest_trim.is_empty()
-        || matches!(rest_trim.chars().next(), Some('&' | '*' | '{' | '[' | '|' | '>'))
+        || matches!(
+            rest_trim.chars().next(),
+            Some('&' | '*' | '{' | '[' | '|' | '>')
+        )
     {
         return (
             StatusCode::CONFLICT,
@@ -530,9 +549,11 @@ pub async fn patch(Json(req): Json<PatchReq>) -> axum::response::Response {
     }
     // 行尾注释:带引号的值先跳过引号段再找 `#`;裸值找第一个 ` #`。
     let comment_at = if let Some(q) = rest_trim.chars().next().filter(|c| *c == '"' || *c == '\'') {
-        rest_trim[1..]
-            .find(q)
-            .and_then(|close| rest_trim[1 + close + 1..].find('#').map(|h| 1 + close + 1 + h))
+        rest_trim[1..].find(q).and_then(|close| {
+            rest_trim[1 + close + 1..]
+                .find('#')
+                .map(|h| 1 + close + 1 + h)
+        })
     } else {
         rest_trim.find(" #").map(|i| i + 1)
     };
@@ -549,7 +570,8 @@ pub async fn patch(Json(req): Json<PatchReq>) -> axum::response::Response {
         "yes" | "no" | "on" | "off" | "null" | "~" | ""
     );
     let bare_safe = !v.is_empty()
-        && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
         && !v.starts_with('-');
     let rendered = if v.parse::<i64>().is_ok()
         || v.parse::<f64>().is_ok()
@@ -588,7 +610,10 @@ mod projection_tests {
             substrate_ref("    file: \"https://x/${substrate.arch}/y\""),
             Some("arch".into())
         );
-        assert_eq!(substrate_ref("  when: \"${substrate.family}\""), Some("family".into()));
+        assert_eq!(
+            substrate_ref("  when: \"${substrate.family}\""),
+            Some("family".into())
+        );
         // 不是 substrate 的插值不该被认成事实。
         assert_eq!(substrate_ref("  v: ${params.version}"), None);
         assert_eq!(substrate_ref("  普通的一行"), None);

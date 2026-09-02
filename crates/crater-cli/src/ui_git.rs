@@ -70,8 +70,7 @@ fn probe(ws: &Path) -> (Option<PathBuf>, String) {
             if top.is_empty() {
                 return (
                     None,
-                    "工作区不是 git 仓库,改动不会被记录(在工作区里 git init 即可开启)"
-                        .to_string(),
+                    "工作区不是 git 仓库,改动不会被记录(在工作区里 git init 即可开启)".to_string(),
                 );
             }
             let top = PathBuf::from(top);
@@ -93,7 +92,11 @@ pub(crate) fn record(paths: &[&Path], action: &str) {
     let Some(Some(top)) = REPO.get() else { return };
     // 备份与回收站不进版本库:`.bak` 是防手滑的临时物,`.crater-trash/`
     // 是删除的暂存区 —— 把它们提交进去,`git log` 立刻被噪声淹没。
-    let wanted: Vec<&Path> = paths.iter().copied().filter(|p| worth_recording(p)).collect();
+    let wanted: Vec<&Path> = paths
+        .iter()
+        .copied()
+        .filter(|p| worth_recording(p))
+        .collect();
     if wanted.is_empty() {
         return;
     }
@@ -189,7 +192,10 @@ fn message(rels: &[String], action: &str) -> String {
         n => format!("ui: {action} {}(共 {n} 个文件)", rels[0]),
     };
     let body: Vec<String> = rels.iter().map(|r| format!("  {r}")).collect();
-    format!("{head}\n\n经 crater UI 写入,自动记录。涉及文件:\n{}\n", body.join("\n"))
+    format!(
+        "{head}\n\n经 crater UI 写入,自动记录。涉及文件:\n{}\n",
+        body.join("\n")
+    )
 }
 
 #[cfg(test)]
@@ -201,14 +207,19 @@ mod tests {
         // 反证:`.bak` 与回收站是 UI 自己的临时物,不是期望态。
         assert!(worth_recording(Path::new("/ws/site.yaml")));
         assert!(!worth_recording(Path::new("/ws/site.yaml.bak")));
-        assert!(!worth_recording(Path::new("/ws/.crater-trash/site.yaml.17")));
+        assert!(!worth_recording(Path::new(
+            "/ws/.crater-trash/site.yaml.17"
+        )));
     }
 
     #[test]
     fn the_first_line_names_the_file_and_the_action() {
         // `git log --oneline` 只显示首行 —— 文件名掉到正文里等于没记。
         let m = message(&["lab.inventory.yaml".into()], "改主机 n1");
-        assert_eq!(m.lines().next().unwrap(), "ui: 改主机 n1 lab.inventory.yaml");
+        assert_eq!(
+            m.lines().next().unwrap(),
+            "ui: 改主机 n1 lab.inventory.yaml"
+        );
         let m2 = message(&["a.yaml".into(), "b.yaml".into()], "改名");
         assert!(m2.lines().next().unwrap().contains("共 2 个文件"), "{m2}");
         assert!(m2.contains("  b.yaml"), "{m2}");

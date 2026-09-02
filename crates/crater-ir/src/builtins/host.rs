@@ -37,7 +37,10 @@ impl ResourceType for Hostname {
         }
     }
     fn apply(&self, ctx: &dyn Ctx, args: &ResolvedArgs, _c: &Change) -> Result<Outcome> {
-        run_ok(ctx, &format!("hostnamectl set-hostname {}", sh(arg_str(args, "name")?)))?;
+        run_ok(
+            ctx,
+            &format!("hostnamectl set-hostname {}", sh(arg_str(args, "name")?)),
+        )?;
         Ok(Outcome::Changed)
     }
     fn destroy(&self, _ctx: &dyn Ctx, _args: &ResolvedArgs, _o: &Observed) -> Result<Outcome> {
@@ -229,7 +232,12 @@ impl ResourceType for Sysctl {
         if wrong.is_empty() {
             Change::Ok
         } else {
-            Change::Update(wrong.split(SEP).map(|w| FieldDiff::set("sysctl", w)).collect())
+            Change::Update(
+                wrong
+                    .split(SEP)
+                    .map(|w| FieldDiff::set("sysctl", w))
+                    .collect(),
+            )
         }
     }
     fn apply(&self, ctx: &dyn Ctx, args: &ResolvedArgs, _c: &Change) -> Result<Outcome> {
@@ -282,7 +290,11 @@ impl ResourceType for User {
         // 主组以**组名**呈现(而非 gid),好与蓝图里写的 `group: appsvc` 直接比。
         let gname = {
             let (c, o) = ctx.probe(&format!("getent group {} | cut -d: -f1", sh(&g(1))))?;
-            if c == 0 { o.trim().to_string() } else { g(1) }
+            if c == 0 {
+                o.trim().to_string()
+            } else {
+                g(1)
+            }
         };
         Ok(Observed::present([
             ("uid", g(0)),
@@ -303,7 +315,12 @@ impl ResourceType for User {
         if arg_bool(args, "system").unwrap_or(false) {
             flags.push_str(" --system");
         }
-        for (k, flag) in [("shell", "--shell"), ("home", "--home"), ("uid", "--uid"), ("group", "--gid")] {
+        for (k, flag) in [
+            ("shell", "--shell"),
+            ("home", "--home"),
+            ("uid", "--uid"),
+            ("group", "--gid"),
+        ] {
             // arg_scalar_opt 而非 arg_str_opt:uid 常被写成 `type: int`,
             // 后者会返回 None 并静默省掉标志。
             if let Some(v) = arg_scalar_opt(args, k) {
@@ -314,7 +331,11 @@ impl ResourceType for User {
         if !groups.is_empty() {
             flags.push_str(&format!(" --groups {}", sh(&groups.join(","))));
         }
-        let verb = if matches!(change, Change::Create(_)) { "useradd" } else { "usermod" };
+        let verb = if matches!(change, Change::Create(_)) {
+            "useradd"
+        } else {
+            "usermod"
+        };
         run_ok(ctx, &format!("{verb}{flags} {}", sh(name)))?;
         Ok(Outcome::Changed)
     }
@@ -351,7 +372,11 @@ impl ResourceType for Group {
         if matches!(change, Change::Destroy) {
             return self.destroy(ctx, args, &Observed::present([]));
         }
-        let sys = if arg_bool(args, "system").unwrap_or(false) { " --system" } else { "" };
+        let sys = if arg_bool(args, "system").unwrap_or(false) {
+            " --system"
+        } else {
+            ""
+        };
         let gid = arg_scalar_opt(args, "gid")
             .map(|g| format!(" --gid {}", sh(&g)))
             .unwrap_or_default();
@@ -414,7 +439,12 @@ fn pairs_of(args: &ResolvedArgs, key: &str) -> Vec<(String, String)> {
     match args.get(key) {
         Some(Yaml::Mapping(m)) => m
             .iter()
-            .map(|(k, v)| (crate::eval::scalar_to_string(k), crate::eval::scalar_to_string(v)))
+            .map(|(k, v)| {
+                (
+                    crate::eval::scalar_to_string(k),
+                    crate::eval::scalar_to_string(v),
+                )
+            })
             .collect(),
         _ => Vec::new(),
     }
@@ -426,17 +456,27 @@ mod tests {
     use crate::ctx::FakeCtx;
 
     fn args(pairs: &[(&str, Yaml)]) -> ResolvedArgs {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
     }
     fn diff<T: ResourceType>(t: &T, a: &ResolvedArgs, o: &Observed) -> Change {
-        t.diff(&DiffInput { args: a, observed: o, upstream_changed: false })
+        t.diff(&DiffInput {
+            args: a,
+            observed: o,
+            upstream_changed: false,
+        })
     }
 
     #[test]
     fn swap_catches_the_classic_reboot_trap() {
         // 只 `swapoff -a` 不改 fstab —— 重启后 swap 自己回来,k8s 再次拒绝启动。
         // 类型化之后这一项在 plan 里是**看得见**的。
-        let a = args(&[("state", Yaml::from("disabled")), ("persist", Yaml::from(true))]);
+        let a = args(&[
+            ("state", Yaml::from("disabled")),
+            ("persist", Yaml::from(true)),
+        ]);
         let obs = Observed::present([("active", "false".into()), ("persisted", "true".into())]);
         let c = diff(&Swap, &a, &obs);
         assert_eq!(c.fields()[0].to_string(), "fstab: 有 swap 条目 → 注释掉");
@@ -454,7 +494,8 @@ mod tests {
         // 目标机原来什么样我们并不知道 —— 擅自开回来是越权。
         let ctx = FakeCtx::new();
         assert_eq!(
-            Swap.destroy(&ctx, &args(&[]), &Observed::present([])).unwrap(),
+            Swap.destroy(&ctx, &args(&[]), &Observed::present([]))
+                .unwrap(),
             Outcome::Ok
         );
         assert!(ctx.calls().is_empty());
@@ -512,7 +553,10 @@ mod tests {
             serde_yaml::from_str("{net.bridge.bridge-nf-call-iptables: 1}").unwrap(),
         )]);
         let obs = Sysctl.observe(&ctx, &a).unwrap();
-        assert_eq!(obs.get("wrong"), Some("net.bridge.bridge-nf-call-iptables: (未设置) → 1"));
+        assert_eq!(
+            obs.get("wrong"),
+            Some("net.bridge.bridge-nf-call-iptables: (未设置) → 1")
+        );
         let c = diff(&Sysctl, &a, &obs);
         assert_eq!(c.fields().len(), 1, "一个键就该是一项:{:?}", c.fields());
     }
@@ -531,7 +575,10 @@ mod tests {
     #[test]
     fn sysctl_all_correct_is_a_noop() {
         let ctx = FakeCtx::new().on("sysctl -n", 0, "1\n");
-        let a = args(&[("set", serde_yaml::from_str("{net.ipv4.ip_forward: 1}").unwrap())]);
+        let a = args(&[(
+            "set",
+            serde_yaml::from_str("{net.ipv4.ip_forward: 1}").unwrap(),
+        )]);
         let obs = Sysctl.observe(&ctx, &a).unwrap();
         assert_eq!(diff(&Sysctl, &a, &obs), Change::Ok);
     }
@@ -539,31 +586,60 @@ mod tests {
     #[test]
     fn hostname_compares_against_reality() {
         let a = args(&[("name", Yaml::from("n11"))]);
-        assert_eq!(diff(&Hostname, &a, &Observed::present([("name", "n11".into())])), Change::Ok);
-        let c = diff(&Hostname, &a, &Observed::present([("name", "ubuntu".into())]));
+        assert_eq!(
+            diff(&Hostname, &a, &Observed::present([("name", "n11".into())])),
+            Change::Ok
+        );
+        let c = diff(
+            &Hostname,
+            &a,
+            &Observed::present([("name", "ubuntu".into())]),
+        );
         assert_eq!(c.fields()[0].to_string(), "name: ubuntu → n11");
     }
 
     #[test]
     fn hostname_destroy_leaves_the_machine_alone() {
         let ctx = FakeCtx::new();
-        Hostname.destroy(&ctx, &args(&[]), &Observed::present([])).unwrap();
+        Hostname
+            .destroy(&ctx, &args(&[]), &Observed::present([]))
+            .unwrap();
         assert!(ctx.calls().is_empty(), "没有'原来的名字'可以改回去");
     }
 
     #[test]
     fn user_create_update_and_absent_are_all_expressible() {
-        let a = args(&[("name", Yaml::from("app")), ("shell", Yaml::from("/bin/bash"))]);
-        assert!(matches!(diff(&User, &a, &Observed::absent()), Change::Create(_)));
+        let a = args(&[
+            ("name", Yaml::from("app")),
+            ("shell", Yaml::from("/bin/bash")),
+        ]);
+        assert!(matches!(
+            diff(&User, &a, &Observed::absent()),
+            Change::Create(_)
+        ));
         assert_eq!(
-            diff(&User, &a, &Observed::present([("shell", "/bin/bash".into())])),
+            diff(
+                &User,
+                &a,
+                &Observed::present([("shell", "/bin/bash".into())])
+            ),
             Change::Ok
         );
-        let c = diff(&User, &a, &Observed::present([("shell", "/usr/sbin/nologin".into())]));
-        assert_eq!(c.fields()[0].to_string(), "shell: /usr/sbin/nologin → /bin/bash");
+        let c = diff(
+            &User,
+            &a,
+            &Observed::present([("shell", "/usr/sbin/nologin".into())]),
+        );
+        assert_eq!(
+            c.fields()[0].to_string(),
+            "shell: /usr/sbin/nologin → /bin/bash"
+        );
 
         let absent = args(&[("name", Yaml::from("app")), ("state", Yaml::from("absent"))]);
-        assert_eq!(diff(&User, &absent, &Observed::present([])), Change::Destroy);
+        assert_eq!(
+            diff(&User, &absent, &Observed::present([])),
+            Change::Destroy
+        );
         assert_eq!(diff(&User, &absent, &Observed::absent()), Change::Ok);
     }
 
@@ -613,7 +689,10 @@ impl ResourceType for Timezone {
     }
 
     fn apply(&self, ctx: &dyn Ctx, args: &ResolvedArgs, _c: &Change) -> Result<Outcome> {
-        run_ok(ctx, &format!("timedatectl set-timezone {}", sh(arg_str(args, "name")?)))?;
+        run_ok(
+            ctx,
+            &format!("timedatectl set-timezone {}", sh(arg_str(args, "name")?)),
+        )?;
         Ok(Outcome::Changed)
     }
 
@@ -670,12 +749,20 @@ impl ResourceType for TimeSync {
 
         let mut fields = Vec::new();
         if want_on != is_on {
-            fields.push(FieldDiff::change("enabled", is_on.to_string(), want_on.to_string()));
+            fields.push(FieldDiff::change(
+                "enabled",
+                is_on.to_string(),
+                want_on.to_string(),
+            ));
         }
         if !want_servers.is_empty() && have_servers != want_servers {
             fields.push(FieldDiff::change(
                 "servers",
-                if have_servers.is_empty() { "(系统默认)" } else { have_servers },
+                if have_servers.is_empty() {
+                    "(系统默认)"
+                } else {
+                    have_servers
+                },
                 &want_servers,
             ));
         }
@@ -696,10 +783,19 @@ impl ResourceType for TimeSync {
         let servers = servers_of(args);
 
         if !servers.is_empty() {
-            run_ok(ctx, &format!("mkdir -p \"$(dirname {})\"", sh(TIMESYNC_DROPIN)))?;
+            run_ok(
+                ctx,
+                &format!("mkdir -p \"$(dirname {})\"", sh(TIMESYNC_DROPIN)),
+            )?;
             ctx.write_file(TIMESYNC_DROPIN, &format!("[Time]\nNTP={servers}\n"))?;
         }
-        run_ok(ctx, &format!("timedatectl set-ntp {}", if want_on { "true" } else { "false" }))?;
+        run_ok(
+            ctx,
+            &format!(
+                "timedatectl set-ntp {}",
+                if want_on { "true" } else { "false" }
+            ),
+        )?;
         if want_on {
             // 改了服务器就得重启守护进程,否则新配置要等下一次轮换才生效。
             // 刻意**不**校验退出码:有的系统用 chrony 而非 timesyncd,那里这条
@@ -749,14 +845,25 @@ mod time_tests {
     use crate::eval::Yaml;
 
     fn args(pairs: &[(&str, &str)]) -> ResolvedArgs {
-        pairs.iter().map(|(k, v)| (k.to_string(), Yaml::from(*v))).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), Yaml::from(*v)))
+            .collect()
     }
     fn diff_of(t: &dyn ResourceType, a: &ResolvedArgs, o: &Observed) -> Change {
-        t.diff(&DiffInput { args: a, observed: o, upstream_changed: false })
+        t.diff(&DiffInput {
+            args: a,
+            observed: o,
+            upstream_changed: false,
+        })
     }
     /// timedatectl 的三段应答:NTP / NTPSynchronized / drop-in 里的 servers
     fn ts(ntp: &str, synced: &str, servers: &str) -> FakeCtx {
-        FakeCtx::new().on("timedatectl show -p NTP", 0, &format!("{ntp}{SEP}{synced}{SEP}{servers}"))
+        FakeCtx::new().on(
+            "timedatectl show -p NTP",
+            0,
+            &format!("{ntp}{SEP}{synced}{SEP}{servers}"),
+        )
     }
 
     // ---------------------------------------------------------- timezone
@@ -768,7 +875,10 @@ mod time_tests {
         // 这种"狼来了"比漏报更伤,报久了没人再看真的告警。
         let ctx = FakeCtx::new().on("sysctl -n", 0, "10000\t65000\n");
         let mut a = ResolvedArgs::new();
-        a.insert("set".into(), serde_yaml::from_str("{net.ipv4.ip_local_port_range: \"10000 65000\"}").unwrap());
+        a.insert(
+            "set".into(),
+            serde_yaml::from_str("{net.ipv4.ip_local_port_range: \"10000 65000\"}").unwrap(),
+        );
         let obs = Sysctl.observe(&ctx, &a).unwrap();
         assert_eq!(obs.get("wrong"), Some(""), "空白差异被当成了漂移:{obs:?}");
     }
@@ -778,7 +888,10 @@ mod time_tests {
         // 别把归一扩大成"什么差异都忽略"。
         let ctx = FakeCtx::new().on("sysctl -n", 0, "10000\t60000\n");
         let mut a = ResolvedArgs::new();
-        a.insert("set".into(), serde_yaml::from_str("{net.ipv4.ip_local_port_range: \"10000 65000\"}").unwrap());
+        a.insert(
+            "set".into(),
+            serde_yaml::from_str("{net.ipv4.ip_local_port_range: \"10000 65000\"}").unwrap(),
+        );
         let obs = Sysctl.observe(&ctx, &a).unwrap();
         assert!(obs.get("wrong").unwrap().contains("65000"), "{obs:?}");
     }
@@ -813,7 +926,12 @@ mod time_tests {
     fn destroying_a_timezone_changes_nothing() {
         // 没有"原来的时区"可以改回去 —— 与 hostname 同理。
         let ctx = FakeCtx::new();
-        assert_eq!(Timezone.destroy(&ctx, &args(&[("name", "UTC")]), &Observed::absent()).unwrap(), Outcome::Ok);
+        assert_eq!(
+            Timezone
+                .destroy(&ctx, &args(&[("name", "UTC")]), &Observed::absent())
+                .unwrap(),
+            Outcome::Ok
+        );
         assert!(ctx.calls().is_empty());
     }
 
@@ -855,7 +973,10 @@ mod time_tests {
     fn changed_servers_are_detected() {
         let ctx = ts("yes", "yes", "ntp.ubuntu.com");
         let mut a = ResolvedArgs::new();
-        a.insert("servers".into(), serde_yaml::from_str("[ntp.aliyun.com, cn.pool.ntp.org]").unwrap());
+        a.insert(
+            "servers".into(),
+            serde_yaml::from_str("[ntp.aliyun.com, cn.pool.ntp.org]").unwrap(),
+        );
         let obs = TimeSync.observe(&ctx, &a).unwrap();
         match diff_of(&TimeSync, &a, &obs) {
             Change::Update(f) => assert_eq!(
@@ -870,7 +991,10 @@ mod time_tests {
     fn matching_servers_are_a_noop_so_it_does_not_rewrite_every_run() {
         let ctx = ts("yes", "yes", "ntp.aliyun.com cn.pool.ntp.org");
         let mut a = ResolvedArgs::new();
-        a.insert("servers".into(), serde_yaml::from_str("[ntp.aliyun.com, cn.pool.ntp.org]").unwrap());
+        a.insert(
+            "servers".into(),
+            serde_yaml::from_str("[ntp.aliyun.com, cn.pool.ntp.org]").unwrap(),
+        );
         let obs = TimeSync.observe(&ctx, &a).unwrap();
         assert_eq!(diff_of(&TimeSync, &a, &obs), Change::Ok);
     }
@@ -880,27 +1004,43 @@ mod time_tests {
         // 改发行版的主配置会在系统升级时打架;drop-in 才是可维护的落点。
         let ctx = FakeCtx::new().on("", 0, "");
         let mut a = ResolvedArgs::new();
-        a.insert("servers".into(), serde_yaml::from_str("[ntp.aliyun.com]").unwrap());
+        a.insert(
+            "servers".into(),
+            serde_yaml::from_str("[ntp.aliyun.com]").unwrap(),
+        );
         TimeSync.apply(&ctx, &a, &Change::Update(vec![])).unwrap();
         let body = ctx.written_file(TIMESYNC_DROPIN).expect("应写 drop-in");
         assert_eq!(body, "[Time]\nNTP=ntp.aliyun.com\n");
-        assert!(ctx.written_file("/etc/systemd/timesyncd.conf").is_none(), "不该动主配置");
+        assert!(
+            ctx.written_file("/etc/systemd/timesyncd.conf").is_none(),
+            "不该动主配置"
+        );
     }
 
     #[test]
     fn waiting_for_convergence_that_never_comes_is_a_warn_not_a_hard_failure() {
         // 同步不上通常是网络,不该让整个部署停摆 —— 但必须留痕。
-        let ctx = FakeCtx::new().on("timedatectl set-ntp", 0, "").on("seq 1 60", 1, "");
+        let ctx = FakeCtx::new()
+            .on("timedatectl set-ntp", 0, "")
+            .on("seq 1 60", 1, "");
         let mut a = ResolvedArgs::new();
         a.insert("wait".into(), Yaml::from(true));
-        assert_eq!(TimeSync.apply(&ctx, &a, &Change::Update(vec![])).unwrap(), Outcome::Warn);
+        assert_eq!(
+            TimeSync.apply(&ctx, &a, &Change::Update(vec![])).unwrap(),
+            Outcome::Warn
+        );
     }
 
     #[test]
     fn destroying_time_sync_leaves_the_clock_alone() {
         // 关掉同步对这台机器上**其它**东西是纯粹的伤害。
         let ctx = FakeCtx::new();
-        assert_eq!(TimeSync.destroy(&ctx, &ResolvedArgs::new(), &Observed::absent()).unwrap(), Outcome::Ok);
+        assert_eq!(
+            TimeSync
+                .destroy(&ctx, &ResolvedArgs::new(), &Observed::absent())
+                .unwrap(),
+            Outcome::Ok
+        );
         assert!(ctx.calls().is_empty());
     }
 

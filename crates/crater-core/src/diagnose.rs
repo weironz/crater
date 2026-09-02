@@ -124,9 +124,9 @@ pub fn diagnose(text: &str) -> Vec<Finding> {
             && !out
                 .iter()
                 .any(|f| f.category == rule.finding.category && f.cause == rule.finding.cause)
-            {
-                out.push(rule.finding.clone());
-            }
+        {
+            out.push(rule.finding.clone());
+        }
     }
     out
 }

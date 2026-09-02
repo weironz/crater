@@ -74,9 +74,15 @@ fn fleet_to_yaml(fleet: &crate::fleet::Fleet) -> Yaml {
             Yaml::from("roles"),
             Yaml::Sequence(m.roles.iter().map(|r| Yaml::String(r.clone())).collect()),
         );
-        entry.insert(Yaml::from("vars"), map_to_yaml(
-            &m.vars.iter().map(|(k, v)| (k.clone(), Yaml::String(v.clone()))).collect(),
-        ));
+        entry.insert(
+            Yaml::from("vars"),
+            map_to_yaml(
+                &m.vars
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Yaml::String(v.clone())))
+                    .collect(),
+            ),
+        );
         let y = Yaml::Mapping(entry);
         for role in &m.roles {
             by_group.entry(role.clone()).or_default().push(y.clone());
@@ -148,13 +154,17 @@ mod tests {
     fn a_typo_in_a_variable_name_is_an_error_not_an_empty_string() {
         // 默认 Jinja 会把 `{{ prot }}` 渲染成空串,生成一份语法合法、语义错误的
         // 配置,然后服务带着它启动。宁可在控制端炸。
-        let err = render("listen {{ params.prot }}", &scope()).unwrap_err().to_string();
+        let err = render("listen {{ params.prot }}", &scope())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("渲染失败"), "{err}");
     }
 
     #[test]
     fn a_syntax_error_names_the_line() {
-        let err = render("ok\nok\n{% if %}", &scope()).unwrap_err().to_string();
+        let err = render("ok\nok\n{% if %}", &scope())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("语法错误") && err.contains("3 行"), "{err}");
     }
 
@@ -187,7 +197,10 @@ mod fleet_ctx_tests {
             Member::new("cp2", &["controlplane"]).with_address("10.0.0.12"),
             Member::new("w1", &["worker"]).with_address("10.0.0.21"),
         ]);
-        let mut s = Scope { fleet: Some(fleet), ..Default::default() };
+        let mut s = Scope {
+            fleet: Some(fleet),
+            ..Default::default()
+        };
         s.params.insert("port".into(), Yaml::from(6443));
         s
     }
@@ -202,7 +215,10 @@ mod fleet_ctx_tests {
             &scope_with_fleet(),
         )
         .unwrap();
-        assert_eq!(out, "server cp1 10.0.0.11:6443\nserver cp2 10.0.0.12:6443\n");
+        assert_eq!(
+            out,
+            "server cp1 10.0.0.11:6443\nserver cp2 10.0.0.12:6443\n"
+        );
     }
 
     #[test]
@@ -219,7 +235,11 @@ mod fleet_ctx_tests {
 
     #[test]
     fn groups_are_indexed_by_name_so_the_author_need_not_filter() {
-        let out = render("{{ fleet.worker | length }}/{{ fleet.controlplane | length }}", &scope_with_fleet()).unwrap();
+        let out = render(
+            "{{ fleet.worker | length }}/{{ fleet.controlplane | length }}",
+            &scope_with_fleet(),
+        )
+        .unwrap();
         assert_eq!(out, "1/2");
     }
 
@@ -236,7 +256,9 @@ mod fleet_ctx_tests {
     fn a_scope_without_a_fleet_simply_has_no_fleet_variable() {
         // 单机语境(如 crater plan --local)不该因为引入 fleet 而报错;
         // 用到它的模板会在 strict 模式下明确失败,那正是想要的。
-        let err = render("{{ fleet.controlplane }}", &Scope::default()).unwrap_err().to_string();
+        let err = render("{{ fleet.controlplane }}", &Scope::default())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("渲染失败"), "{err}");
     }
 
@@ -245,7 +267,10 @@ mod fleet_ctx_tests {
         let mut vars = BTreeMap::new();
         vars.insert("rack".to_string(), "r2".to_string());
         let fleet = Fleet::new(vec![Member::new("n1", &["db"]).with_vars(vars)]);
-        let s = Scope { fleet: Some(fleet), ..Default::default() };
+        let s = Scope {
+            fleet: Some(fleet),
+            ..Default::default()
+        };
         assert_eq!(render("{{ fleet.db[0].vars.rack }}", &s).unwrap(), "r2");
     }
 }

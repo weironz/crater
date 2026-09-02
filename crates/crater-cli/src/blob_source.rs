@@ -89,7 +89,9 @@ struct TargetFetches {
 
 impl TargetFetches {
     fn new() -> Self {
-        TargetFetches { manifest: empty_manifest(String::new()) }
+        TargetFetches {
+            manifest: empty_manifest(String::new()),
+        }
     }
 }
 

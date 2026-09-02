@@ -18,7 +18,14 @@ pub fn run(path: &Path) -> Result<()> {
 }
 
 fn print_blueprint(bp: &Blueprint) {
-    println!("蓝图 {}{}", bp.name, bp.version.as_deref().map(|v| format!("  v{v}")).unwrap_or_default());
+    println!(
+        "蓝图 {}{}",
+        bp.name,
+        bp.version
+            .as_deref()
+            .map(|v| format!("  v{v}"))
+            .unwrap_or_default()
+    );
     if let Some(d) = &bp.description {
         println!("{d}");
     }
@@ -52,7 +59,11 @@ fn print_blueprint(bp: &Blueprint) {
     if !bp.fleet.groups.is_empty() {
         println!("\n需要的机群:");
         for (g, c) in &bp.fleet.groups {
-            let n = if c.min == 0 { "可为空".to_string() } else { format!("至少 {} 台", c.min) };
+            let n = if c.min == 0 {
+                "可为空".to_string()
+            } else {
+                format!("至少 {} 台", c.min)
+            };
             println!("  {g:<16}  {n}");
         }
     }
@@ -69,14 +80,25 @@ fn print_blueprint(bp: &Blueprint) {
             let ps: Vec<String> = p
                 .params
                 .iter()
-                .map(|(n, s)| if s.default.is_none() { format!("--set {n}=<必填>") } else { format!("[--set {n}=…]") })
+                .map(|(n, s)| {
+                    if s.default.is_none() {
+                        format!("--set {n}=<必填>")
+                    } else {
+                        format!("[--set {n}=…]")
+                    }
+                })
                 .collect();
             println!("  {:<16}  {} 步  {}", name, p.steps.len(), ps.join(" "));
         }
     }
 
-    println!("\n资源 {} 项 · 物料 {} 份 · 自定义类型 {} 个 · 健康探针 {} 条",
-        bp.resources.len(), bp.materials.len(), bp.types.len(), bp.health.len());
+    println!(
+        "\n资源 {} 项 · 物料 {} 份 · 自定义类型 {} 个 · 健康探针 {} 条",
+        bp.resources.len(),
+        bp.materials.len(),
+        bp.types.len(),
+        bp.health.len()
+    );
 }
 
 /// 单行渲染一个默认值。
@@ -87,7 +109,10 @@ fn compact(v: &crater_ir::eval::Yaml) -> String {
     use crater_ir::eval::Yaml;
     match v {
         Yaml::Sequence(items) => {
-            format!("[{}]", items.iter().map(compact).collect::<Vec<_>>().join(", "))
+            format!(
+                "[{}]",
+                items.iter().map(compact).collect::<Vec<_>>().join(", ")
+            )
         }
         Yaml::Mapping(m) => format!(
             "{{{}}}",
@@ -103,13 +128,26 @@ fn compact(v: &crater_ir::eval::Yaml) -> String {
 fn inspect_stack(path: &Path) -> Result<()> {
     let st = crater_ir::stack::from_path(path)?;
     let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    println!("栈 {} —— {} 份蓝图,apply 自上而下、destroy 逆序\n", st.name, st.uses.len());
+    println!(
+        "栈 {} —— {} 份蓝图,apply 自上而下、destroy 逆序\n",
+        st.name,
+        st.uses.len()
+    );
     for (i, u) in st.uses.iter().enumerate() {
         let p = crater_ir::stack::resolve_ref(&u.blueprint, &dir)?;
-        println!("── [{}/{}] {} ({})", i + 1, st.uses.len(), u.label(), p.display());
+        println!(
+            "── [{}/{}] {} ({})",
+            i + 1,
+            st.uses.len(),
+            u.label(),
+            p.display()
+        );
         if !u.params.is_empty() {
-            let kv: Vec<String> = u.params.iter()
-                .map(|(k, v)| format!("{k}={}", compact(v))).collect();
+            let kv: Vec<String> = u
+                .params
+                .iter()
+                .map(|(k, v)| format!("{k}={}", compact(v)))
+                .collect();
             println!("   栈给的参数: {}", kv.join(" "));
         }
         if !u.groups.is_empty() {

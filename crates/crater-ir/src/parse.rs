@@ -18,8 +18,8 @@ use crate::schema::{ParamSpec, ParamType, Params, Stage};
 use crate::selector::Selector;
 use crate::{Error, Result};
 use serde_yaml::Value as Y;
-use std::path::{Path, PathBuf};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 /// 资源条目允许的步骤关键字(其余 key 视为模块名)。
 const RESOURCE_KEYWORDS: &[&str] = &["id", "name", "target", "when", "each", "deps"];
@@ -58,7 +58,10 @@ pub fn blueprint_from_path(path: &Path) -> Result<Blueprint> {
 
 /// 蓝图文件的 stem:`k8s.blueprint.yaml` → `k8s`(去掉 `.blueprint` 与扩展名)。
 fn blueprint_stem(path: &Path) -> String {
-    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
     name.strip_suffix(".yaml")
         .or_else(|| name.strip_suffix(".yml"))
         .unwrap_or(name)
@@ -161,27 +164,45 @@ fn assign_lines(bp: &mut Blueprint, idx: &crate::loc::LineIndex) {
     let res = idx.list_items(&["resources"]);
     bp.resources.iter_mut().for_each(|r| put(&mut r.line, &res));
     let mats = idx.list_items(&["materials"]);
-    bp.materials.iter_mut().for_each(|m| put(&mut m.line, &mats));
+    bp.materials
+        .iter_mut()
+        .for_each(|m| put(&mut m.line, &mats));
     let pre = idx.list_items(&["preflight"]);
     bp.preflight.iter_mut().for_each(|a| put(&mut a.line, &pre));
     let health = idx.list_items(&["health"]);
     bp.health.iter_mut().for_each(|h| put(&mut h.line, &health));
     for (name, proc) in bp.procedures.iter_mut() {
         let steps = idx.list_items(&["procedures", name, "steps"]);
-        proc.steps.iter_mut().for_each(|st| put(&mut st.line, &steps));
+        proc.steps
+            .iter_mut()
+            .for_each(|st| put(&mut st.line, &steps));
     }
 }
 
 fn parse_structure(text: &str) -> Result<Blueprint> {
     let root: Y = serde_yaml::from_str(text)?;
-    let m = root.as_mapping().ok_or_else(|| Error::parse("blueprint 顶层应是一个 map"))?;
+    let m = root
+        .as_mapping()
+        .ok_or_else(|| Error::parse("blueprint 顶层应是一个 map"))?;
 
     known_keys(
         m,
         &[
-            "name", "version", "description", "params", "requires", "materials",
-            "preflight", "types", "resources", "procedures", "health", "parts",
-            "fleet", "cast", "facts",
+            "name",
+            "version",
+            "description",
+            "params",
+            "requires",
+            "materials",
+            "preflight",
+            "types",
+            "resources",
+            "procedures",
+            "health",
+            "parts",
+            "fleet",
+            "cast",
+            "facts",
         ],
         "blueprint",
     )?;
@@ -252,7 +273,9 @@ fn split_entry<'a>(
             let names: Vec<&str> = modules.iter().map(|(n, _)| n.as_str()).collect();
             let hint = names
                 .iter()
-                .filter_map(|n| crate::types::suggest(n).map(|s| format!("`{n}` 是不是想写 `{s}`?")))
+                .filter_map(|n| {
+                    crate::types::suggest(n).map(|s| format!("`{n}` 是不是想写 `{s}`?"))
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
             Err(Error::parse(format!(
@@ -308,9 +331,12 @@ fn resolve_selector(src: &str, cast: &Cast) -> Result<Selector> {
     Selector::parse(src).map_err(|e| {
         // 看起来像个光秃秃的名字 → 多半是想引用选角表却拼错了。
         let hint = if !src.contains('.') && !src.contains('(') && !cast.is_empty() {
-            closest(src.trim(), &cast.keys().map(String::as_str).collect::<Vec<_>>())
-                .map(|c| format!(",是不是想写 cast 里的 `{c}`?"))
-                .unwrap_or_default()
+            closest(
+                src.trim(),
+                &cast.keys().map(String::as_str).collect::<Vec<_>>(),
+            )
+            .map(|c| format!(",是不是想写 cast 里的 `{c}`?"))
+            .unwrap_or_default()
         } else {
             String::new()
         };
@@ -329,15 +355,17 @@ fn parse_cast(v: Option<&Y>, fleet: &FleetContract) -> Result<Cast> {
         let name = scalar_to_string(k);
         let src = scalar_to_string(val);
         // 选角表自己不能套选角表 —— 一层间接已经够,两层就开始要跳读了。
-        let sel = Selector::parse(&src)
-            .map_err(|e| Error::parse(format!("cast `{name}`:{e}")))?;
+        let sel = Selector::parse(&src).map_err(|e| Error::parse(format!("cast `{name}`:{e}")))?;
         // 引用了 fleet 没声明的组 → 当场报错。这是契约存在的意义。
         if !fleet.groups.is_empty() {
             for role in sel.roles() {
                 if !fleet.groups.contains_key(role) {
-                    let hint = closest(role, &fleet.groups.keys().map(String::as_str).collect::<Vec<_>>())
-                        .map(|c| format!(",是不是 `{c}`?"))
-                        .unwrap_or_default();
+                    let hint = closest(
+                        role,
+                        &fleet.groups.keys().map(String::as_str).collect::<Vec<_>>(),
+                    )
+                    .map(|c| format!(",是不是 `{c}`?"))
+                    .unwrap_or_default();
                     return Err(Error::parse(format!(
                         "cast `{name}` 引用了组 `{role}`,但 `fleet.groups` 没声明它{hint}"
                     )));
@@ -367,7 +395,10 @@ fn parse_fleet(v: Option<&Y>) -> Result<FleetContract> {
             groups.insert(
                 name,
                 GroupContract {
-                    min: body.get(Y::from("min")).and_then(|v| v.as_u64()).unwrap_or(1) as usize,
+                    min: body
+                        .get(Y::from("min"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(1) as usize,
                 },
             );
         }
@@ -390,8 +421,8 @@ pub fn parse_flags(v: &Y) -> Result<Vec<Flag>> {
             .as_mapping()
             .ok_or_else(|| Error::parse(format!("flags[{i}]:应是 map")))?;
         known_keys(m, &["name", "value", "when"], &format!("flags[{i}]"))?;
-        let name = get_str(m, "name")
-            .ok_or_else(|| Error::parse(format!("flags[{i}]:缺少 `name:`")))?;
+        let name =
+            get_str(m, "name").ok_or_else(|| Error::parse(format!("flags[{i}]:缺少 `name:`")))?;
         if name.contains("${") {
             return Err(Error::parse(format!(
                 "flags[{i}] `name: {name}`:flag 名禁止插值 —— \
@@ -429,7 +460,10 @@ pub fn value_from_yaml(v: &Y) -> Result<Value> {
             }
         }
         Y::Sequence(items) => Value::List(
-            items.iter().map(value_from_yaml).collect::<Result<Vec<_>>>()?,
+            items
+                .iter()
+                .map(value_from_yaml)
+                .collect::<Result<Vec<_>>>()?,
         ),
         Y::Mapping(m) => {
             let mut out = BTreeMap::new();
@@ -468,7 +502,10 @@ fn parse_common(kw: &BTreeMap<String, &Y>, cast: &Cast) -> Result<Common> {
     };
     let each = match kw.get("each") {
         Some(Y::Sequence(items)) => Some(Each::List(
-            items.iter().map(value_from_yaml).collect::<Result<Vec<_>>>()?,
+            items
+                .iter()
+                .map(value_from_yaml)
+                .collect::<Result<Vec<_>>>()?,
         )),
         Some(scalar) => Some(Each::Expr(
             CelExpr::compile(&scalar_to_string(scalar))
@@ -481,7 +518,14 @@ fn parse_common(kw: &BTreeMap<String, &Y>, cast: &Cast) -> Result<Common> {
         .and_then(|v| v.as_sequence())
         .map(|s| s.iter().map(scalar_to_string).collect())
         .unwrap_or_default();
-    Ok(Common { id, name, on, when, each, deps })
+    Ok(Common {
+        id,
+        name,
+        on,
+        when,
+        each,
+        deps,
+    })
 }
 
 fn parse_resources(v: Option<&Y>, cast: &Cast) -> Result<Vec<ResourceDecl>> {
@@ -499,7 +543,11 @@ fn parse_resources(v: Option<&Y>, cast: &Cast) -> Result<Vec<ResourceDecl>> {
         let (ty, args, kw) = split_entry(m, RESOURCE_KEYWORDS, &format!("resources[{i}]"))?;
         let c = parse_common(&kw, cast)?;
         let n = counters.entry(ty.clone()).or_insert(0);
-        let auto = if *n == 0 { ty.clone() } else { format!("{ty}{n}") };
+        let auto = if *n == 0 {
+            ty.clone()
+        } else {
+            format!("{ty}{n}")
+        };
         *n += 1;
         out.push(ResourceDecl {
             id: c.id.unwrap_or(auto),
@@ -528,10 +576,21 @@ fn parse_procedures(v: Option<&Y>, cast: &Cast) -> Result<BTreeMap<String, Proce
         let body = body
             .as_mapping()
             .ok_or_else(|| Error::parse(format!("procedure `{name}`:应是 map")))?;
-        known_keys(body, &["params", "steps", "description"], &format!("procedure `{name}`"))?;
+        known_keys(
+            body,
+            &["params", "steps", "description"],
+            &format!("procedure `{name}`"),
+        )?;
         let params = parse_params(body.get(Y::from("params")))?;
         let steps = parse_steps(body.get(Y::from("steps")), &name, cast)?;
-        out.insert(name.clone(), Procedure { name, params, steps });
+        out.insert(
+            name.clone(),
+            Procedure {
+                name,
+                params,
+                steps,
+            },
+        );
     }
     Ok(out)
 }
@@ -540,12 +599,18 @@ fn parse_steps(v: Option<&Y>, proc_name: &str, cast: &Cast) -> Result<Vec<Step>>
     let seq = match v {
         None | Some(Y::Null) => return Ok(vec![]),
         Some(Y::Sequence(s)) => s,
-        Some(_) => return Err(Error::parse(format!("procedure `{proc_name}`:`steps:` 应是列表"))),
+        Some(_) => {
+            return Err(Error::parse(format!(
+                "procedure `{proc_name}`:`steps:` 应是列表"
+            )))
+        }
     };
     let mut out = Vec::new();
     for (i, item) in seq.iter().enumerate() {
         let what = format!("procedure `{proc_name}` steps[{i}]");
-        let m = item.as_mapping().ok_or_else(|| Error::parse(format!("{what}:应是 map")))?;
+        let m = item
+            .as_mapping()
+            .ok_or_else(|| Error::parse(format!("{what}:应是 map")))?;
         let (ty, args, kw) = split_entry(m, STEP_KEYWORDS, &what)?;
         let c = parse_common(&kw, cast)?;
         let exports = match kw.get("exports") {
@@ -553,15 +618,29 @@ fn parse_steps(v: Option<&Y>, proc_name: &str, cast: &Cast) -> Result<Vec<Step>>
                 .iter()
                 .map(|(k, v)| (scalar_to_string(k), scalar_to_string(v)))
                 .collect(),
-            Some(_) => return Err(Error::parse(format!("{what}:`exports:` 应是 map(fact 名 → 取值命令)"))),
+            Some(_) => {
+                return Err(Error::parse(format!(
+                    "{what}:`exports:` 应是 map(fact 名 → 取值命令)"
+                )))
+            }
             None => BTreeMap::new(),
         };
         let strategy = match kw.get("strategy") {
             Some(Y::Mapping(sm)) => {
-                known_keys(sm, &["throttle", "retries", "ignore_errors"], &format!("{what} strategy"))?;
+                known_keys(
+                    sm,
+                    &["throttle", "retries", "ignore_errors"],
+                    &format!("{what} strategy"),
+                )?;
                 Strategy {
-                    throttle: sm.get(Y::from("throttle")).and_then(|v| v.as_u64()).map(|n| n as usize),
-                    retries: sm.get(Y::from("retries")).and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                    throttle: sm
+                        .get(Y::from("throttle"))
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as usize),
+                    retries: sm
+                        .get(Y::from("retries"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
                     ignore_errors: sm
                         .get(Y::from("ignore_errors"))
                         .and_then(|v| v.as_bool())
@@ -595,14 +674,24 @@ fn parse_types(v: Option<&Y>) -> Result<Vec<TypeDef>> {
     };
     let mut out = Vec::new();
     for (i, item) in seq.iter().enumerate() {
-        let m = item.as_mapping().ok_or_else(|| Error::parse(format!("types[{i}]:应是 map")))?;
-        known_keys(m, &["name", "args", "observe", "apply", "destroy", "upgrade"], &format!("types[{i}]"))?;
-        let name = get_str(m, "name")
-            .ok_or_else(|| Error::parse(format!("types[{i}]:缺少 `name:`")))?;
+        let m = item
+            .as_mapping()
+            .ok_or_else(|| Error::parse(format!("types[{i}]:应是 map")))?;
+        known_keys(
+            m,
+            &["name", "args", "observe", "apply", "destroy", "upgrade"],
+            &format!("types[{i}]"),
+        )?;
+        let name =
+            get_str(m, "name").ok_or_else(|| Error::parse(format!("types[{i}]:缺少 `name:`")))?;
         let ob = m
             .get(Y::from("observe"))
             .and_then(|v| v.as_mapping())
-            .ok_or_else(|| Error::parse(format!("type `{name}`:缺少 `observe:`(五动词里唯一强制的一个)")))?;
+            .ok_or_else(|| {
+                Error::parse(format!(
+                    "type `{name}`:缺少 `observe:`(五动词里唯一强制的一个)"
+                ))
+            })?;
         known_keys(ob, &["cmd", "parse"], &format!("type `{name}` observe"))?;
         let observe = ObserveSpec {
             cmd: get_str(ob, "cmd")
@@ -610,15 +699,20 @@ fn parse_types(v: Option<&Y>) -> Result<Vec<TypeDef>> {
             parse: ob
                 .get(Y::from("parse"))
                 .and_then(|v| v.as_mapping())
-                .map(|pm| pm.iter().map(|(k, v)| (scalar_to_string(k), scalar_to_string(v))).collect())
+                .map(|pm| {
+                    pm.iter()
+                        .map(|(k, v)| (scalar_to_string(k), scalar_to_string(v)))
+                        .collect()
+                })
                 .unwrap_or_default(),
         };
         out.push(TypeDef {
             name: name.clone(),
             args: parse_params(m.get(Y::from("args")))?,
             observe,
-            apply: get_str(m, "apply")
-                .ok_or_else(|| Error::parse(format!("type `{name}`:缺少 `apply:`(procedure 名)")))?,
+            apply: get_str(m, "apply").ok_or_else(|| {
+                Error::parse(format!("type `{name}`:缺少 `apply:`(procedure 名)"))
+            })?,
             destroy: get_str(m, "destroy"),
             upgrade: get_str(m, "upgrade"),
         });
@@ -640,23 +734,32 @@ fn parse_params(v: Option<&Y>) -> Result<Params> {
             .ok_or_else(|| Error::parse(format!("param `{name}`:应是 map")))?;
         known_keys(
             b,
-            &["type", "default", "required", "secret", "stage", "desc", "description"],
+            &[
+                "type",
+                "default",
+                "required",
+                "secret",
+                "stage",
+                "desc",
+                "description",
+            ],
             &format!("param `{name}`"),
         )?;
         let ty = match b.get(Y::from("type")) {
-            Some(tv) => ParamType::from_yaml(tv)
-                .map_err(|e| Error::parse(format!("param `{name}`:{e}")))?,
+            Some(tv) => {
+                ParamType::from_yaml(tv).map_err(|e| Error::parse(format!("param `{name}`:{e}")))?
+            }
             None => ParamType::default(),
         };
         let stage = match b.get(Y::from("stage")).and_then(|v| v.as_str()) {
             Some("build") => Stage::Build,
             Some("deploy") | None => Stage::Deploy,
-            Some("apply") => {
-                return Err(Error::parse(format!(
-                    "param `{name}`:`stage: apply` 已废止 —— apply 是动词,参数分期请写 `stage: deploy`"
-                )))
+            Some("apply") => return Err(Error::parse(format!(
+                "param `{name}`:`stage: apply` 已废止 —— apply 是动词,参数分期请写 `stage: deploy`"
+            ))),
+            Some(other) => {
+                return Err(Error::parse(format!("param `{name}`:未知 stage `{other}`")))
             }
-            Some(other) => return Err(Error::parse(format!("param `{name}`:未知 stage `{other}`"))),
         };
         out.insert(
             name.clone(),
@@ -664,8 +767,14 @@ fn parse_params(v: Option<&Y>) -> Result<Params> {
                 name,
                 ty,
                 default: b.get(Y::from("default")).cloned(),
-                required: b.get(Y::from("required")).and_then(|v| v.as_bool()).unwrap_or(false),
-                secret: b.get(Y::from("secret")).and_then(|v| v.as_bool()).unwrap_or(false),
+                required: b
+                    .get(Y::from("required"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                secret: b
+                    .get(Y::from("secret"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 stage,
                 desc: get_str(b, "desc").or_else(|| get_str(b, "description")),
             },
@@ -680,8 +789,12 @@ fn parse_params(v: Option<&Y>) -> Result<Params> {
 /// (含探针函数),因为这是声明位置;资源参数那边仍然只许名词(E310)。
 /// 一次计算、多处引用,正是 `cast:` 对 selector 做过的事。
 fn parse_derived_facts(v: Option<&Y>) -> Result<BTreeMap<String, CelExpr>> {
-    let Some(v) = v else { return Ok(BTreeMap::new()) };
-    let m = v.as_mapping().ok_or_else(|| Error::parse("`facts:` 应是 map(名字: 表达式)"))?;
+    let Some(v) = v else {
+        return Ok(BTreeMap::new());
+    };
+    let m = v
+        .as_mapping()
+        .ok_or_else(|| Error::parse("`facts:` 应是 map(名字: 表达式)"))?;
     let mut out = BTreeMap::new();
     for (k, val) in m {
         let name = k
@@ -697,8 +810,7 @@ fn parse_derived_facts(v: Option<&Y>) -> Result<BTreeMap<String, CelExpr>> {
             .and_then(|r| r.strip_suffix('}'))
             .unwrap_or(raw.trim())
             .to_string();
-        let expr = CelExpr::compile(&src)
-            .map_err(|e| Error::parse(format!("facts.{name}:{e}")))?;
+        let expr = CelExpr::compile(&src).map_err(|e| Error::parse(format!("facts.{name}:{e}")))?;
         out.insert(name, expr);
     }
     Ok(out)
@@ -712,10 +824,20 @@ fn parse_materials(v: Option<&Y>) -> Result<Vec<Material>> {
     };
     let mut out = Vec::new();
     for (i, item) in seq.iter().enumerate() {
-        let m = item.as_mapping().ok_or_else(|| Error::parse(format!("materials[{i}]:应是 map")))?;
+        let m = item
+            .as_mapping()
+            .ok_or_else(|| Error::parse(format!("materials[{i}]:应是 map")))?;
         known_keys(
             m,
-            &["name", "file", "image", "os_package", "sha256", "unzip", "when"],
+            &[
+                "name",
+                "file",
+                "image",
+                "os_package",
+                "sha256",
+                "unzip",
+                "when",
+            ],
             &format!("materials[{i}]"),
         )?;
         let name = get_str(m, "name")
@@ -770,7 +892,9 @@ fn parse_preflight(v: Option<&Y>, cast: &Cast) -> Result<Vec<Assertion>> {
     };
     let mut out = Vec::new();
     for (i, item) in seq.iter().enumerate() {
-        let m = item.as_mapping().ok_or_else(|| Error::parse(format!("preflight[{i}]:应是 map")))?;
+        let m = item
+            .as_mapping()
+            .ok_or_else(|| Error::parse(format!("preflight[{i}]:应是 map")))?;
         known_keys(m, &["assert", "msg", "target"], &format!("preflight[{i}]"))?;
         let src = get_str(m, "assert")
             .ok_or_else(|| Error::parse(format!("preflight[{i}]:缺少 `assert:`")))?;
@@ -796,8 +920,11 @@ fn parse_health(v: Option<&Y>, cast: &Cast) -> Result<Vec<HealthProbe>> {
     };
     let mut out = Vec::new();
     for (i, item) in seq.iter().enumerate() {
-        let m = item.as_mapping().ok_or_else(|| Error::parse(format!("health[{i}]:应是 map")))?;
-        let (ty, args, kw) = split_entry(m, &["target", "timeout", "name"], &format!("health[{i}]"))?;
+        let m = item
+            .as_mapping()
+            .ok_or_else(|| Error::parse(format!("health[{i}]:应是 map")))?;
+        let (ty, args, kw) =
+            split_entry(m, &["target", "timeout", "name"], &format!("health[{i}]"))?;
         out.push(HealthProbe {
             ty,
             args,
@@ -908,7 +1035,10 @@ pub fn scalar_to_string(v: &Y) -> String {
         Y::Number(n) => n.to_string(),
         Y::Bool(b) => b.to_string(),
         Y::Null => String::new(),
-        other => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
+        other => serde_yaml::to_string(other)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
     }
 }
 
@@ -924,10 +1054,15 @@ mod cast_fleet_tests {
 
     #[test]
     fn a_cast_name_expands_to_its_selector_at_parse_time() {
-        let b = bp(&format!("{HEAD}resources:\n  - service: {{name: kubelet, state: running}}\n    target: seed\n")).unwrap();
+        let b = bp(&format!(
+            "{HEAD}resources:\n  - service: {{name: kubelet, state: running}}\n    target: seed\n"
+        ))
+        .unwrap();
         // 展开发生在解析期:运行期看到的就是完整 selector,零间接。
         match &b.resources[0].on {
-            Selector::First(inner) => assert!(matches!(**inner, Selector::Role(ref r) if r == "controlplane")),
+            Selector::First(inner) => {
+                assert!(matches!(**inner, Selector::Role(ref r) if r == "controlplane"))
+            }
             other => panic!("未展开:{other:?}"),
         }
     }
@@ -935,9 +1070,11 @@ mod cast_fleet_tests {
     #[test]
     fn a_misspelled_cast_name_is_caught_with_a_suggestion() {
         // 光秃秃的名字既不是 role.x 也不是 host.x —— 只可能是想引用选角表。
-        let err = bp(&format!("{HEAD}resources:\n  - service: {{name: k, state: running}}\n    target: sed\n"))
-            .unwrap_err()
-            .to_string();
+        let err = bp(&format!(
+            "{HEAD}resources:\n  - service: {{name: k, state: running}}\n    target: sed\n"
+        ))
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("seed"), "{err}");
     }
 
@@ -967,7 +1104,9 @@ mod cast_fleet_tests {
     #[test]
     fn cast_may_not_chain_into_another_cast_entry() {
         // 一层间接够用;两层就要跳读了。这条限制是刻意的。
-        let err = bp("name: t\ncast:\n  a: role.x\n  b: first(a)\n").unwrap_err().to_string();
+        let err = bp("name: t\ncast:\n  a: role.x\n  b: first(a)\n")
+            .unwrap_err()
+            .to_string();
         assert!(!err.is_empty());
     }
 }

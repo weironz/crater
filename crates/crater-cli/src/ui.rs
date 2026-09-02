@@ -58,7 +58,13 @@ impl AppState {
             *n += 1;
             *n
         };
-        self.jobs.lock().unwrap().insert(id, Job { title, ..Default::default() });
+        self.jobs.lock().unwrap().insert(
+            id,
+            Job {
+                title,
+                ..Default::default()
+            },
+        );
         let jobs = self.jobs.clone();
         tokio::spawn(async move {
             let push = |jobs: &Arc<Mutex<BTreeMap<u64, Job>>>, line: String| {
@@ -127,13 +133,18 @@ impl AppState {
 /// — `?token=` (first visit; answered with a cookie redirect), the cookie, or
 /// an `Authorization: Bearer` header. Constant requirement, no sessions.
 async fn auth_mw(State(st): State<AppState>, req: Request, next: Next) -> Response {
-    let Some(want) = &st.token else { return next.run(req).await };
+    let Some(want) = &st.token else {
+        return next.run(req).await;
+    };
     // ?token=<t> → set cookie, redirect to clean URL (login-by-link).
     if let Some(q) = req.uri().query() {
         if let Some(t) = q.split('&').find_map(|kv| kv.strip_prefix("token=")) {
             if t == want {
                 return (
-                    [(header::SET_COOKIE, format!("crater_token={t}; Path=/; SameSite=Strict"))],
+                    [(
+                        header::SET_COOKIE,
+                        format!("crater_token={t}; Path=/; SameSite=Strict"),
+                    )],
                     Redirect::to(req.uri().path()),
                 )
                     .into_response();
@@ -144,7 +155,10 @@ async fn auth_mw(State(st): State<AppState>, req: Request, next: Next) -> Respon
         .headers()
         .get(header::COOKIE)
         .and_then(|c| c.to_str().ok())
-        .is_some_and(|c| c.split(';').any(|kv| kv.trim() == format!("crater_token={want}")));
+        .is_some_and(|c| {
+            c.split(';')
+                .any(|kv| kv.trim() == format!("crater_token={want}"))
+        });
     let bearer_ok = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -170,8 +184,7 @@ pub async fn serve(
     let ws = match workspace {
         Some(p) => {
             // 不存在就建出来:第一次用不该被"先去 mkdir"挡住。
-            std::fs::create_dir_all(&p)
-                .with_context(|| format!("建工作区目录 {}", p.display()))?;
+            std::fs::create_dir_all(&p).with_context(|| format!("建工作区目录 {}", p.display()))?;
             p.canonicalize()?
         }
         None => std::env::current_dir()?.canonicalize()?,
@@ -196,7 +209,10 @@ pub async fn serve(
     crate::ui_run::sweep_on_start();
     // 定时 verify 调度器:读 app 文件的 verify.interval,到点起 job。
     crate::ui_app::start_scheduler();
-    let st = AppState { token, ..Default::default() };
+    let st = AppState {
+        token,
+        ..Default::default()
+    };
     let app = Router::new()
         .route("/", get(index))
         .route("/view/dashboard", get(view_dashboard))
@@ -218,11 +234,17 @@ pub async fn serve(
         .route("/api/facts", get(crate::ui_contract::facts))
         .route("/api/schema", post(crate::ui_contract::schema))
         .route("/api/lint", post(crate::ui_contract::lint))
-        .route("/api/inventory/skeleton", post(crate::ui_contract::inventory_skeleton))
+        .route(
+            "/api/inventory/skeleton",
+            post(crate::ui_contract::inventory_skeleton),
+        )
         // ---- 编辑器(阶段 2)----
         .route("/view/edit", get(crate::ui_edit::view_edit))
         .route("/api/files", get(crate::ui_edit::files))
-        .route("/api/file", get(crate::ui_edit::file_get).post(crate::ui_edit::file_put))
+        .route(
+            "/api/file",
+            get(crate::ui_edit::file_get).post(crate::ui_edit::file_put),
+        )
         // 物料可能是几十 MB 的二进制,默认 2MB 的 body 上限挡不住它。
         .route(
             "/api/upload",
@@ -237,7 +259,10 @@ pub async fn serve(
         .route("/api/apps", get(crate::ui_app::apps))
         .route("/api/lint-project", post(crate::ui_app::lint_project))
         .route("/api/app/create", post(crate::ui_app::create_app))
-        .route("/api/blueprint/skeleton", post(crate::ui_contract::blueprint_skeleton))
+        .route(
+            "/api/blueprint/skeleton",
+            post(crate::ui_contract::blueprint_skeleton),
+        )
         .route("/api/catalog", get(crate::ui_catalog::catalog))
         .route("/api/repos", get(crate::ui_catalog::repos))
         .route("/api/repos/add", post(crate::ui_catalog::repo_add))
@@ -245,7 +270,10 @@ pub async fn serve(
         .route("/api/repos/pull", post(crate::ui_catalog::repo_pull))
         .route("/api/catalog/fit", get(crate::ui_catalog::fit))
         .route("/api/inventory/read", get(crate::ui_inventory::inv_read))
-        .route("/api/inventory/create", post(crate::ui_inventory::inv_create))
+        .route(
+            "/api/inventory/create",
+            post(crate::ui_inventory::inv_create),
+        )
         .route(
             "/api/inventory/host",
             post(crate::ui_inventory::host_add)
@@ -256,7 +284,10 @@ pub async fn serve(
             "/api/inventory/group",
             post(crate::ui_inventory::group_set).delete(crate::ui_inventory::group_remove),
         )
-        .route("/api/inventory/liveness", get(crate::ui_inventory::liveness))
+        .route(
+            "/api/inventory/liveness",
+            get(crate::ui_inventory::liveness),
+        )
         .route("/api/inventory/probe", post(crate::ui_inventory::probe))
         .route("/api/context", post(crate::ui_contract::context))
         .route("/api/patch", post(crate::ui_contract::patch))
@@ -264,7 +295,10 @@ pub async fn serve(
         .route("/api/file/rename", post(crate::ui_edit::file_rename))
         .route("/view/catalog", get(crate::ui_catalog::view_catalog))
         .route("/view/overview", get(crate::ui_overview::view_overview))
-        .route("/api/record/{id}", axum::routing::delete(crate::ui_overview::delete_record))
+        .route(
+            "/api/record/{id}",
+            axum::routing::delete(crate::ui_overview::delete_record),
+        )
         .route("/api/jobs", get(crate::ui_run::jobs_fragment))
         .route("/api/job2/{id}", get(crate::ui_run::tail))
         .route("/api/job2/{id}/cancel", post(crate::ui_run::cancel))
@@ -289,7 +323,9 @@ async fn htmx_js() -> impl IntoResponse {
 }
 
 fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 // ---- page shell (static; no format! so CSS braces stay literal) -------------
@@ -447,7 +483,6 @@ async fn view_dashboard() -> Html<&'static str> {
     )
 }
 
-
 // ---- data fragments (polled) ------------------------------------------------
 
 fn card(label: &str, value: usize, kind: &str) -> String {
@@ -457,7 +492,12 @@ fn card(label: &str, value: usize, kind: &str) -> String {
 async fn stats_fragment() -> Html<String> {
     let store = match TursoStore::open_read().await {
         Ok(s) => s,
-        Err(e) => return Html(format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string()))),
+        Err(e) => {
+            return Html(format!(
+                "<div class='empty fail'>db error: {}</div>",
+                esc(&e.to_string())
+            ))
+        }
     };
     let deps = store.list_deployments().await.unwrap_or_default();
     let mut deployments: BTreeSet<String> = BTreeSet::new();
@@ -488,11 +528,21 @@ async fn deployments_fragment() -> Html<String> {
 async fn render_deployments() -> String {
     let store = match TursoStore::open_read().await {
         Ok(s) => s,
-        Err(e) => return format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string())),
+        Err(e) => {
+            return format!(
+                "<div class='empty fail'>db error: {}</div>",
+                esc(&e.to_string())
+            )
+        }
     };
     let deps = match store.list_deployments().await {
         Ok(d) => d,
-        Err(e) => return format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string())),
+        Err(e) => {
+            return format!(
+                "<div class='empty fail'>db error: {}</div>",
+                esc(&e.to_string())
+            )
+        }
     };
     let toolbar = "<div class='toolbar'><button class='btn' hx-post='/api/verify' hx-target='#jobs' hx-swap='innerHTML'>↻ Verify now</button></div>";
     if deps.is_empty() {
@@ -523,18 +573,32 @@ async fn render_deployments() -> String {
         }
     }
     let join = |s: BTreeSet<String>| {
-        if s.len() == 1 { s.into_iter().next().unwrap() } else { format!("{} (mixed)", s.into_iter().collect::<Vec<_>>().join(",")) }
+        if s.len() == 1 {
+            s.into_iter().next().unwrap()
+        } else {
+            format!("{} (mixed)", s.into_iter().collect::<Vec<_>>().join(","))
+        }
     };
     let mut rows = String::new();
     for (dep, a) in by {
         let pill = if a.drift > 0 {
-            format!("<span class='pill drift'><span class='d'></span>DRIFT {}/{}</span>", a.drift, a.hosts)
+            format!(
+                "<span class='pill drift'><span class='d'></span>DRIFT {}/{}</span>",
+                a.drift, a.hosts
+            )
         } else if a.ok == a.hosts && a.hosts > 0 {
-            format!("<span class='pill ok'><span class='d'></span>ok {}/{}</span>", a.ok, a.hosts)
+            format!(
+                "<span class='pill ok'><span class='d'></span>ok {}/{}</span>",
+                a.ok, a.hosts
+            )
         } else {
             "<span class='pill unknown'><span class='d'></span>unknown</span>".to_string()
         };
-        let checked = if a.checked > 0 { state::fmt_epoch(a.checked) } else { "—".to_string() };
+        let checked = if a.checked > 0 {
+            state::fmt_epoch(a.checked)
+        } else {
+            "—".to_string()
+        };
         // heal: plain confirm. delete: TYPE-THE-NAME prompt (D-099) — htmx
         // sends the answer as HX-Prompt; the server only proceeds on equality.
         // plan: read-only preview, no confirm (D-100). heal: plain confirm.
@@ -559,11 +623,21 @@ async fn render_deployments() -> String {
 async fn hosts_fragment() -> Html<String> {
     let store = match TursoStore::open_read().await {
         Ok(s) => s,
-        Err(e) => return Html(format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string()))),
+        Err(e) => {
+            return Html(format!(
+                "<div class='empty fail'>db error: {}</div>",
+                esc(&e.to_string())
+            ))
+        }
     };
     let deps = match store.list_deployments().await {
         Ok(d) => d,
-        Err(e) => return Html(format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string()))),
+        Err(e) => {
+            return Html(format!(
+                "<div class='empty fail'>db error: {}</div>",
+                esc(&e.to_string())
+            ))
+        }
     };
     if deps.is_empty() {
         return Html("<div class='empty'>no hosts with deployments</div>".into());
@@ -596,7 +670,11 @@ async fn hosts_fragment() -> Html<String> {
         } else {
             "<span class='pill unknown'><span class='d'></span>unknown</span>".to_string()
         };
-        let tags: String = h.deps.iter().map(|d| format!("<span class='tag'>{}</span>", esc(d))).collect();
+        let tags: String = h
+            .deps
+            .iter()
+            .map(|d| format!("<span class='tag'>{}</span>", esc(d)))
+            .collect();
         rows.push_str(&format!(
             "<tr><td class='mono'>{}</td><td class='num'>{}</td><td>{}</td><td>{}</td><td class='muted mono'>{}</td></tr>",
             esc(&host), h.deps.len(), tags, pill, state::fmt_epoch(h.last)
@@ -610,11 +688,21 @@ async fn hosts_fragment() -> Html<String> {
 async fn history_fragment() -> Html<String> {
     let store = match TursoStore::open_read().await {
         Ok(s) => s,
-        Err(e) => return Html(format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string()))),
+        Err(e) => {
+            return Html(format!(
+                "<div class='empty fail'>db error: {}</div>",
+                esc(&e.to_string())
+            ))
+        }
     };
     let runs = match store.history(50).await {
         Ok(r) => r,
-        Err(e) => return Html(format!("<div class='empty fail'>db error: {}</div>", esc(&e.to_string()))),
+        Err(e) => {
+            return Html(format!(
+                "<div class='empty fail'>db error: {}</div>",
+                esc(&e.to_string())
+            ))
+        }
     };
     if runs.is_empty() {
         return Html("<div class='empty'>no activity yet</div>".into());
@@ -699,7 +787,13 @@ async fn verify_action(State(st): State<AppState>) -> Html<String> {
     }
     let id = st.spawn_job(
         "verify".into(),
-        vec!["task".into(), "list".into(), "--verify".into(), "-i".into(), INVENTORY.into()],
+        vec![
+            "task".into(),
+            "list".into(),
+            "--verify".into(),
+            "-i".into(),
+            INVENTORY.into(),
+        ],
     );
     job_panel(id)
 }
@@ -724,7 +818,10 @@ async fn plan_action(State(st): State<AppState>, AxPath(dep): AxPath<String>) ->
         return no_inventory_note();
     }
     let Some(source) = source_of(&dep).await else {
-        return Html(format!("<div class='note fail'>deployment '{}' not found</div>", esc(&dep)));
+        return Html(format!(
+            "<div class='note fail'>deployment '{}' not found</div>",
+            esc(&dep)
+        ));
     };
     let id = st.spawn_job(
         format!("plan {dep}"),
@@ -738,7 +835,10 @@ async fn apply_action(State(st): State<AppState>, AxPath(dep): AxPath<String>) -
         return no_inventory_note();
     }
     let Some(source) = source_of(&dep).await else {
-        return Html(format!("<div class='note fail'>deployment '{}' not found</div>", esc(&dep)));
+        return Html(format!(
+            "<div class='note fail'>deployment '{}' not found</div>",
+            esc(&dep)
+        ));
     };
     let id = st.spawn_job(
         format!("heal {dep}"),
@@ -758,15 +858,22 @@ async fn delete_action(
     if !std::path::Path::new(INVENTORY).exists() {
         return no_inventory_note();
     }
-    let typed = headers.get("HX-Prompt").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let typed = headers
+        .get("HX-Prompt")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     if typed != dep {
         return Html(format!(
             "<div class='note fail'>未删除:输入 '{}' 与部署名 '{}' 不一致</div>",
-            esc(typed), esc(&dep)
+            esc(typed),
+            esc(&dep)
         ));
     }
     let Some(source) = source_of(&dep).await else {
-        return Html(format!("<div class='note fail'>deployment '{}' not found</div>", esc(&dep)));
+        return Html(format!(
+            "<div class='note fail'>deployment '{}' not found</div>",
+            esc(&dep)
+        ));
     };
     let id = st.spawn_job(
         format!("delete {dep}"),

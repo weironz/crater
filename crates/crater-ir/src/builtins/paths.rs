@@ -28,8 +28,10 @@ impl ResourceType for Template {
         if obs.present {
             if let Some(name) = arg_str_opt(args, "material") {
                 if let Some(text) = ctx.render_material(name)? {
-                    obs.fields
-                        .insert("want_sha256".into(), crate::builtins::copy::sha256_hex(&text));
+                    obs.fields.insert(
+                        "want_sha256".into(),
+                        crate::builtins::copy::sha256_hex(&text),
+                    );
                 }
             }
         }
@@ -101,7 +103,9 @@ fn sed_delim(pattern: &str) -> String {
 /// 替换文本里 `&`(= 整个匹配)、`\`、定界符都得转义 —— 否则一行普通配置
 /// 里出现的 `&` 会被 sed 展开成原文,产出谁也没写过的内容。
 fn sed_repl(line: &str) -> String {
-    line.replace('\\', r"\\").replace('|', r"\|").replace('&', r"\&")
+    line.replace('\\', r"\\")
+        .replace('|', r"\|")
+        .replace('&', r"\&")
 }
 
 /// 解压清单的落点。放 /var/lib 而不是解压目标里:目标常是 /usr/local 这种
@@ -141,7 +145,8 @@ impl ResourceType for LineInFile {
         let pattern = arg_str_opt(args, "regexp")
             .map(str::to_string)
             .unwrap_or_else(|| regex_escape(arg_str_opt(args, "line").unwrap_or_default()));
-        let (hit, matched) = ctx.probe(&format!("grep -E {} {} | head -1", sh(&pattern), sh(path)))?;
+        let (hit, matched) =
+            ctx.probe(&format!("grep -E {} {} | head -1", sh(&pattern), sh(path)))?;
         Ok(Observed::present([
             ("present", (hit == 0).to_string()),
             ("line", matched.trim().to_string()),
@@ -184,7 +189,10 @@ impl ResourceType for LineInFile {
             .unwrap_or_else(|| regex_escape(line));
 
         if !want_present {
-            run_ok(ctx, &format!("sed -i -E {} {}", sh(&format!("/{}/d", pattern)), sh(path)))?;
+            run_ok(
+                ctx,
+                &format!("sed -i -E {} {}", sh(&format!("/{}/d", pattern)), sh(path)),
+            )?;
             return Ok(Outcome::Changed);
         }
         if arg_bool(args, "create").unwrap_or(false) {
@@ -202,7 +210,11 @@ impl ResourceType for LineInFile {
             "if grep -qE {p} {f}; then sed -i -E {sub} {f}; else printf '%s\\n' {l} >> {f}; fi",
             p = sh(&pattern),
             f = sh(path),
-            sub = sh(&format!("\\|{}|s|.*|{}|", sed_delim(&pattern), sed_repl(line))),
+            sub = sh(&format!(
+                "\\|{}|s|.*|{}|",
+                sed_delim(&pattern),
+                sed_repl(line)
+            )),
             l = sh(line)
         );
         run_ok(ctx, &cmd)?;
@@ -259,9 +271,7 @@ impl ResourceType for Unarchive {
 
     fn diff(&self, input: &DiffInput) -> Change {
         if arg_str_opt(input.args, "creates").is_none() {
-            return Change::Unknown(
-                "未声明 `creates:` —— 无法判断是否已展开(每次都会重跑)".into(),
-            );
+            return Change::Unknown("未声明 `creates:` —— 无法判断是否已展开(每次都会重跑)".into());
         }
         if input.observed.present {
             Change::Ok
@@ -367,17 +377,27 @@ mod tests {
     use crate::eval::Yaml;
 
     fn args(pairs: &[(&str, &str)]) -> ResolvedArgs {
-        pairs.iter().map(|(k, v)| (k.to_string(), Yaml::from(*v))).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), Yaml::from(*v)))
+            .collect()
     }
     fn diff<T: ResourceType>(t: &T, a: &ResolvedArgs, o: &Observed, up: bool) -> Change {
-        t.diff(&DiffInput { args: a, observed: o, upstream_changed: up })
+        t.diff(&DiffInput {
+            args: a,
+            observed: o,
+            upstream_changed: up,
+        })
     }
 
     // ---- lineinfile ----
 
     #[test]
     fn lineinfile_is_idempotent_when_the_line_already_matches() {
-        let a = args(&[("path", "/etc/fstab"), ("line", "tmpfs /tmp tmpfs defaults 0 0")]);
+        let a = args(&[
+            ("path", "/etc/fstab"),
+            ("line", "tmpfs /tmp tmpfs defaults 0 0"),
+        ]);
         let obs = Observed::present([
             ("present", "true".into()),
             ("line", "tmpfs /tmp tmpfs defaults 0 0".into()),
@@ -387,7 +407,11 @@ mod tests {
 
     #[test]
     fn lineinfile_replaces_a_drifted_line_and_shows_both_sides() {
-        let a = args(&[("path", "/etc/x"), ("regexp", "^PORT="), ("line", "PORT=9000")]);
+        let a = args(&[
+            ("path", "/etc/x"),
+            ("regexp", "^PORT="),
+            ("line", "PORT=9000"),
+        ]);
         let obs = Observed::present([("present", "true".into()), ("line", "PORT=80".into())]);
         let c = diff(&LineInFile, &a, &obs, false);
         assert_eq!(c.fields()[0].to_string(), "line: PORT=80 → PORT=9000");
@@ -405,7 +429,10 @@ mod tests {
     #[test]
     fn lineinfile_absent_on_a_missing_file_is_already_satisfied() {
         let a = args(&[("path", "/etc/nope"), ("line", "x"), ("state", "absent")]);
-        assert_eq!(diff(&LineInFile, &a, &Observed::absent(), false), Change::Ok);
+        assert_eq!(
+            diff(&LineInFile, &a, &Observed::absent(), false),
+            Change::Ok
+        );
     }
 
     #[test]
@@ -427,16 +454,28 @@ mod tests {
         LineInFile.destroy(&ctx, &a, &obs).unwrap();
         let cmds: Vec<String> = ctx.calls().iter().map(|c| c.text().to_string()).collect();
         assert!(cmds[0].starts_with("sed -i"), "{cmds:?}");
-        assert!(!cmds.iter().any(|c| c.contains("rm ")), "别删别人的文件:{cmds:?}");
+        assert!(
+            !cmds.iter().any(|c| c.contains("rm ")),
+            "别删别人的文件:{cmds:?}"
+        );
     }
 
     // ---- unarchive ----
 
     #[test]
     fn unarchive_uses_the_authors_creates_probe_for_idempotency() {
-        let a = args(&[("material", "ctd"), ("to", "/usr/local"), ("creates", "/usr/local/bin/containerd")]);
+        let a = args(&[
+            ("material", "ctd"),
+            ("to", "/usr/local"),
+            ("creates", "/usr/local/bin/containerd"),
+        ]);
         assert_eq!(
-            diff(&Unarchive, &a, &Observed::present([("creates", "x".into())]), false),
+            diff(
+                &Unarchive,
+                &a,
+                &Observed::present([("creates", "x".into())]),
+                false
+            ),
             Change::Ok
         );
         assert!(matches!(
@@ -456,12 +495,19 @@ mod tests {
     #[test]
     fn unarchive_places_the_material_then_extracts_then_cleans_up() {
         let ctx = FakeCtx::new().on("", 0, "");
-        let a = args(&[("material", "ctd"), ("to", "/usr/local"), ("creates", "/usr/local/bin/containerd")]);
+        let a = args(&[
+            ("material", "ctd"),
+            ("to", "/usr/local"),
+            ("creates", "/usr/local/bin/containerd"),
+        ]);
         Unarchive.apply(&ctx, &a, &Change::Create(vec![])).unwrap();
         let calls: Vec<String> = ctx.calls().iter().map(|c| format!("{c:?}")).collect();
         assert!(calls.iter().any(|c| c.contains("Place")), "{calls:?}");
         assert!(calls.iter().any(|c| c.contains("tar -xf")), "{calls:?}");
-        assert!(calls.iter().any(|c| c.contains("rm -f")), "临时归档要清掉:{calls:?}");
+        assert!(
+            calls.iter().any(|c| c.contains("rm -f")),
+            "临时归档要清掉:{calls:?}"
+        );
     }
 
     #[test]
@@ -472,14 +518,24 @@ mod tests {
         // 几个月后另一个场景装 docker 报 "unsupported protocol: Yunix" ——
         // 一条与真正原因毫无字面关联的错误。
         let ctx = FakeCtx::new().on("rm", 0, "");
-        let a = args(&[("to", "/usr/local"), ("creates", "/usr/local/bin/containerd"), ("material", "x")]);
+        let a = args(&[
+            ("to", "/usr/local"),
+            ("creates", "/usr/local/bin/containerd"),
+            ("material", "x"),
+        ]);
         let out = Unarchive
             .destroy(&ctx, &a, &Observed::present([("creates", "x".into())]))
             .unwrap();
         assert_eq!(out, Outcome::Warn, "没清单就该报 warn,而不是假装拆干净了");
         let cmds: Vec<String> = ctx.calls().iter().map(|c| c.text().to_string()).collect();
-        assert!(cmds.iter().any(|c| c.contains("/usr/local/bin/containerd")), "{cmds:?}");
-        assert!(!cmds.iter().any(|c| c.ends_with("'/usr/local'")), "不该删整个 /usr/local:{cmds:?}");
+        assert!(
+            cmds.iter().any(|c| c.contains("/usr/local/bin/containerd")),
+            "{cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| c.ends_with("'/usr/local'")),
+            "不该删整个 /usr/local:{cmds:?}"
+        );
     }
 
     #[test]
@@ -489,7 +545,11 @@ mod tests {
         let a = args(&[("from", "/tmp/x.tar"), ("to", "/usr/local")]);
         Unarchive.apply(&ctx, &a, &Change::Create(vec![])).unwrap();
         let cmds: Vec<String> = ctx.calls().iter().map(|c| c.text().to_string()).collect();
-        assert!(cmds.iter().any(|c| c.contains("tar -tf") && c.contains("usr_local.list")), "{cmds:?}");
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("tar -tf") && c.contains("usr_local.list")),
+            "{cmds:?}"
+        );
     }
 
     #[test]
@@ -502,9 +562,15 @@ mod tests {
             .unwrap();
         assert_eq!(out, Outcome::Changed);
         let cmds: Vec<String> = ctx.calls().iter().map(|c| c.text().to_string()).collect();
-        let del = cmds.iter().find(|c| c.starts_with("cd ")).expect("按清单删");
+        let del = cmds
+            .iter()
+            .find(|c| c.starts_with("cd "))
+            .expect("按清单删");
         assert!(del.contains("rmdir"), "空目录也要收:{del}");
-        assert!(del.contains("sort -r"), "自底向上删,否则非空目录删不掉:{del}");
+        assert!(
+            del.contains("sort -r"),
+            "自底向上删,否则非空目录删不掉:{del}"
+        );
     }
 
     #[test]
@@ -514,7 +580,9 @@ mod tests {
         a.insert("strip".into(), Yaml::from(1));
         Unarchive.apply(&ctx, &a, &Change::Create(vec![])).unwrap();
         assert!(
-            ctx.calls().iter().any(|c| c.text().contains("--strip-components=1")),
+            ctx.calls()
+                .iter()
+                .any(|c| c.text().contains("--strip-components=1")),
             "{:?}",
             ctx.calls()
         );
@@ -526,7 +594,10 @@ mod tests {
     fn template_admits_it_cannot_predict_rendered_content() {
         let a = args(&[("material", "cfg.j2"), ("dest", "/etc/app.conf")]);
         let obs = Observed::present([("sha256", "abc".into())]);
-        assert!(matches!(diff(&Template, &a, &obs, false), Change::Unknown(_)));
+        assert!(matches!(
+            diff(&Template, &a, &obs, false),
+            Change::Unknown(_)
+        ));
         // 但上游变了就说得出来
         assert!(matches!(diff(&Template, &a, &obs, true), Change::Update(_)));
         assert!(matches!(
@@ -543,7 +614,10 @@ mod lineinfile_replace_tests {
     use crate::eval::Yaml;
 
     fn args(pairs: &[(&str, &str)]) -> ResolvedArgs {
-        pairs.iter().map(|(k, v)| (k.to_string(), Yaml::from(*v))).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), Yaml::from(*v)))
+            .collect()
     }
 
     #[test]
@@ -561,7 +635,10 @@ mod lineinfile_replace_tests {
         let cmd = ctx.calls()[0].text().to_string();
         // 关键是 `s|.*|` —— 把整行内容换掉,而不是 `s|PAT|LINE|`。
         assert!(cmd.contains("s|.*|"), "仍是子串替换:{cmd}");
-        assert!(cmd.contains("^#?listen_addresses"), "定址用的仍是原模式:{cmd}");
+        assert!(
+            cmd.contains("^#?listen_addresses"),
+            "定址用的仍是原模式:{cmd}"
+        );
     }
 
     #[test]

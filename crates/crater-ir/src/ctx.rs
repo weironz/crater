@@ -4,9 +4,9 @@
 //! 这样五动词与 plan 推导可以在**零网络**下被完整测试,这正是"observe 必须只读"
 //! 这条纪律能被机器验证的前提。
 
-use std::sync::Mutex;
 use std::collections::BTreeMap;
 use std::process::Command;
+use std::sync::Mutex;
 
 use crate::verbs::Ctx;
 
@@ -89,7 +89,8 @@ impl FakeCtx {
 
     /// 命令中**包含** `needle` 时返回该应答;先注册的先匹配。
     pub fn on(mut self, needle: &str, code: i32, stdout: &str) -> Self {
-        self.responses.push((needle.to_string(), (code, stdout.to_string())));
+        self.responses
+            .push((needle.to_string(), (code, stdout.to_string())));
         self
     }
 
@@ -97,7 +98,13 @@ impl FakeCtx {
         self.log.lock().unwrap().clone()
     }
     pub fn writes(&self) -> Vec<Call> {
-        self.log.lock().unwrap().iter().filter(|c| c.is_write()).cloned().collect()
+        self.log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.is_write())
+            .cloned()
+            .collect()
     }
     pub fn written_file(&self, path: &str) -> Option<String> {
         self.files.lock().unwrap().get(path).cloned()
@@ -134,7 +141,10 @@ impl Ctx for FakeCtx {
     }
     fn write_file(&self, path: &str, content: &str) -> anyhow::Result<()> {
         self.log.lock().unwrap().push(Call::Write(path.to_string()));
-        self.files.lock().unwrap().insert(path.to_string(), content.to_string());
+        self.files
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), content.to_string());
         Ok(())
     }
     /// 假目标记住二进制的**长度**而不是内容 —— 测试要断言的是"推过去了多少",
@@ -142,7 +152,11 @@ impl Ctx for FakeCtx {
     fn write_bytes(&self, path: &str, content: &[u8]) -> anyhow::Result<()> {
         self.log.lock().unwrap().push(Call::Write(path.to_string()));
         match std::str::from_utf8(content) {
-            Ok(text) => self.files.lock().unwrap().insert(path.into(), text.to_string()),
+            Ok(text) => self
+                .files
+                .lock()
+                .unwrap()
+                .insert(path.into(), text.to_string()),
             Err(_) => self
                 .files
                 .lock()
@@ -152,7 +166,10 @@ impl Ctx for FakeCtx {
         Ok(())
     }
     fn place_material(&self, name: &str, dest: &str) -> anyhow::Result<()> {
-        self.log.lock().unwrap().push(Call::Place(name.to_string(), dest.to_string()));
+        self.log
+            .lock()
+            .unwrap()
+            .push(Call::Place(name.to_string(), dest.to_string()));
         Ok(())
     }
 }
@@ -165,7 +182,10 @@ mod tests {
     fn fake_answers_by_prefix_and_defaults_to_absent() {
         let c = FakeCtx::new().on("stat -c", 0, "directory|750");
         assert_eq!(c.probe("stat -c '%F|%a' /data").unwrap().0, 0);
-        assert_eq!(c.probe("systemctl is-active x").unwrap(), (1, String::new()));
+        assert_eq!(
+            c.probe("systemctl is-active x").unwrap(),
+            (1, String::new())
+        );
     }
 
     #[test]

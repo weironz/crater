@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
 use tracing::info;
 
+use crater_core::bundle;
 use crater_core::engine::PlanContext;
 use crater_core::os::OsFamily;
-use crater_core::bundle;
 use crater_core::source::{self, OnlineSource};
 use crater_core::store::ImageStore;
 
@@ -71,7 +71,11 @@ async fn build_project_to_store(
     if project.plays.is_empty() {
         anyhow::bail!("project '{}' 没有 plays", project.name);
     }
-    info!("build project '{}': {} play(s)", project.name, project.plays.len());
+    info!(
+        "build project '{}': {} play(s)",
+        project.name,
+        project.plays.len()
+    );
     // Build each play's task. Play vars participate as build overrides (they
     // may pin versions → affect materials), CLI --set wins over play vars.
     // Same default ref reached from two plays must mean the same inputs —
@@ -82,12 +86,22 @@ async fn build_project_to_store(
         let label = play.name.clone().unwrap_or_else(|| play.source.clone());
         let task_file = find_named(&play.source)
             .filter(|f| crater_core::task::is_task_file(f))
-            .ok_or_else(|| anyhow!("play '{label}': task '{}' 未找到(路径或 library/**/{}.yaml)", play.source, play.source))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "play '{label}': task '{}' 未找到(路径或 library/**/{}.yaml)",
+                    play.source,
+                    play.source
+                )
+            })?;
         let mut play_overrides = play.vars.clone();
         for (k, v) in overrides {
             play_overrides.insert(k.clone(), v.clone());
         }
-        info!("── build play {}/{total}: {label}({})", i + 1, task_file.display());
+        info!(
+            "── build play {}/{total}: {label}({})",
+            i + 1,
+            task_file.display()
+        );
         let task_ref =
             build_task_to_store(&task_file, None, arch_filter, &play_overrides, no_cache).await?;
         if let Some((prev_file, prev_vars)) = built.get(&task_ref) {
@@ -170,11 +184,15 @@ pub(crate) async fn ensure_unzip_blob(
     raw_url: &str,
     fetch: bool,
 ) -> Result<PathBuf> {
-    let member = m.unzip.as_deref().ok_or_else(|| anyhow!("material '{}' has no unzip", m.name))?;
+    let member = m
+        .unzip
+        .as_deref()
+        .ok_or_else(|| anyhow!("material '{}' has no unzip", m.name))?;
     let ckey = file_cache_key(m.sha256.as_deref(), raw_url);
-    let out = cache_dir()
-        .join("file")
-        .join(format!("{ckey}.unzip.{}", &crater_core::bundle::sha256_hex(member.as_bytes())[..12]));
+    let out = cache_dir().join("file").join(format!(
+        "{ckey}.unzip.{}",
+        &crater_core::bundle::sha256_hex(member.as_bytes())[..12]
+    ));
     if out.exists() || !fetch {
         return Ok(out);
     }
@@ -204,7 +222,10 @@ pub(crate) async fn ensure_unzip_blob(
             data
         }
     };
-    info!("  unzip material {}: 控制端解出成员 '{member}'(D-103)", m.name);
+    info!(
+        "  unzip material {}: 控制端解出成员 '{member}'(D-103)",
+        m.name
+    );
     let bytes = crater_core::zip::extract_member(&zip, member)?;
     // Atomic publish (tmp + rename): a concurrent reader never sees a torn file.
     let tmp = out.with_extension(format!("tmp.{}", std::process::id()));
@@ -285,17 +306,28 @@ pub(crate) async fn inspect_source(source: &str, gen_inventory: bool) -> Result<
         .collect();
     params.sort_by(|a, b| a.name.cmp(&b.name));
     // Internal vars not declared as params (count only, for the summary note).
-    let internal_vars = task.vars.keys().filter(|k| !task.params.contains_key(*k)).count();
+    let internal_vars = task
+        .vars
+        .keys()
+        .filter(|k| !task.params.contains_key(*k))
+        .count();
 
     if gen_inventory {
         // Starter inventory: apply-stage params under vars, required groups.
         println!("inventory:");
-        let apply: Vec<&P> = params.iter().filter(|p| p.stage == ParamStage::Apply).collect();
+        let apply: Vec<&P> = params
+            .iter()
+            .filter(|p| p.stage == ParamStage::Apply)
+            .collect();
         if !apply.is_empty() {
             println!("  vars:");
             for p in &apply {
                 let val = p.default.clone().unwrap_or_else(|| "TODO".into());
-                let note = p.desc.as_deref().map(|d| format!("   # {d}")).unwrap_or_default();
+                let note = p
+                    .desc
+                    .as_deref()
+                    .map(|d| format!("   # {d}"))
+                    .unwrap_or_default();
                 println!("    {}: \"{}\"{}", p.name, val, note);
             }
         }
@@ -314,15 +346,26 @@ pub(crate) async fn inspect_source(source: &str, gen_inventory: bool) -> Result<
     }
 
     // Contract summary.
-    let ver = ev.get("version").map(|v| format!("  v{v}")).unwrap_or_default();
-    let desc = task.description.as_deref().map(|d| format!("  — {d}")).unwrap_or_default();
+    let ver = ev
+        .get("version")
+        .map(|v| format!("  v{v}"))
+        .unwrap_or_default();
+    let desc = task
+        .description
+        .as_deref()
+        .map(|d| format!("  — {d}"))
+        .unwrap_or_default();
     println!("{}{}{}", task.name, ver, desc);
     println!("hosts: {}", task.hosts);
     // Admission contract (D-102) — visible BEFORE touching any machine.
     println!("环境要求(requires): {}", task.requires.describe());
     println!(
         "角色(inventory 需定义): {}",
-        if roles.is_empty() { "(无 / 全部)".to_string() } else { roles.join(", ") }
+        if roles.is_empty() {
+            "(无 / 全部)".to_string()
+        } else {
+            roles.join(", ")
+        }
     );
     if params.is_empty() {
         println!("参数: (无声明的 params)");
@@ -333,9 +376,21 @@ pub(crate) async fn inspect_source(source: &str, gen_inventory: bool) -> Result<
                 ParamStage::Build => "build",
                 ParamStage::Apply => "apply",
             };
-            let req = if p.required && p.default.is_none() { "必填" } else { "选填" };
-            let def = p.default.as_deref().map(|d| format!(" = {d}")).unwrap_or_default();
-            let d = p.desc.as_deref().map(|d| format!("   {d}")).unwrap_or_default();
+            let req = if p.required && p.default.is_none() {
+                "必填"
+            } else {
+                "选填"
+            };
+            let def = p
+                .default
+                .as_deref()
+                .map(|d| format!(" = {d}"))
+                .unwrap_or_default();
+            let d = p
+                .desc
+                .as_deref()
+                .map(|d| format!("   {d}"))
+                .unwrap_or_default();
             println!("  {:<22} ({stage}, {req}){def}{d}", p.name);
         }
     }
@@ -350,7 +405,10 @@ pub(crate) async fn inspect_source(source: &str, gen_inventory: bool) -> Result<
             MaterialKind::OsPackage => no += 1,
         }
     }
-    println!("materials: {} ({nf} file, {ni} image, {no} os_package)", task.materials.len());
+    println!(
+        "materials: {} ({nf} file, {ni} image, {no} os_package)",
+        task.materials.len()
+    );
     Ok(())
 }
 
@@ -359,7 +417,9 @@ pub(crate) async fn inspect_source(source: &str, gen_inventory: bool) -> Result<
 /// by recipe-replay through `plan_from_task` (offline).
 /// Make an image ref safe as a temp-file fragment.
 pub(crate) fn sanitize_ref(s: &str) -> String {
-    s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 /// Resolve an OS-package dependency closure in `base` via **buildah** (daemonless)
@@ -375,7 +435,9 @@ pub(crate) fn build_os_package_repo(base: &str, family: &str, pkgs: &[String]) -
         let out = Command::new("buildah").args(args).output()?;
         Ok(out)
     };
-    let ctr = String::from_utf8(run(&["from", base])?.stdout)?.trim().to_string();
+    let ctr = String::from_utf8(run(&["from", base])?.stdout)?
+        .trim()
+        .to_string();
     if ctr.is_empty() {
         anyhow::bail!("buildah from {base} failed");
     }
@@ -399,18 +461,34 @@ pub(crate) fn build_os_package_repo(base: &str, family: &str, pkgs: &[String]) -
              (repotrack -p /repo {pkglist} || yumdownloader --resolve --destdir=/repo {pkglist})"
         )
     };
-    let st = Command::new("buildah").args(["run", &ctr, "--", "bash", "-c", &script]).status()?;
+    let st = Command::new("buildah")
+        .args(["run", &ctr, "--", "bash", "-c", &script])
+        .status()?;
     if !st.success() {
         cleanup(&ctr);
         anyhow::bail!("buildah closure resolution failed in {base}");
     }
-    let mnt = String::from_utf8(run(&["mount", &ctr])?.stdout)?.trim().to_string();
+    let mnt = String::from_utf8(run(&["mount", &ctr])?.stdout)?
+        .trim()
+        .to_string();
     if mnt.is_empty() {
         cleanup(&ctr);
         anyhow::bail!("buildah mount failed");
     }
-    let tar = std::env::temp_dir().join(format!("crater-osrepo-{}-{}.tar", std::process::id(), sanitize_ref(base)));
-    let st = Command::new("tar").args(["cf", tar.to_str().unwrap(), "-C", &format!("{mnt}/repo"), "."]).status()?;
+    let tar = std::env::temp_dir().join(format!(
+        "crater-osrepo-{}-{}.tar",
+        std::process::id(),
+        sanitize_ref(base)
+    ));
+    let st = Command::new("tar")
+        .args([
+            "cf",
+            tar.to_str().unwrap(),
+            "-C",
+            &format!("{mnt}/repo"),
+            ".",
+        ])
+        .status()?;
     cleanup(&ctr);
     if !st.success() {
         anyhow::bail!("tar of package closure failed");
@@ -444,11 +522,16 @@ pub(crate) async fn build_task_to_store(
     // Flatten role bundles BEFORE collecting materials (D-080): role closures are
     // hoisted into task.materials (so they get packed) and role actions spliced
     // into the recipe — making the OCI self-contained (no role files needed offline).
-    task.expand_roles(&roles_dir_for(file.parent().unwrap_or_else(|| Path::new("."))))?;
+    task.expand_roles(&roles_dir_for(
+        file.parent().unwrap_or_else(|| Path::new(".")),
+    ))?;
     // Never bake an embedded inventory (creds!) into the distributable OCI (D-084).
     task.inventory = None;
     // Build-stage params (version-like, affect materials) must be resolved now (D-081).
-    task.validate_params(&task.effective_vars(), Some(crater_core::task::ParamStage::Build))?;
+    task.validate_params(
+        &task.effective_vars(),
+        Some(crater_core::task::ParamStage::Build),
+    )?;
     let ver = task
         .effective_vars()
         .get("version")
@@ -458,8 +541,10 @@ pub(crate) async fn build_task_to_store(
     let spec_dir = file.parent().unwrap_or_else(|| Path::new("."));
     let online = OnlineSource::with_default_mirrors();
     // Optional --arch narrowing (D-048): pack only these arches' variants.
-    let want_arch: Vec<crater_core::arch::Arch> =
-        arch_filter.iter().map(|s| crater_core::arch::Arch::from_uname(s)).collect();
+    let want_arch: Vec<crater_core::arch::Arch> = arch_filter
+        .iter()
+        .map(|s| crater_core::arch::Arch::from_uname(s))
+        .collect();
 
     // Fetch binary materials, keyed by material NAME (or name@arch for an
     // arch-specific variant, D-048) — the same key `place` resolves offline.
@@ -493,8 +578,7 @@ pub(crate) async fn build_task_to_store(
                     ctx.vars.insert("arch".to_string(), a.as_str().to_string());
                 }
                 let raw = ctx.rendered_url(tmpl)?;
-                let mut desc =
-                    format!("file:{key}:{raw}:{}", m.sha256.as_deref().unwrap_or(""));
+                let mut desc = format!("file:{key}:{raw}:{}", m.sha256.as_deref().unwrap_or(""));
                 // D-103: a different member out of the same zip = different content.
                 if let Some(u) = &m.unzip {
                     desc.push_str(&format!(":unzip={u}"));
@@ -502,9 +586,16 @@ pub(crate) async fn build_task_to_store(
                 material_descs.push(desc);
             } else if let Some(src) = &m.src {
                 // Local file: the CONTENT is the source — edits invalidate.
-                let data = std::fs::read(spec_dir.join(src))
-                    .map_err(|e| anyhow!("read material {key} from {}: {e}", spec_dir.join(src).display()))?;
-                material_descs.push(format!("src:{key}:{}", crater_core::bundle::sha256_hex(&data)));
+                let data = std::fs::read(spec_dir.join(src)).map_err(|e| {
+                    anyhow!(
+                        "read material {key} from {}: {e}",
+                        spec_dir.join(src).display()
+                    )
+                })?;
+                material_descs.push(format!(
+                    "src:{key}:{}",
+                    crater_core::bundle::sha256_hex(&data)
+                ));
             }
         } else if m.kind == MaterialKind::Image {
             if let Some(r) = &m.reference {
@@ -530,7 +621,10 @@ pub(crate) async fn build_task_to_store(
         && ImageStore::open()?.has(&reference)
         && std::fs::read_to_string(&fp_file).is_ok_and(|s| s.trim() == fingerprint)
     {
-        info!("{reference} 已在本地库且源未变(指纹 {})— 构建缓存命中,跳过(--no-cache 强制重建)", &fingerprint[..12]);
+        info!(
+            "{reference} 已在本地库且源未变(指纹 {})— 构建缓存命中,跳过(--no-cache 强制重建)",
+            &fingerprint[..12]
+        );
         return Ok(reference);
     }
 
@@ -541,12 +635,18 @@ pub(crate) async fn build_task_to_store(
     // already-pulled fast path (D-078① digest skip).
     if image_refs.len() > 1 {
         use futures::StreamExt;
-        info!("  pre-pull {} image material(s) (parallel)", image_refs.len());
+        info!(
+            "  pre-pull {} image material(s) (parallel)",
+            image_refs.len()
+        );
         let store = ImageStore::open()?;
         let results: Vec<Result<()>> = futures::stream::iter(image_refs.iter().map(|r| {
             let store = &store;
             async move {
-                store.pull(r).await.map_err(|e| anyhow!("pull image {r}: {e}"))
+                store
+                    .pull(r)
+                    .await
+                    .map_err(|e| anyhow!("pull image {r}: {e}"))
             }
         }))
         .buffer_unordered(4)
@@ -580,7 +680,11 @@ pub(crate) async fn build_task_to_store(
                 // or by the rendered URL (source). `--no-cache` forces a refetch.
                 let ckey = file_cache_key(m.sha256.as_deref(), &raw);
                 let cpath = cache_dir().join("file").join(&ckey);
-                let cached = if no_cache { None } else { cache_get(&cpath, m.sha256.as_deref()) };
+                let cached = if no_cache {
+                    None
+                } else {
+                    cache_get(&cpath, m.sha256.as_deref())
+                };
                 let data = match cached {
                     Some(data) => {
                         info!("  material {key} <- 缓存({})", cpath.display());
@@ -596,7 +700,9 @@ pub(crate) async fn build_task_to_store(
                         if let Some(want) = &m.sha256 {
                             let got = crater_core::bundle::sha256_hex(&data);
                             if &got != want {
-                                anyhow::bail!("material {key}: sha256 不符(声明 {want},实际 {got})");
+                                anyhow::bail!(
+                                    "material {key}: sha256 不符(声明 {want},实际 {got})"
+                                );
                             }
                         }
                         cache_put(&cpath, &data);
@@ -625,7 +731,9 @@ pub(crate) async fn build_task_to_store(
                     .map_err(|e| anyhow!("read material {key} from {}: {e}", path.display()))?;
                 materials.push((key, true, data)); // self-authored src, no online source → embedded (D-087)
             } else {
-                return Err(anyhow!("file material '{key}' has neither `url_tmpl` nor `src`"));
+                return Err(anyhow!(
+                    "file material '{key}' has neither `url_tmpl` nor `src`"
+                ));
             }
         } else if m.kind == MaterialKind::Image {
             // kind: image (D-061) — pull the image and pack it as a self-
@@ -643,10 +751,19 @@ pub(crate) async fn build_task_to_store(
                 info!("  image material {key} <- {reference}(已预拉)");
             } else {
                 info!("  pull image material {key} <- {reference}");
-                store.pull(&reference).await.map_err(|e| anyhow!("pull image {reference}: {e}"))?;
+                store
+                    .pull(&reference)
+                    .await
+                    .map_err(|e| anyhow!("pull image {reference}: {e}"))?;
             }
-            let tmp = std::env::temp_dir().join(format!("crater-img-{}-{}.tar", std::process::id(), sanitize_ref(&key)));
-            store.export_oci_archive(&reference, &tmp).map_err(|e| anyhow!("export image {reference}: {e}"))?;
+            let tmp = std::env::temp_dir().join(format!(
+                "crater-img-{}-{}.tar",
+                std::process::id(),
+                sanitize_ref(&key)
+            ));
+            store
+                .export_oci_archive(&reference, &tmp)
+                .map_err(|e| anyhow!("export image {reference}: {e}"))?;
             let data = std::fs::read(&tmp)?;
             let _ = std::fs::remove_file(&tmp);
             info!("    packed {} ({} bytes)", reference, data.len());
@@ -655,15 +772,24 @@ pub(crate) async fn build_task_to_store(
             // kind: os_package (D-062) — resolve the .deb/.rpm dependency closure
             // in the target OS via buildah (daemonless), pack as a tar blob;
             // apply installs it locally (apt-get install ./*.deb / dnf ./*.rpm).
-            let base = m
-                .base
-                .as_ref()
-                .ok_or_else(|| anyhow!("os_package material '{}' has no `base` (OS image, e.g. ubuntu:24.04)", m.name))?;
+            let base = m.base.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "os_package material '{}' has no `base` (OS image, e.g. ubuntu:24.04)",
+                    m.name
+                )
+            })?;
             // pick the package list matching the base OS family.
-            let family = if base.contains("ubuntu") || base.contains("debian") { "debian" } else { "rhel" };
+            let family = if base.contains("ubuntu") || base.contains("debian") {
+                "debian"
+            } else {
+                "rhel"
+            };
             let pkgs = m.packages.get(family).cloned().unwrap_or_default();
             if pkgs.is_empty() {
-                anyhow::bail!("os_package material '{}' has no packages for family '{family}'", m.name);
+                anyhow::bail!(
+                    "os_package material '{}' has no packages for family '{family}'",
+                    m.name
+                );
             }
             let key = PlanContext::material_blob_key(m);
             // Download cache (D-096): the buildah closure is minutes of work;
@@ -672,14 +798,21 @@ pub(crate) async fn build_task_to_store(
                 format!("{base}|{family}|{}", pkgs.join(",")).as_bytes(),
             );
             let cpath = cache_dir().join("ospkg").join(format!("{ckey}.tar"));
-            let cached = if no_cache { None } else { cache_get(&cpath, None) };
+            let cached = if no_cache {
+                None
+            } else {
+                cache_get(&cpath, None)
+            };
             let data = match cached {
                 Some(data) => {
                     info!("  os_package {key} <- 缓存({})", cpath.display());
                     data
                 }
                 None => {
-                    info!("  build os_package {key} <- {base} [{}] (buildah)", pkgs.join(" "));
+                    info!(
+                        "  build os_package {key} <- {base} [{}] (buildah)",
+                        pkgs.join(" ")
+                    );
                     let data = build_os_package_repo(base, family, &pkgs)?;
                     info!("    packed closure ({} bytes)", data.len());
                     cache_put(&cpath, &data);
@@ -696,8 +829,13 @@ pub(crate) async fn build_task_to_store(
     let stage_root = std::env::temp_dir().join(format!("crater-taskimg-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&stage_root);
     let stage = bundle::BundleStage::new(stage_root.clone())?;
-    let ir = stage.store_component_artifact(&reference, &task.name, &ver, "task", &recipe, &materials)?;
-    info!("  {} → task artifact {reference}: recipe + {} material(s)", task.name, materials.len());
+    let ir = stage
+        .store_component_artifact(&reference, &task.name, &ver, "task", &recipe, &materials)?;
+    info!(
+        "  {} → task artifact {reference}: recipe + {} material(s)",
+        task.name,
+        materials.len()
+    );
     stage.write_artifact_index(&[ir])?;
     let tmp_oci = std::env::temp_dir().join(format!("crater-taskbuild-{}.oci", std::process::id()));
     bundle::pack(&stage_root, &tmp_oci)?;
@@ -732,10 +870,22 @@ mod tests {
     #[test]
     fn build_fingerprint_tracks_all_sources() {
         let base = build_fingerprint(b"recipe", &["file:a:url:".into()], &[]);
-        assert_eq!(base, build_fingerprint(b"recipe", &["file:a:url:".into()], &[]));
-        assert_ne!(base, build_fingerprint(b"recipe2", &["file:a:url:".into()], &[]));
-        assert_ne!(base, build_fingerprint(b"recipe", &["file:a:url2:".into()], &[]));
-        assert_ne!(base, build_fingerprint(b"recipe", &["file:a:url:".into()], &["amd64".into()]));
+        assert_eq!(
+            base,
+            build_fingerprint(b"recipe", &["file:a:url:".into()], &[])
+        );
+        assert_ne!(
+            base,
+            build_fingerprint(b"recipe2", &["file:a:url:".into()], &[])
+        );
+        assert_ne!(
+            base,
+            build_fingerprint(b"recipe", &["file:a:url2:".into()], &[])
+        );
+        assert_ne!(
+            base,
+            build_fingerprint(b"recipe", &["file:a:url:".into()], &["amd64".into()])
+        );
     }
 
     /// D-096: a corrupt cache entry (declared sha mismatch) is dropped, not used.
@@ -746,7 +896,10 @@ mod tests {
         let sha = crater_core::bundle::sha256_hex(b"good content");
         assert_eq!(cache_get(&p, Some(&sha)).unwrap(), b"good content");
         std::fs::write(&p, b"tampered").unwrap();
-        assert!(cache_get(&p, Some(&sha)).is_none(), "corrupt entry rejected");
+        assert!(
+            cache_get(&p, Some(&sha)).is_none(),
+            "corrupt entry rejected"
+        );
         assert!(!p.exists(), "corrupt entry deleted");
     }
 }

@@ -81,7 +81,10 @@ pub(crate) async fn select_agent_binary(
 /// Push the crater binary to the target (cached by sha256 at
 /// `/var/lib/crater/crater`) and return that path. Shared by component
 /// (`--plan`) and task (`--task-plan`) agent runs.
-pub(crate) async fn push_agent_binary(exec: &dyn Executor, agent_bin: Option<&Path>) -> Result<&'static str> {
+pub(crate) async fn push_agent_binary(
+    exec: &dyn Executor,
+    agent_bin: Option<&Path>,
+) -> Result<&'static str> {
     // Pick the binary to ship: explicit override > a bundled musl static
     // matching the target's arch > the control binary (only if same arch).
     let (bin_path, how) = select_agent_binary(exec, agent_bin).await?;
@@ -90,10 +93,15 @@ pub(crate) async fn push_agent_binary(exec: &dyn Executor, agent_bin: Option<&Pa
     let want = crater_core::bundle::sha256_hex(&bytes);
     let remote_bin = "/var/lib/crater/crater";
     let cached = exec
-        .run(&format!("sha256sum {remote_bin} 2>/dev/null | cut -d' ' -f1"))
+        .run(&format!(
+            "sha256sum {remote_bin} 2>/dev/null | cut -d' ' -f1"
+        ))
         .await?;
     if cached.ok() && cached.stdout.trim() == want {
-        info!("[{}] agent: binary cached (sha256 match), reusing [{how}]", exec.label());
+        info!(
+            "[{}] agent: binary cached (sha256 match), reusing [{how}]",
+            exec.label()
+        );
     } else {
         info!(
             "[{}] agent: pushing {} ({} bytes) [{how}]",
@@ -128,7 +136,6 @@ pub(crate) fn forward_agent_output(out: &crater_core::executor::CmdOutput) -> Re
     Ok(())
 }
 
-
 /// Stage every CONTROL-side blob a plan references onto the target, content-
 /// addressed at `/var/lib/crater/blobs/<sha256>`, and rewrite the ops to those
 /// TARGET-local paths (D-095). After this an offline plan is agent-runnable:
@@ -142,7 +149,11 @@ pub(crate) async fn stage_blobs(
 ) -> Result<usize> {
     // Unique control-side paths across steps AND handlers.
     let mut wanted: Vec<PathBuf> = Vec::new();
-    for op in steps.iter_mut().map(|s| &mut s.op).chain(handlers.values_mut()) {
+    for op in steps
+        .iter_mut()
+        .map(|s| &mut s.op)
+        .chain(handlers.values_mut())
+    {
         for p in op.offline_blob_paths_mut() {
             if !wanted.contains(p) {
                 wanted.push(p.clone());
@@ -155,8 +166,8 @@ pub(crate) async fn stage_blobs(
     // Push each blob once (content-addressed, cached by sha256).
     let mut staged: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
     for local in wanted {
-        let data = std::fs::read(&local)
-            .map_err(|e| anyhow!("read blob {}: {e}", local.display()))?;
+        let data =
+            std::fs::read(&local).map_err(|e| anyhow!("read blob {}: {e}", local.display()))?;
         let digest = crater_core::bundle::sha256_hex(&data);
         let remote = format!("/var/lib/crater/blobs/{digest}");
         let cached = exec
@@ -177,7 +188,11 @@ pub(crate) async fn stage_blobs(
     }
     let n = staged.len();
     // Rewrite the plan to the staged target-local paths.
-    for op in steps.iter_mut().map(|s| &mut s.op).chain(handlers.values_mut()) {
+    for op in steps
+        .iter_mut()
+        .map(|s| &mut s.op)
+        .chain(handlers.values_mut())
+    {
         for p in op.offline_blob_paths_mut() {
             if let Some(remote) = staged.get(p) {
                 *p = remote.clone();
@@ -204,8 +219,11 @@ pub(crate) async fn run_task_via_agent(
     let mut handlers = handlers.clone();
     stage_blobs(exec, &mut steps, &mut handlers).await?;
     let remote_plan = "/tmp/crater-task-plan.yaml";
-    exec.write_file(remote_plan, engine::task_plan_to_yaml(&steps, &handlers)?.as_bytes())
-        .await?;
+    exec.write_file(
+        remote_plan,
+        engine::task_plan_to_yaml(&steps, &handlers)?.as_bytes(),
+    )
+    .await?;
     info!("[{}] agent: executing task on target ↓", exec.label());
     let out = exec
         .run(&format!("{remote_bin} agent --task-plan {remote_plan}"))
@@ -221,7 +239,10 @@ pub(crate) async fn run_agent(task_plan: &Path) -> Result<()> {
     let text = std::fs::read_to_string(task_plan)
         .map_err(|e| anyhow!("read task plan {}: {e}", task_plan.display()))?;
     let plan = engine::task_plan_from_yaml(&text)?;
-    info!("agent: executing task ({} step(s)) locally", plan.steps.len());
+    info!(
+        "agent: executing task ({} step(s)) locally",
+        plan.steps.len()
+    );
     // Agent runs one host locally — no cross-host coordination (D-077).
     engine::execute_task(&plan.steps, &plan.handlers, &LocalExecutor, None).await
 }
@@ -243,7 +264,9 @@ mod tests {
     fn musl_candidates_use_arch_specific_name() {
         let c = musl_candidates("aarch64");
         assert!(c.iter().all(|p| p.ends_with("crater-linux-aarch64")));
-        assert!(c.iter().any(|p| p == &PathBuf::from("dist/crater-linux-aarch64")));
+        assert!(c
+            .iter()
+            .any(|p| p == &PathBuf::from("dist/crater-linux-aarch64")));
     }
 
     /// Fake target: records every write_file; `sha256sum` probes report the
@@ -299,7 +322,10 @@ mod tests {
         let digest = crater_core::bundle::sha256_hex(b"hello blob");
         let staged = format!("/var/lib/crater/blobs/{digest}");
 
-        let exec = FakeExec { writes: std::sync::Mutex::new(vec![]), cached: None };
+        let exec = FakeExec {
+            writes: std::sync::Mutex::new(vec![]),
+            cached: None,
+        };
         let mut steps = vec![push_step(&blob, "/opt/a"), push_step(&blob, "/opt/b")];
         let mut handlers = BTreeMap::new();
         let n = stage_blobs(&exec, &mut steps, &mut handlers).await.unwrap();
@@ -323,7 +349,10 @@ mod tests {
         std::fs::write(&blob, b"cached blob").unwrap();
         let digest = crater_core::bundle::sha256_hex(b"cached blob");
 
-        let exec = FakeExec { writes: std::sync::Mutex::new(vec![]), cached: Some(digest.clone()) };
+        let exec = FakeExec {
+            writes: std::sync::Mutex::new(vec![]),
+            cached: Some(digest.clone()),
+        };
         let mut steps = vec![push_step(&blob, "/opt/a")];
         let mut handlers = BTreeMap::new();
         stage_blobs(&exec, &mut steps, &mut handlers).await.unwrap();
@@ -331,7 +360,10 @@ mod tests {
         assert!(exec.writes.lock().unwrap().is_empty(), "cached → no push");
         match &steps[0].op {
             Op::PushFile { local_path, .. } => {
-                assert_eq!(local_path, &PathBuf::from(format!("/var/lib/crater/blobs/{digest}")));
+                assert_eq!(
+                    local_path,
+                    &PathBuf::from(format!("/var/lib/crater/blobs/{digest}"))
+                );
             }
             _ => unreachable!(),
         }

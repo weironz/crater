@@ -18,21 +18,38 @@ use serde_json::json;
 
 fn snap_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home).join(".crater").join("ui").join("verify")
+    PathBuf::from(home)
+        .join(".crater")
+        .join("ui")
+        .join("verify")
 }
 
 fn sanitize(id: &str) -> String {
-    id.chars().map(|c| if c.is_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect()
+    id.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// verify job 结束后由 ui_run::finalize 调:把 --json 报告拆成每记录一份快照。
 pub fn stash_verify_report(path: &std::path::Path) {
-    let Ok(text) = std::fs::read_to_string(path) else { return };
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
     let ts = doc["ts"].as_u64().unwrap_or(0);
     let _ = std::fs::create_dir_all(snap_dir());
     for h in doc["hosts"].as_array().cloned().unwrap_or_default() {
-        let Some(rid) = h["record_id"].as_str() else { continue };
+        let Some(rid) = h["record_id"].as_str() else {
+            continue;
+        };
         let snap = json!({
             "ts": ts,
             "verdict": h["verdict"],
@@ -48,7 +65,8 @@ pub fn stash_verify_report(path: &std::path::Path) {
 }
 
 fn load_snap(record_id: &str) -> Option<serde_json::Value> {
-    let text = std::fs::read_to_string(snap_dir().join(format!("{}.json", sanitize(record_id)))).ok()?;
+    let text =
+        std::fs::read_to_string(snap_dir().join(format!("{}.json", sanitize(record_id)))).ok()?;
     serde_json::from_str(&text).ok()
 }
 
@@ -56,20 +74,38 @@ fn load_snap(record_id: &str) -> Option<serde_json::Value> {
 /// 文件是它的当前载体 —— 同名多文件时如实报 ambiguous,不猜。
 fn name_to_path() -> BTreeMap<String, Vec<String>> {
     let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let Ok(root) = crate::ui_edit::root() else { return map };
+    let Ok(root) = crate::ui_edit::root() else {
+        return map;
+    };
     let mut stack = vec![root.clone()];
     let mut seen = 0;
     while let Some(dir) = stack.pop() {
-        if seen > 400 { break }
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        if seen > 400 {
+            break;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
             let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') || matches!(name.as_str(), "target" | "node_modules") { continue }
-            if p.is_dir() { stack.push(p); continue }
-            if !matches!(p.extension().and_then(|s| s.to_str()), Some("yaml") | Some("yml")) { continue }
+            if name.starts_with('.') || matches!(name.as_str(), "target" | "node_modules") {
+                continue;
+            }
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !matches!(
+                p.extension().and_then(|s| s.to_str()),
+                Some("yaml") | Some("yml")
+            ) {
+                continue;
+            }
             seen += 1;
-            if !crate::blueprint::is_blueprint_file(&p) { continue }
+            if !crate::blueprint::is_blueprint_file(&p) {
+                continue;
+            }
             if let Ok(bp) = crater_ir::parse::blueprint_from_path(&p) {
                 let rel = p.strip_prefix(&root).unwrap_or(&p).display().to_string();
                 map.entry(bp.name).or_default().push(rel);
@@ -80,7 +116,10 @@ fn name_to_path() -> BTreeMap<String, Vec<String>> {
 }
 
 fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// `GET /api/overview` —— 卡片数据(JSON;页面片段由前端渲染)。
@@ -100,7 +139,8 @@ pub async fn overview() -> impl IntoResponse {
             // 同步轴:优先级 Progressing > OutOfDate > 快照结论 > Unknown。
             // Progressing 压过一切:有 job 在动这份蓝图时,别的结论都是旧闻。
             let progressing = running.iter().any(|j| {
-                j.blueprint.ends_with(&format!("{}.blueprint.yaml", r.blueprint))
+                j.blueprint
+                    .ends_with(&format!("{}.blueprint.yaml", r.blueprint))
                     || bp_paths.contains(&j.blueprint)
             });
             let out_of_date = match (&r.blueprint_sha256, bp_paths.first()) {
@@ -174,8 +214,16 @@ pub async fn delete_record(
 ) -> impl IntoResponse {
     match FileStore::default_location().remove(&id) {
         Ok(true) => Json(json!({ "ok": true })).into_response(),
-        Ok(false) => (axum::http::StatusCode::NOT_FOUND, Json(json!({ "error": "没有这条记录" }))).into_response(),
-        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(false) => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(json!({ "error": "没有这条记录" })),
+        )
+            .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 

@@ -95,12 +95,18 @@ pub enum DriftVerdict {
     /// 部署过,但现实变了。
     Drifted(Vec<DriftItem>),
     /// 部署过,但有些项 plan 说不清 —— 不能断言 in-sync。
-    Indeterminate { drifted: Vec<DriftItem>, unknown: usize },
+    Indeterminate {
+        drifted: Vec<DriftItem>,
+        unknown: usize,
+    },
 }
 
 impl DriftVerdict {
     pub fn is_drifted(&self) -> bool {
-        matches!(self, DriftVerdict::Drifted(_) | DriftVerdict::Indeterminate { .. })
+        matches!(
+            self,
+            DriftVerdict::Drifted(_) | DriftVerdict::Indeterminate { .. }
+        )
     }
 }
 
@@ -185,7 +191,13 @@ impl FileStore {
         // id 里有 `@` 和可能的 `/`(目标地址),编码成安全文件名。
         let safe: String = id
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         self.root.join(format!("{safe}.yaml"))
     }
@@ -276,7 +288,12 @@ fn encode(r: &DeploymentRecord) -> String {
             let observed: serde_yaml::Mapping = res
                 .observed
                 .iter()
-                .map(|(k, v)| (serde_yaml::Value::from(k.clone()), serde_yaml::Value::from(v.clone())))
+                .map(|(k, v)| {
+                    (
+                        serde_yaml::Value::from(k.clone()),
+                        serde_yaml::Value::from(v.clone()),
+                    )
+                })
                 .collect();
             m.insert("observed".into(), serde_yaml::Value::Mapping(observed));
             serde_yaml::Value::Mapping(m)
@@ -288,8 +305,14 @@ fn encode(r: &DeploymentRecord) -> String {
 
 fn decode(text: &str) -> anyhow::Result<DeploymentRecord> {
     let v: serde_yaml::Value = serde_yaml::from_str(text)?;
-    let m = v.as_mapping().ok_or_else(|| anyhow::anyhow!("记录格式错误"))?;
-    let s = |k: &str| m.get(serde_yaml::Value::from(k)).and_then(|v| v.as_str()).map(str::to_string);
+    let m = v
+        .as_mapping()
+        .ok_or_else(|| anyhow::anyhow!("记录格式错误"))?;
+    let s = |k: &str| {
+        m.get(serde_yaml::Value::from(k))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
     let n = |k: &str| m.get(serde_yaml::Value::from(k)).and_then(|v| v.as_u64());
     Ok(DeploymentRecord {
         id: s("id").ok_or_else(|| anyhow::anyhow!("记录缺少 id"))?,
@@ -419,7 +442,10 @@ mod tests {
             item("shell", Change::Unknown("无 check".into())),
         ]);
         let v = assess(&p, Some(&record()));
-        assert!(matches!(v, DriftVerdict::Indeterminate { unknown: 1, .. }), "{v:?}");
+        assert!(
+            matches!(v, DriftVerdict::Indeterminate { unknown: 1, .. }),
+            "{v:?}"
+        );
         assert!(v.is_drifted(), "说不清也要促使人去看");
     }
 
@@ -433,7 +459,10 @@ mod tests {
         assert_eq!(store.load(&r.id).unwrap().unwrap(), r);
         assert_eq!(store.list().unwrap().len(), 1);
         assert!(store.remove(&r.id).unwrap());
-        assert!(!store.remove(&r.id).unwrap(), "删第二次应返回 false 而非报错");
+        assert!(
+            !store.remove(&r.id).unwrap(),
+            "删第二次应返回 false 而非报错"
+        );
     }
 
     #[test]
@@ -442,7 +471,10 @@ mod tests {
         let text = encode(&record());
         assert!(text.contains("blueprint: demo"), "{text}");
         assert!(text.contains("applied_at: 1700000000"), "{text}");
-        assert!(text.contains("mode: '750'") || text.contains("mode: \"750\""), "{text}");
+        assert!(
+            text.contains("mode: '750'") || text.contains("mode: \"750\""),
+            "{text}"
+        );
     }
 
     #[test]
@@ -461,7 +493,11 @@ mod tests {
         let store = FileStore::new(d.path());
         store.save(&record()).unwrap();
         std::fs::write(d.path().join("broken.yaml"), "{{{ not yaml").unwrap();
-        assert_eq!(store.list().unwrap().len(), 1, "坏的那条跳过,好的仍要列出来");
+        assert_eq!(
+            store.list().unwrap().len(),
+            1,
+            "坏的那条跳过,好的仍要列出来"
+        );
     }
 
     #[test]

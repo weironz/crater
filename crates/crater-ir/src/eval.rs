@@ -28,7 +28,6 @@ fn run(p: &Option<Prober>, cmd: &str) -> Result<String, cel::ExecutionError> {
     }
 }
 
-
 /// `ip -o -4 addr show` 的输出里,哪块网卡持有落在 `cidr` 内的地址。
 ///
 /// 匹配不到返回**空串**,不编一个网卡名出来:编出来的话 keepalived 会起来
@@ -36,16 +35,26 @@ fn run(p: &Option<Prober>, cmd: &str) -> Result<String, cel::ExecutionError> {
 ///
 /// 纯函数,所以可测:网段算术的边界(/31、/32、跨字节前缀)不该靠真机试。
 fn iface_in_cidr(out: &str, cidr: &str) -> String {
-    let Some(net) = parse_cidr(cidr) else { return String::new() };
+    let Some(net) = parse_cidr(cidr) else {
+        return String::new();
+    };
     for line in out.lines() {
         // `2: ens33    inet 10.219.111.111/24 brd ... scope global ens33`
         let f: Vec<&str> = line.split_whitespace().collect();
-        let (Some(name), Some(addr)) = (f.get(1), f.iter().position(|x| *x == "inet").and_then(|i| f.get(i + 1)))
-        else {
+        let (Some(name), Some(addr)) = (
+            f.get(1),
+            f.iter()
+                .position(|x| *x == "inet")
+                .and_then(|i| f.get(i + 1)),
+        ) else {
             continue;
         };
-        let Some((ip, _)) = addr.split_once('/') else { continue };
-        let Ok(ip) = ip.parse::<std::net::Ipv4Addr>() else { continue };
+        let Some((ip, _)) = addr.split_once('/') else {
+            continue;
+        };
+        let Ok(ip) = ip.parse::<std::net::Ipv4Addr>() else {
+            continue;
+        };
         if in_net(u32::from(ip), net) {
             return (*name).to_string();
         }
@@ -62,7 +71,11 @@ fn parse_cidr(s: &str) -> Option<(u32, u32)> {
         return None;
     }
     // `<< 32` 在 Rust 里是溢出而不是 0 —— /0 要单独处理。
-    let mask = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
+    let mask = if bits == 0 {
+        0
+    } else {
+        u32::MAX << (32 - bits)
+    };
     Some((base & mask, mask))
 }
 
@@ -134,7 +147,8 @@ impl Scope {
     /// 当前 OS 主机名 —— 两者常常不同,而 kubeadm 之类恰恰要用前者当节点名。
     pub fn identify(&mut self, name: &str, roles: &[String]) {
         self.host = Some(name.to_string());
-        self.substrate.insert("name".into(), Yaml::String(name.to_string()));
+        self.substrate
+            .insert("name".into(), Yaml::String(name.to_string()));
         self.substrate.insert(
             "roles".into(),
             Yaml::Sequence(roles.iter().cloned().map(Yaml::String).collect()),
@@ -142,7 +156,10 @@ impl Scope {
     }
 
     pub fn with_item(&self, item: Yaml) -> Scope {
-        Scope { item: Some(item), ..self.clone() }
+        Scope {
+            item: Some(item),
+            ..self.clone()
+        }
     }
 
     fn context(&self) -> Result<cel::Context<'_>, String> {
@@ -187,17 +204,29 @@ impl Scope {
         });
 
         let p = probe.clone();
-        ctx.add_function("path_exists", move |path: Arc<String>| -> Result<V, cel::ExecutionError> {
-            let out = run(&p, &format!("test -e {} && echo yes || echo no", shq(&path)))?;
-            Ok(V::Bool(out.trim() == "yes"))
-        });
+        ctx.add_function(
+            "path_exists",
+            move |path: Arc<String>| -> Result<V, cel::ExecutionError> {
+                let out = run(
+                    &p,
+                    &format!("test -e {} && echo yes || echo no", shq(&path)),
+                )?;
+                Ok(V::Bool(out.trim() == "yes"))
+            },
+        );
 
         let p = probe.clone();
-        ctx.add_function("cmd_ok", move |cmd: Arc<String>| -> Result<V, cel::ExecutionError> {
-            // 退出码而不是输出:`cmd_ok` 问的是"成不成",不是"说了什么"。
-            let out = run(&p, &format!("if {cmd} >/dev/null 2>&1; then echo yes; else echo no; fi"))?;
-            Ok(V::Bool(out.trim() == "yes"))
-        });
+        ctx.add_function(
+            "cmd_ok",
+            move |cmd: Arc<String>| -> Result<V, cel::ExecutionError> {
+                // 退出码而不是输出:`cmd_ok` 问的是"成不成",不是"说了什么"。
+                let out = run(
+                    &p,
+                    &format!("if {cmd} >/dev/null 2>&1; then echo yes; else echo no; fi"),
+                )?;
+                Ok(V::Bool(out.trim() == "yes"))
+            },
+        );
 
         // 持有该网段地址的网卡名(D-136)。
         //
@@ -209,18 +238,28 @@ impl Scope {
         // 在目标机上算需要 python3 或 ipcalc,而"目标零依赖"是硬约束 ——
         // 为一个网卡名去要求目标装 python,这笔交易不成立。
         let p = probe.clone();
-        ctx.add_function("iface_in", move |cidr: Arc<String>| -> Result<V, cel::ExecutionError> {
-            let out = run(&p, "ip -o -4 addr show 2>/dev/null")?;
-            Ok(V::String(iface_in_cidr(&out, &cidr).into()))
-        });
+        ctx.add_function(
+            "iface_in",
+            move |cidr: Arc<String>| -> Result<V, cel::ExecutionError> {
+                let out = run(&p, "ip -o -4 addr show 2>/dev/null")?;
+                Ok(V::String(iface_in_cidr(&out, &cidr).into()))
+            },
+        );
 
         let p = probe;
-        ctx.add_function("service_state", move |name: Arc<String>| -> Result<V, cel::ExecutionError> {
-            let out = run(&p, &format!(
-                "systemctl is-active {} 2>/dev/null || echo unknown", shq(&name)
-            ))?;
-            Ok(V::String(out.trim().to_string().into()))
-        });
+        ctx.add_function(
+            "service_state",
+            move |name: Arc<String>| -> Result<V, cel::ExecutionError> {
+                let out = run(
+                    &p,
+                    &format!(
+                        "systemctl is-active {} 2>/dev/null || echo unknown",
+                        shq(&name)
+                    ),
+                )?;
+                Ok(V::String(out.trim().to_string().into()))
+            },
+        );
     }
 
     /// 求一段表达式,得到 YAML 值。
@@ -250,7 +289,10 @@ impl Scope {
             Value::Lit(y) => y.clone(),
             Value::Tmpl(t) => self.resolve_template(t)?,
             Value::List(items) => Yaml::Sequence(
-                items.iter().map(|i| self.resolve(i)).collect::<Result<Vec<_>, _>>()?,
+                items
+                    .iter()
+                    .map(|i| self.resolve(i))
+                    .collect::<Result<Vec<_>, _>>()?,
             ),
             Value::Map(m) => {
                 let mut out = serde_yaml::Mapping::new();
@@ -322,9 +364,7 @@ impl Scope {
     /// `each:` 的展开:表达式求值后必须是列表;字面列表逐项求值。
     pub fn expand_each(&self, each: &crate::ir::Each) -> Result<Vec<Yaml>, String> {
         match each {
-            crate::ir::Each::List(items) => {
-                items.iter().map(|i| self.resolve(i)).collect()
-            }
+            crate::ir::Each::List(items) => items.iter().map(|i| self.resolve(i)).collect(),
             crate::ir::Each::Expr(e) => match self.eval(e)? {
                 Yaml::Sequence(items) => Ok(items),
                 other => Err(format!("`each: {}` 需要求值为列表,得到 {other:?}", e.src())),
@@ -344,12 +384,18 @@ fn cel_to_yaml(v: &cel::Value) -> Result<Yaml, String> {
         C::Null => Yaml::Null,
         C::Bytes(b) => Yaml::String(String::from_utf8_lossy(b).into_owned()),
         C::List(items) => Yaml::Sequence(
-            items.iter().map(cel_to_yaml).collect::<Result<Vec<_>, _>>()?,
+            items
+                .iter()
+                .map(cel_to_yaml)
+                .collect::<Result<Vec<_>, _>>()?,
         ),
         C::Map(m) => {
             let mut out = serde_yaml::Mapping::new();
             for (k, val) in m.map.iter() {
-                out.insert(Yaml::String(format!("{k:?}").trim_matches('"').to_string()), cel_to_yaml(val)?);
+                out.insert(
+                    Yaml::String(format!("{k:?}").trim_matches('"').to_string()),
+                    cel_to_yaml(val)?,
+                );
             }
             Yaml::Mapping(out)
         }
@@ -364,7 +410,10 @@ pub fn scalar_to_string(v: &Yaml) -> String {
         Yaml::Number(n) => n.to_string(),
         Yaml::Bool(b) => b.to_string(),
         Yaml::Null => String::new(),
-        other => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
+        other => serde_yaml::to_string(other)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
     }
 }
 
@@ -377,11 +426,18 @@ mod tests {
         let mut params = BTreeMap::new();
         params.insert("port".to_string(), Yaml::from(9000));
         params.insert("vip".to_string(), Yaml::from("10.0.0.9"));
-        params.insert("dirs".to_string(), serde_yaml::from_str("[/data/a, /data/b]").unwrap());
+        params.insert(
+            "dirs".to_string(),
+            serde_yaml::from_str("[/data/a, /data/b]").unwrap(),
+        );
         params.insert("debug".to_string(), Yaml::from(false));
         let mut substrate = BTreeMap::new();
         substrate.insert("arch".to_string(), Yaml::from("arm64"));
-        Scope { params, substrate, ..Default::default() }
+        Scope {
+            params,
+            substrate,
+            ..Default::default()
+        }
     }
 
     fn v(yaml: &str) -> Value {
@@ -391,40 +447,67 @@ mod tests {
     #[test]
     fn lone_expression_keeps_its_native_type() {
         // 旧模型把一切压成字符串,`timeout: "{{n}}"` 一路以字符串流到执行层。
-        assert_eq!(scope().resolve(&v(r#""${params.port}""#)).unwrap(), Yaml::from(9000));
-        assert_eq!(scope().resolve(&v(r#""${params.debug}""#)).unwrap(), Yaml::from(false));
-        assert!(scope().resolve(&v(r#""${params.dirs}""#)).unwrap().is_sequence());
+        assert_eq!(
+            scope().resolve(&v(r#""${params.port}""#)).unwrap(),
+            Yaml::from(9000)
+        );
+        assert_eq!(
+            scope().resolve(&v(r#""${params.debug}""#)).unwrap(),
+            Yaml::from(false)
+        );
+        assert!(scope()
+            .resolve(&v(r#""${params.dirs}""#))
+            .unwrap()
+            .is_sequence());
     }
 
     #[test]
     fn mixed_template_concatenates_to_a_string() {
         assert_eq!(
-            scope().resolve(&v(r#""http://${params.vip}:${params.port}/health""#)).unwrap(),
+            scope()
+                .resolve(&v(r#""http://${params.vip}:${params.port}/health""#))
+                .unwrap(),
             Yaml::from("http://10.0.0.9:9000/health")
         );
     }
 
     #[test]
     fn literals_pass_through_untouched() {
-        assert_eq!(scope().resolve(&v("/usr/local/bin/x")).unwrap(), Yaml::from("/usr/local/bin/x"));
+        assert_eq!(
+            scope().resolve(&v("/usr/local/bin/x")).unwrap(),
+            Yaml::from("/usr/local/bin/x")
+        );
         assert_eq!(scope().resolve(&v("420")).unwrap(), Yaml::from(420));
     }
 
     #[test]
     fn nested_containers_resolve_recursively() {
-        let out = scope().resolve(&v(r#"{ ports: ["${params.port}", 9001], host: "${params.vip}" }"#)).unwrap();
+        let out = scope()
+            .resolve(&v(
+                r#"{ ports: ["${params.port}", 9001], host: "${params.vip}" }"#,
+            ))
+            .unwrap();
         let m = out.as_mapping().unwrap();
         assert_eq!(m[&Yaml::from("host")], Yaml::from("10.0.0.9"));
-        assert_eq!(m[&Yaml::from("ports")].as_sequence().unwrap()[0], Yaml::from(9000));
+        assert_eq!(
+            m[&Yaml::from("ports")].as_sequence().unwrap()[0],
+            Yaml::from(9000)
+        );
     }
 
     #[test]
     fn conditions_must_be_boolean() {
         let s = scope();
-        assert!(s.eval_bool(&CelExpr::compile("params.port > 1024").unwrap()).unwrap());
-        assert!(!s.eval_bool(&CelExpr::compile("substrate.arch == 'amd64'").unwrap()).unwrap());
+        assert!(s
+            .eval_bool(&CelExpr::compile("params.port > 1024").unwrap())
+            .unwrap());
+        assert!(!s
+            .eval_bool(&CelExpr::compile("substrate.arch == 'amd64'").unwrap())
+            .unwrap());
         // 含糊真值不接受 —— 免得 `when: params.vip` 这种写法悄悄成立。
-        let err = s.eval_bool(&CelExpr::compile("params.vip").unwrap()).unwrap_err();
+        let err = s
+            .eval_bool(&CelExpr::compile("params.vip").unwrap())
+            .unwrap_err();
         assert!(err.contains("必须求值为布尔"), "{err}");
     }
 
@@ -450,9 +533,19 @@ mod tests {
         let mut s = scope();
         s.substrate.insert("hostname".into(), Yaml::from("ubuntu"));
         s.identify("n11", &["controlplane".to_string()]);
-        assert_eq!(s.resolve(&v("\"${substrate.name}\"")).unwrap(), Yaml::from("n11"));
-        assert_eq!(s.resolve(&v("\"${substrate.hostname}\"")).unwrap(), Yaml::from("ubuntu"));
-        assert_eq!(s.host.as_deref(), Some("n11"), "host 与 substrate.name 同源");
+        assert_eq!(
+            s.resolve(&v("\"${substrate.name}\"")).unwrap(),
+            Yaml::from("n11")
+        );
+        assert_eq!(
+            s.resolve(&v("\"${substrate.hostname}\"")).unwrap(),
+            Yaml::from("ubuntu")
+        );
+        assert_eq!(
+            s.host.as_deref(),
+            Some("n11"),
+            "host 与 substrate.name 同源"
+        );
         assert!(s
             .eval_bool(&CelExpr::compile("'controlplane' in substrate.roles").unwrap())
             .unwrap());
@@ -463,7 +556,10 @@ mod tests {
         let s = scope();
         assert!(s.resolve(&v("\"${item}\"")).is_err());
         let s2 = s.with_item(Yaml::from("/data/a"));
-        assert_eq!(s2.resolve(&v("\"${item}\"")).unwrap(), Yaml::from("/data/a"));
+        assert_eq!(
+            s2.resolve(&v("\"${item}\"")).unwrap(),
+            Yaml::from("/data/a")
+        );
         assert_eq!(
             s2.resolve(&v(r#""/usr/local/bin/${item}""#)).unwrap(),
             Yaml::from("/usr/local/bin//data/a")

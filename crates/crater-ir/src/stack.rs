@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::eval::Yaml;
-use crate::Error;
 use crate::parse::{known_keys, scalar_to_string};
+use crate::Error;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -161,7 +161,9 @@ pub fn resolve_ref(reference: &str, stack_dir: &Path) -> Result<PathBuf> {
         for cand in [
             stack_dir.join(format!("{reference}.blueprint.yaml")),
             stack_dir.join(format!("{reference}.yaml")),
-            stack_dir.join(reference).join(format!("{reference}.blueprint.yaml")),
+            stack_dir
+                .join(reference)
+                .join(format!("{reference}.blueprint.yaml")),
         ] {
             if let Some(p) = probe(cand) {
                 return Ok(p);
@@ -197,7 +199,10 @@ uses:
         // 顺序**就是**语义:apply 自上而下,destroy 逆序。
         let s = from_str(S).unwrap();
         assert_eq!(
-            s.uses.iter().map(|u| u.blueprint.as_str()).collect::<Vec<_>>(),
+            s.uses
+                .iter()
+                .map(|u| u.blueprint.as_str())
+                .collect::<Vec<_>>(),
             vec!["containerd", "k8s-cluster"]
         );
     }
@@ -227,7 +232,9 @@ uses:
 
     #[test]
     fn a_typo_in_a_top_level_key_is_caught() {
-        let err = from_str("stack: x\nuse:\n  - blueprint: a\n").unwrap_err().to_string();
+        let err = from_str("stack: x\nuse:\n  - blueprint: a\n")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("use"), "{err}");
     }
 

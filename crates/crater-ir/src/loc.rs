@@ -174,7 +174,10 @@ procedures:
     #[test]
     fn drills_into_nested_paths() {
         let idx = LineIndex::new(SRC);
-        assert_eq!(idx.list_items(&["procedures", "boot", "steps"]), vec![15, 16]);
+        assert_eq!(
+            idx.list_items(&["procedures", "boot", "steps"]),
+            vec![15, 16]
+        );
         assert_eq!(idx.key_line(&["procedures", "boot"]), Some(13));
     }
 

@@ -33,8 +33,7 @@ pub type BlobMap = BTreeMap<String, PathBuf>;
 fn oci_archive(img: &ClosureImage, reference: &str) -> Result<Vec<u8>> {
     let read = |digest: &str| -> Result<Vec<u8>> {
         let d = digest.trim_start_matches("sha256:");
-        std::fs::read(img.blobs_dir.join(d))
-            .with_context(|| format!("闭包里读不到 blob {d}"))
+        std::fs::read(img.blobs_dir.join(d)).with_context(|| format!("闭包里读不到 blob {d}"))
     };
     let mbytes = read(&img.manifest_digest)?;
     let manifest: serde_json::Value = serde_json::from_slice(&mbytes)?;
@@ -43,10 +42,17 @@ fn oci_archive(img: &ClosureImage, reference: &str) -> Result<Vec<u8>> {
     let push_blob = |d: &str, files: &mut Vec<(String, Vec<u8>, u32)>| -> Result<u64> {
         let data = read(d)?;
         let n = data.len() as u64;
-        files.push((format!("blobs/sha256/{}", d.trim_start_matches("sha256:")), data, 0o644));
+        files.push((
+            format!("blobs/sha256/{}", d.trim_start_matches("sha256:")),
+            data,
+            0o644,
+        ));
         Ok(n)
     };
-    let cfg_d = manifest["config"]["digest"].as_str().unwrap_or_default().to_string();
+    let cfg_d = manifest["config"]["digest"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     push_blob(&cfg_d, &mut files)?;
     for l in manifest["layers"].as_array().into_iter().flatten() {
         let d = l["digest"].as_str().unwrap_or_default().to_string();
@@ -128,7 +134,14 @@ impl<'a> MaterialCtx<'a> {
         blobs: BlobMap,
         base_dir: PathBuf,
     ) -> Self {
-        MaterialCtx { inner, bp, scope, blobs, images: ImageMap::new(), base_dir }
+        MaterialCtx {
+            inner,
+            bp,
+            scope,
+            blobs,
+            images: ImageMap::new(),
+            base_dir,
+        }
     }
 
     /// 挂上闭包里的镜像。分成单独一个方法而不是加进 `new`:调用点有十来处,
@@ -181,7 +194,11 @@ impl<'a> MaterialCtx<'a> {
         );
         let (code, out) = self.inner.run(&cmd)?;
         if code != 0 {
-            bail!("物料 `{}` 下载失败(exit {code}):{url}\n{}", plan.name, out.trim());
+            bail!(
+                "物料 `{}` 下载失败(exit {code}):{url}\n{}",
+                plan.name,
+                out.trim()
+            );
         }
         Ok(())
     }
@@ -254,7 +271,9 @@ impl Ctx for MaterialCtx<'_> {
             if m.kind == MaterialKind::OsPackage {
                 let (_, fam) = self.probe(crater_ir::builtins::pkg::FAMILY_PROBE)?;
                 let key = fam.trim();
-                let crater_ir::ir::Value::Map(table) = &m.source else { return Ok(None) };
+                let crater_ir::ir::Value::Map(table) = &m.source else {
+                    return Ok(None);
+                };
                 let Some(crater_ir::ir::Value::List(xs)) = table.get(key) else {
                     return Ok(None); // 没为本机家族声明包名 —— 如实说不清
                 };
@@ -268,7 +287,9 @@ impl Ctx for MaterialCtx<'_> {
                 return Ok(Some(names.join(",")));
             }
         }
-        Ok(materials::resolve(self.bp, name, &self.scope).ok().map(|p| p.source))
+        Ok(materials::resolve(self.bp, name, &self.scope)
+            .ok()
+            .map(|p| p.source))
     }
 
     /// 三种情形,按可信度排序:
@@ -278,8 +299,8 @@ impl Ctx for MaterialCtx<'_> {
     ///
     /// 第 3 种不是失败:它让 plan 诚实地报"说不清",而不是猜一个。
     fn material_digest(&self, name: &str) -> Result<Option<String>> {
-        let plan = materials::resolve(self.bp, name, &self.scope)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let plan =
+            materials::resolve(self.bp, name, &self.scope).map_err(|e| anyhow::anyhow!("{e}"))?;
         // 同上:解包物料的声明摘要属于 zip,不属于落地文件 —— 短路返回它会让
         // copy 的 diff 永远"不符",每次 apply 都重推一遍。
         if plan.unzip.is_none() {
@@ -310,8 +331,8 @@ impl Ctx for MaterialCtx<'_> {
     /// 只对**控制端能读到字节**的物料成立(本地文件 / 已备好的 blob)。
     /// 远端 URL 且没有闭包时返回 None:那份模板此刻不在手上,如实说不清。
     fn render_material(&self, name: &str) -> Result<Option<String>> {
-        let plan = materials::resolve(self.bp, name, &self.scope)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let plan =
+            materials::resolve(self.bp, name, &self.scope).map_err(|e| anyhow::anyhow!("{e}"))?;
         // 字节从哪来,决定了报错该指向哪儿。闭包是**快照**:改了本地模板却没重烤,
         // 渲染的仍是旧内容 —— 此时把错误指向磁盘上那个已经改好的文件,
         // 会让人对着正确的代码查半天。所以来源必须写进报错。
@@ -339,7 +360,8 @@ impl Ctx for MaterialCtx<'_> {
     }
 
     fn place_material(&self, name: &str, dest: &str) -> Result<()> {
-        let plan = materials::resolve(self.bp, name, &self.scope).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let plan =
+            materials::resolve(self.bp, name, &self.scope).map_err(|e| anyhow::anyhow!("{e}"))?;
         // 镜像:把闭包里那棵 OCI 树打成一个 archive 推过去,由 `image_present`
         // 导入运行时。**只有闭包里有才走这条** —— 没有就让调用方自己去在线拉,
         // 与 file 类物料的两条路同构。
@@ -359,8 +381,11 @@ impl Ctx for MaterialCtx<'_> {
         // 系统包:一个物料对应**一批**包文件(本体 + 依赖),`dest` 是目录。
         if plan.kind == MaterialKind::OsPackage {
             let prefix = format!("{}{name}/", crate::closure::OS_PKG_SCHEME);
-            let files: Vec<(&String, &PathBuf)> =
-                self.blobs.iter().filter(|(k, _)| k.starts_with(&prefix)).collect();
+            let files: Vec<(&String, &PathBuf)> = self
+                .blobs
+                .iter()
+                .filter(|(k, _)| k.starts_with(&prefix))
+                .collect();
             if files.is_empty() {
                 bail!(
                     "系统包 `{name}` 不在闭包里 —— 断网现场装不上。\n\
@@ -370,8 +395,7 @@ impl Ctx for MaterialCtx<'_> {
             self.inner.run(&format!("mkdir -p {}", sh(dest)))?;
             for (key, path) in files {
                 let file = key.rsplit('/').next().unwrap_or("pkg");
-                let bytes = std::fs::read(path)
-                    .with_context(|| format!("读闭包里的 {file}"))?;
+                let bytes = std::fs::read(path).with_context(|| format!("读闭包里的 {file}"))?;
                 self.inner.write_bytes(&format!("{dest}/{file}"), &bytes)?;
             }
             return Ok(());
@@ -419,7 +443,10 @@ resources:
     fn scope(arch: &str) -> Scope {
         let mut substrate = BTreeMap::new();
         substrate.insert("arch".to_string(), Yaml::from(arch));
-        Scope { substrate, ..Default::default() }
+        Scope {
+            substrate,
+            ..Default::default()
+        }
     }
 
     fn wrap<'a>(inner: &'a FakeCtx, bp: &'a Blueprint, blobs: BlobMap) -> MaterialCtx<'a> {
@@ -444,16 +471,24 @@ resources:
                 self.0.material_digest(n)
             }
         }
-        MaterialCtx::new(Box::new(Borrowed(inner)), bp, scope("amd64"), blobs, PathBuf::from("."))
+        MaterialCtx::new(
+            Box::new(Borrowed(inner)),
+            bp,
+            scope("amd64"),
+            blobs,
+            PathBuf::from("."),
+        )
     }
 
     #[test]
     fn online_materials_are_fetched_by_the_target_itself() {
         // agentless:控制端只编排,不把几十 MB 的二进制当中转。
         let bp = blueprint_from_str(BP).unwrap();
-        let inner = FakeCtx::new()
-            .on("curl", 0, "")
-            .on("sha256sum", 0, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n");
+        let inner = FakeCtx::new().on("curl", 0, "").on(
+            "sha256sum",
+            0,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n",
+        );
         wrap(&inner, &bp, BlobMap::new())
             .place_material("cfg", "/etc/app.conf")
             .unwrap();
@@ -465,7 +500,9 @@ resources:
     #[test]
     fn a_bad_digest_fails_and_removes_the_half_written_file() {
         let bp = blueprint_from_str(BP).unwrap();
-        let inner = FakeCtx::new().on("curl", 0, "").on("sha256sum", 0, "deadbeef\n");
+        let inner = FakeCtx::new()
+            .on("curl", 0, "")
+            .on("sha256sum", 0, "deadbeef\n");
         let err = wrap(&inner, &bp, BlobMap::new())
             .place_material("cfg", "/etc/app.conf")
             .unwrap_err()
@@ -473,7 +510,10 @@ resources:
         assert!(err.contains("摘要不符"), "{err}");
         assert!(err.contains("已删除"), "{err}");
         let cmds: Vec<String> = inner.calls().iter().map(|c| c.text().to_string()).collect();
-        assert!(cmds.iter().any(|c| c.starts_with("rm -f")), "半成品必须删掉:{cmds:?}");
+        assert!(
+            cmds.iter().any(|c| c.starts_with("rm -f")),
+            "半成品必须删掉:{cmds:?}"
+        );
     }
 
     #[test]
@@ -499,9 +539,14 @@ resources:
         // 键是**源 URL**,不是物料名 —— 多架构变体同名不同源,按名字索引会取错。
         blobs.insert("https://ex.com/app.conf".into(), blob);
 
-        let inner = FakeCtx::new()
-            .on("sha256sum", 0, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n");
-        wrap(&inner, &bp, blobs).place_material("cfg", "/etc/app.conf").unwrap();
+        let inner = FakeCtx::new().on(
+            "sha256sum",
+            0,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n",
+        );
+        wrap(&inner, &bp, blobs)
+            .place_material("cfg", "/etc/app.conf")
+            .unwrap();
         assert_eq!(inner.written_file("/etc/app.conf").as_deref(), Some("abc"));
         assert!(
             !inner.calls().iter().any(|c| c.text().contains("curl")),
@@ -520,7 +565,10 @@ resources:
             BlobMap::new(),
             PathBuf::from("."),
         );
-        let err = ctx.place_material("bin", "/usr/local/bin/tool").unwrap_err().to_string();
+        let err = ctx
+            .place_material("bin", "/usr/local/bin/tool")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("拒绝装半套"), "{err}");
         assert!(inner.calls().is_empty());
     }
@@ -535,7 +583,11 @@ resources:
         .unwrap();
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(d.path().join("files")).unwrap();
-        std::fs::write(d.path().join("files/demo.service"), "[Unit]\nDescription=demo\n").unwrap();
+        std::fs::write(
+            d.path().join("files/demo.service"),
+            "[Unit]\nDescription=demo\n",
+        )
+        .unwrap();
 
         let inner = FakeCtx::new();
         let ctx = MaterialCtx::new(
@@ -547,7 +599,8 @@ resources:
         );
         // 用真实的内层 ctx 才能看到 write;这里换一个直接可查的
         let _ = inner;
-        ctx.place_material("unit", "/etc/systemd/system/demo.service").unwrap();
+        ctx.place_material("unit", "/etc/systemd/system/demo.service")
+            .unwrap();
     }
 
     #[test]
@@ -564,9 +617,15 @@ resources:
             BlobMap::new(),
             d.path().to_path_buf(),
         );
-        let err = ctx.place_material("unit", "/tmp/x").unwrap_err().to_string();
+        let err = ctx
+            .place_material("unit", "/tmp/x")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("ghost.service"), "{err}");
-        assert!(err.contains("相对 blueprint 目录"), "要说清怎么解析的:{err}");
+        assert!(
+            err.contains("相对 blueprint 目录"),
+            "要说清怎么解析的:{err}"
+        );
     }
 
     #[test]
@@ -577,7 +636,9 @@ resources:
         .unwrap();
         let inner = FakeCtx::new();
         assert_eq!(
-            wrap(&inner, &bp, BlobMap::new()).material_digest("bin").unwrap(),
+            wrap(&inner, &bp, BlobMap::new())
+                .material_digest("bin")
+                .unwrap(),
             Some("deadbeef".to_string())
         );
     }
@@ -612,7 +673,12 @@ resources:
         )
         .unwrap();
         let inner = FakeCtx::new();
-        assert_eq!(wrap(&inner, &bp, BlobMap::new()).material_digest("bin").unwrap(), None);
+        assert_eq!(
+            wrap(&inner, &bp, BlobMap::new())
+                .material_digest("bin")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -675,14 +741,28 @@ resources:
 
     struct Wrap<'a>(&'a FakeCtx);
     impl Ctx for Wrap<'_> {
-        fn probe(&self, c: &str) -> Result<(i32, String)> { self.0.probe(c) }
-        fn run(&self, c: &str) -> Result<(i32, String)> { self.0.run(c) }
-        fn write_file(&self, p: &str, c: &str) -> Result<()> { self.0.write_file(p, c) }
-        fn place_material(&self, n: &str, d: &str) -> Result<()> { self.0.place_material(n, d) }
+        fn probe(&self, c: &str) -> Result<(i32, String)> {
+            self.0.probe(c)
+        }
+        fn run(&self, c: &str) -> Result<(i32, String)> {
+            self.0.run(c)
+        }
+        fn write_file(&self, p: &str, c: &str) -> Result<()> {
+            self.0.write_file(p, c)
+        }
+        fn place_material(&self, n: &str, d: &str) -> Result<()> {
+            self.0.place_material(n, d)
+        }
     }
 
     fn ctx<'a>(inner: &'a FakeCtx, bp: &'a Blueprint, dir: &tempfile::TempDir) -> MaterialCtx<'a> {
-        MaterialCtx::new(Box::new(Wrap(inner)), bp, scope(), BlobMap::new(), dir.path().to_path_buf())
+        MaterialCtx::new(
+            Box::new(Wrap(inner)),
+            bp,
+            scope(),
+            BlobMap::new(),
+            dir.path().to_path_buf(),
+        )
     }
 
     #[test]
@@ -699,31 +779,43 @@ resources:
         // verify 因此永远给不出绿灯,漂移检测也永远有一条噪声。
         let (dir, bp) = fixture("listen {{ params.port }}\n");
         let want = sha256_hex("listen 9000\n");
-        let fake = FakeCtx::new()
-            .on("test -f '/etc/app.conf'", 0, &format!("{want}\n644\n"));
+        let fake = FakeCtx::new().on("test -f '/etc/app.conf'", 0, &format!("{want}\n644\n"));
         let c = ctx(&fake, &bp, &dir);
 
-        let obs = crater_ir::builtins::get("template").unwrap().observe(&c, &args()).unwrap();
-        let change = crater_ir::builtins::get("template").unwrap().diff(&DiffInput {
-            args: &args(),
-            observed: &obs,
-            upstream_changed: false,
-        });
+        let obs = crater_ir::builtins::get("template")
+            .unwrap()
+            .observe(&c, &args())
+            .unwrap();
+        let change = crater_ir::builtins::get("template")
+            .unwrap()
+            .diff(&DiffInput {
+                args: &args(),
+                observed: &obs,
+                upstream_changed: false,
+            });
         assert_eq!(change, Change::Ok, "渲染结果与现实一致时应为 noop");
     }
 
     #[test]
     fn a_drifted_target_is_reported_as_an_update_with_both_digests() {
         let (dir, bp) = fixture("listen {{ params.port }}\n");
-        let fake = FakeCtx::new()
-            .on("test -f '/etc/app.conf'", 0, &format!("{}\n644\n", sha256_hex("listen 1\n")));
+        let fake = FakeCtx::new().on(
+            "test -f '/etc/app.conf'",
+            0,
+            &format!("{}\n644\n", sha256_hex("listen 1\n")),
+        );
         let c = ctx(&fake, &bp, &dir);
-        let obs = crater_ir::builtins::get("template").unwrap().observe(&c, &args()).unwrap();
-        let change = crater_ir::builtins::get("template").unwrap().diff(&DiffInput {
-            args: &args(),
-            observed: &obs,
-            upstream_changed: false,
-        });
+        let obs = crater_ir::builtins::get("template")
+            .unwrap()
+            .observe(&c, &args())
+            .unwrap();
+        let change = crater_ir::builtins::get("template")
+            .unwrap()
+            .diff(&DiffInput {
+                args: &args(),
+                observed: &obs,
+                upstream_changed: false,
+            });
         assert!(matches!(change, Change::Update(_)), "{change:?}");
     }
 
@@ -731,11 +823,21 @@ resources:
     fn observing_a_template_writes_nothing_to_the_target() {
         // observe 的只读纪律:渲染发生在控制端,不该向目标发出任何写命令。
         let (dir, bp) = fixture("listen {{ params.port }}\n");
-        let fake = FakeCtx::new()
-            .on("test -f '/etc/app.conf'", 0, &format!("{}\n644\n", sha256_hex("x")));
+        let fake = FakeCtx::new().on(
+            "test -f '/etc/app.conf'",
+            0,
+            &format!("{}\n644\n", sha256_hex("x")),
+        );
         let c = ctx(&fake, &bp, &dir);
-        crater_ir::builtins::get("template").unwrap().observe(&c, &args()).unwrap();
-        assert!(fake.calls().iter().all(|call| !call.is_write()), "{:?}", fake.calls());
+        crater_ir::builtins::get("template")
+            .unwrap()
+            .observe(&c, &args())
+            .unwrap();
+        assert!(
+            fake.calls().iter().all(|call| !call.is_write()),
+            "{:?}",
+            fake.calls()
+        );
     }
 
     #[test]
@@ -806,17 +908,30 @@ resources:
 
     struct Wrap<'a>(&'a FakeCtx);
     impl Ctx for Wrap<'_> {
-        fn probe(&self, c: &str) -> Result<(i32, String)> { self.0.probe(c) }
-        fn run(&self, c: &str) -> Result<(i32, String)> { self.0.run(c) }
-        fn write_file(&self, p: &str, c: &str) -> Result<()> { self.0.write_file(p, c) }
-        fn write_bytes(&self, p: &str, c: &[u8]) -> Result<()> { self.0.write_bytes(p, c) }
-        fn place_material(&self, n: &str, d: &str) -> Result<()> { self.0.place_material(n, d) }
+        fn probe(&self, c: &str) -> Result<(i32, String)> {
+            self.0.probe(c)
+        }
+        fn run(&self, c: &str) -> Result<(i32, String)> {
+            self.0.run(c)
+        }
+        fn write_file(&self, p: &str, c: &str) -> Result<()> {
+            self.0.write_file(p, c)
+        }
+        fn write_bytes(&self, p: &str, c: &[u8]) -> Result<()> {
+            self.0.write_bytes(p, c)
+        }
+        fn place_material(&self, n: &str, d: &str) -> Result<()> {
+            self.0.place_material(n, d)
+        }
     }
 
     fn scope_for(arch: &str) -> Scope {
         let mut substrate = BTreeMap::new();
         substrate.insert("arch".to_string(), Yaml::from(arch));
-        Scope { substrate, ..Default::default() }
+        Scope {
+            substrate,
+            ..Default::default()
+        }
     }
 
     /// 一个装好两个架构 blob 的假闭包。内容刻意可读,好断言"拿到的是哪一份"。
@@ -858,9 +973,15 @@ resources:
         // 早先这里会直接报"当前 Ctx 只有文本通道"。
         let dir = tempfile::tempdir().unwrap();
         // 真二进制:0xFF 是任何 UTF-8 序列里都不合法的字节。
-        std::fs::write(dir.path().join("bin"), [0x7Fu8, b'E', b'L', b'F', 0xFF, 0x00]).unwrap();
-        let blobs =
-            BlobMap::from([("https://ex.com/tool-amd64".to_string(), dir.path().join("bin"))]);
+        std::fs::write(
+            dir.path().join("bin"),
+            [0x7Fu8, b'E', b'L', b'F', 0xFF, 0x00],
+        )
+        .unwrap();
+        let blobs = BlobMap::from([(
+            "https://ex.com/tool-amd64".to_string(),
+            dir.path().join("bin"),
+        )]);
         let bp = blueprint_from_str(BP).unwrap();
         let fake = FakeCtx::new().on("", 0, "");
         let c = MaterialCtx::new(
@@ -870,8 +991,12 @@ resources:
             blobs,
             PathBuf::from("."),
         );
-        c.place_material("tool", "/usr/bin/tool").expect("二进制物料必须能推过去");
-        assert!(fake.written_file("/usr/bin/tool").unwrap().contains("binary 6 bytes"));
+        c.place_material("tool", "/usr/bin/tool")
+            .expect("二进制物料必须能推过去");
+        assert!(fake
+            .written_file("/usr/bin/tool")
+            .unwrap()
+            .contains("binary 6 bytes"));
     }
 
     #[test]
@@ -889,7 +1014,8 @@ resources:
         c.place_material("tool", "/usr/bin/tool").unwrap();
         let cmds: Vec<String> = fake.calls().iter().map(|x| x.text().to_string()).collect();
         assert!(
-            cmds.iter().any(|x| x.contains("curl") && x.contains("tool-amd64")),
+            cmds.iter()
+                .any(|x| x.contains("curl") && x.contains("tool-amd64")),
             "{cmds:?}"
         );
     }

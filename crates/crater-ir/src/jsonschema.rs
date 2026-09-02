@@ -148,22 +148,40 @@ fn branch(type_name: &str, freeform: bool) -> Value {
 /// 所有条目通用的元字段。
 fn meta_fields() -> Vec<(String, Value)> {
     vec![
-        ("name".into(), json!({ "type": "string", "description": "人类标签(纯注释,不参与语义)" })),
-        ("id".into(), json!({ "type": "string", "description": "显式 id;不写则按类型自动编号" })),
+        (
+            "name".into(),
+            json!({ "type": "string", "description": "人类标签(纯注释,不参与语义)" }),
+        ),
+        (
+            "id".into(),
+            json!({ "type": "string", "description": "显式 id;不写则按类型自动编号" }),
+        ),
         ("target".into(), json!({ "$ref": "#/$defs/selector" })),
         ("when".into(), json!({ "$ref": "#/$defs/condition" })),
         ("each".into(), json!({ "$ref": "#/$defs/meta_each" })),
-        ("deps".into(), json!({ "type": "array", "items": { "type": "string" },
-                                "description": "显式依赖;默认按声明顺序建边" })),
-        ("exports".into(), json!({ "type": "object",
-                                   "description": "步骤位:导出跨主机 fact(名 → 取值命令)" })),
-        ("strategy".into(), json!({ "type": "object",
+        (
+            "deps".into(),
+            json!({ "type": "array", "items": { "type": "string" },
+                                "description": "显式依赖;默认按声明顺序建边" }),
+        ),
+        (
+            "exports".into(),
+            json!({ "type": "object",
+                                   "description": "步骤位:导出跨主机 fact(名 → 取值命令)" }),
+        ),
+        (
+            "strategy".into(),
+            json!({ "type": "object",
                                     "description": "步骤位:throttle / retries / ignore_errors",
                                     "additionalProperties": false,
                                     "properties": { "throttle": { "type": "integer", "minimum": 1 },
                                                     "retries": { "type": "integer", "minimum": 0 },
-                                                    "ignore_errors": { "type": "boolean" } } })),
-        ("timeout".into(), json!({ "type": ["string", "integer"], "description": "探针位:超时" })),
+                                                    "ignore_errors": { "type": "boolean" } } }),
+        ),
+        (
+            "timeout".into(),
+            json!({ "type": ["string", "integer"], "description": "探针位:超时" }),
+        ),
     ]
 }
 
@@ -257,11 +275,17 @@ fn selector_def(bp: Option<&Blueprint>) -> Value {
         .unwrap_or_default();
     let mut examples: Vec<String> = cast.iter().map(|s| s.to_string()).collect();
     examples.extend(
-        ["all", "role.controlplane", "first(role.controlplane)", "rest(role.controlplane)"]
-            .map(String::from),
+        [
+            "all",
+            "role.controlplane",
+            "first(role.controlplane)",
+            "rest(role.controlplane)",
+        ]
+        .map(String::from),
     );
     let desc = if cast.is_empty() {
-        "定址:all | role.<组> | host.<名> | first(<sel>) | rest(<sel>) | <sel> where <CEL>".to_string()
+        "定址:all | role.<组> | host.<名> | first(<sel>) | rest(<sel>) | <sel> where <CEL>"
+            .to_string()
     } else {
         format!(
             "定址:all | role.<组> | host.<名> | first(<sel>) | rest(<sel>) | <sel> where <CEL>\n             本蓝图的选角表:{}",
@@ -386,11 +410,18 @@ mod tests {
     fn every_catalog_type_gets_a_definition_and_a_branch() {
         let s = generic();
         for t in types::BUILTINS {
-            assert!(defs(&s).contains_key(&format!("type_{}", t.name)), "{} 缺 $def", t.name);
+            assert!(
+                defs(&s).contains_key(&format!("type_{}", t.name)),
+                "{} 缺 $def",
+                t.name
+            );
         }
         // 资源位的分支数 = 资源类型数(探针与过程性原语不在 resources 里补全)
         let branches = s["$defs"]["resource"]["oneOf"].as_array().unwrap();
-        let resources = types::BUILTINS.iter().filter(|t| t.kind == Kind::Resource).count();
+        let resources = types::BUILTINS
+            .iter()
+            .filter(|t| t.kind == Kind::Resource)
+            .count();
         assert_eq!(branches.len(), resources);
     }
 
@@ -404,9 +435,17 @@ mod tests {
             .iter()
             .find(|b| b["required"][0] == "service")
             .expect("service 分支");
-        assert_eq!(branch["additionalProperties"], json!(false), "未知字段要就地飘红");
+        assert_eq!(
+            branch["additionalProperties"],
+            json!(false),
+            "未知字段要就地飘红"
+        );
         let props = branch["properties"].as_object().unwrap();
-        assert!(props.contains_key("service") && props.contains_key("target") && props.contains_key("when"));
+        assert!(
+            props.contains_key("service")
+                && props.contains_key("target")
+                && props.contains_key("when")
+        );
     }
 
     #[test]
@@ -414,10 +453,19 @@ mod tests {
         let s = generic();
         let svc = &s["$defs"]["type_service"];
         assert_eq!(svc["required"], json!(["name"]));
-        assert_eq!(svc["properties"]["state"]["enum"], json!(["started", "stopped", "restarted"]));
+        assert_eq!(
+            svc["properties"]["state"]["enum"],
+            json!(["started", "stopped", "restarted"])
+        );
         // 说明文字直接来自注册表 —— 编辑器悬停即可读到
-        assert!(svc["properties"]["enabled"]["description"].as_str().unwrap().contains("开机自启"));
-        assert!(svc["description"].as_str().unwrap().contains("传导"), "note 应进 description");
+        assert!(svc["properties"]["enabled"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("开机自启"));
+        assert!(
+            svc["description"].as_str().unwrap().contains("传导"),
+            "note 应进 description"
+        );
     }
 
     #[test]
@@ -425,7 +473,11 @@ mod tests {
         let s = generic();
         let all = s["$defs"]["type_copy"]["allOf"].as_array().unwrap();
         assert_eq!(all.len(), 1, "copy 只有一个互斥组");
-        assert_eq!(all[0]["oneOf"].as_array().unwrap().len(), 3, "content / src / material");
+        assert_eq!(
+            all[0]["oneOf"].as_array().unwrap().len(),
+            3,
+            "content / src / material"
+        );
     }
 
     #[test]
@@ -433,7 +485,10 @@ mod tests {
         // 不带引号会被 YAML 当十进制整数 —— 经典脚枪,schema 层就挡掉。
         let s = generic();
         assert_eq!(s["$defs"]["mode"]["pattern"], json!("^0[0-7]{3,4}$"));
-        assert_eq!(s["$defs"]["type_file"]["properties"]["mode"]["$ref"], json!("#/$defs/mode"));
+        assert_eq!(
+            s["$defs"]["type_file"]["properties"]["mode"]["$ref"],
+            json!("#/$defs/mode")
+        );
     }
 
     #[test]
@@ -445,13 +500,19 @@ mod tests {
             .iter()
             .find(|b| b["required"][0] == "shell")
             .expect("shell 分支");
-        assert!(shell["properties"]["shell"]["oneOf"].is_array(), "短写法与 map 都要收");
+        assert!(
+            shell["properties"]["shell"]["oneOf"].is_array(),
+            "短写法与 map 都要收"
+        );
     }
 
     #[test]
     fn a_generic_schema_leaves_material_names_open() {
         let s = generic();
-        assert!(s["$defs"]["material_ref"]["anyOf"].is_null(), "没有蓝图就无从枚举");
+        assert!(
+            s["$defs"]["material_ref"]["anyOf"].is_null(),
+            "没有蓝图就无从枚举"
+        );
         assert_eq!(s["$defs"]["material_ref"]["type"], json!("string"));
     }
 
@@ -459,10 +520,9 @@ mod tests {
     fn a_material_position_still_accepts_an_interpolation() {
         // `each:` 展开时 `material: "${item}"` 是正当写法 ——
         // 只枚举字面名会把它误判成错误(真实 blueprint 实测踩到)。
-        let bp = blueprint_from_str(
-            "name: t\nmaterials:\n  - { name: kubeadm, file: \"https://x\" }\n",
-        )
-        .unwrap();
+        let bp =
+            blueprint_from_str("name: t\nmaterials:\n  - { name: kubeadm, file: \"https://x\" }\n")
+                .unwrap();
         let s = generate(Some(&bp));
         let alts = s["$defs"]["material_ref"]["anyOf"].as_array().unwrap();
         assert_eq!(alts.len(), 2, "枚举 + 插值兜底");
@@ -506,7 +566,10 @@ resources:
         .unwrap();
         let s = generate(Some(&bp));
 
-        assert_eq!(s["$defs"]["material_ref"]["anyOf"][0]["enum"], json!(["caddy-bin", "cfg"]));
+        assert_eq!(
+            s["$defs"]["material_ref"]["anyOf"][0]["enum"],
+            json!(["caddy-bin", "cfg"])
+        );
         assert!(s["title"].as_str().unwrap().contains("demo"));
         // 自定义类型进入资源位的 oneOf —— 在编辑器里不该有二等感
         let has_custom = s["$defs"]["resource"]["oneOf"]
@@ -536,10 +599,24 @@ resources:
     #[test]
     fn the_document_is_a_valid_2020_12_schema_shell() {
         let s = generic();
-        assert_eq!(s["$schema"], json!("https://json-schema.org/draft/2020-12/schema"));
-        assert_eq!(s["additionalProperties"], json!(false), "顶层未知键也要飘红");
+        assert_eq!(
+            s["$schema"],
+            json!("https://json-schema.org/draft/2020-12/schema")
+        );
+        assert_eq!(
+            s["additionalProperties"],
+            json!(false),
+            "顶层未知键也要飘红"
+        );
         assert_eq!(s["required"], json!(["name"]));
-        for key in ["resources", "procedures", "params", "materials", "health", "types"] {
+        for key in [
+            "resources",
+            "procedures",
+            "params",
+            "materials",
+            "health",
+            "types",
+        ] {
             assert!(s["properties"][key].is_object(), "顶层缺 {key}");
         }
     }
@@ -547,6 +624,9 @@ resources:
     #[test]
     fn the_editor_hint_is_a_yaml_comment() {
         let hint = language_server_hint(".crater/schema.json");
-        assert!(hint.starts_with("# yaml-language-server: $schema="), "{hint}");
+        assert!(
+            hint.starts_with("# yaml-language-server: $schema="),
+            "{hint}"
+        );
     }
 }

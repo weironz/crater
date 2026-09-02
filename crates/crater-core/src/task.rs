@@ -152,7 +152,11 @@ impl Requires {
         if !self.arch.is_empty() {
             parts.push(format!("arch {}", self.arch.join("/")));
         }
-        if parts.is_empty() { "不限".to_string() } else { parts.join(",") }
+        if parts.is_empty() {
+            "不限".to_string()
+        } else {
+            parts.join(",")
+        }
     }
 
     /// Err(reason) when the detected identity violates the contract (D-102).
@@ -168,8 +172,16 @@ impl Requires {
             if !admitted {
                 return Err(format!(
                     "OS 不符:目标是 {} {},task 要求 {}",
-                    if os.distro.is_empty() { "<未知发行版>" } else { &os.distro },
-                    if os.version.is_empty() { "<未知版本>" } else { &os.version },
+                    if os.distro.is_empty() {
+                        "<未知发行版>"
+                    } else {
+                        &os.distro
+                    },
+                    if os.version.is_empty() {
+                        "<未知版本>"
+                    } else {
+                        &os.version
+                    },
                     self.describe()
                 ));
             }
@@ -306,7 +318,9 @@ pub fn expand_loops(actions: &[ActionStep]) -> crate::Result<Vec<ActionStep>> {
             let mut av = serde_yaml::to_value(&s.action)?;
             subst(&mut av, &item);
             let action: Action = serde_yaml::from_value(av).map_err(|e| {
-                anyhow::anyhow!("step '{base}' loop[{j}] ({item}): 代入 {{{{item}}}} 后解析失败:{e}")
+                anyhow::anyhow!(
+                    "step '{base}' loop[{j}] ({item}): 代入 {{{{item}}}} 后解析失败:{e}"
+                )
             })?;
             let id = format!("{base}@{j}");
             expanded_ids.push(id.clone());
@@ -390,7 +404,12 @@ impl TaskFile {
     /// actions/teardown/handlers/register. Tells a consumer which groups to define.
     pub fn roles_needed(&self) -> Vec<String> {
         let mut s: BTreeSet<String> = BTreeSet::new();
-        for a in self.actions.iter().chain(&self.teardown).chain(&self.handlers) {
+        for a in self
+            .actions
+            .iter()
+            .chain(&self.teardown)
+            .chain(&self.handlers)
+        {
             s.extend(a.when_role.iter().cloned());
         }
         for r in &self.register {
@@ -486,8 +505,7 @@ fn expand_steps(
         }
         // Prefix handler ids (so role-internal notify can target them).
         let mut handlers = rhandlers;
-        let handler_ids: BTreeSet<String> =
-            handlers.iter().filter_map(|h| h.id.clone()).collect();
+        let handler_ids: BTreeSet<String> = handlers.iter().filter_map(|h| h.id.clone()).collect();
         for h in &mut handlers {
             if let Some(id) = &h.id {
                 h.id = Some(format!("{prefix}.{id}"));
@@ -502,7 +520,13 @@ fn expand_steps(
             let mut needs: Vec<String> = a
                 .needs
                 .iter()
-                .map(|n| if role_ids.contains(n) { format!("{prefix}.{n}") } else { n.clone() })
+                .map(|n| {
+                    if role_ids.contains(n) {
+                        format!("{prefix}.{n}")
+                    } else {
+                        n.clone()
+                    }
+                })
                 .collect();
             if !had_internal {
                 needs.extend(step.needs.iter().cloned());
@@ -546,7 +570,12 @@ fn expand_steps(
                 s.needs = s
                     .needs
                     .iter()
-                    .flat_map(|n| terminal_map.get(n).cloned().unwrap_or_else(|| vec![n.clone()]))
+                    .flat_map(|n| {
+                        terminal_map
+                            .get(n)
+                            .cloned()
+                            .unwrap_or_else(|| vec![n.clone()])
+                    })
                     .collect();
             }
         }
@@ -572,7 +601,10 @@ fn render_yaml<T: Serialize + serde::de::DeserializeOwned>(
 /// `roles/<uses>.yaml` (base = roles_dir) OR dir `roles/<uses>/role.yaml`
 /// (base = roles_dir/<uses>, holding its private `files/` + `templates/`).
 /// Base is canonicalized so the role's `src:` paths become absolute.
-fn load_role(roles_dir: &Path, uses: &str) -> crate::Result<(ModuleDescriptor, std::path::PathBuf)> {
+fn load_role(
+    roles_dir: &Path,
+    uses: &str,
+) -> crate::Result<(ModuleDescriptor, std::path::PathBuf)> {
     let flat = roles_dir.join(format!("{uses}.yaml"));
     let dir_file = roles_dir.join(uses).join("role.yaml");
     let (file, base) = if flat.is_file() {
@@ -598,7 +630,10 @@ fn with_to_strings(with: &BTreeMap<String, serde_yaml::Value>) -> BTreeMap<Strin
                 serde_yaml::Value::String(s) => s.clone(),
                 serde_yaml::Value::Bool(b) => b.to_string(),
                 serde_yaml::Value::Number(n) => n.to_string(),
-                other => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
+                other => serde_yaml::to_string(other)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
             };
             (k.clone(), s)
         })
@@ -624,7 +659,11 @@ fn rewrite_material_refs(action: &mut Action, map: &BTreeMap<String, String>) {
         Action::Copy { material, .. }
         | Action::Extract { material, .. }
         | Action::PkgInstall { material, .. } => opt(material),
-        Action::LoadImage { material, materials, .. } => {
+        Action::LoadImage {
+            material,
+            materials,
+            ..
+        } => {
             opt(material);
             for m in materials {
                 one(m);
@@ -691,7 +730,10 @@ actions:
   - { action: shell, cmd: "echo {{item}}", loop: [{a: 1}] }
 "#;
         let t: TaskFile = serde_yaml::from_str(bad).unwrap();
-        assert!(expand_loops(&t.actions).unwrap_err().to_string().contains("标量"));
+        assert!(expand_loops(&t.actions)
+            .unwrap_err()
+            .to_string()
+            .contains("标量"));
     }
 
     #[test]
@@ -719,7 +761,13 @@ actions:
         assert_eq!(t.hosts, "all");
         assert_eq!(t.actions.len(), 2);
         assert_eq!(t.actions[0].id.as_deref(), Some("place_yq"));
-        assert!(matches!(t.actions[0].action, Action::Copy { material: Some(_), .. }));
+        assert!(matches!(
+            t.actions[0].action,
+            Action::Copy {
+                material: Some(_),
+                ..
+            }
+        ));
         assert_eq!(t.actions[1].phase, Phase::Verify);
         assert_eq!(t.actions[1].needs, vec!["place_yq".to_string()]);
     }
@@ -760,7 +808,16 @@ actions:
             assert_eq!(got, want, "action: {name} should parse to {want}");
         }
         // Old names must now be rejected.
-        for old in ["run_cmd", "command", "pkg_install", "extract", "render_template", "module", "write_file", "systemd_unit"] {
+        for old in [
+            "run_cmd",
+            "command",
+            "pkg_install",
+            "extract",
+            "render_template",
+            "module",
+            "write_file",
+            "systemd_unit",
+        ] {
             let yaml = format!("action: {old}\nname: x");
             assert!(
                 serde_yaml::from_str::<Action>(&yaml).is_err(),
@@ -859,16 +916,28 @@ actions:
         let names: Vec<&str> = task.materials.iter().map(|m| m.name.as_str()).collect();
         assert_eq!(names, vec!["other", "cr.bin"]);
         let bin = task.materials.iter().find(|m| m.name == "cr.bin").unwrap();
-        assert_eq!(bin.url_tmpl.as_deref(), Some("https://x/v2.3.1/containerd.tgz"));
+        assert_eq!(
+            bin.url_tmpl.as_deref(),
+            Some("https://x/v2.3.1/containerd.tgz")
+        );
         // handler hoisted + prefixed.
         assert_eq!(task.handlers.len(), 1);
         assert_eq!(task.handlers[0].id.as_deref(), Some("cr.reload"));
 
         // actions flattened: pre, cr.fetch, cr.svc, post.
-        let ids: Vec<&str> = task.actions.iter().map(|a| a.id.as_deref().unwrap()).collect();
+        let ids: Vec<&str> = task
+            .actions
+            .iter()
+            .map(|a| a.id.as_deref().unwrap())
+            .collect();
         assert_eq!(ids, vec!["pre", "cr.fetch", "cr.svc", "post"]);
 
-        let by = |id: &str| task.actions.iter().find(|a| a.id.as_deref() == Some(id)).unwrap();
+        let by = |id: &str| {
+            task.actions
+                .iter()
+                .find(|a| a.id.as_deref() == Some(id))
+                .unwrap()
+        };
         // entry action inherits the role-step's needs + when_role; material ref prefixed.
         let fetch = by("cr.fetch");
         assert_eq!(fetch.needs, vec!["pre"]);
@@ -923,7 +992,11 @@ mod requires_tests {
     use crate::os::OsInfo;
 
     fn os(distro: &str, version: &str) -> OsInfo {
-        OsInfo { family: crate::os::OsFamily::Unknown, distro: distro.into(), version: version.into() }
+        OsInfo {
+            family: crate::os::OsFamily::Unknown,
+            distro: distro.into(),
+            version: version.into(),
+        }
     }
 
     /// D-102: distro+version+arch admission — exact/prefix versions, distro
@@ -949,7 +1022,9 @@ mod requires_tests {
         let e = req.check(&os("ubuntu", "24.04"), Arch::Arm64).unwrap_err();
         assert!(e.contains("架构不符"), "{e}");
         // empty contract admits anything
-        assert!(Requires::default().check(&os("kylin", "V10"), Arch::Unknown).is_ok());
+        assert!(Requires::default()
+            .check(&os("kylin", "V10"), Arch::Unknown)
+            .is_ok());
         // arch aliases: requirement spelled x86_64 admits Amd64
         let req2: Requires = serde_yaml::from_str("arch: [x86_64]\n").unwrap();
         assert!(req2.check(&os("", ""), Arch::Amd64).is_ok());

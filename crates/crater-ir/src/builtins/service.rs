@@ -73,7 +73,11 @@ impl ResourceType for Service {
         match want_state {
             "started" => {
                 if !is_active {
-                    fields.push(FieldDiff::change("state", obs.get("active").unwrap_or("?"), "active"));
+                    fields.push(FieldDiff::change(
+                        "state",
+                        obs.get("active").unwrap_or("?"),
+                        "active",
+                    ));
                 } else if input.upstream_changed {
                     // ← 取代 handler/notify
                     fields.push(FieldDiff::change("state", "active", "restarted(上游已变)"));
@@ -166,12 +170,19 @@ mod tests {
         Observed::present([("active", "active".into()), ("enabled", "enabled".into())])
     }
     fn diff_of(a: &ResolvedArgs, o: &Observed, upstream: bool) -> Change {
-        Service.diff(&DiffInput { args: a, observed: o, upstream_changed: upstream })
+        Service.diff(&DiffInput {
+            args: a,
+            observed: o,
+            upstream_changed: upstream,
+        })
     }
 
     #[test]
     fn a_running_enabled_service_needs_nothing() {
-        assert_eq!(diff_of(&args("started", Some(true)), &running(), false), Change::Ok);
+        assert_eq!(
+            diff_of(&args("started", Some(true)), &running(), false),
+            Change::Ok
+        );
     }
 
     #[test]
@@ -180,7 +191,11 @@ mod tests {
         // 二进制/配置一变,服务自己要求重启。
         let c = diff_of(&args("started", Some(true)), &running(), true);
         assert!(matches!(c, Change::Update(_)), "{c:?}");
-        assert!(c.fields()[0].to_string().contains("restarted"), "{:?}", c.fields());
+        assert!(
+            c.fields()[0].to_string().contains("restarted"),
+            "{:?}",
+            c.fields()
+        );
     }
 
     #[test]
@@ -214,7 +229,11 @@ mod tests {
 
     #[test]
     fn observe_reads_active_and_enabled_in_one_probe() {
-        let ctx = FakeCtx::new().on("systemctl is-active", 0, &format!("active{SEP}enabled{SEP}rustfs.service enabled"));
+        let ctx = FakeCtx::new().on(
+            "systemctl is-active",
+            0,
+            &format!("active{SEP}enabled{SEP}rustfs.service enabled"),
+        );
         let obs = Service.observe(&ctx, &args("started", None)).unwrap();
         assert_eq!(obs.get("active"), Some("active"));
         assert_eq!(obs.get("enabled"), Some("enabled"));
@@ -225,31 +244,48 @@ mod tests {
     #[test]
     fn a_missing_unit_reads_as_absent_not_as_stopped() {
         let ctx = FakeCtx::new().on("systemctl is-active", 0, &format!("{SEP}{SEP}"));
-        assert!(!Service.observe(&ctx, &args("started", None)).unwrap().present);
+        assert!(
+            !Service
+                .observe(&ctx, &args("started", None))
+                .unwrap()
+                .present
+        );
     }
 
     #[test]
     fn apply_reloads_before_acting_and_restarts_when_upstream_moved() {
         let ctx = FakeCtx::new().on("systemctl", 0, "");
         let change = diff_of(&args("started", Some(true)), &running(), true);
-        Service.apply(&ctx, &args("started", Some(true)), &change).unwrap();
+        Service
+            .apply(&ctx, &args("started", Some(true)), &change)
+            .unwrap();
         let cmds: Vec<String> = ctx.calls().iter().map(|c| c.text().to_string()).collect();
         assert_eq!(cmds[0], "systemctl daemon-reload", "{cmds:?}");
-        assert!(cmds.iter().any(|c| c.starts_with("systemctl restart")), "{cmds:?}");
-        assert!(cmds.iter().any(|c| c.starts_with("systemctl enable")), "{cmds:?}");
+        assert!(
+            cmds.iter().any(|c| c.starts_with("systemctl restart")),
+            "{cmds:?}"
+        );
+        assert!(
+            cmds.iter().any(|c| c.starts_with("systemctl enable")),
+            "{cmds:?}"
+        );
     }
 
     #[test]
     fn destroy_stops_and_disables_but_leaves_the_unit_file_alone() {
         let ctx = FakeCtx::new().on("systemctl", 0, "");
-        Service.destroy(&ctx, &args("started", None), &running()).unwrap();
+        Service
+            .destroy(&ctx, &args("started", None), &running())
+            .unwrap();
         let cmds: Vec<String> = ctx.calls().iter().map(|c| c.text().to_string()).collect();
         assert!(cmds.iter().any(|c| c.starts_with("systemctl stop")));
         assert!(cmds.iter().any(|c| c.starts_with("systemctl disable")));
-        assert!(!cmds.iter().any(|c| c.contains("rm ")), "unit 文件归它自己那条资源管");
+        assert!(
+            !cmds.iter().any(|c| c.contains("rm ")),
+            "unit 文件归它自己那条资源管"
+        );
     }
 }
-
 
 /// `systemd_unit` —— unit 文件本身(rustfs 试金石裁定 C)。
 ///
@@ -281,20 +317,35 @@ impl ResourceType for SystemdUnit {
             if let Some(want) = ctx.material_digest(name)? {
                 fields.insert("want_sha256".to_string(), want);
             }
-            return Ok(Observed { present: true, fields });
+            return Ok(Observed {
+                present: true,
+                fields,
+            });
         }
         // 只解析我们会写的那几项 —— 别人手改的其它字段不该被我们判成"漂移"。
         let mut fields = std::collections::BTreeMap::new();
         for line in out.lines() {
-            let Some((k, v)) = line.split_once('=') else { continue };
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
             let k = k.trim();
-            if ["ExecStart", "Restart", "EnvironmentFile", "Description", "After", "WantedBy"]
-                .contains(&k)
+            if [
+                "ExecStart",
+                "Restart",
+                "EnvironmentFile",
+                "Description",
+                "After",
+                "WantedBy",
+            ]
+            .contains(&k)
             {
                 fields.insert(k.to_lowercase(), v.trim().to_string());
             }
         }
-        Ok(Observed { present: true, fields })
+        Ok(Observed {
+            present: true,
+            fields,
+        })
     }
 
     fn diff(&self, input: &DiffInput) -> Change {
@@ -307,9 +358,8 @@ impl ResourceType for SystemdUnit {
                 Some(want) if input.observed.get("sha256") == Some(want) => Change::Ok,
                 Some(want) => Change::Update(vec![FieldDiff::change(
                     "unit",
-                    &input.observed.get("sha256").unwrap_or("?")[..12.min(
-                        input.observed.get("sha256").unwrap_or("?").len(),
-                    )],
+                    &input.observed.get("sha256").unwrap_or("?")
+                        [..12.min(input.observed.get("sha256").unwrap_or("?").len())],
                     &want[..12.min(want.len())],
                 )]),
                 // 远端物料且未声明 sha256 —— 此刻确实算不出来,如实说。
@@ -324,7 +374,10 @@ impl ResourceType for SystemdUnit {
         let desired = rendered_fields(input.args);
         if !input.observed.present {
             return Change::Create(
-                desired.iter().map(|(k, v)| FieldDiff::set(k, v.clone())).collect(),
+                desired
+                    .iter()
+                    .map(|(k, v)| FieldDiff::set(k, v.clone()))
+                    .collect(),
             );
         }
         let fields: Vec<FieldDiff> = desired
@@ -386,14 +439,27 @@ fn rendered_fields(args: &ResolvedArgs) -> Vec<(&'static str, String)> {
             out.push((k, v));
         }
     };
-    put("Description", arg_str_opt(args, "description").map(str::to_string));
+    put(
+        "Description",
+        arg_str_opt(args, "description").map(str::to_string),
+    );
     put("After", non_empty(list_of(args, "after").join(" ")));
-    put("ExecStart", arg_str_opt(args, "exec_start").map(str::to_string));
-    put("EnvironmentFile", arg_str_opt(args, "environment_file").map(str::to_string));
+    put(
+        "ExecStart",
+        arg_str_opt(args, "exec_start").map(str::to_string),
+    );
+    put(
+        "EnvironmentFile",
+        arg_str_opt(args, "environment_file").map(str::to_string),
+    );
     put("Restart", arg_str_opt(args, "restart").map(str::to_string));
     put(
         "WantedBy",
-        Some(arg_str_opt(args, "wanted_by").unwrap_or("multi-user.target").to_string()),
+        Some(
+            arg_str_opt(args, "wanted_by")
+                .unwrap_or("multi-user.target")
+                .to_string(),
+        ),
     );
     out
 }
@@ -456,11 +522,20 @@ mod unit_tests {
         let mut a = ResolvedArgs::new();
         a.insert("name".into(), Yaml::from("rustfs"));
         a.insert("description".into(), Yaml::from("RustFS object storage"));
-        a.insert("exec_start".into(), Yaml::from("/usr/local/bin/rustfs $VOL"));
+        a.insert(
+            "exec_start".into(),
+            Yaml::from("/usr/local/bin/rustfs $VOL"),
+        );
         a.insert("environment_file".into(), Yaml::from("/etc/default/rustfs"));
         a.insert("restart".into(), Yaml::from("on-failure"));
-        a.insert("after".into(), serde_yaml::from_str("[network-online.target]").unwrap());
-        a.insert("limits".into(), serde_yaml::from_str("{NOFILE: 1048576}").unwrap());
+        a.insert(
+            "after".into(),
+            serde_yaml::from_str("[network-online.target]").unwrap(),
+        );
+        a.insert(
+            "limits".into(),
+            serde_yaml::from_str("{NOFILE: 1048576}").unwrap(),
+        );
         a
     }
 
@@ -468,12 +543,24 @@ mod unit_tests {
     fn renders_a_valid_three_section_unit() {
         let text = render_unit(&args());
         assert!(text.starts_with("[Unit]\n"), "{text}");
-        assert!(text.contains("\n[Service]\n") && text.contains("\n[Install]\n"), "{text}");
-        assert!(text.contains("ExecStart=/usr/local/bin/rustfs $VOL"), "{text}");
+        assert!(
+            text.contains("\n[Service]\n") && text.contains("\n[Install]\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("ExecStart=/usr/local/bin/rustfs $VOL"),
+            "{text}"
+        );
         assert!(text.contains("LimitNOFILE=1048576"), "{text}");
         // `-` 前缀:环境文件缺失不该让服务起不来
-        assert!(text.contains("EnvironmentFile=-/etc/default/rustfs"), "{text}");
-        assert!(text.contains("WantedBy=multi-user.target"), "默认 WantedBy:{text}");
+        assert!(
+            text.contains("EnvironmentFile=-/etc/default/rustfs"),
+            "{text}"
+        );
+        assert!(
+            text.contains("WantedBy=multi-user.target"),
+            "默认 WantedBy:{text}"
+        );
     }
 
     #[test]
@@ -482,10 +569,19 @@ mod unit_tests {
         let obs = Observed {
             present: true,
             fields: [
-                ("execstart".to_string(), "/usr/local/bin/rustfs OLD".to_string()),
+                (
+                    "execstart".to_string(),
+                    "/usr/local/bin/rustfs OLD".to_string(),
+                ),
                 ("restart".to_string(), "on-failure".to_string()),
-                ("description".to_string(), "RustFS object storage".to_string()),
-                ("environmentfile".to_string(), "/etc/default/rustfs".to_string()),
+                (
+                    "description".to_string(),
+                    "RustFS object storage".to_string(),
+                ),
+                (
+                    "environmentfile".to_string(),
+                    "/etc/default/rustfs".to_string(),
+                ),
                 ("after".to_string(), "network-online.target".to_string()),
                 ("wantedby".to_string(), "multi-user.target".to_string()),
             ]
@@ -497,7 +593,11 @@ mod unit_tests {
             upstream_changed: false,
         });
         assert_eq!(c.fields().len(), 1, "{:?}", c.fields());
-        assert!(c.fields()[0].to_string().starts_with("ExecStart:"), "{:?}", c.fields());
+        assert!(
+            c.fields()[0].to_string().starts_with("ExecStart:"),
+            "{:?}",
+            c.fields()
+        );
     }
 
     #[test]
@@ -506,9 +606,16 @@ mod unit_tests {
         for (k, v) in rendered_fields(&args()) {
             fields.insert(k.to_lowercase(), v);
         }
-        let obs = Observed { present: true, fields };
+        let obs = Observed {
+            present: true,
+            fields,
+        };
         assert_eq!(
-            SystemdUnit.diff(&DiffInput { args: &args(), observed: &obs, upstream_changed: false }),
+            SystemdUnit.diff(&DiffInput {
+                args: &args(),
+                observed: &obs,
+                upstream_changed: false
+            }),
             Change::Ok
         );
     }
@@ -523,7 +630,11 @@ mod unit_tests {
         );
         let obs = SystemdUnit.observe(&ctx, &args()).unwrap();
         assert_eq!(obs.get("execstart"), Some("/usr/local/bin/rustfs $VOL"));
-        assert!(obs.fields.keys().all(|k| k != "memorymax"), "{:?}", obs.fields);
+        assert!(
+            obs.fields.keys().all(|k| k != "memorymax"),
+            "{:?}",
+            obs.fields
+        );
     }
 
     #[test]
@@ -537,13 +648,23 @@ mod unit_tests {
         let same = Observed {
             present: true,
             fields: [
-                ("sha256".to_string(), crate::builtins::copy::sha256_hex(body)),
-                ("want_sha256".to_string(), crate::builtins::copy::sha256_hex(body)),
+                (
+                    "sha256".to_string(),
+                    crate::builtins::copy::sha256_hex(body),
+                ),
+                (
+                    "want_sha256".to_string(),
+                    crate::builtins::copy::sha256_hex(body),
+                ),
             ]
             .into(),
         };
         assert_eq!(
-            SystemdUnit.diff(&DiffInput { args: &a, observed: &same, upstream_changed: false }),
+            SystemdUnit.diff(&DiffInput {
+                args: &a,
+                observed: &same,
+                upstream_changed: false
+            }),
             Change::Ok,
             "内容一致就该是 ✓,不是 ?"
         );
@@ -551,8 +672,14 @@ mod unit_tests {
         let drifted = Observed {
             present: true,
             fields: [
-                ("sha256".to_string(), crate::builtins::copy::sha256_hex("changed by hand")),
-                ("want_sha256".to_string(), crate::builtins::copy::sha256_hex(body)),
+                (
+                    "sha256".to_string(),
+                    crate::builtins::copy::sha256_hex("changed by hand"),
+                ),
+                (
+                    "want_sha256".to_string(),
+                    crate::builtins::copy::sha256_hex(body),
+                ),
             ]
             .into(),
         };
@@ -575,7 +702,11 @@ mod unit_tests {
             fields: [("sha256".to_string(), "abc".to_string())].into(),
         };
         assert!(matches!(
-            SystemdUnit.diff(&DiffInput { args: &a, observed: &obs, upstream_changed: false }),
+            SystemdUnit.diff(&DiffInput {
+                args: &a,
+                observed: &obs,
+                upstream_changed: false
+            }),
             Change::Unknown(_)
         ));
     }
@@ -598,9 +729,14 @@ mod unit_tests {
     #[test]
     fn writing_a_unit_always_reloads_the_daemon() {
         let ctx = FakeCtx::new().on("systemctl", 0, "");
-        SystemdUnit.apply(&ctx, &args(), &Change::Create(vec![])).unwrap();
+        SystemdUnit
+            .apply(&ctx, &args(), &Change::Create(vec![]))
+            .unwrap();
         let calls: Vec<String> = ctx.calls().iter().map(|c| c.text().to_string()).collect();
-        assert!(calls.iter().any(|c| c.contains("rustfs.service")), "{calls:?}");
+        assert!(
+            calls.iter().any(|c| c.contains("rustfs.service")),
+            "{calls:?}"
+        );
         assert!(
             calls.iter().any(|c| c == "systemctl daemon-reload"),
             "不 reload 的话 systemd 还认旧的:{calls:?}"
@@ -611,7 +747,10 @@ mod unit_tests {
     fn a_name_with_an_explicit_suffix_is_respected() {
         let mut a = args();
         a.insert("name".into(), Yaml::from("containerd.socket"));
-        assert_eq!(unit_path(&a).unwrap(), "/etc/systemd/system/containerd.socket");
+        assert_eq!(
+            unit_path(&a).unwrap(),
+            "/etc/systemd/system/containerd.socket"
+        );
     }
 }
 
@@ -622,7 +761,9 @@ mod absence_tests {
     use crate::eval::Yaml;
 
     fn args(name: &str) -> ResolvedArgs {
-        [("name".to_string(), Yaml::from(name))].into_iter().collect()
+        [("name".to_string(), Yaml::from(name))]
+            .into_iter()
+            .collect()
     }
 
     #[test]
@@ -630,8 +771,11 @@ mod absence_tests {
         // 真机实证:unit 文件删掉后 `systemctl is-active` 仍回 "inactive"(非空)。
         // 早先的判据 `unit_line.is_empty() && active.is_empty()` 因此判不出
         // "不存在",destroy 会去 stop 一个不存在的 unit 拿到 exit 5 —— 退役不幂等。
-        let ctx = FakeCtx::new()
-            .on("systemctl is-active", 0, &format!("inactive{SEP}not-found{SEP}"));
+        let ctx = FakeCtx::new().on(
+            "systemctl is-active",
+            0,
+            &format!("inactive{SEP}not-found{SEP}"),
+        );
         let obs = Service.observe(&ctx, &args("keepalived")).unwrap();
         assert!(!obs.present, "unit 已删除却被判为存在:{obs:?}");
     }
@@ -657,9 +801,16 @@ mod absence_tests {
         // FakeCtx 对未注册命令回 exit 1,所以 disable 也要显式注册成 5。
         let ctx = FakeCtx::new()
             .on("systemctl stop", 5, "Unit keepalived.service not loaded.")
-            .on("systemctl disable", 5, "Unit keepalived.service does not exist.");
+            .on(
+                "systemctl disable",
+                5,
+                "Unit keepalived.service does not exist.",
+            );
         let obs = Observed::present([("active", "inactive".into()), ("enabled", "".into())]);
-        assert_eq!(Service.destroy(&ctx, &args("keepalived"), &obs).unwrap(), Outcome::Changed);
+        assert_eq!(
+            Service.destroy(&ctx, &args("keepalived"), &obs).unwrap(),
+            Outcome::Changed
+        );
     }
 
     #[test]

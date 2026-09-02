@@ -150,7 +150,11 @@ impl BuiltinType {
         self.fields.iter().map(|f| f.name).collect()
     }
     fn pick(&self, want: impl Fn(Req) -> bool) -> Vec<&'static str> {
-        self.fields.iter().filter(|f| want(f.req)).map(|f| f.name).collect()
+        self.fields
+            .iter()
+            .filter(|f| want(f.req))
+            .map(|f| f.name)
+            .collect()
     }
 }
 
@@ -200,7 +204,6 @@ pub static BUILTINS: &[BuiltinType] = &[
     ], note: "三种来源恰择其一。URL 里引用 `${substrate.arch}` 这类目标事实时,\
               `crater build` 无从推断要烤哪个变体,必须用 `--for arch=amd64` 给出目标画像。",
       see: ["copy", "template", "unarchive"]),
-
     // ---------------- 文件与内容 ----------------
     t!("file", Resource, "路径的期望态:目录 / 存在 / 不存在,含权限属主", [
         f!("path", Path, req, "目标路径"),
@@ -209,7 +212,6 @@ pub static BUILTINS: &[BuiltinType] = &[
         f!("owner", Str, opt, "属主"),
         f!("group", Str, opt, "属组"),
     ], see: ["copy", "unarchive"]),
-
     t!("copy", Resource, "把内容放到目标路径;幂等靠内容寻址(sha256)而非时间戳", [
         f!("dest", Path, req, "目标路径"),
         f!("content", Str, one_of "来源", "内联文本,可含 ${} 插值"),
@@ -221,7 +223,6 @@ pub static BUILTINS: &[BuiltinType] = &[
     ], note: "三种来源恰择其一。用 material 时,若物料声明了 sha256 或是本地文件,\
               plan 期即可内容寻址比对;远端且无 sha256 则只能退回\"上游变没变\"的粗判据。",
       see: ["template", "file"]),
-
     t!("template", Resource, "渲染一份模板物料到目标路径(纯替换,无条件无循环)", [
         f!("dest", Path, req, "目标路径"),
         f!("material", Material, one_of "来源", "作为模板的物料名"),
@@ -232,7 +233,6 @@ pub static BUILTINS: &[BuiltinType] = &[
     ], note: "模板只做替换 —— 条件与循环是藏逻辑的第一现场,一律不支持。\
               需要结构化生成请用 file 的键值形式或 each:。",
       see: ["copy"]),
-
     t!("lineinfile", Resource, "确保某一行在文件里存在或不存在", [
         f!("path", Path, req, "目标文件"),
         f!("line", Str, req, "期望的整行内容"),
@@ -240,7 +240,6 @@ pub static BUILTINS: &[BuiltinType] = &[
         f!("state", enum ["present", "absent"], Optional, "默认 present"),
         f!("create", Bool, opt, "文件不存在时是否创建,默认 false"),
     ], note: "退役时只删这一行,不删整个文件 —— 那往往是别人的文件。"),
-
     t!("unarchive", Resource, "把归档展开到目标目录", [
         f!("to", Path, req, "展开到哪个目录"),
         f!("material", Material, one_of "来源", "归档物料名"),
@@ -250,7 +249,6 @@ pub static BUILTINS: &[BuiltinType] = &[
     ], note: "不写 creates 就无法判断是否已展开,plan 会报 `?说不清`、每次都重跑 —— \
               引擎不猜\"哪个文件代表展开成功\",那是产品知识,必须由作者声明。\
               退役只删 creates 指的产物:to 常是 /usr/local 这类共享目录,整个删会连累别人。"),
-
     // ---------------- 服务与主机基线 ----------------
     t!("systemd_unit", Resource, "安装 systemd unit 文件(自动 daemon-reload)", [
         f!("name", Str, req, "unit 名,可省 .service 后缀"),
@@ -269,7 +267,6 @@ pub static BUILTINS: &[BuiltinType] = &[
     ], note: "字段化而非 copy 一坨 INI:能说出\"只有 ExecStart 变了\",\
               且只比对我们写的那几项 —— 目标机上别人手加的 MemoryMax= 不算漂移。",
       see: ["service"]),
-
     t!("service", Resource, "systemd 服务的运行态与开机自启", [
         f!("name", Str, req, "服务名,可省 .service 后缀"),
         f!("state", enum ["started", "stopped", "restarted"], Optional, "不写 = 不管理运行态"),
@@ -278,13 +275,11 @@ pub static BUILTINS: &[BuiltinType] = &[
               本服务会被判定需要重启 —— 作者不写 notify,也就不会因为忘写而漏重启。\
               `restarted` 表示每次都重启,永远不是 noop;想保持运行写 `started`。",
       see: ["systemd_unit"]),
-
     t!("hostname", Resource, "目标主机名(kubeadm 等按 OS hostname 认节点)", [
         f!("name", Str, req, "期望的主机名,常写 ${substrate.name}"),
     ], free: "name",
       note: "substrate.name 是 inventory 里的名字(身份);substrate.hostname 是当前 OS 主机名(现实)。\
               退役时不动主机名 —— 没有\"原来的名字\"可以改回去。"),
-
     t!("timezone", Resource, "系统时区", [
         f!("name", Str, req, "IANA 时区名,如 Asia/Shanghai;`timedatectl list-timezones` 可列全"),
     ], free: "name",
@@ -292,7 +287,6 @@ pub static BUILTINS: &[BuiltinType] = &[
               但机群时区不一致会让跨机对日志变成一件苦差事,所以它值得是期望态而不是一条命令。\
               退役时不动时区:没有\"原来的时区\"可以改回去。",
       see: ["time_sync"]),
-
     t!("time_sync", Resource, "时钟同步(NTP)", [
         f!("enabled", Bool, opt, "是否启用 NTP 同步,默认 true"),
         f!("servers", List, opt, "NTP 服务器;留空用系统默认(境内建议 ntp.aliyun.com)"),
@@ -303,27 +297,23 @@ pub static BUILTINS: &[BuiltinType] = &[
               和证书有效期恰恰吃这几百毫秒。跨主机比时间戳的一切判据,精度下限都是它。\
               实现走 systemd-timesyncd(Ubuntu/Debian 默认);退役时不关同步。",
       see: ["timezone"]),
-
     t!("swap", Resource, "交换分区的启用状态(k8s 要求关闭)", [
         f!("state", enum ["disabled", "enabled"], Required, "期望状态"),
         f!("persist", Bool, opt, "同时注释掉 /etc/fstab 里的 swap 条目,默认 true"),
     ], free: "state",
       note: "只 swapoff 不改 fstab 是经典陷阱:重启后 swap 自己回来、k8s 再次拒绝启动。\
               persist 让这一项在 plan 里**看得见**。退役时不擅自开回来 —— 原来什么样我们并不知道。"),
-
     t!("kernel_modules", Resource, "内核模块加载与持久化", [
         f!("load", List, req, "要加载的模块名列表"),
         f!("persist", Bool, opt, "写入 /etc/modules-load.d/,默认 true"),
     ], free: "load",
       note: "退役只撤持久化,不 rmmod —— 别的东西可能正用着这些模块。"),
-
     t!("sysctl", Resource, "内核参数", [
         f!("set", Map, one_of "来源", "键值表,如 {net.ipv4.ip_forward: 1}"),
         f!("from_material", Material, one_of "来源", "整份 sysctl 配置来自物料"),
         f!("reload", Bool, opt, "写完是否 sysctl --system,默认 true"),
     ], note: "逐键比对并逐键报差异;键在本机不存在(如模块未加载)时读作\"(未设置)\",\
               不会把探针的 stderr 当成当前值。"),
-
     t!("user", Resource, "系统用户", [
         f!("name", Str, req, "用户名"),
         f!("state", enum ["present", "absent"], Optional, "默认 present"),
@@ -338,58 +328,81 @@ pub static BUILTINS: &[BuiltinType] = &[
               属主靠的是数字而不是名字 —— 系统分配的 uid 各机不同,搬过去就成了\
               一堆 `nobody`。主组用 `group:`(单数),附加组用 `groups:`(复数)。",
       see: ["group"]),
-
     t!("group", Resource, "系统组", [
         f!("name", Str, req, "组名"),
         f!("state", enum ["present", "absent"], Optional, "默认 present"),
         f!("system", Bool, opt, "系统组"),
         f!("gid", Int, opt, "固定 gid;不写则由系统分配"),
     ], see: ["user"]),
-
-    t!("mount", Resource, "挂载点", [
-        f!("path", Path, req, "挂载点"),
-        f!("src", Str, req, "设备或源"),
-        f!("fstype", Str, req, "文件系统类型"),
-        f!("opts", Str, opt, "挂载选项"),
-        f!("state", enum ["mounted", "unmounted", "absent"], Optional, "默认 mounted"),
-        f!("persist", Bool, opt, "写入 /etc/fstab"),
-    ]),
-
-    t!("cron", Resource, "定时任务", [
-        f!("name", Str, req, "任务标识(注释行,用于幂等)"),
-        f!("job", Str, req, "要执行的命令"),
-        f!("schedule", Str, opt, "cron 表达式,默认每日"),
-        f!("user", Str, opt, "以哪个用户运行"),
-        f!("state", enum ["present", "absent"], Optional, "默认 present"),
-    ]),
-
+    t!(
+        "mount",
+        Resource,
+        "挂载点",
+        [
+            f!("path", Path, req, "挂载点"),
+            f!("src", Str, req, "设备或源"),
+            f!("fstype", Str, req, "文件系统类型"),
+            f!("opts", Str, opt, "挂载选项"),
+            f!("state", enum ["mounted", "unmounted", "absent"], Optional, "默认 mounted"),
+            f!("persist", Bool, opt, "写入 /etc/fstab"),
+        ]
+    ),
+    t!(
+        "cron",
+        Resource,
+        "定时任务",
+        [
+            f!("name", Str, req, "任务标识(注释行,用于幂等)"),
+            f!("job", Str, req, "要执行的命令"),
+            f!("schedule", Str, opt, "cron 表达式,默认每日"),
+            f!("user", Str, opt, "以哪个用户运行"),
+            f!("state", enum ["present", "absent"], Optional, "默认 present"),
+        ]
+    ),
     // ---------------- 包与容器 ----------------
-    t!("package", Resource, "OS 包(按 family 分叉:引擎只懂怎么装,装什么是数据)", [
-        f!("packages", Map, one_of "来源", "按 family 的包名表 {debian: [...], rhel: [...]}"),
-        f!("material", Material, one_of "来源", "os_package 类物料(离线闭包)"),
-        f!("state", enum ["present", "absent"], Optional, "默认 present"),
-    ]),
-
+    t!(
+        "package",
+        Resource,
+        "OS 包(按 family 分叉:引擎只懂怎么装,装什么是数据)",
+        [
+            f!("packages", Map, one_of "来源", "按 family 的包名表 {debian: [...], rhel: [...]}"),
+            f!("material", Material, one_of "来源", "os_package 类物料(离线闭包)"),
+            f!("state", enum ["present", "absent"], Optional, "默认 present"),
+        ]
+    ),
     t!("image_present", Resource, "容器镜像已在目标运行时里", [
         f!("material", Material, one_of "来源", "单个镜像物料"),
         f!("materials", List, one_of "来源", "一批镜像物料名"),
         f!("namespace", Str, opt, "ctr/nerdctl 命名空间,如 k8s.io"),
         f!("runtime", Str, opt, "运行时 CLI,默认 docker"),
     ], note: "退役不删镜像:别的负载可能正用着,重新拉取代价也高。"),
-
-    t!("container", Resource, "目标运行时上的一个容器", [
-        f!("name", Str, req, "容器名"),
-        f!("image", Str, opt, "镜像引用;state: started 时必需"),
-        f!("state", enum ["started", "stopped", "absent"], Optional, "默认 started"),
-        f!("ports", List, opt, "端口映射,docker -p 语法"),
-        f!("volumes", List, opt, "挂载,docker -v 语法"),
-        f!("env", Map, opt, "环境变量"),
-        f!("command", Str, opt, "镜像**之后**的参数 —— 给容器内的程序(如 --config.file=…)"),
-        f!("args", List, opt, "镜像**之前**的 docker run 标志(逃生舱,如 --cap-add=…)"),
-        f!("restart_policy", Str, opt, "--restart"),
-        f!("runtime", Str, opt, "docker 兼容 CLI,默认 docker"),
-    ]),
-
+    t!(
+        "container",
+        Resource,
+        "目标运行时上的一个容器",
+        [
+            f!("name", Str, req, "容器名"),
+            f!("image", Str, opt, "镜像引用;state: started 时必需"),
+            f!("state", enum ["started", "stopped", "absent"], Optional, "默认 started"),
+            f!("ports", List, opt, "端口映射,docker -p 语法"),
+            f!("volumes", List, opt, "挂载,docker -v 语法"),
+            f!("env", Map, opt, "环境变量"),
+            f!(
+                "command",
+                Str,
+                opt,
+                "镜像**之后**的参数 —— 给容器内的程序(如 --config.file=…)"
+            ),
+            f!(
+                "args",
+                List,
+                opt,
+                "镜像**之前**的 docker run 标志(逃生舱,如 --cap-add=…)"
+            ),
+            f!("restart_policy", Str, opt, "--restart"),
+            f!("runtime", Str, opt, "docker 兼容 CLI,默认 docker"),
+        ]
+    ),
     // ---------------- 过程性原语 ----------------
     t!("cmd", Procedural, "结构化命令:argv 直达 execve,条件是 flag 条目的属性", [
         f!("argv", List, one_of "形态", "命令与固定参数,如 [kubeadm, init]"),
@@ -408,7 +421,6 @@ pub static BUILTINS: &[BuiltinType] = &[
               flags[].name 禁插值,于是 lint 能静态枚举这条命令的全部展开形态。\
               argv 逐 token 转义,注入与引号事故一并根治。",
       see: ["shell"]),
-
     t!("shell", Procedural, "逃生舱:一条自由 shell 命令", [
         f!("cmd", Str, req, "命令行(过 shell)"),
         f!("check", Str, opt, "幂等探针:退出 0 即视为已完成"),
@@ -420,7 +432,6 @@ pub static BUILTINS: &[BuiltinType] = &[
               退役无逆操作(返回 warn);想要退役行为请写进 procedure。\
               能用 cmd 的结构化形态就别用它。",
       see: ["cmd"]),
-
     t!("wait", Procedural, "阻塞直到条件满足(只读:它改变不了任何东西)", [
         f!("port", Int, one_of "对象", "TCP 端口"),
         f!("path", Path, one_of "对象", "路径"),
@@ -429,7 +440,6 @@ pub static BUILTINS: &[BuiltinType] = &[
         f!("timeout", Int, opt, "秒,默认 30"),
         f!("delay", Int, opt, "首次探测前等待秒数"),
     ], note: "等待成功报 ok 而非 changed —— 它没有改变世界。"),
-
     // ---------------- 只读探针 ----------------
     t!("http", Probe, "HTTP 状态码探针", [
         f!("url", Str, req, "目标 URL"),
@@ -437,12 +447,10 @@ pub static BUILTINS: &[BuiltinType] = &[
         f!("method", Str, opt, "HTTP 方法"),
         f!("insecure", Bool, opt, "跳过 TLS 校验"),
     ], free: "url"),
-
     t!("port_open", Probe, "端口可连通探针", [
         f!("port", Int, req, "端口"),
         f!("host", Str, opt, "默认 127.0.0.1"),
     ], free: "port"),
-
     t!("service_active", Probe, "systemd 服务正在运行", [
         f!("name", Str, req, "服务名"),
     ], free: "name"),
@@ -557,8 +565,16 @@ mod tests {
     #[test]
     fn catalog_has_the_types_the_touchstones_demanded() {
         // rustfs 裁定 C、k8s 裁定 E:这些是"仪式型 shell 升类型"的实证清单。
-        for t in ["systemd_unit", "swap", "kernel_modules", "sysctl", "hostname", "image_present",
-                  "timezone", "time_sync"] {
+        for t in [
+            "systemd_unit",
+            "swap",
+            "kernel_modules",
+            "sysctl",
+            "hostname",
+            "image_present",
+            "timezone",
+            "time_sync",
+        ] {
             assert!(is_builtin(t), "缺内建类型 {t}");
         }
     }
@@ -594,7 +610,11 @@ mod tests {
         // 只有一个成员的"互斥组"是笔误 —— 它本该是 Required。
         for t in BUILTINS {
             for (g, members) in t.one_of_groups() {
-                assert!(members.len() >= 2, "{}:互斥组 `{g}` 只有 {members:?}", t.name);
+                assert!(
+                    members.len() >= 2,
+                    "{}:互斥组 `{g}` 只有 {members:?}",
+                    t.name
+                );
             }
         }
     }
@@ -603,7 +623,11 @@ mod tests {
     fn freeform_shorthand_points_at_a_real_field() {
         for t in BUILTINS {
             if let Some(ff) = t.freeform {
-                assert!(t.field(ff).is_some(), "{}:短写法指向不存在的字段 {ff}", t.name);
+                assert!(
+                    t.field(ff).is_some(),
+                    "{}:短写法指向不存在的字段 {ff}",
+                    t.name
+                );
             }
         }
     }

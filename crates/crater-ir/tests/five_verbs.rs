@@ -40,9 +40,17 @@ fn converged_host() -> FakeCtx {
     // 所以这里让 copy 的探针返回真实内容的摘要。
     let sha = sha256_of("PORT=9000\n");
     FakeCtx::new()
-        .on("stat -c '%F", 0, &format!("directory{sep}750{sep}root{sep}root"))
+        .on(
+            "stat -c '%F",
+            0,
+            &format!("directory{sep}750{sep}root{sep}root"),
+        )
         .on("sha256sum", 0, &format!("{sha}\n600\n"))
-        .on("systemctl is-active", 0, &format!("active{sep}enabled{sep}demo.service enabled"))
+        .on(
+            "systemctl is-active",
+            0,
+            &format!("active{sep}enabled{sep}demo.service enabled"),
+        )
         // 写命令也要能成功 —— 这台机器是"真"的,不只是一组探针应答。
         .on("systemctl", 0, "")
         .on("rm -", 0, "")
@@ -55,7 +63,10 @@ fn sha256_of(s: &str) -> String {
     use std::process::Command;
     let out = Command::new("sh")
         .arg("-c")
-        .arg(format!("printf '%s' {} | sha256sum | cut -d' ' -f1", shell_quote(s)))
+        .arg(format!(
+            "printf '%s' {} | sha256sum | cut -d' ' -f1",
+            shell_quote(s)
+        ))
         .output()
         .expect("sha256sum");
     String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -84,7 +95,12 @@ fn a_blank_host_plans_everything_as_create() {
     let b = bp();
     let p = plan(&b, &scope_from_defaults(&b), &blank_host()).unwrap();
     // 2 个数据目录(each 展开)+ 1 个配置文件 + 1 个服务
-    assert_eq!(p.items.len(), 4, "{:#?}", p.items.iter().map(|i| &i.id).collect::<Vec<_>>());
+    assert_eq!(
+        p.items.len(),
+        4,
+        "{:#?}",
+        p.items.iter().map(|i| &i.id).collect::<Vec<_>>()
+    );
     assert_eq!(p.summary(), "+4 ~0 -0 ✓0");
     assert_eq!(p.debt(), 0, "全是可判定的资源,不该有欠债");
 }
@@ -108,7 +124,15 @@ fn an_already_converged_host_plans_nothing() {
     // 幂等的正面表述:现实符合期望 → plan 是空的。
     let b = bp();
     let p = plan(&b, &scope_from_defaults(&b), &converged_host()).unwrap();
-    assert_eq!(p.summary(), "+0 ~0 -0 ✓4", "{:#?}", p.items.iter().map(|i| (&i.id, &i.change)).collect::<Vec<_>>());
+    assert_eq!(
+        p.summary(),
+        "+0 ~0 -0 ✓4",
+        "{:#?}",
+        p.items
+            .iter()
+            .map(|i| (&i.id, &i.change))
+            .collect::<Vec<_>>()
+    );
     assert!(!p.has_changes());
 }
 
@@ -129,7 +153,10 @@ fn converge_on_a_blank_host_writes_and_reports_changed() {
     let b = bp();
     let report = converge(&b, &scope_from_defaults(&b), &ctx).unwrap();
     assert_eq!(report.changed(), 4);
-    assert_eq!(ctx.written_file("/etc/default/demo").as_deref(), Some("PORT=9000\n"));
+    assert_eq!(
+        ctx.written_file("/etc/default/demo").as_deref(),
+        Some("PORT=9000\n")
+    );
 }
 
 #[test]
@@ -137,16 +164,31 @@ fn upstream_change_restarts_the_service_with_no_handler_declared() {
     // blueprint 里没有一个 `notify:` —— 但配置变了,服务必须重启。
     let sep = "\u{1}";
     let ctx = FakeCtx::new()
-        .on("stat -c '%F", 0, &format!("directory{sep}750{sep}root{sep}root"))
-        .on("sha256sum", 0, "0000000000000000000000000000000000000000000000000000000000000000\n600\n")
-        .on("systemctl is-active", 0, &format!("active{sep}enabled{sep}demo.service enabled"));
+        .on(
+            "stat -c '%F",
+            0,
+            &format!("directory{sep}750{sep}root{sep}root"),
+        )
+        .on(
+            "sha256sum",
+            0,
+            "0000000000000000000000000000000000000000000000000000000000000000\n600\n",
+        )
+        .on(
+            "systemctl is-active",
+            0,
+            &format!("active{sep}enabled{sep}demo.service enabled"),
+        );
 
     let b = bp();
     let p = plan(&b, &scope_from_defaults(&b), &ctx).unwrap();
     let svc = p.items.iter().find(|i| i.ty == "service").unwrap();
     assert!(!svc.change.is_noop(), "配置变了服务却不动:{:?}", svc.change);
     assert!(
-        svc.change.fields().iter().any(|f| f.to_string().contains("restarted")),
+        svc.change
+            .fields()
+            .iter()
+            .any(|f| f.to_string().contains("restarted")),
         "{:?}",
         svc.change.fields()
     );
@@ -178,7 +220,11 @@ fn destroying_an_already_clean_host_is_a_noop() {
     let b = bp();
     let report = destroy(&b, &scope_from_defaults(&b), &ctx).unwrap();
     assert_eq!(report.ok(), 4, "什么都不在了,就什么都别删");
-    assert!(ctx.writes().is_empty(), "不该对不存在的资源发写命令:{:?}", ctx.writes());
+    assert!(
+        ctx.writes().is_empty(),
+        "不该对不存在的资源发写命令:{:?}",
+        ctx.writes()
+    );
 }
 
 #[test]
@@ -191,7 +237,10 @@ fn param_overrides_flow_into_rendered_content() {
     );
     let ctx = FakeCtx::new().on("", 0, "");
     converge(&b, &scope, &ctx).unwrap();
-    assert_eq!(ctx.written_file("/etc/default/demo").as_deref(), Some("PORT=9443\n"));
+    assert_eq!(
+        ctx.written_file("/etc/default/demo").as_deref(),
+        Some("PORT=9443\n")
+    );
 }
 
 #[test]
@@ -202,7 +251,12 @@ fn a_custom_type_is_observed_by_its_declared_probe_not_marked_unknown() {
 
     let joined = FakeCtx::new().on("kubelet.conf", 0, "joined\n");
     let p = plan(&b, &scope_from_defaults(&b), &joined).unwrap();
-    assert_eq!(p.summary(), "+0 ~0 -0 ✓1", "已在册就该是 ✓:{:?}", p.items[0].change);
+    assert_eq!(
+        p.summary(),
+        "+0 ~0 -0 ✓1",
+        "已在册就该是 ✓:{:?}",
+        p.items[0].change
+    );
     assert_eq!(p.debt(), 0, "自定义类型不再计入模型化欠债");
 
     let fresh = FakeCtx::new().on("kubelet.conf", 0, "absent\n");
@@ -210,7 +264,9 @@ fn a_custom_type_is_observed_by_its_declared_probe_not_marked_unknown() {
     assert_eq!(p.summary(), "+1 ~0 -0 ✓0");
     // plan 要说清"靠哪支舞"达成
     assert!(
-        p.items[0].change.fields()[0].to_string().contains("procedure bootstrap"),
+        p.items[0].change.fields()[0]
+            .to_string()
+            .contains("procedure bootstrap"),
         "{:?}",
         p.items[0].change.fields()
     );
@@ -223,10 +279,16 @@ fn converging_a_custom_type_defers_to_the_fleet_level_dance() {
     let b = parse::blueprint_from_str(CUSTOM).unwrap();
     let ctx = FakeCtx::new().on("kubelet.conf", 0, "absent\n");
     let report = converge(&b, &scope_from_defaults(&b), &ctx).unwrap();
-    assert!(report.procedures_needed.contains("bootstrap"), "{:?}", report.procedures_needed);
+    assert!(
+        report.procedures_needed.contains("bootstrap"),
+        "{:?}",
+        report.procedures_needed
+    );
     // 不该在这一层偷偷执行任何舞的步骤
     assert!(
-        !ctx.calls().iter().any(|c| c.text().contains("kubeadm init")),
+        !ctx.calls()
+            .iter()
+            .any(|c| c.text().contains("kubeadm init")),
         "{:?}",
         ctx.calls()
     );
@@ -256,7 +318,8 @@ fn a_type_without_an_implementation_is_marked_unknown_not_faked() {
     // 内建登记表如今已全部有实现(见 builtins::pending 的断言),所以这条
     // 通路只能用一个引擎不认得的名字来走 —— lint 会拦下它,但 plan 本身
     // 必须在被绕过 lint 时依然诚实。
-    let b = parse::blueprint_from_str("name: t\nresources:\n  - not_a_real_type: { name: web }\n").unwrap();
+    let b = parse::blueprint_from_str("name: t\nresources:\n  - not_a_real_type: { name: web }\n")
+        .unwrap();
     let p = plan(&b, &scope_from_defaults(&b), &blank_host()).unwrap();
     assert_eq!(p.debt(), 1);
     assert_eq!(p.summary(), "+0 ~0 -0 ✓0 ?1");
@@ -317,9 +380,21 @@ fn audit_does_not_let_one_drift_stain_everything_downstream() {
     // 配置内容不符(真漂移),其余一切正常。
     let sep = "\u{1}";
     let ctx = FakeCtx::new()
-        .on("stat -c '%F", 0, &format!("directory{sep}750{sep}root{sep}root"))
-        .on("sha256sum", 0, "0000000000000000000000000000000000000000000000000000000000000000\n600\n")
-        .on("systemctl is-active", 0, &format!("active{sep}enabled{sep}demo.service enabled"));
+        .on(
+            "stat -c '%F",
+            0,
+            &format!("directory{sep}750{sep}root{sep}root"),
+        )
+        .on(
+            "sha256sum",
+            0,
+            "0000000000000000000000000000000000000000000000000000000000000000\n600\n",
+        )
+        .on(
+            "systemctl is-active",
+            0,
+            &format!("active{sep}enabled{sep}demo.service enabled"),
+        );
 
     let converge = plan_with(&b, &scope_from_defaults(&b), &ctx, Intent::Converge).unwrap();
     let audit = plan_with(&b, &scope_from_defaults(&b), &ctx, Intent::Audit).unwrap();
@@ -347,7 +422,11 @@ fn a_destroy_plan_writes_nothing_and_lists_what_exists() {
     let ctx = converged_host();
     let b = bp();
     let p = plan_destroy(&b, &scope_from_defaults(&b), &ctx).unwrap();
-    assert!(ctx.writes().is_empty(), "退役计划期发生了写操作:{:?}", ctx.writes());
+    assert!(
+        ctx.writes().is_empty(),
+        "退役计划期发生了写操作:{:?}",
+        ctx.writes()
+    );
     assert_eq!(p.summary(), "+0 ~0 -4 ✓0");
 }
 
@@ -387,7 +466,10 @@ fn a_custom_type_without_a_destroy_dance_is_not_pretended_to_be_destroyable() {
 fn a_custom_type_with_a_destroy_dance_plans_as_a_real_removal() {
     // 声明了 `destroy:` 就说得出"靠哪支舞退役" —— 不再是一个 `?`。
     use crater_ir::plan::{destroy_dances, plan_destroy};
-    let src = CUSTOM.replace("apply: bootstrap", "apply: bootstrap\n    destroy: teardown");
+    let src = CUSTOM.replace(
+        "apply: bootstrap",
+        "apply: bootstrap\n    destroy: teardown",
+    );
     let src = src.replace("procedures:\n  bootstrap:", "procedures:\n  teardown:\n    steps:\n      - shell: { cmd: \"kubeadm reset -f\", check: \"! test -f /etc/kubernetes/kubelet.conf\" }\n  bootstrap:");
     let b = parse::blueprint_from_str(&src).expect("夹具应能解析");
 
@@ -395,10 +477,20 @@ fn a_custom_type_with_a_destroy_dance_plans_as_a_real_removal() {
     let p = plan_destroy(&b, &scope_from_defaults(&b), &joined).unwrap();
     assert_eq!(p.summary(), "+0 ~0 -1 ✓0", "{:?}", p.items[0].change);
     assert_eq!(p.debt(), 0);
-    assert_eq!(destroy_dances(&b, &scope_from_defaults(&b), &joined).unwrap(), vec!["teardown"]);
+    assert_eq!(
+        destroy_dances(&b, &scope_from_defaults(&b), &joined).unwrap(),
+        vec!["teardown"]
+    );
 
     // 已经不在册的机器不该再跳一次退役的舞。
     let gone = FakeCtx::new().on("kubelet.conf", 0, "absent\n");
-    assert!(destroy_dances(&b, &scope_from_defaults(&b), &gone).unwrap().is_empty());
-    assert_eq!(plan_destroy(&b, &scope_from_defaults(&b), &gone).unwrap().summary(), "+0 ~0 -0 ✓1");
+    assert!(destroy_dances(&b, &scope_from_defaults(&b), &gone)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        plan_destroy(&b, &scope_from_defaults(&b), &gone)
+            .unwrap()
+            .summary(),
+        "+0 ~0 -0 ✓1"
+    );
 }

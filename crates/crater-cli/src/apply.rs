@@ -19,7 +19,6 @@ use crater_core::state::{self, Marker};
 use crate::target::{connect_executor, TargetOpts};
 use crate::{agent, deployments, images};
 
-
 /// `crater apply <source>` — one entry point for online & offline (D-020).
 /// Auto-detect the source kind and route; the execution engine (idempotency,
 /// tracing, agent/shell) is shared — online vs offline differ only in where
@@ -37,7 +36,13 @@ pub(crate) async fn apply_source(
     set: &[String],
     plan: bool,
 ) -> Result<()> {
-    let verb = if teardown { "delete" } else if plan { "plan" } else { "apply" };
+    let verb = if teardown {
+        "delete"
+    } else if plan {
+        "plan"
+    } else {
+        "apply"
+    };
     // `--set` (D-093): parsed here, GATED per task in `apply_task` (only declared
     // `stage: apply` params pass — build params are frozen in the artifact).
     let set_overrides = crate::build::parse_set_overrides(set)?;
@@ -55,12 +60,33 @@ pub(crate) async fn apply_source(
         // — `-i inventory.yaml`, `--host a,b`, or none → local.
         info!("{verb}: {src} → offline (OCI bundle)");
         let hosts = target.hosts()?;
-        return apply_oci_bundle(&path, hosts, !dry_run, shell, teardown, &src, name.as_deref(), set_overrides, plan).await;
+        return apply_oci_bundle(
+            &path,
+            hosts,
+            !dry_run,
+            shell,
+            teardown,
+            &src,
+            name.as_deref(),
+            set_overrides,
+            plan,
+        )
+        .await;
     }
     if path.is_file() && crater_core::project::is_project_file(&path) {
         // A project (top-level `plays:`, D-083): orchestrate plays in order.
         info!("{verb}: {src} → project");
-        return apply_project(&path, name.as_deref(), &target, dry_run, shell, teardown, set_overrides, plan).await;
+        return apply_project(
+            &path,
+            name.as_deref(),
+            &target,
+            dry_run,
+            shell,
+            teardown,
+            set_overrides,
+            plan,
+        )
+        .await;
     }
     if path.is_file() {
         // A task file (top-level `actions:`, D-037). Component specs are gone.
@@ -88,14 +114,36 @@ pub(crate) async fn apply_source(
     if src.contains('/') || src.contains(':') {
         info!("{verb}: {src} → image (local store / registry)");
         let hosts = target.hosts()?;
-        return images::apply_image_ref(&src, hosts, !dry_run, shell, teardown, &src, name.as_deref(), offline, set_overrides, plan).await;
+        return images::apply_image_ref(
+            &src,
+            hosts,
+            !dry_run,
+            shell,
+            teardown,
+            &src,
+            name.as_deref(),
+            offline,
+            set_overrides,
+            plan,
+        )
+        .await;
     }
     // Named task/project: `crater apply <name>` → first match of <name>.yaml under
     // library/ (then tasks/ for back-compat). D-043/D-085.
     if let Some(named) = find_named(&src) {
         if crater_core::project::is_project_file(&named) {
             info!("{verb}: {src} → named project ({})", named.display());
-            return apply_project(&named, name.as_deref(), &target, dry_run, shell, teardown, set_overrides, plan).await;
+            return apply_project(
+                &named,
+                name.as_deref(),
+                &target,
+                dry_run,
+                shell,
+                teardown,
+                set_overrides,
+                plan,
+            )
+            .await;
         }
         if crater_core::task::is_task_file(&named) {
             info!("{verb}: {src} → named task ({})", named.display());
@@ -138,7 +186,13 @@ pub(crate) async fn apply_project(
 ) -> Result<()> {
     use crater_core::project::Project;
     let project = Project::from_yaml_file(path)?;
-    let verb = if teardown { "delete" } else if plan { "plan" } else { "apply" };
+    let verb = if teardown {
+        "delete"
+    } else if plan {
+        "plan"
+    } else {
+        "apply"
+    };
     if project.plays.is_empty() {
         anyhow::bail!("project '{}' 没有 plays", project.name);
     }
@@ -146,7 +200,9 @@ pub(crate) async fn apply_project(
     if teardown {
         order.reverse(); // tear down in reverse: e.g. k8s before host baseline.
     }
-    let deployment = name.map(|s| s.to_string()).unwrap_or_else(|| project.name.clone());
+    let deployment = name
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| project.name.clone());
     info!(
         "{verb} project '{}': {} play(s){}",
         project.name,
@@ -160,7 +216,9 @@ pub(crate) async fn apply_project(
         let src_path = find_named(&play.source).ok_or_else(|| {
             anyhow!(
                 "project '{}' play '{label}':source '{}' 未找到(路径或 library/**/{}.yaml)",
-                project.name, play.source, play.source
+                project.name,
+                play.source,
+                play.source
             )
         })?;
         info!(
@@ -174,7 +232,9 @@ pub(crate) async fn apply_project(
         // workers) — don't abort the whole project (D-083).
         if let Some(g) = &play.hosts {
             let matches = g == "all"
-                || hosts.iter().any(|h| h.roles.is_empty() || h.name == *g || h.roles.iter().any(|r| r == g));
+                || hosts
+                    .iter()
+                    .any(|h| h.roles.is_empty() || h.name == *g || h.roles.iter().any(|r| r == g));
             if !matches {
                 info!("   (跳过:hosts='{g}' 无匹配主机)");
                 continue;
@@ -200,8 +260,12 @@ pub(crate) async fn apply_project(
             plan_check: plan,
         };
         apply_task(
-            &src_path, hosts, opts, Some(&deployment),
-            play.hosts.clone(), play.vars.clone(),
+            &src_path,
+            hosts,
+            opts,
+            Some(&deployment),
+            play.hosts.clone(),
+            play.vars.clone(),
         )
         .await
         .map_err(|e| anyhow!("project '{}' play '{label}' 失败:{e}", project.name))?;
@@ -310,7 +374,9 @@ pub(crate) async fn apply_task(
     // Flatten role bundles (D-080): online from a task file → roles read from
     // ./roles; offline from an OCI → recipe is already flat (expanded at build),
     // so this is a no-op (no `action: role` bundles remain).
-    task.expand_roles(&roles_dir_for(path.parent().unwrap_or_else(|| Path::new("."))))?;
+    task.expand_roles(&roles_dir_for(
+        path.parent().unwrap_or_else(|| Path::new(".")),
+    ))?;
     // Param-contract validation happens per-host in run_task_on_host (against the
     // merged task ⊕ inventory vars, D-082) — so inventory-supplied required params
     // count and errors are reported before that host plans.
@@ -352,7 +418,11 @@ pub(crate) async fn apply_task(
                 failures.join("\n")
             );
         }
-        info!("准入通过:{} 台目标满足 requires({})", hosts.len(), req.describe());
+        info!(
+            "准入通过:{} 台目标满足 requires({})",
+            hosts.len(),
+            req.describe()
+        );
     }
     // Delete is opt-in (D-049): a task only has delete capability if it authored
     // a `teardown:`. No auto-inversion of `actions:` — real cleanup targets
@@ -364,7 +434,10 @@ pub(crate) async fn apply_task(
             task.name
         );
     }
-    let spec_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    let spec_dir = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
     // `hosts` filter (D-037-b/D-043/D-077/D-084): `all` → every target; else keep
     // hosts matching that **group name** (a role, derived transitively from
     // inventory groups) OR that **host name** (ansible-style). Hosts with no roles
@@ -388,7 +461,11 @@ pub(crate) async fn apply_task(
         "{} '{}': {} action(s), hosts={}, {} target(s), mode={}",
         if opts.teardown { "teardown" } else { "task" },
         task.name,
-        if opts.teardown { task.teardown.len() } else { task.actions.len() },
+        if opts.teardown {
+            task.teardown.len()
+        } else {
+            task.actions.len()
+        },
         task.hosts,
         hosts.len(),
         if opts.do_apply { "apply" } else { "dry-run" }
@@ -403,27 +480,49 @@ pub(crate) async fn apply_task(
         let mut acc: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
         for h in &hosts {
             for r in &h.roles {
-                acc.entry(r.clone()).or_default().push((h.name.clone(), h.address.clone()));
+                acc.entry(r.clone())
+                    .or_default()
+                    .push((h.name.clone(), h.address.clone()));
             }
         }
         acc
     };
     let role_addrs: BTreeMap<String, String> = role_members
         .iter()
-        .map(|(k, v)| (k.clone(), v.iter().map(|(_, ip)| ip.clone()).collect::<Vec<_>>().join(" ")))
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                v.iter()
+                    .map(|(_, ip)| ip.clone())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        })
         .collect();
     // host name → roles, so a host's registered facts can also be published under
     // its roles (`hostvars.<role>.<name>`, D-071) for singleton roles like the init node.
-    let name_roles: BTreeMap<String, Vec<String>> =
-        hosts.iter().map(|h| (h.name.clone(), h.roles.clone())).collect();
+    let name_roles: BTreeMap<String, Vec<String>> = hosts
+        .iter()
+        .map(|h| (h.name.clone(), h.roles.clone()))
+        .collect();
     // Ordered (name, roles) of all targets (D-077), for `run_once` gating: a
     // run_once step runs only on the first target matching its when_role.
-    let target_hosts: Vec<(String, Vec<String>)> =
-        hosts.iter().map(|h| (h.name.clone(), h.roles.clone())).collect();
+    let target_hosts: Vec<(String, Vec<String>)> = hosts
+        .iter()
+        .map(|h| (h.name.clone(), h.roles.clone()))
+        .collect();
 
     // From here on the run-wide context is fixed; only host / hostvars / coord
     // vary per call.
-    let rc = RunContext { task, spec_dir, role_addrs, role_members, target_hosts, deployment, opts };
+    let rc = RunContext {
+        task,
+        spec_dir,
+        role_addrs,
+        role_members,
+        target_hosts,
+        deployment,
+        opts,
+    };
 
     if !rc.opts.do_apply {
         for h in &hosts {
@@ -446,9 +545,15 @@ pub(crate) async fn apply_task(
     ) {
         let roles = name_roles.get(host_name).cloned().unwrap_or_default();
         for (k, v) in regs {
-            hostvars.entry(host_name.to_string()).or_default().insert(k.clone(), v.clone());
+            hostvars
+                .entry(host_name.to_string())
+                .or_default()
+                .insert(k.clone(), v.clone());
             for r in &roles {
-                hostvars.entry(r.clone()).or_default().insert(k.clone(), v.clone());
+                hostvars
+                    .entry(r.clone())
+                    .or_default()
+                    .insert(k.clone(), v.clone());
             }
         }
     }
@@ -481,8 +586,8 @@ pub(crate) async fn apply_task(
             }
             let coord = engine::HostCoord::new(seed, group.len());
             let (rc_ref, hostvars_ref, coord_ref) = (&rc, &hostvars, &coord);
-            let results: Vec<HostRunResult> = futures::stream::iter(
-                group.iter().map(|h| async move {
+            let results: Vec<HostRunResult> =
+                futures::stream::iter(group.iter().map(|h| async move {
                     // Signal the coordinator on finish so peers awaiting this host's
                     // facts fail fast on error / never-produced rather than blocking
                     // to the timeout (D-077). Facts (if any) are published inside.
@@ -492,11 +597,10 @@ pub(crate) async fn apply_task(
                     }
                     coord_ref.host_done();
                     r
-                }),
-            )
-            .buffer_unordered(forks)
-            .collect()
-            .await;
+                }))
+                .buffer_unordered(forks)
+                .collect()
+                .await;
             let mut first_err = None;
             for r in results {
                 match r {
@@ -519,12 +623,19 @@ pub(crate) async fn apply_task(
 
     // Record to the control-side aggregate DB (D-051). Best-effort: the markers
     // on the targets are authoritative; the DB is a cache/history for list/UI.
-    if let Err(e) = deployments::record_deployments(&rc.task, &rc.opts.source, &rc.deployment, rc.opts.teardown, &applied_hosts).await {
+    if let Err(e) = deployments::record_deployments(
+        &rc.task,
+        &rc.opts.source,
+        &rc.deployment,
+        rc.opts.teardown,
+        &applied_hosts,
+    )
+    .await
+    {
         warn!("state DB update failed (targets' markers are authoritative): {e}");
     }
     Ok(())
 }
-
 
 /// 一台机跑完的结果:(主机名, 这台机 `register` 出来的事实 kv)。
 pub(crate) type HostRunResult = Result<(String, Vec<(String, String)>)>;
@@ -538,8 +649,25 @@ pub(crate) async fn run_task_on_host(
     hostvars: &BTreeMap<String, BTreeMap<String, String>>,
     coord: Option<&engine::HostCoord>,
 ) -> HostRunResult {
-    let RunContext { task, spec_dir, role_addrs, role_members, target_hosts, deployment, opts } = rc;
-    let RunOpts { offline_blobmap, offline, do_apply, do_shell, teardown, source, set_overrides: _, plan_check } = opts;
+    let RunContext {
+        task,
+        spec_dir,
+        role_addrs,
+        role_members,
+        target_hosts,
+        deployment,
+        opts,
+    } = rc;
+    let RunOpts {
+        offline_blobmap,
+        offline,
+        do_apply,
+        do_shell,
+        teardown,
+        source,
+        set_overrides: _,
+        plan_check,
+    } = opts;
     let (offline, do_apply, do_shell, teardown) = (*offline, *do_apply, *do_shell, *teardown);
     if host.is_local() {
         info!("▶ host {} (local)", host.name);
@@ -548,7 +676,10 @@ pub(crate) async fn run_task_on_host(
     }
     let exec = connect_executor(host, do_apply).await?;
     let (osf, target_arch) = if do_apply {
-        (os::detect_via(exec.as_ref()).await, arch::detect_via(exec.as_ref()).await)
+        (
+            os::detect_via(exec.as_ref()).await,
+            arch::detect_via(exec.as_ref()).await,
+        )
     } else {
         // Dry-run preview: no target connection — use the control machine's arch
         // so `place` can resolve a concrete variant for the plan.
@@ -612,15 +743,19 @@ pub(crate) async fn run_task_on_host(
                 continue;
             }
         }
-        ctx.self_produced.insert(format!("hostvars.{}.{}", host.name, reg.name));
+        ctx.self_produced
+            .insert(format!("hostvars.{}.{}", host.name, reg.name));
         for r in &host.roles {
-            ctx.self_produced.insert(format!("hostvars.{r}.{}", reg.name));
+            ctx.self_produced
+                .insert(format!("hostvars.{r}.{}", reg.name));
         }
     }
     // The target's own inventory identity, for templates that need a stable
     // unique per-host value (e.g. kubeadm `--node-name`, D-071).
-    ctx.vars.insert("inventory_hostname".to_string(), host.name.clone());
-    ctx.vars.insert("inventory_addr".to_string(), host.address.clone());
+    ctx.vars
+        .insert("inventory_hostname".to_string(), host.name.clone());
+    ctx.vars
+        .insert("inventory_addr".to_string(), host.address.clone());
     for m in &task.materials {
         ctx.add_material(m.clone());
     }
@@ -649,8 +784,8 @@ pub(crate) async fn run_task_on_host(
                 continue;
             }
             let Some(tmpl) = &m.url_tmpl else { continue }; // src+unzip rejected at build
-            // RAW url (no mirror rewrite) = the build-side cache key (D-096);
-            // {{arch}} resolves from the material itself (D-064).
+                                                            // RAW url (no mirror rewrite) = the build-side cache key (D-096);
+                                                            // {{arch}} resolves from the material itself (D-064).
             let raw = if let Some(a) = m.arch {
                 let mut vars = ctx.vars.clone();
                 vars.insert("arch".to_string(), a.as_str().to_string());
@@ -665,7 +800,11 @@ pub(crate) async fn run_task_on_host(
         }
     }
     // delete → run the authored `teardown:` actions; apply → `actions`.
-    let action_list = if teardown { &task.teardown } else { &task.actions };
+    let action_list = if teardown {
+        &task.teardown
+    } else {
+        &task.actions
+    };
     let steps = engine::plan_from_task(action_list, &ctx)?;
     // Silent-skip trap (D-102): when_os/when_role filtered EVERYTHING out —
     // the run would report "success" having done nothing. Say so loudly.
@@ -694,7 +833,10 @@ pub(crate) async fn run_task_on_host(
     // and write no markers, run no registers (early return).
     if *plan_check {
         let (ok, ch, unk, skip) = engine::plan_check_task(&steps, exec.as_ref()).await?;
-        info!("[{}] plan: {ch} 会变更, {ok} 已就位, {unk} 未知, {skip} 跳过", host.name);
+        info!(
+            "[{}] plan: {ch} 会变更, {ok} 已就位, {unk} 未知, {skip} 跳过",
+            host.name
+        );
         return Ok((host.name.clone(), Vec::new()));
     }
     // Default: self-bootstrap agent runs the task plan on the target (D-044).
@@ -706,7 +848,9 @@ pub(crate) async fn run_task_on_host(
     // facts, D-077 — agents have no channel to each other, so e.g. k8s-HA's
     // serialized joins keep the control-plane path).
     let needs_coord = coord.is_some()
-        && steps.iter().any(|s| s.throttle.is_some() || !s.awaited_facts.is_empty());
+        && steps
+            .iter()
+            .any(|s| s.throttle.is_some() || !s.awaited_facts.is_empty());
     if do_shell || host.is_local() || needs_coord {
         engine::execute_task(&steps, &handlers, exec.as_ref(), coord).await?;
     } else {
@@ -728,7 +872,10 @@ pub(crate) async fn run_task_on_host(
         state::write_marker(exec.as_ref(), &m).await
     };
     if let Err(e) = marker_res {
-        warn!("[{}] state marker update failed (deployment still applied): {e}", host.name);
+        warn!(
+            "[{}] state marker update failed (deployment still applied): {e}",
+            host.name
+        );
     }
 
     // Capture this host's facts for later groups (D-030). Apply only — teardown
@@ -766,7 +913,12 @@ pub(crate) async fn run_task_on_host(
             );
         }
         let val = out.stdout.trim().to_string();
-        info!("[{}] registered {} ({} bytes)", host.name, reg.name, val.len());
+        info!(
+            "[{}] registered {} ({} bytes)",
+            host.name,
+            reg.name,
+            val.len()
+        );
         registered.push((reg.name.clone(), val));
     }
     // Publish to the group coordinator (D-077) so concurrently-running peers
@@ -787,14 +939,13 @@ pub(crate) async fn run_task_on_host(
     Ok((host.name.clone(), registered))
 }
 
-
-
-
 /// Group hosts by their role-set (sorted), preserving each signature's first
 /// appearance order. Same-role hosts land in one group (run in parallel);
 /// distinct role-sets form ordered groups (run sequentially) so a producer role
 /// registers its facts before a consumer role consumes them (F17 + D-030).
-pub(crate) fn group_hosts_by_role(hosts: &[crater_core::spec::Host]) -> Vec<Vec<&crater_core::spec::Host>> {
+pub(crate) fn group_hosts_by_role(
+    hosts: &[crater_core::spec::Host],
+) -> Vec<Vec<&crater_core::spec::Host>> {
     let mut order: Vec<String> = Vec::new();
     let mut groups: BTreeMap<String, Vec<&crater_core::spec::Host>> = BTreeMap::new();
     for h in hosts {
@@ -806,7 +957,10 @@ pub(crate) fn group_hosts_by_role(hosts: &[crater_core::spec::Host]) -> Vec<Vec<
         }
         groups.entry(sig).or_default().push(h);
     }
-    order.into_iter().filter_map(|s| groups.remove(&s)).collect()
+    order
+        .into_iter()
+        .filter_map(|s| groups.remove(&s))
+        .collect()
 }
 
 /// Max hosts to deploy concurrently within a group (`CRATER_FORKS`, default 10).
@@ -817,11 +971,6 @@ pub(crate) fn forks_limit() -> usize {
         .filter(|&n| n >= 1)
         .unwrap_or(10)
 }
-
-
-
-
-
 
 /// Offline deploy via the SAME pipeline as online (D-020 单管线): unpack the OCI
 /// bundle, build a synthetic spec (components from the bundle's crater-manifest,
@@ -856,10 +1005,9 @@ pub(crate) async fn apply_oci_bundle(
             bundle_file.display()
         );
     }
-    if !mats
-        .iter()
-        .all(|mc| crater_core::task::is_task_file(&recipe_dir.join(&mc.name).join("component.yaml")))
-    {
+    if !mats.iter().all(|mc| {
+        crater_core::task::is_task_file(&recipe_dir.join(&mc.name).join("component.yaml"))
+    }) {
         let _ = std::fs::remove_dir_all(&dest_root);
         anyhow::bail!(
             "{}: legacy component artifact; rebuild as a task",
@@ -869,8 +1017,16 @@ pub(crate) async fn apply_oci_bundle(
     // A project bundle (D-098): orchestrate plays in order against the bundled
     // task artifacts (locked by ref at build). Delete runs plays in REVERSE.
     if let Some(project) = bundle::read_artifact_project(&dest_root)? {
-        let verb = if teardown { "delete" } else if plan { "plan" } else { "apply" };
-        let deployment = name.map(|s| s.to_string()).unwrap_or_else(|| project.name.clone());
+        let verb = if teardown {
+            "delete"
+        } else if plan {
+            "plan"
+        } else {
+            "apply"
+        };
+        let deployment = name
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| project.name.clone());
         let mut order: Vec<&crater_core::project::Play> = project.plays.iter().collect();
         if teardown {
             order.reverse();
@@ -887,9 +1043,15 @@ pub(crate) async fn apply_oci_bundle(
             let mc = mats
                 .iter()
                 .find(|m| m.reference == play.source)
-                .ok_or_else(|| anyhow!("bundle 不含 play '{label}' 锁定的制品 '{}'", play.source))?;
-            info!("── play {}/{total}: {label}(source={}, hosts={})",
-                i + 1, play.source, play.hosts.as_deref().unwrap_or("<task 默认>"));
+                .ok_or_else(|| {
+                    anyhow!("bundle 不含 play '{label}' 锁定的制品 '{}'", play.source)
+                })?;
+            info!(
+                "── play {}/{total}: {label}(source={}, hosts={})",
+                i + 1,
+                play.source,
+                play.hosts.as_deref().unwrap_or("<task 默认>")
+            );
             // Project delete skips plays with no authored teardown (D-083 后续):
             // single-task delete stays a hard error (opt-in), but aborting a
             // multi-play teardown halfway over one optional play helps nobody.
@@ -904,7 +1066,9 @@ pub(crate) async fn apply_oci_bundle(
             // Same group-match/skip semantics as the online project path (D-083).
             if let Some(g) = &play.hosts {
                 let matches = g == "all"
-                    || hosts.iter().any(|h| h.roles.is_empty() || h.name == *g || h.roles.iter().any(|r| r == g));
+                    || hosts.iter().any(|h| {
+                        h.roles.is_empty() || h.name == *g || h.roles.iter().any(|r| r == g)
+                    });
                 if !matches {
                     info!("   (跳过:hosts='{g}' 无匹配主机)");
                     continue;
@@ -922,8 +1086,12 @@ pub(crate) async fn apply_oci_bundle(
                 plan_check: plan,
             };
             apply_task(
-                &recipe_file, hosts.clone(), opts, Some(&deployment),
-                play.hosts.clone(), play.vars.clone(),
+                &recipe_file,
+                hosts.clone(),
+                opts,
+                Some(&deployment),
+                play.hosts.clone(),
+                play.vars.clone(),
             )
             .await
             .map_err(|e| anyhow!("project '{}' play '{label}' 失败:{e}", project.name))?;
@@ -946,7 +1114,15 @@ pub(crate) async fn apply_oci_bundle(
             set_overrides: set_overrides.clone(),
             plan_check: plan,
         };
-        apply_task(&recipe_file, hosts.clone(), opts, name, None, BTreeMap::new()).await?;
+        apply_task(
+            &recipe_file,
+            hosts.clone(),
+            opts,
+            name,
+            None,
+            BTreeMap::new(),
+        )
+        .await?;
     }
     let _ = std::fs::remove_dir_all(&dest_root);
     Ok(())
@@ -1001,10 +1177,6 @@ pub(crate) fn find_yaml_under(dir: &Path, name: &str) -> Option<PathBuf> {
     subdirs.sort();
     subdirs.into_iter().find_map(|d| find_yaml_under(&d, name))
 }
-
-
-
-
 
 // ---------------------------------------------------------------------------
 // M4: AI copilot — natural language -> validated crater.yaml
@@ -1065,6 +1237,9 @@ actions:
     #[test]
     fn set_gate_rejects_undeclared_key() {
         let err = gate_set_overrides(&task_with_params(), &kv("vipp", "x")).unwrap_err();
-        assert!(err.to_string().contains("不是该 task 声明的参数"), "got: {err}");
+        assert!(
+            err.to_string().contains("不是该 task 声明的参数"),
+            "got: {err}"
+        );
     }
 }

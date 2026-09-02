@@ -24,7 +24,12 @@ pub fn run(name: Option<&str>, json: bool) -> Result<()> {
 // ---------------------------------------------------------------- 列表
 
 fn print_index() {
-    for kind in [Kind::Resource, Kind::Procedural, Kind::Probe, Kind::Declaration] {
+    for kind in [
+        Kind::Resource,
+        Kind::Procedural,
+        Kind::Probe,
+        Kind::Declaration,
+    ] {
         let group: Vec<&BuiltinType> = types::BUILTINS.iter().filter(|t| t.kind == kind).collect();
         if group.is_empty() {
             continue;
@@ -124,7 +129,10 @@ fn print_card(name: &str) -> Result<()> {
 
 fn print_card_json(name: &str) -> Result<()> {
     let t = lookup(name)?;
-    println!("{}", crater_ir::types::type_json(t.name).expect("lookup 已确认存在"));
+    println!(
+        "{}",
+        crater_ir::types::type_json(t.name).expect("lookup 已确认存在")
+    );
     Ok(())
 }
 
@@ -146,9 +154,6 @@ fn req_label(r: Req) -> &'static str {
         Req::OneOf(_) => "择一",
     }
 }
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -177,7 +182,12 @@ mod tests {
         // "哪些必选哪些可选"正是用户提出的原始诉求。
         for t in types::BUILTINS {
             for f in t.fields {
-                assert!(!req_label(f.req).is_empty(), "{}.{} 缺必选性", t.name, f.name);
+                assert!(
+                    !req_label(f.req).is_empty(),
+                    "{}.{} 缺必选性",
+                    t.name,
+                    f.name
+                );
             }
         }
     }
@@ -191,8 +201,15 @@ mod tests {
         assert!(pending.is_empty(), "有登记未实现的类型:{pending:?}");
         // 机制本身仍须完好:真出现 pending 时,卡上必须写明。
         // 声明段条目除外 —— 它没有五动词可实现(见 Kind::Declaration)。
-        for t in types::BUILTINS.iter().filter(|t| t.kind != Kind::Declaration) {
-            assert!(crater_ir::builtins::get(t.name).is_some(), "{} 没有实现", t.name);
+        for t in types::BUILTINS
+            .iter()
+            .filter(|t| t.kind != Kind::Declaration)
+        {
+            assert!(
+                crater_ir::builtins::get(t.name).is_some(),
+                "{} 没有实现",
+                t.name
+            );
         }
     }
 }

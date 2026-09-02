@@ -45,7 +45,11 @@ pub trait Executor: Send + Sync {
         let head = format!("mkdir -p \"$(dirname '{path}')\" && : > '{path}'");
         let out = self.run(&head).await?;
         if !out.ok() {
-            anyhow::bail!("write_file {path}:建目录/清空失败(code {}):{}", out.code, out.stderr.trim());
+            anyhow::bail!(
+                "write_file {path}:建目录/清空失败(code {}):{}",
+                out.code,
+                out.stderr.trim()
+            );
         }
 
         // base64 的字母表是 A-Za-z0-9+/= ,不含单引号,所以块可以直接放进
@@ -218,12 +222,7 @@ pub enum SshAuth {
 
 impl SshExecutor {
     /// Connect with a password (kept for call-site stability).
-    pub async fn connect(
-        host: &str,
-        port: u16,
-        user: &str,
-        password: &str,
-    ) -> crate::Result<Self> {
+    pub async fn connect(host: &str, port: u16, user: &str, password: &str) -> crate::Result<Self> {
         Self::connect_auth(host, port, user, &SshAuth::Password(password.to_string())).await
     }
 
@@ -235,7 +234,10 @@ impl SshExecutor {
         auth: &SshAuth,
     ) -> crate::Result<Self> {
         let config = Arc::new(client::Config::default());
-        let handler = ClientHandler { host: host.to_string(), port };
+        let handler = ClientHandler {
+            host: host.to_string(),
+            port,
+        };
         let mut handle = client::connect(config, (host, port), handler)
             .await
             .map_err(|e| anyhow::anyhow!("ssh connect {host}:{port} failed: {e}"))?;
@@ -297,9 +299,7 @@ impl Executor for SshExecutor {
         let mut stderr: Vec<u8> = Vec::new();
         while let Some(msg) = channel.wait().await {
             match msg {
-                ChannelMsg::ExtendedData { ref data, ext: 1 } => {
-                    stderr.extend_from_slice(data)
-                }
+                ChannelMsg::ExtendedData { ref data, ext: 1 } => stderr.extend_from_slice(data),
                 ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status as i32),
                 _ => {}
             }
@@ -412,7 +412,11 @@ mod write_file_tests {
     impl Executor for Recorder {
         async fn run(&self, cmd: &str) -> crate::Result<CmdOutput> {
             self.cmds.lock().unwrap().push(cmd.to_string());
-            Ok(CmdOutput { code: 0, stdout: String::new(), stderr: String::new() })
+            Ok(CmdOutput {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         }
     }
 
@@ -420,12 +424,18 @@ mod write_file_tests {
     async fn a_large_file_is_written_in_bounded_chunks() {
         // 这条测试守的是一次真机事故:把 58MB 编码成 78MB 拼进单条命令,
         // 进程 100% 占满一个核、网络零流量。任何一条命令都不该大到那个地步。
-        let r = Recorder { cmds: Mutex::new(Vec::new()) };
+        let r = Recorder {
+            cmds: Mutex::new(Vec::new()),
+        };
         let content = vec![0xABu8; 5 * 1024 * 1024]; // 5 MiB
         r.write_file("/opt/big.bin", &content).await.unwrap();
 
         let cmds = r.cmds.lock().unwrap().clone();
-        assert!(cmds[0].contains(": > '/opt/big.bin'"), "第一条应清空目标:{}", &cmds[0][..60.min(cmds[0].len())]);
+        assert!(
+            cmds[0].contains(": > '/opt/big.bin'"),
+            "第一条应清空目标:{}",
+            &cmds[0][..60.min(cmds[0].len())]
+        );
         assert_eq!(cmds.len(), 1 + 3, "5MiB / 2MiB → 3 块:{}", cmds.len());
         // 单条命令的上限:2MiB 原始 → 约 2.7MiB base64,留一倍余量。
         for c in &cmds {
@@ -436,8 +446,12 @@ mod write_file_tests {
     #[tokio::test]
     async fn the_first_chunk_truncates_and_the_rest_append() {
         // 顺序反了会得到一个"内容是最后一块"的文件,而且大小看着还挺像。
-        let r = Recorder { cmds: Mutex::new(Vec::new()) };
-        r.write_file("/opt/x", &vec![1u8; 3 * 1024 * 1024]).await.unwrap();
+        let r = Recorder {
+            cmds: Mutex::new(Vec::new()),
+        };
+        r.write_file("/opt/x", &vec![1u8; 3 * 1024 * 1024])
+            .await
+            .unwrap();
         let cmds = r.cmds.lock().unwrap().clone();
         assert!(cmds[0].contains(": >"), "首条截断");
         for c in &cmds[1..] {
@@ -450,7 +464,9 @@ mod write_file_tests {
     /// 见 `SshExecutor::write_file` 的注释。这条测试守的是默认实现的分块。
     #[tokio::test]
     async fn a_small_file_still_takes_one_chunk() {
-        let r = Recorder { cmds: Mutex::new(Vec::new()) };
+        let r = Recorder {
+            cmds: Mutex::new(Vec::new()),
+        };
         r.write_file("/etc/small.conf", b"hello").await.unwrap();
         assert_eq!(r.cmds.lock().unwrap().len(), 2, "清空 + 一块");
     }
@@ -458,7 +474,9 @@ mod write_file_tests {
     #[tokio::test]
     async fn an_empty_file_is_created_and_left_empty() {
         // `chunks()` 对空切片不产出任何块 —— 清空那一步必须已经把文件建出来。
-        let r = Recorder { cmds: Mutex::new(Vec::new()) };
+        let r = Recorder {
+            cmds: Mutex::new(Vec::new()),
+        };
         r.write_file("/etc/empty", b"").await.unwrap();
         let cmds = r.cmds.lock().unwrap().clone();
         assert_eq!(cmds.len(), 1);

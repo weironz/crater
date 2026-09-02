@@ -45,7 +45,11 @@ fn human(bytes: u64) -> String {
 ///
 /// `--dry-run` reports without deleting. All four are caches/orphans: nothing
 /// a deployment or a later build can't recreate.
-pub(crate) async fn gc(cache: bool, dry_run: bool, target: crate::target::TargetOpts) -> Result<()> {
+pub(crate) async fn gc(
+    cache: bool,
+    dry_run: bool,
+    target: crate::target::TargetOpts,
+) -> Result<()> {
     let tag = if dry_run { "(dry-run)" } else { "" };
     let store = ImageStore::open()?;
     // 1. store blobs.
@@ -71,7 +75,10 @@ pub(crate) async fn gc(cache: bool, dry_run: bool, target: crate::target::Target
             }
         }
     }
-    info!("build 指纹: {fp_swept} 个过期 sidecar,{} {tag}", human(fp_freed));
+    info!(
+        "build 指纹: {fp_swept} 个过期 sidecar,{} {tag}",
+        human(fp_freed)
+    );
     // 3. download cache (opt-in: it SAVES future fetches; only --cache drops it).
     if cache {
         let mut dl_freed = 0u64;
@@ -126,7 +133,12 @@ pub(crate) async fn list_images() -> Result<()> {
         "REFERENCE", "DIGEST", "DISK USAGE", "CONTENT SIZE"
     );
     for i in imgs {
-        let short = i.digest.trim_start_matches("sha256:").chars().take(12).collect::<String>();
+        let short = i
+            .digest
+            .trim_start_matches("sha256:")
+            .chars()
+            .take(12)
+            .collect::<String>();
         println!(
             "{:<refw$} {:<16} {:>11} {:>13}",
             i.reference,
@@ -263,10 +275,14 @@ async fn apply_task_artifact(
     graceful_no_teardown: bool,
 ) -> Result<()> {
     let manifest = store.resolve_manifest(reference)?;
-    let recipe_dir = std::env::temp_dir()
-        .join(format!("crater-ref-{}-{}", std::process::id(), crate::build::sanitize_ref(reference)));
+    let recipe_dir = std::env::temp_dir().join(format!(
+        "crater-ref-{}-{}",
+        std::process::id(),
+        crate::build::sanitize_ref(reference)
+    ));
     let _ = std::fs::remove_dir_all(&recipe_dir);
-    let Some(mc) = bundle::materialize_component(&manifest, &store.blobs_dir(), &recipe_dir)? else {
+    let Some(mc) = bundle::materialize_component(&manifest, &store.blobs_dir(), &recipe_dir)?
+    else {
         anyhow::bail!("'{reference}' 不是 crater task 制品(无 recipe)");
     };
     let recipe_file = recipe_dir.join(&mc.name).join("component.yaml");
@@ -298,7 +314,15 @@ async fn apply_task_artifact(
         set_overrides,
         plan_check: plan,
     };
-    let res = apply_task(&recipe_file, hosts, opts, name, hosts_override, var_overrides).await;
+    let res = apply_task(
+        &recipe_file,
+        hosts,
+        opts,
+        name,
+        hosts_override,
+        var_overrides,
+    )
+    .await;
     let _ = std::fs::remove_dir_all(&recipe_dir);
     res
 }
@@ -332,22 +356,40 @@ pub(crate) async fn apply_image_ref(
     if manifest["artifactType"].as_str() == Some(AT_PROJECT) {
         let project = store.project_recipe(&manifest)?;
         let registry = crater_core::store::registry_of(reference);
-        let verb = if teardown { "delete" } else if plan { "plan" } else { "apply" };
-        let deployment = name.map(|s| s.to_string()).unwrap_or_else(|| project.name.clone());
+        let verb = if teardown {
+            "delete"
+        } else if plan {
+            "plan"
+        } else {
+            "apply"
+        };
+        let deployment = name
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| project.name.clone());
         let mut order: Vec<&crater_core::project::Play> = project.plays.iter().collect();
         if teardown {
             order.reverse();
         }
-        info!("{verb} project '{}'(registry/store 直连): {} play(s){}",
-            project.name, order.len(), if teardown { "(逆序)" } else { "" });
+        info!(
+            "{verb} project '{}'(registry/store 直连): {} play(s){}",
+            project.name,
+            order.len(),
+            if teardown { "(逆序)" } else { "" }
+        );
         let total = order.len();
         for (i, play) in order.iter().enumerate() {
             let label = play.name.clone().unwrap_or_else(|| play.source.clone());
-            info!("── play {}/{total}: {label}(source={}, hosts={})",
-                i + 1, play.source, play.hosts.as_deref().unwrap_or("<task 默认>"));
+            info!(
+                "── play {}/{total}: {label}(source={}, hosts={})",
+                i + 1,
+                play.source,
+                play.hosts.as_deref().unwrap_or("<task 默认>")
+            );
             if let Some(g) = &play.hosts {
                 let matches = g == "all"
-                    || hosts.iter().any(|h| h.roles.is_empty() || h.name == *g || h.roles.iter().any(|r| r == g));
+                    || hosts.iter().any(|h| {
+                        h.roles.is_empty() || h.name == *g || h.roles.iter().any(|r| r == g)
+                    });
                 if !matches {
                     info!("   (跳过:hosts='{g}' 无匹配主机)");
                     continue;
@@ -357,9 +399,20 @@ pub(crate) async fn apply_image_ref(
             let remote = format!("{registry}/{}", play.source);
             ensure_pulled(&store, &play.source, &remote, offline).await?;
             apply_task_artifact(
-                &store, &play.source, hosts.clone(), do_apply, do_shell, teardown,
-                source, Some(&deployment), offline, set_overrides.clone(), plan,
-                play.hosts.clone(), play.vars.clone(), true,
+                &store,
+                &play.source,
+                hosts.clone(),
+                do_apply,
+                do_shell,
+                teardown,
+                source,
+                Some(&deployment),
+                offline,
+                set_overrides.clone(),
+                plan,
+                play.hosts.clone(),
+                play.vars.clone(),
+                true,
             )
             .await
             .map_err(|e| anyhow!("project '{}' play '{label}' 失败:{e}", project.name))?;
@@ -369,22 +422,40 @@ pub(crate) async fn apply_image_ref(
     }
     if manifest["artifactType"].as_str().is_some() {
         return apply_task_artifact(
-            &store, reference, hosts, do_apply, do_shell, teardown, source, name,
-            offline, set_overrides, plan, None, BTreeMap::new(), false,
+            &store,
+            reference,
+            hosts,
+            do_apply,
+            do_shell,
+            teardown,
+            source,
+            name,
+            offline,
+            set_overrides,
+            plan,
+            None,
+            BTreeMap::new(),
+            false,
         )
         .await;
     }
 
     // Plain container image → rootfs overlay (extract all layers to /).
     let layers = store.resolve_layers(reference)?;
-    info!("image {reference}: plain image, {} layer(s), {} host(s)", layers.len(), hosts.len());
+    info!(
+        "image {reference}: plain image, {} layer(s), {} host(s)",
+        layers.len(),
+        hosts.len()
+    );
     if !do_apply {
         info!("dry-run; omit --dry-run to install (extract layers to / on each host)");
         return Ok(());
     }
     let forks = forks_limit();
     let results: Vec<Result<()>> = futures::stream::iter(
-        hosts.iter().map(|h| install_image_on_host(h, &layers, reference)),
+        hosts
+            .iter()
+            .map(|h| install_image_on_host(h, &layers, reference)),
     )
     .buffer_unordered(forks)
     .collect()

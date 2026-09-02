@@ -117,7 +117,9 @@ fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<serde_json::Value>)
     if depth > 4 || out.len() > 500 {
         return;
     }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         let name = e.file_name().to_string_lossy().into_owned();
@@ -158,8 +160,12 @@ fn classify(p: &Path) -> &'static str {
 fn ensure_parent(rel: &str) -> Result<(), (StatusCode, String)> {
     let p = Path::new(rel);
     if p.is_absolute()
-        || p.components()
-            .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir))
+        || p.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::RootDir
+            )
+        })
     {
         return Err((
             StatusCode::FORBIDDEN,
@@ -220,8 +226,14 @@ pub async fn file_get(Query(q): Query<PathQuery>) -> impl IntoResponse {
         Err((c, m)) => return (c, Json(json!({ "error": m }))).into_response(),
     };
     match std::fs::read_to_string(&path) {
-        Ok(text) => Json(json!({ "path": q.path, "text": text, "kind": classify(&path) })).into_response(),
-        Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(text) => {
+            Json(json!({ "path": q.path, "text": text, "kind": classify(&path) })).into_response()
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -258,7 +270,11 @@ pub async fn file_trash(Query(q): Query<PathQuery>) -> impl IntoResponse {
         Err((c, m)) => return (c, Json(json!({ "error": m }))).into_response(),
     };
     if !path.exists() {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "文件不存在" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "文件不存在" })),
+        )
+            .into_response();
     }
     let refs: Vec<String> = crate::ui_app::list_apps()
         .into_iter()
@@ -268,13 +284,21 @@ pub async fn file_trash(Query(q): Query<PathQuery>) -> impl IntoResponse {
     if !refs.is_empty() {
         return (
             StatusCode::CONFLICT,
-            Json(json!({ "error": format!("被 {} 引用,先解绑再删", refs.join(", ")), "refs": refs })),
+            Json(
+                json!({ "error": format!("被 {} 引用,先解绑再删", refs.join(", ")), "refs": refs }),
+            ),
         )
             .into_response();
     }
     let root = match root() {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     };
     let trash = root.join(".crater-trash");
     let _ = std::fs::create_dir_all(&trash);
@@ -287,8 +311,14 @@ pub async fn file_trash(Query(q): Query<PathQuery>) -> impl IntoResponse {
         path.file_name().unwrap_or_default().to_string_lossy()
     ));
     match move_file(&path, &dest, "删除") {
-        Ok(()) => Json(json!({ "ok": true, "trashed_to": dest.display().to_string() })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(()) => {
+            Json(json!({ "ok": true, "trashed_to": dest.display().to_string() })).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -320,7 +350,11 @@ pub async fn file_rename(Query(q): Query<PathQuery>, body: String) -> impl IntoR
     }
     match move_file(&from, &to, "改名") {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 

@@ -55,9 +55,7 @@ pub fn get(name: &str) -> Option<&'static dyn ResourceType> {
 
 /// 已实现五动词的类型名(与 `types.rs` 的登记表比对,得出"还欠多少")。
 pub fn implemented() -> Vec<&'static str> {
-    executable()
-        .filter(|n| get(n).is_some())
-        .collect()
+    executable().filter(|n| get(n).is_some()).collect()
 }
 
 /// 需要有实现的类型 —— **声明段条目不在此列**:`material` 不是资源,
@@ -72,9 +70,7 @@ fn executable() -> impl Iterator<Item = &'static str> {
 
 /// 已登记但**还没有**五动词实现的类型 —— 差距要可见,不可含糊。
 pub fn pending() -> Vec<&'static str> {
-    executable()
-        .filter(|n| get(n).is_none())
-        .collect()
+    executable().filter(|n| get(n).is_none()).collect()
 }
 
 #[cfg(test)]

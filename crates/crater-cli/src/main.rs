@@ -22,28 +22,28 @@ mod blueprint;
 mod build;
 mod closure;
 mod deployments;
+mod events;
+mod facts_cmd;
 mod fmt_cmd;
 mod images;
 mod inspect_bp;
-mod material_ctx;
 mod lint;
+mod material_ctx;
+mod out;
+mod pkg;
+mod repo;
 mod schema_cmd;
 mod stack_cmd;
 mod target;
 mod types_cmd;
 mod ui;
+mod ui_app;
+mod ui_catalog;
 mod ui_contract;
 mod ui_edit;
 mod ui_git;
-mod ui_app;
-mod ui_overview;
-mod events;
-mod facts_cmd;
-mod out;
-mod pkg;
-mod repo;
-mod ui_catalog;
 mod ui_inventory;
+mod ui_overview;
 mod ui_run;
 
 use std::path::{Path, PathBuf};
@@ -54,8 +54,8 @@ use tracing::info;
 
 use target::TargetOpts;
 
-use crater_core::executor::{Executor, SshExecutor};
 use crate::blueprint::StackMode;
+use crater_core::executor::{Executor, SshExecutor};
 use crater_core::store::ImageStore;
 
 #[derive(Parser)]
@@ -421,9 +421,7 @@ enum Cmd {
         reference: String,
     },
     /// Push a stored image to a registry.
-    Push {
-        reference: String,
-    },
+    Push { reference: String },
     /// Import an oci-archive file (e.g. `crater save` output) into the store.
     Load {
         /// Path to the .oci archive.
@@ -689,7 +687,6 @@ enum CreateWhat {
     },
 }
 
-
 /// Compact wall-clock timer (`HH:MM:SS`, UTC) — dependency-free, keeps log
 /// lines short vs the default RFC3339 timestamp.
 struct ClockTime;
@@ -699,7 +696,13 @@ impl tracing_subscriber::fmt::time::FormatTime for ClockTime {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        write!(w, "{:02}:{:02}:{:02}", (s / 3600) % 24, (s / 60) % 60, s % 60)
+        write!(
+            w,
+            "{:02}:{:02}:{:02}",
+            (s / 3600) % 24,
+            (s / 60) % 60,
+            s % 60
+        )
     }
 }
 
@@ -722,19 +725,30 @@ fn log_level() -> tracing::Level {
 /// 命令行给的 source 是不是**新 IR blueprint 文件**。是则走五动词管线,
 /// 否则(旧 task / 镜像 ref / .oci / 命名 task)交回原管线 —— 两条管线并存到迁移完成。
 fn blueprint_source(file: &Option<PathBuf>, source: &Option<String>) -> Option<PathBuf> {
-    let candidate = file.clone().or_else(|| source.as_ref().map(PathBuf::from))?;
+    let candidate = file
+        .clone()
+        .or_else(|| source.as_ref().map(PathBuf::from))?;
     (candidate.is_file() && blueprint::is_blueprint_file(&candidate)).then_some(candidate)
 }
 
 /// `k8s-ha.blueprint.yaml` → `k8s-ha.closure.tar`;`platform.stack.yaml` → `platform.closure.tar`。
 fn default_closure_path(file: &Path, kind_suffix: &str) -> PathBuf {
-    let stem = file.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-    PathBuf::from(format!("{}.closure.tar", stem.trim_end_matches(kind_suffix)))
+    let stem = file
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    PathBuf::from(format!(
+        "{}.closure.tar",
+        stem.trim_end_matches(kind_suffix)
+    ))
 }
 
 /// 同上,但认的是**栈**。栈与蓝图靠形状分辨(`stack:` + `uses:`),不靠文件名。
 fn stack_source(file: &Option<PathBuf>, source: &Option<String>) -> Option<PathBuf> {
-    let candidate = file.clone().or_else(|| source.as_ref().map(PathBuf::from))?;
+    let candidate = file
+        .clone()
+        .or_else(|| source.as_ref().map(PathBuf::from))?;
     (candidate.is_file() && stack_cmd::is_stack_file(&candidate)).then_some(candidate)
 }
 
@@ -769,7 +783,11 @@ async fn main() -> Result<()> {
             // 新 IR blueprint 先分流(同 plan);其余走原管线。
             let probe = arg2.clone().or_else(|| arg1.clone());
             if let Some(p) = stack_source(&file, &probe) {
-                let m = if dry_run { StackMode::Plan } else { StackMode::Apply };
+                let m = if dry_run {
+                    StackMode::Plan
+                } else {
+                    StackMode::Apply
+                };
                 return stack_cmd::run(&p, &target, &set, m).await;
             }
             if let Some(p) = blueprint_source(&file, &probe) {
@@ -784,9 +802,18 @@ async fn main() -> Result<()> {
                 (Some(a), None) => (None, Some(a)),
                 (None, _) => (None, None),
             };
-            apply::apply_source(name, source, file, target, dry_run, shell, false, offline, &set, false).await
+            apply::apply_source(
+                name, source, file, target, dry_run, shell, false, offline, &set, false,
+            )
+            .await
         }
-        Cmd::Plan { source, file, target, offline, set } => {
+        Cmd::Plan {
+            source,
+            file,
+            target,
+            offline,
+            set,
+        } => {
             // 按文件格式分流:栈 → 逐蓝图;新 IR blueprint → 五动词管线;旧 task → 原管线。
             if let Some(p) = stack_source(&file, &source) {
                 return stack_cmd::run(&p, &target, &set, StackMode::Plan).await;
@@ -794,8 +821,10 @@ async fn main() -> Result<()> {
             match blueprint_source(&file, &source) {
                 Some(p) => blueprint::plan_blueprint(&p, &target, &set).await,
                 None => {
-                    apply::apply_source(None, source, file, target, false, false, false, offline, &set, true)
-                        .await
+                    apply::apply_source(
+                        None, source, file, target, false, false, false, offline, &set, true,
+                    )
+                    .await
                 }
             }
         }
@@ -806,14 +835,36 @@ async fn main() -> Result<()> {
             dry_run,
             shell,
             set,
-        } => apply::apply_source(None, source, file, target, dry_run, shell, true, false, &set, false).await,
+        } => {
+            apply::apply_source(
+                None, source, file, target, dry_run, shell, true, false, &set, false,
+            )
+            .await
+        }
         Cmd::Task { cmd } => match cmd {
             TaskCmd::List { target, verify } => deployments::task_list(target, verify).await,
-            TaskCmd::Show { name, target, verify } => deployments::task_show(&name, target, verify).await,
+            TaskCmd::Show {
+                name,
+                target,
+                verify,
+            } => deployments::task_show(&name, target, verify).await,
             TaskCmd::History { limit } => deployments::task_history(limit).await,
         },
-        Cmd::Ui { bind, port, token, workspace } => ui::serve(&bind, port, token, workspace).await,
-        Cmd::Build { file, output, profile, tag, arch, no_cache, set } => {
+        Cmd::Ui {
+            bind,
+            port,
+            token,
+            workspace,
+        } => ui::serve(&bind, port, token, workspace).await,
+        Cmd::Build {
+            file,
+            output,
+            profile,
+            tag,
+            arch,
+            no_cache,
+            set,
+        } => {
             // 与 apply/plan 同一条按文件格式分派的路子:栈/蓝图烤闭包,task 进 store。
             if stack_cmd::is_stack_file(&file) {
                 let out = output.unwrap_or_else(|| default_closure_path(&file, ".stack"));
@@ -828,13 +879,18 @@ async fn main() -> Result<()> {
             }
             build::build_to_store(&file, tag, &arch, &set, no_cache).await
         }
-        Cmd::Inspect { source, gen_inventory } => {
+        Cmd::Inspect {
+            source,
+            gen_inventory,
+        } => {
             // 与 apply/plan 同一条按文件格式分派:蓝图/栈走 IR 的输入契约视图,
             // 其余(task 文件、OCI ref)仍走旧管线。
             let p = PathBuf::from(&source);
             if p.is_file() && (blueprint::is_blueprint_file(&p) || stack_cmd::is_stack_file(&p)) {
                 if gen_inventory {
-                    anyhow::bail!("`--gen-inventory` 暂只支持旧 task;蓝图请照 `需要的机群` 一节手写");
+                    anyhow::bail!(
+                        "`--gen-inventory` 暂只支持旧 task;蓝图请照 `需要的机群` 一节手写"
+                    );
                 }
                 return inspect_bp::run(&p);
             }
@@ -855,28 +911,57 @@ async fn main() -> Result<()> {
             chmod,
         } => push_file(&host, &user, password, port, &src, &dst, chmod).await,
         Cmd::Images => images::list_images().await,
-        Cmd::Install { source, name, repo, set, yes, full, force, target } => {
-            pkg::install(&source, &target, &set, name.as_deref(), repo.as_deref(), yes, full, force)
-                .await
+        Cmd::Install {
+            source,
+            name,
+            repo,
+            set,
+            yes,
+            full,
+            force,
+            target,
+        } => {
+            pkg::install(
+                &source,
+                &target,
+                &set,
+                name.as_deref(),
+                repo.as_deref(),
+                yes,
+                full,
+                force,
+            )
+            .await
         }
         Cmd::Pkg { cmd } => match cmd {
-            PkgCmd::Push { path, reference, arch, fors } => {
-                pkg::push(&path, &reference, &arch, &fors).await
-            }
-            PkgCmd::Build { path, reference, arch, fors } => {
-                pkg::build(&path, &reference, &arch, &fors).await
-            }
-            PkgCmd::Pull { reference, into, full } => {
-                pkg::pull(&reference, into.as_deref(), full).await
-            }
+            PkgCmd::Push {
+                path,
+                reference,
+                arch,
+                fors,
+            } => pkg::push(&path, &reference, &arch, &fors).await,
+            PkgCmd::Build {
+                path,
+                reference,
+                arch,
+                fors,
+            } => pkg::build(&path, &reference, &arch, &fors).await,
+            PkgCmd::Pull {
+                reference,
+                into,
+                full,
+            } => pkg::pull(&reference, into.as_deref(), full).await,
             PkgCmd::Inspect { reference } => pkg::inspect(&reference).await,
             PkgCmd::Tags { reference } => pkg::tags(&reference).await,
             PkgCmd::Ls => pkg::ls(),
             PkgCmd::Save { reference, output } => pkg::save(&reference, &output),
             PkgCmd::Load { file, as_ref } => pkg::load(&file, as_ref.as_deref()),
-            PkgCmd::Index { sources, store, out, merge } => {
-                repo::index(&sources, store, &out, merge).await
-            }
+            PkgCmd::Index {
+                sources,
+                store,
+                out,
+                merge,
+            } => repo::index(&sources, store, &out, merge).await,
         },
         Cmd::Repo { cmd } => match cmd {
             RepoCmd::Add { name, url } => repo::add(&name, &url).await,
@@ -893,7 +978,11 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Rmi { reference } => images::remove_image(&reference),
-        Cmd::Gc { cache, dry_run, target } => images::gc(cache, dry_run, target).await,
+        Cmd::Gc {
+            cache,
+            dry_run,
+            target,
+        } => images::gc(cache, dry_run, target).await,
         Cmd::Tag { source, target } => {
             ImageStore::open()?.retag(&source, &target)?;
             info!("tagged {source} → {target}");
@@ -916,15 +1005,33 @@ async fn main() -> Result<()> {
         Cmd::Fmt { file, split, join } => fmt_cmd::run(&file, split.as_deref(), join),
         Cmd::Facts { target } => facts_cmd::run(&target).await,
         Cmd::Types { name, json } => types_cmd::run(name.as_deref(), json),
-        Cmd::Schema { file, output, to_stdout } => {
-            schema_cmd::run(file.as_deref(), output.as_deref(), to_stdout)
-        }
-        Cmd::Lint { paths, strict, json, stats } => lint::run(&paths, strict, json, stats),
-        Cmd::Procedure { name, file, target, set } => match blueprint_source(&file, &None) {
+        Cmd::Schema {
+            file,
+            output,
+            to_stdout,
+        } => schema_cmd::run(file.as_deref(), output.as_deref(), to_stdout),
+        Cmd::Lint {
+            paths,
+            strict,
+            json,
+            stats,
+        } => lint::run(&paths, strict, json, stats),
+        Cmd::Procedure {
+            name,
+            file,
+            target,
+            set,
+        } => match blueprint_source(&file, &None) {
             Some(p) => blueprint::run_procedure(&p, &name, &target, &set).await,
             None => anyhow::bail!("`crater procedure` 需要 `-f <blueprint.yaml>`"),
         },
-        Cmd::Destroy { file, source, target, yes, set } => {
+        Cmd::Destroy {
+            file,
+            source,
+            target,
+            yes,
+            set,
+        } => {
             if let Some(p) = stack_source(&file, &source) {
                 return stack_cmd::destroy(&p, &target, &set, yes).await;
             }
@@ -936,12 +1043,20 @@ async fn main() -> Result<()> {
                 ),
             }
         }
-        Cmd::Verify { json, file, source, target, set } => {
+        Cmd::Verify {
+            json,
+            file,
+            source,
+            target,
+            set,
+        } => {
             if let Some(p) = stack_source(&file, &source) {
                 return stack_cmd::run(&p, &target, &set, StackMode::Verify).await;
             }
             match blueprint_source(&file, &source) {
-                Some(p) => blueprint::verify_blueprint_json(&p, &target, &set, json.as_deref()).await,
+                Some(p) => {
+                    blueprint::verify_blueprint_json(&p, &target, &set, json.as_deref()).await
+                }
                 None => anyhow::bail!(
                     "`crater verify` 目前只支持新 IR blueprint 与 stack;\
                      旧 task 的漂移检测用 `crater task list --verify`"
@@ -1017,7 +1132,9 @@ async fn push_file(
         }
     }
     // Confirm via sha256 on the remote side.
-    let out = exec.run(&format!("sha256sum '{dst}' | cut -d' ' -f1")).await?;
+    let out = exec
+        .run(&format!("sha256sum '{dst}' | cut -d' ' -f1"))
+        .await?;
     println!("remote sha256: {}", out.stdout.trim());
     println!("local  sha256: {}", crater_core::bundle::sha256_hex(&data));
     println!("Done.");
@@ -1078,12 +1195,33 @@ async fn component_shortcut(args: Vec<String>) -> Result<()> {
         i += 1;
     }
     let name = name.ok_or_else(|| anyhow!("missing task name"))?;
-    let target = TargetOpts { inventory, host, user, password, key, port, parallel: 1, closure: None, limit: None, strategy: crate::target::Strategy::Host, serial: None };
-    apply::apply_source(None, Some(name), None, target, dry_run, shell, false, false, &[], false).await
+    let target = TargetOpts {
+        inventory,
+        host,
+        user,
+        password,
+        key,
+        port,
+        parallel: 1,
+        closure: None,
+        limit: None,
+        strategy: crate::target::Strategy::Host,
+        serial: None,
+    };
+    apply::apply_source(
+        None,
+        Some(name),
+        None,
+        target,
+        dry_run,
+        shell,
+        false,
+        false,
+        &[],
+        false,
+    )
+    .await
 }
-
-
-
 
 /// systemd unit names mentioned by tasks under `tasks/` (their `service` /
 /// `systemd_unit` actions). `doctor` derives per-unit journal probes from this
@@ -1121,7 +1259,10 @@ async fn ai_generate(request: &str, output: Option<PathBuf>) -> Result<()> {
              Qwen, or an on-prem OpenAI-compatible endpoint."
         )
     })?;
-    println!("AI: model={} endpoint={}", settings.model, settings.endpoint);
+    println!(
+        "AI: model={} endpoint={}",
+        settings.model, settings.endpoint
+    );
 
     let provider = OpenAiCompatProvider::new(settings)?;
     let (yaml, task) = ai::nl_to_task(&provider, request).await?;
@@ -1137,7 +1278,10 @@ async fn ai_generate(request: &str, output: Option<PathBuf>) -> Result<()> {
     if let Some(out) = output {
         std::fs::write(&out, &yaml)?;
         println!("Wrote {}", out.display());
-        println!("Next: crater apply {} (add --dry-run to preview first)", out.display());
+        println!(
+            "Next: crater apply {} (add --dry-run to preview first)",
+            out.display()
+        );
     } else {
         println!("(Tip: -o task.yaml to save, then `crater apply task.yaml`.)");
     }
@@ -1223,10 +1367,10 @@ async fn doctor(
                     Err(e) => println!("(AI analysis unavailable: {e})"),
                 }
             }
-            None => println!("(--ai requested but CRATER_AI_* not configured; rules above stand alone.)"),
+            None => println!(
+                "(--ai requested but CRATER_AI_* not configured; rules above stand alone.)"
+            ),
         }
     }
     Ok(())
 }
-
-

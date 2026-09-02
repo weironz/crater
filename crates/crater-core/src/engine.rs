@@ -202,11 +202,18 @@ impl Op {
     pub fn offline_blob_paths_mut(&mut self) -> Vec<&mut std::path::PathBuf> {
         match self {
             Op::PushFile { local_path, .. } => vec![local_path],
-            Op::UnarchiveMaterial { local_archive: Some(p), .. } => vec![p],
-            Op::PackageInstall { local_archive: Some(p), .. } => vec![p],
-            Op::ImageImport { images, .. } => {
-                images.iter_mut().filter_map(|i| i.local_archive.as_mut()).collect()
-            }
+            Op::UnarchiveMaterial {
+                local_archive: Some(p),
+                ..
+            } => vec![p],
+            Op::PackageInstall {
+                local_archive: Some(p),
+                ..
+            } => vec![p],
+            Op::ImageImport { images, .. } => images
+                .iter_mut()
+                .filter_map(|i| i.local_archive.as_mut())
+                .collect(),
             _ => vec![],
         }
     }
@@ -305,17 +312,18 @@ impl HostCoord {
 
     /// A peer host errored — release all waiters with a fail-fast error.
     pub fn mark_aborted(&self) {
-        self.aborted.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.aborted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// A host finished (success or failure). Its facts, if any, are already
     /// published by this point, so decrementing here is safe.
     pub fn host_done(&self) {
-        let _ = self
-            .remaining
-            .fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |n| {
-                Some(n.saturating_sub(1))
-            });
+        let _ = self.remaining.fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |n| Some(n.saturating_sub(1)),
+        );
     }
 
     /// Block until every key in `keys` is published, returning their values.
@@ -332,10 +340,14 @@ impl HostCoord {
                 }
                 let missing: Vec<&String> = keys.iter().filter(|k| !f.contains_key(*k)).collect();
                 if self.aborted.load(Ordering::SeqCst) {
-                    anyhow::bail!("a peer host failed before producing cross-host facts {missing:?}");
+                    anyhow::bail!(
+                        "a peer host failed before producing cross-host facts {missing:?}"
+                    );
                 }
                 if self.remaining.load(Ordering::SeqCst) == 0 {
-                    anyhow::bail!("all peer hosts finished without producing cross-host facts {missing:?}");
+                    anyhow::bail!(
+                        "all peer hosts finished without producing cross-host facts {missing:?}"
+                    );
                 }
                 if start.elapsed() >= self.timeout {
                     anyhow::bail!(
@@ -466,9 +478,13 @@ impl PlanContext {
     /// the wrong arch, which must fail loudly (esp. offline/air-gap).
     pub fn resolve_material(&self, name: &str) -> crate::Result<&crate::component::Material> {
         use crate::arch::Arch;
-        let variants = self.materials.get(name).filter(|v| !v.is_empty()).ok_or_else(|| {
-            anyhow::anyhow!("place: unknown material '{name}' (declare it under `materials:`)")
-        })?;
+        let variants = self
+            .materials
+            .get(name)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("place: unknown material '{name}' (declare it under `materials:`)")
+            })?;
         // Exact arch match first.
         let exact: Vec<&crate::component::Material> = variants
             .iter()
@@ -478,7 +494,10 @@ impl PlanContext {
             return Ok(exact[0]);
         }
         if exact.len() > 1 {
-            anyhow::bail!("place: material '{name}' has duplicate variants for arch {}", self.target_arch.as_str());
+            anyhow::bail!(
+                "place: material '{name}' has duplicate variants for arch {}",
+                self.target_arch.as_str()
+            );
         }
         // Fall back to an arch-neutral variant.
         let neutral: Vec<&crate::component::Material> =
@@ -502,7 +521,9 @@ impl PlanContext {
                         .join(", ")
                 )
             }
-            _ => anyhow::bail!("place: material '{name}' has multiple arch-neutral variants (ambiguous)"),
+            _ => anyhow::bail!(
+                "place: material '{name}' has multiple arch-neutral variants (ambiguous)"
+            ),
         }
     }
 
@@ -527,8 +548,6 @@ impl PlanContext {
         })
     }
 }
-
-
 
 /// A lowered task step: the Op plus its run policy (D-037-b). Serializable so the
 /// whole task plan can be shipped to the self-bootstrap agent (D-044).
@@ -624,7 +643,10 @@ pub fn plan_from_task(
     for (i, s) in actions.iter().enumerate() {
         let id = s.id.clone().unwrap_or_else(|| format!("action{i}"));
         let os_ok = s.when_os.is_empty()
-            || os.match_keys().iter().any(|k| s.when_os.iter().any(|w| w == k));
+            || os
+                .match_keys()
+                .iter()
+                .any(|k| s.when_os.iter().any(|w| w == k));
         let off_ok = s.when_offline.is_none_or(|w| w == offline);
         // when_role (D-071): run only on hosts holding one of these roles.
         let role_match = |roles: &[String]| {
@@ -753,11 +775,17 @@ async fn run_one(
             Err(e) => {
                 if attempt < retries {
                     attempt += 1;
-                    tracing::warn!("[{n}/{total}] {} failed, retry {attempt}/{retries}: {e}", op.describe());
+                    tracing::warn!(
+                        "[{n}/{total}] {} failed, retry {attempt}/{retries}: {e}",
+                        op.describe()
+                    );
                     continue;
                 }
                 if ignore_errors {
-                    tracing::warn!("[{n}/{total}] {} failed (ignore_errors): {e}", op.describe());
+                    tracing::warn!(
+                        "[{n}/{total}] {} failed (ignore_errors): {e}",
+                        op.describe()
+                    );
                     return Ok(StepStatus::Warn);
                 }
                 return Err(e);
@@ -848,8 +876,6 @@ pub async fn execute_task(
     Ok(())
 }
 
-
-
 fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
     let op = match a {
         Action::PkgInstall { packages, material } => {
@@ -889,7 +915,11 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
             // Source marker (D-088): `(blob)` = packed deb/rpm closure pushed
             // from control; `(target repo)` = the target installs from its own
             // package source online.
-            let src_tag = if local_archive.is_some() { "blob" } else { "target repo" };
+            let src_tag = if local_archive.is_some() {
+                "blob"
+            } else {
+                "target repo"
+            };
             Op::PackageInstall {
                 phase,
                 describe: format!("install packages ({src_tag}): [{}]", pkgs.join(", ")),
@@ -899,7 +929,13 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 check,
             }
         }
-        Action::Extract { to, from, material, strip, creates } => {
+        Action::Extract {
+            to,
+            from,
+            material,
+            strip,
+            creates,
+        } => {
             let to_s = to.display().to_string();
             let creates_s = creates.as_ref().map(|p| p.display().to_string());
             if let Some(name) = material {
@@ -920,7 +956,9 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                     anyhow::bail!("offline bundle missing material '{key}'")
                 } else {
                     let tmpl = m.url_tmpl.as_deref().ok_or_else(|| {
-                        anyhow::anyhow!("unarchive: material '{name}' has no url_tmpl for online fetch")
+                        anyhow::anyhow!(
+                            "unarchive: material '{name}' has no url_tmpl for online fetch"
+                        )
                     })?;
                     let raw = if let Some(a) = m.arch {
                         let mut vars = ctx.vars.clone();
@@ -935,7 +973,10 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 // the packed OCI layer; `<- url` = fetched online at apply.
                 let describe = match (&local_archive, &url) {
                     (Some(_), _) => {
-                        format!("unarchive (blob) {} -> {to_s}", PlanContext::material_blob_key(m))
+                        format!(
+                            "unarchive (blob) {} -> {to_s}",
+                            PlanContext::material_blob_key(m)
+                        )
                     }
                     (_, Some(u)) => format!("unarchive {name} <- {u} -> {to_s}"),
                     _ => unreachable!("either blob or url set above"),
@@ -1033,7 +1074,12 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 check: desc.check.as_ref().map(|c| render(c, &vars)).transpose()?,
             }
         }
-        Action::LoadImage { material, materials, namespace, runtime } => {
+        Action::LoadImage {
+            material,
+            materials,
+            namespace,
+            runtime,
+        } => {
             // Resolve one or more kind:image materials (D-061/074): online →
             // runtime pulls each `ref`; offline → import each packed oci-archive.
             let names: Vec<&String> = material.iter().chain(materials.iter()).collect();
@@ -1055,7 +1101,10 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                     }
                     None => None,
                 };
-                images.push(ImageItem { reference, local_archive });
+                images.push(ImageItem {
+                    reference,
+                    local_archive,
+                });
             }
             // Source marker (D-088): `(blob)` = packed oci-archive imported;
             // `(pull)` = the runtime pulls the ref online.
@@ -1064,7 +1113,11 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 let tag = if n_blob == 1 { "blob" } else { "pull" };
                 format!("load image ({tag}) {}", images[0].reference)
             } else {
-                format!("load {} images ({n_blob} blob, {} pull)", images.len(), images.len() - n_blob)
+                format!(
+                    "load {} images ({n_blob} blob, {} pull)",
+                    images.len(),
+                    images.len() - n_blob
+                )
             };
             Op::ImageImport {
                 phase,
@@ -1118,7 +1171,13 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 check,
             }
         }
-        Action::Copy { dest, src, content, material, mode } => {
+        Action::Copy {
+            dest,
+            src,
+            content,
+            material,
+            mode,
+        } => {
             // ansible `copy` (D-090): the source is EXACTLY ONE of
             //   content  — inline text, rendered, inlined into the plan;
             //   src      — control-side text file, read + inlined (agent-safe);
@@ -1170,7 +1229,9 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                     }
                     // Online: the target fetches the variant's declared URL itself.
                     let tmpl = m.url_tmpl.as_deref().ok_or_else(|| {
-                        anyhow::anyhow!("copy: material '{name}' has no url_tmpl or src for online fetch")
+                        anyhow::anyhow!(
+                            "copy: material '{name}' has no url_tmpl or src for online fetch"
+                        )
                     })?;
                     // {{arch}} = the resolved material's arch (single source, D-064).
                     let raw = if let Some(a) = m.arch {
@@ -1198,8 +1259,9 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                     (Some(c), _) => render(c, &ctx.vars)?,
                     (_, Some(s)) => {
                         let src_path = ctx.component_dir.join(s);
-                        let bytes = std::fs::read(&src_path)
-                            .map_err(|e| anyhow::anyhow!("copy: read {}: {e}", src_path.display()))?;
+                        let bytes = std::fs::read(&src_path).map_err(|e| {
+                            anyhow::anyhow!("copy: read {}: {e}", src_path.display())
+                        })?;
                         String::from_utf8(bytes).map_err(|_| {
                             anyhow::anyhow!(
                                 "copy: {} is not UTF-8 (use `material` for binaries)",
@@ -1222,12 +1284,21 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 }
             }
         }
-        Action::WaitFor { port, host, path, state, timeout, delay } => {
+        Action::WaitFor {
+            port,
+            host,
+            path,
+            state,
+            timeout,
+            delay,
+        } => {
             // ansible `wait_for` (D-104): a read-only probe loop — succeed the
             // moment the condition holds, fail LOUDLY after `timeout`. Replaces
             // every hand-rolled `for i in $(seq 1 30); do …; sleep 1; done`.
             if (port.is_some() as u8) + (path.is_some() as u8) != 1 {
-                return Err(anyhow::anyhow!("wait_for: set exactly one of `port` / `path`"));
+                return Err(anyhow::anyhow!(
+                    "wait_for: set exactly one of `port` / `path`"
+                ));
             }
             let timeout = timeout.unwrap_or(30);
             let positive = state.wants_positive();
@@ -1244,7 +1315,10 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                 let connect = format!(
                     "{{ if command -v nc >/dev/null 2>&1; then nc -z -w 2 '{h}' '{p}' >/dev/null 2>&1; else bash -c 'exec 3<>/dev/tcp/{h}/{p}' >/dev/null 2>&1; fi; }}"
                 );
-                (connect, format!("port {h}:{p} {}", if positive { "open" } else { "closed" }))
+                (
+                    connect,
+                    format!("port {h}:{p} {}", if positive { "open" } else { "closed" }),
+                )
             } else {
                 let p = path.as_ref().unwrap().display().to_string();
                 (
@@ -1252,7 +1326,11 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                     format!("{p} {}", if positive { "present" } else { "absent" }),
                 )
             };
-            let probe = if positive { probe } else { format!("! {probe}") };
+            let probe = if positive {
+                probe
+            } else {
+                format!("! {probe}")
+            };
             let head = match delay.unwrap_or(0) {
                 0 => String::new(),
                 d => format!("sleep {d}; "),
@@ -1430,7 +1508,16 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
             }
         }
         Action::DockerContainer {
-            name, image, state, restart_policy, ports, volumes, env, command, args, runtime,
+            name,
+            image,
+            state,
+            restart_policy,
+            ports,
+            volumes,
+            env,
+            command,
+            args,
+            runtime,
         } => {
             use crate::component::ContainerState;
             let rt = runtime.as_deref().unwrap_or("docker");
@@ -1441,7 +1528,9 @@ fn action_op(phase: Phase, a: &Action, ctx: &PlanContext) -> crate::Result<Op> {
                     describe: format!("container {name} absent"),
                     cmd: format!("{rt} rm -f '{name}' 2>/dev/null || true"),
                     soft_fail: false,
-                    check: Some(format!("! {rt} ps -a --filter name=^{name}$ -q | grep -q .")),
+                    check: Some(format!(
+                        "! {rt} ps -a --filter name=^{name}$ -q | grep -q ."
+                    )),
                 },
                 ContainerState::Stopped => Op::Shell {
                     phase,
@@ -1621,7 +1710,10 @@ fn yaml_value_to_string(v: &serde_yaml::Value) -> String {
         serde_yaml::Value::Bool(b) => b.to_string(),
         serde_yaml::Value::Number(n) => n.to_string(),
         serde_yaml::Value::Null => String::new(),
-        other => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
+        other => serde_yaml::to_string(other)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
     }
 }
 
@@ -1725,7 +1817,9 @@ pub async fn plan_check_task(
                 let cur = exec.run(&sha_probe(path)).await?;
                 Out::Probe(Some(cur.ok() && cur.stdout.trim() == want))
             }
-            Op::PushFile { local_path, dest, .. } => match std::fs::read(local_path) {
+            Op::PushFile {
+                local_path, dest, ..
+            } => match std::fs::read(local_path) {
                 Ok(data) => {
                     let want = crate::bundle::sha256_hex(&data);
                     let cur = exec.run(&sha_probe(dest)).await?;
@@ -1734,13 +1828,11 @@ pub async fn plan_check_task(
                 // Blob not on control (e.g. thin ref) — can't compare.
                 Err(_) => Out::Probe(None),
             },
-            Op::UnarchiveMaterial { creates: Some(c), .. } => {
-                Out::Probe(Some(exec.run(&format!("test -e '{c}'")).await?.ok()))
-            }
+            Op::UnarchiveMaterial {
+                creates: Some(c), ..
+            } => Out::Probe(Some(exec.run(&format!("test -e '{c}'")).await?.ok())),
             Op::UnarchiveMaterial { .. } => Out::Probe(None),
-            Op::PackageInstall { check: Some(c), .. } => {
-                Out::Probe(Some(exec.run(c).await?.ok()))
-            }
+            Op::PackageInstall { check: Some(c), .. } => Out::Probe(Some(exec.run(c).await?.ok())),
             Op::PackageInstall { .. } => Out::Probe(None),
             // Imports re-run every apply by design (no image-exists probe).
             Op::ImageImport { .. } => Out::Probe(Some(false)),
@@ -1751,7 +1843,11 @@ pub async fn plan_check_task(
             std::io::stdout().is_terminal()
         };
         let tint = |code: &str, s: &str| {
-            if tty { format!("\x1b[{code}m{s}\x1b[0m") } else { s.to_string() }
+            if tty {
+                format!("\x1b[{code}m{s}\x1b[0m")
+            } else {
+                s.to_string()
+            }
         };
         let label = match out {
             Out::Probe(Some(true)) => {
@@ -1830,7 +1926,10 @@ async fn exec_one(
             }
         }
         Op::WriteFile {
-            path, content, mode, ..
+            path,
+            content,
+            mode,
+            ..
         } => {
             // Idempotency: skip the write if the remote file already matches.
             let want = crate::bundle::sha256_hex(content.as_bytes());
@@ -1895,9 +1994,15 @@ async fn exec_one(
                 tracing::debug!("      pushed {} bytes archive -> {tmp}", data.len());
             } else if let Some(u) = url {
                 // Online: the target downloads it.
-                let out = exec.run(&format!("curl -fL --retry 3 -o '{tmp}' '{u}'")).await?;
+                let out = exec
+                    .run(&format!("curl -fL --retry 3 -o '{tmp}' '{u}'"))
+                    .await?;
                 if !out.ok() {
-                    anyhow::bail!("step {n} fetch {u} failed (exit {}): {}", out.code, out.stderr.trim());
+                    anyhow::bail!(
+                        "step {n} fetch {u} failed (exit {}): {}",
+                        out.code,
+                        out.stderr.trim()
+                    );
                 }
             } else {
                 anyhow::bail!("step {n} unarchive: no material blob or url");
@@ -1909,7 +2014,11 @@ async fn exec_one(
             if out.ok() {
                 Ok((StepStatus::Changed, Vec::new()))
             } else {
-                anyhow::bail!("step {n} unarchive failed (exit {}): {}", out.code, out.stderr.trim());
+                anyhow::bail!(
+                    "step {n} unarchive failed (exit {}): {}",
+                    out.code,
+                    out.stderr.trim()
+                );
             }
         }
         Op::ImageImport {
@@ -1927,7 +2036,9 @@ async fn exec_one(
                     let out = exec.run(probe).await?;
                     let r = out.stdout.trim().to_string();
                     if r.is_empty() {
-                        anyhow::bail!("step {n}: no container runtime (nerdctl/ctr/docker/podman) on target");
+                        anyhow::bail!(
+                            "step {n}: no container runtime (nerdctl/ctr/docker/podman) on target"
+                        );
                     }
                     r
                 }
@@ -1941,8 +2052,9 @@ async fn exec_one(
                 let reference = &img.reference;
                 let cmd = if let Some(archive) = &img.local_archive {
                     // Offline: push the oci-archive, then import it.
-                    let data = std::fs::read(archive)
-                        .map_err(|e| anyhow::anyhow!("read image archive {}: {e}", archive.display()))?;
+                    let data = std::fs::read(archive).map_err(|e| {
+                        anyhow::anyhow!("read image archive {}: {e}", archive.display())
+                    })?;
                     let remote = format!("/tmp/crater-img-{}.tar", sanitize(reference));
                     exec.write_file(&remote, &data).await?;
                     tracing::debug!("      pushed {} bytes oci-archive -> {remote}", data.len());
@@ -1963,7 +2075,11 @@ async fn exec_one(
                     for l in out.stderr.trim().lines() {
                         tracing::debug!("      ! {l}");
                     }
-                    anyhow::bail!("step {n} image import '{reference}' failed (exit {}): {}", out.code, out.stderr.trim());
+                    anyhow::bail!(
+                        "step {n} image import '{reference}' failed (exit {}): {}",
+                        out.code,
+                        out.stderr.trim()
+                    );
                 }
                 tracing::debug!("      imported {reference}");
             }
@@ -1984,8 +2100,9 @@ async fn exec_one(
             }
             let cmd = if let Some(archive) = local_archive {
                 // Offline: push the closure tar, extract, install local packages.
-                let data = std::fs::read(archive)
-                    .map_err(|e| anyhow::anyhow!("read package archive {}: {e}", archive.display()))?;
+                let data = std::fs::read(archive).map_err(|e| {
+                    anyhow::anyhow!("read package archive {}: {e}", archive.display())
+                })?;
                 let dir = format!("/tmp/crater-pkgs-{}", sanitize(&packages.join("-")));
                 let tar = format!("{dir}.tar");
                 exec.write_file(&tar, &data).await?;
@@ -2001,12 +2118,18 @@ async fn exec_one(
             } else {
                 // Online: install from the system repo.
                 match family.as_str() {
-                    "rhel" => format!("dnf install -y {p} || yum install -y {p}", p = packages.join(" ")),
+                    "rhel" => format!(
+                        "dnf install -y {p} || yum install -y {p}",
+                        p = packages.join(" ")
+                    ),
                     "debian" => format!(
                         "apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y {}",
                         packages.join(" ")
                     ),
-                    _ => format!("echo 'unknown OS family: cannot install {}'; exit 1", packages.join(" ")),
+                    _ => format!(
+                        "echo 'unknown OS family: cannot install {}'; exit 1",
+                        packages.join(" ")
+                    ),
                 }
             };
             let out = exec.run(&cmd).await?;
@@ -2016,7 +2139,11 @@ async fn exec_one(
                 for l in out.stderr.trim().lines() {
                     tracing::debug!("      ! {l}");
                 }
-                anyhow::bail!("step {n} package install failed (exit {}): {}", out.code, out.stderr.trim());
+                anyhow::bail!(
+                    "step {n} package install failed (exit {}): {}",
+                    out.code,
+                    out.stderr.trim()
+                );
             }
         }
     }
@@ -2051,7 +2178,12 @@ mod tests {
             creates: Some(PathBuf::from("/usr/local/bin/app")),
         };
         match action_op(Phase::Install, &act, &ctx).unwrap() {
-            Op::UnarchiveMaterial { to, local_archive, creates, .. } => {
+            Op::UnarchiveMaterial {
+                to,
+                local_archive,
+                creates,
+                ..
+            } => {
                 assert_eq!(to, "/usr/local");
                 assert_eq!(local_archive, Some(PathBuf::from("/blob/app.tar")));
                 assert_eq!(creates.as_deref(), Some("/usr/local/bin/app"));
@@ -2082,7 +2214,10 @@ mod tests {
         let fp_of = |op: &Op| match op {
             Op::Shell { cmd, check, .. } => {
                 let fp = cmd.split("crater.spec=").nth(1).unwrap()[..12].to_string();
-                assert!(check.as_ref().unwrap().contains(&format!("crater.spec={fp}")));
+                assert!(check
+                    .as_ref()
+                    .unwrap()
+                    .contains(&format!("crater.spec={fp}")));
                 assert!(check.as_ref().unwrap().contains("status=running"));
                 fp
             }
@@ -2135,7 +2270,9 @@ mod tests {
         ctx.add_material(test_material("dep", "https://x/dep"));
         ctx = ctx.with_local_blobs(BTreeMap::new()); // partial map, no "dep"; offline=false
         match action_op(Phase::Install, &place("dep"), &ctx).unwrap() {
-            Op::Shell { cmd, .. } => assert!(cmd.contains("curl"), "thin-online → online curl, got {cmd}"),
+            Op::Shell { cmd, .. } => {
+                assert!(cmd.contains("curl"), "thin-online → online curl, got {cmd}")
+            }
             other => panic!("expected online Shell, got {other:?}"),
         }
 
@@ -2179,10 +2316,21 @@ mod tests {
             delay: None,
         };
         match action_op(Phase::Verify, &port_wait, &ctx).unwrap() {
-            Op::Shell { cmd, check, describe, .. } => {
-                assert!(cmd.contains("127.0.0.1' '6443'"), "renders {{{{api_port}}}}: {cmd}");
+            Op::Shell {
+                cmd,
+                check,
+                describe,
+                ..
+            } => {
+                assert!(
+                    cmd.contains("127.0.0.1' '6443'"),
+                    "renders {{{{api_port}}}}: {cmd}"
+                );
                 assert!(cmd.contains("-lt 60"), "timeout in loop: {cmd}");
-                assert!(cmd.contains("/dev/tcp/127.0.0.1/6443"), "bash fallback: {cmd}");
+                assert!(
+                    cmd.contains("/dev/tcp/127.0.0.1/6443"),
+                    "bash fallback: {cmd}"
+                );
                 assert!(check.is_some(), "single probe doubles as skip-check");
                 assert!(describe.contains("port 127.0.0.1:6443 open"), "{describe}");
             }
@@ -2210,7 +2358,10 @@ mod tests {
             timeout: None,
             delay: None,
         };
-        assert!(action_op(Phase::Install, &both, &ctx).is_err(), "port+path must error");
+        assert!(
+            action_op(Phase::Install, &both, &ctx).is_err(),
+            "port+path must error"
+        );
     }
 
     #[test]
@@ -2226,7 +2377,10 @@ mod tests {
         };
         match action_op(Phase::Install, &restarted, &ctx).unwrap() {
             Op::Shell { check, cmd, .. } => {
-                assert!(check.is_none(), "restarted must always run, got check={check:?}");
+                assert!(
+                    check.is_none(),
+                    "restarted must always run, got check={check:?}"
+                );
                 assert!(cmd.contains("systemctl restart haproxy"));
             }
             _ => panic!("service → shell"),
@@ -2240,7 +2394,10 @@ mod tests {
             Op::Shell { check, .. } => {
                 let c = check.unwrap();
                 assert!(c.contains("is-active"), "started gates on is-active: {c}");
-                assert!(!c.contains("is-enabled"), "must NOT gate on is-enabled: {c}");
+                assert!(
+                    !c.contains("is-enabled"),
+                    "must NOT gate on is-enabled: {c}"
+                );
             }
             _ => panic!("service → shell"),
         }
@@ -2253,12 +2410,21 @@ mod tests {
         ctx.vars.insert("apiserver_port".into(), "6443".into());
         ctx.groups.insert(
             "controlplane".into(),
-            vec![("n11".into(), "10.0.0.11".into()), ("n12".into(), "10.0.0.12".into())],
+            vec![
+                ("n11".into(), "10.0.0.11".into()),
+                ("n12".into(), "10.0.0.12".into()),
+            ],
         );
         let tpl = "backend kube-apiserver\n{% for node in groups.controlplane %}  server {{ node.name }} {{ node.ip }}:{{ apiserver_port }} check\n{% endfor %}";
         let out = render_template_str(tpl, &ctx).unwrap();
-        assert!(out.contains("server n11 10.0.0.11:6443 check"), "got:\n{out}");
-        assert!(out.contains("server n12 10.0.0.12:6443 check"), "got:\n{out}");
+        assert!(
+            out.contains("server n11 10.0.0.11:6443 check"),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains("server n12 10.0.0.12:6443 check"),
+            "got:\n{out}"
+        );
     }
 
     #[test]
@@ -2280,7 +2446,9 @@ mod tests {
             runtime: None,
         };
         match action_op(Phase::Install, &act, &ctx).unwrap() {
-            Op::ImageImport { images, namespace, .. } => {
+            Op::ImageImport {
+                images, namespace, ..
+            } => {
                 assert_eq!(images.len(), 3);
                 assert_eq!(images[0].reference, "repo/a:1");
                 assert_eq!(namespace.as_deref(), Some("k8s.io"));
@@ -2297,7 +2465,11 @@ mod tests {
             needs: vec![],
             phase: Phase::Install,
             when_os: vec![],
-            when_role: if role.is_empty() { vec![] } else { vec![role.into()] },
+            when_role: if role.is_empty() {
+                vec![]
+            } else {
+                vec![role.into()]
+            },
             run_once: false,
             throttle: None,
             when_offline: None,
@@ -2305,9 +2477,16 @@ mod tests {
             ignore_errors: false,
             notify: vec![],
             loop_items: vec![],
-            action: Action::RunCmd { cmd: "true".into(), check: None },
+            action: Action::RunCmd {
+                cmd: "true".into(),
+                check: None,
+            },
         };
-        let actions = vec![step("common", ""), step("init", "bootstrap"), step("join", "worker")];
+        let actions = vec![
+            step("common", ""),
+            step("init", "bootstrap"),
+            step("join", "worker"),
+        ];
 
         let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
         ctx.host_roles = vec!["bootstrap".into()];
@@ -2338,7 +2517,10 @@ mod tests {
             ignore_errors: false,
             notify: vec![],
             loop_items: vec![],
-            action: Action::RunCmd { cmd: "kubeadm init".into(), check: None },
+            action: Action::RunCmd {
+                cmd: "kubeadm init".into(),
+                check: None,
+            },
         };
         let actions = std::slice::from_ref(&init);
 
@@ -2373,21 +2555,35 @@ mod tests {
         let mut op = Op::Shell {
             phase: Phase::Install,
             describe: "join".into(),
-            cmd: "{{hostvars.controlplane.join}} --certificate-key {{hostvars.controlplane.certkey}}".into(),
+            cmd:
+                "{{hostvars.controlplane.join}} --certificate-key {{hostvars.controlplane.certkey}}"
+                    .into(),
             soft_fail: false,
             check: Some("test -f /etc/kubernetes/kubelet.conf".into()), // no hostvars here
         };
         assert_eq!(
             op.unresolved_hostvar_keys(),
-            vec!["hostvars.controlplane.certkey".to_string(), "hostvars.controlplane.join".to_string()]
+            vec![
+                "hostvars.controlplane.certkey".to_string(),
+                "hostvars.controlplane.join".to_string()
+            ]
         );
         let mut vars = BTreeMap::new();
-        vars.insert("hostvars.controlplane.join".to_string(), "kubeadm join 1.2.3.4 --token abc".to_string());
-        vars.insert("hostvars.controlplane.certkey".to_string(), "deadbeef".to_string());
+        vars.insert(
+            "hostvars.controlplane.join".to_string(),
+            "kubeadm join 1.2.3.4 --token abc".to_string(),
+        );
+        vars.insert(
+            "hostvars.controlplane.certkey".to_string(),
+            "deadbeef".to_string(),
+        );
         op.resolve_templates(&vars).unwrap();
         match &op {
             Op::Shell { cmd, .. } => {
-                assert_eq!(cmd, "kubeadm join 1.2.3.4 --token abc --certificate-key deadbeef");
+                assert_eq!(
+                    cmd,
+                    "kubeadm join 1.2.3.4 --token abc --certificate-key deadbeef"
+                );
             }
             _ => unreachable!(),
         }
@@ -2402,13 +2598,18 @@ mod tests {
         // A waiter blocks until the producer publishes the fact.
         let c2 = coord.clone();
         let waiter = tokio::spawn(async move {
-            c2.wait_facts(&["hostvars.controlplane.join".to_string()]).await.unwrap()
+            c2.wait_facts(&["hostvars.controlplane.join".to_string()])
+                .await
+                .unwrap()
         });
         // Not yet published → still pending.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(!waiter.is_finished());
         coord
-            .publish(&[("hostvars.controlplane.join".to_string(), "TOKEN".to_string())])
+            .publish(&[(
+                "hostvars.controlplane.join".to_string(),
+                "TOKEN".to_string(),
+            )])
             .await;
         let got = waiter.await.unwrap();
         assert_eq!(got["hostvars.controlplane.join"], "TOKEN");
@@ -2451,7 +2652,10 @@ mod tests {
 
         // Exact arch match wins.
         ctx.target_arch = Arch::Arm64;
-        assert_eq!(ctx.resolve_material("docker").unwrap().arch, Some(Arch::Arm64));
+        assert_eq!(
+            ctx.resolve_material("docker").unwrap().arch,
+            Some(Arch::Arm64)
+        );
         assert_eq!(
             PlanContext::material_blob_key(ctx.resolve_material("docker").unwrap()),
             "docker@arm64"
@@ -2534,7 +2738,10 @@ mod tests {
         let mut vars = BTreeMap::new();
         vars.insert("hostvars.leader.token".to_string(), "T".to_string());
         assert_eq!(render("x={{hostvars.leader.token}}", &vars).unwrap(), "x=T");
-        assert_eq!(render("x={{ hostvars.leader.token }}", &vars).unwrap(), "x=T");
+        assert_eq!(
+            render("x={{ hostvars.leader.token }}", &vars).unwrap(),
+            "x=T"
+        );
     }
 
     #[test]
@@ -2585,7 +2792,10 @@ mod tests {
         ctx.roles_dir = dir;
 
         let mut with = BTreeMap::new();
-        with.insert("path".into(), serde_yaml::Value::String("/etc/hosts".into()));
+        with.insert(
+            "path".into(),
+            serde_yaml::Value::String("/etc/hosts".into()),
+        );
         with.insert("line".into(), serde_yaml::Value::String("1.1.1.1 x".into()));
         let op = action_op(
             Phase::Install,
@@ -2599,7 +2809,10 @@ mod tests {
         match op {
             Op::Shell { cmd, check, .. } => {
                 assert_eq!(cmd, "echo \"1.1.1.1 x\" >> \"/etc/hosts\"");
-                assert_eq!(check.as_deref(), Some("grep -qF \"1.1.1.1 x\" \"/etc/hosts\""));
+                assert_eq!(
+                    check.as_deref(),
+                    Some("grep -qF \"1.1.1.1 x\" \"/etc/hosts\"")
+                );
             }
             _ => panic!("module should lower to a shell op"),
         }
@@ -2609,7 +2822,11 @@ mod tests {
     fn module_missing_param_errors() {
         let dir = std::env::temp_dir().join("crater-module-test2");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("needs.yaml"), "params: [a, b]\nact: 'echo {{a}} {{b}}'\n").unwrap();
+        std::fs::write(
+            dir.join("needs.yaml"),
+            "params: [a, b]\nact: 'echo {{a}} {{b}}'\n",
+        )
+        .unwrap();
         let mut ctx = PlanContext::new(OsFamily::Debian, "1".into(), PathBuf::from("."));
         ctx.roles_dir = dir;
         let mut with = BTreeMap::new();

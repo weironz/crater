@@ -40,7 +40,11 @@ impl ResourceType for File {
         let obs = input.observed;
 
         if state == "absent" {
-            return if obs.present { Change::Destroy } else { Change::Ok };
+            return if obs.present {
+                Change::Destroy
+            } else {
+                Change::Ok
+            };
         }
         if !obs.present {
             let mut fields = vec![FieldDiff::set("state", state)];
@@ -150,11 +154,18 @@ mod tests {
     use crate::eval::Yaml;
 
     fn args(pairs: &[(&str, &str)]) -> ResolvedArgs {
-        pairs.iter().map(|(k, v)| (k.to_string(), Yaml::from(*v))).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), Yaml::from(*v)))
+            .collect()
     }
 
     fn diff_of(t: &File, a: &ResolvedArgs, o: &Observed) -> Change {
-        t.diff(&DiffInput { args: a, observed: o, upstream_changed: false })
+        t.diff(&DiffInput {
+            args: a,
+            observed: o,
+            upstream_changed: false,
+        })
     }
 
     #[test]
@@ -163,7 +174,10 @@ mod tests {
         let c = diff_of(&File, &a, &Observed::absent());
         assert!(matches!(c, Change::Create(_)));
         let rendered: Vec<String> = c.fields().iter().map(|f| f.to_string()).collect();
-        assert!(rendered.iter().any(|s| s.contains("mode: 0750")), "{rendered:?}");
+        assert!(
+            rendered.iter().any(|s| s.contains("mode: 0750")),
+            "{rendered:?}"
+        );
     }
 
     #[test]
@@ -175,7 +189,11 @@ mod tests {
             ("owner", "root".into()),
             ("group", "root".into()),
         ]);
-        assert_eq!(diff_of(&File, &a, &obs), Change::Ok, "幂等:第二次跑必须是 Ok");
+        assert_eq!(
+            diff_of(&File, &a, &obs),
+            Change::Ok,
+            "幂等:第二次跑必须是 Ok"
+        );
     }
 
     #[test]
@@ -192,12 +210,19 @@ mod tests {
         let a = args(&[("path", "/tmp/x"), ("state", "absent")]);
         assert_eq!(diff_of(&File, &a, &Observed::absent()), Change::Ok);
         assert_eq!(
-            diff_of(&File, &a, &Observed::present([("kind", "regular file".into())])),
+            diff_of(
+                &File,
+                &a,
+                &Observed::present([("kind", "regular file".into())])
+            ),
             Change::Destroy
         );
         // 退役时不该去删一个"本来就该不存在"的路径。
         let ctx = FakeCtx::new();
-        assert_eq!(File.destroy(&ctx, &a, &Observed::absent()).unwrap(), Outcome::Ok);
+        assert_eq!(
+            File.destroy(&ctx, &a, &Observed::absent()).unwrap(),
+            Outcome::Ok
+        );
         assert!(ctx.writes().is_empty());
     }
 
@@ -206,42 +231,67 @@ mod tests {
         // 曾经的真 bug:destroy 不看 observed,对不存在的路径也发 `rm -rf`。
         let ctx = FakeCtx::new();
         let a = args(&[("path", "/data"), ("state", "directory")]);
-        assert_eq!(File.destroy(&ctx, &a, &Observed::absent()).unwrap(), Outcome::Ok);
+        assert_eq!(
+            File.destroy(&ctx, &a, &Observed::absent()).unwrap(),
+            Outcome::Ok
+        );
         assert!(ctx.calls().is_empty(), "{:?}", ctx.calls());
     }
 
     #[test]
     fn observe_issues_exactly_one_readonly_probe() {
         // observe 只读是 plan 可信的前提 —— 用记录式假目标把它钉住。
-        let ctx = FakeCtx::new().on("stat -c", 0, &format!("directory{SEP}750{SEP}root{SEP}root"));
+        let ctx = FakeCtx::new().on(
+            "stat -c",
+            0,
+            &format!("directory{SEP}750{SEP}root{SEP}root"),
+        );
         let obs = File.observe(&ctx, &args(&[("path", "/data")])).unwrap();
         assert!(obs.present);
         assert_eq!(obs.get("mode"), Some("750"));
         assert_eq!(ctx.calls().len(), 1, "多一次往返就是多一次 SSH 延迟");
-        assert!(ctx.writes().is_empty(), "observe 期间不许有任何写:{:?}", ctx.writes());
+        assert!(
+            ctx.writes().is_empty(),
+            "observe 期间不许有任何写:{:?}",
+            ctx.writes()
+        );
     }
 
     #[test]
     fn observe_treats_a_failing_stat_as_absent() {
         let ctx = FakeCtx::new(); // 未注册 → 退出码 1
-        assert!(!File.observe(&ctx, &args(&[("path", "/nope")])).unwrap().present);
+        assert!(
+            !File
+                .observe(&ctx, &args(&[("path", "/nope")]))
+                .unwrap()
+                .present
+        );
     }
 
     #[test]
     fn apply_creates_then_sets_permissions() {
         let ctx = FakeCtx::new().on("", 0, "");
         let a = args(&[("path", "/data"), ("state", "directory"), ("mode", "0750")]);
-        assert_eq!(File.apply(&ctx, &a, &Change::Create(vec![])).unwrap(), Outcome::Changed);
+        assert_eq!(
+            File.apply(&ctx, &a, &Change::Create(vec![])).unwrap(),
+            Outcome::Changed
+        );
         let cmds: Vec<String> = ctx.calls().iter().map(|c| c.text().to_string()).collect();
         assert!(cmds[0].starts_with("mkdir -p"), "{cmds:?}");
-        assert!(cmds.iter().any(|c| c.starts_with("chmod '0750'")), "{cmds:?}");
+        assert!(
+            cmds.iter().any(|c| c.starts_with("chmod '0750'")),
+            "{cmds:?}"
+        );
     }
 
     #[test]
     fn a_failing_command_is_reported_not_swallowed() {
         let ctx = FakeCtx::new().on("mkdir", 1, "Permission denied");
         let a = args(&[("path", "/data"), ("state", "directory")]);
-        let err = File.apply(&ctx, &a, &Change::Create(vec![])).unwrap_err().to_string();
+        let err = File
+            .apply(&ctx, &a, &Change::Create(vec![]))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("Permission denied"), "{err}");
     }
 }
@@ -253,9 +303,12 @@ mod mountpoint_guard_tests {
     use crate::eval::Yaml;
 
     fn args(path: &str) -> ResolvedArgs {
-        [("path".to_string(), Yaml::from(path)), ("state".to_string(), Yaml::from("directory"))]
-            .into_iter()
-            .collect()
+        [
+            ("path".to_string(), Yaml::from(path)),
+            ("state".to_string(), Yaml::from("directory")),
+        ]
+        .into_iter()
+        .collect()
     }
 
     #[test]
@@ -265,7 +318,9 @@ mod mountpoint_guard_tests {
         // 轻则 Device busy(真机上就是这么炸的),重则在挂载已卸时**删光
         // 底层目录里的真实数据**。目录归 mount 的退役管,这里必须让开。
         let ctx = FakeCtx::new().on("mountpoint -q", 0, "");
-        let out = File.destroy(&ctx, &args("/srv/data"), &Observed::present([])).unwrap();
+        let out = File
+            .destroy(&ctx, &args("/srv/data"), &Observed::present([]))
+            .unwrap();
         assert_eq!(out, Outcome::Warn);
         assert!(
             !ctx.calls().iter().any(|c| c.text().starts_with("rm -rf")),
@@ -277,10 +332,17 @@ mod mountpoint_guard_tests {
     #[test]
     fn destroying_a_plain_directory_still_removes_it() {
         // 别把守卫扩大成"什么都不敢删"。
-        let ctx = FakeCtx::new().on("mountpoint -q", 1, "").on("rm -rf", 0, "");
-        let out = File.destroy(&ctx, &args("/opt/plain"), &Observed::present([])).unwrap();
+        let ctx = FakeCtx::new()
+            .on("mountpoint -q", 1, "")
+            .on("rm -rf", 0, "");
+        let out = File
+            .destroy(&ctx, &args("/opt/plain"), &Observed::present([]))
+            .unwrap();
         assert_eq!(out, Outcome::Changed);
-        assert!(ctx.calls().iter().any(|c| c.text().starts_with("rm -rf '/opt/plain'")));
+        assert!(ctx
+            .calls()
+            .iter()
+            .any(|c| c.text().starts_with("rm -rf '/opt/plain'")));
     }
 }
 
@@ -295,9 +357,14 @@ mod destroy_change_tests {
         // plan 判了 Destroy,apply 就必须真删。此前这里把 Observed::default()
         // (present=false)传给 destroy,触发它"不在就不动"的闸 ——
         // 删除静默变空操作还报 ok。
-        let ctx = FakeCtx::new().on("mountpoint -q", 1, "").on("rm -rf", 0, "");
+        let ctx = FakeCtx::new()
+            .on("mountpoint -q", 1, "")
+            .on("rm -rf", 0, "");
         let args: ResolvedArgs = [
-            ("path".to_string(), Yaml::from("/etc/nginx/sites-enabled/default")),
+            (
+                "path".to_string(),
+                Yaml::from("/etc/nginx/sites-enabled/default"),
+            ),
             ("state".to_string(), Yaml::from("absent")),
         ]
         .into_iter()
@@ -305,7 +372,9 @@ mod destroy_change_tests {
         let out = File.apply(&ctx, &args, &Change::Destroy).unwrap();
         assert_eq!(out, Outcome::Changed);
         assert!(
-            ctx.calls().iter().any(|c| c.text().starts_with("rm -rf '/etc/nginx/sites-enabled/default'")),
+            ctx.calls().iter().any(|c| c
+                .text()
+                .starts_with("rm -rf '/etc/nginx/sites-enabled/default'")),
             "没有发出删除:{:?}",
             ctx.calls()
         );

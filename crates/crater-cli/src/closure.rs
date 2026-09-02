@@ -59,8 +59,14 @@ impl Baker {
         profile: &[String],
         extra_params: &BTreeMap<String, serde_yaml::Value>,
     ) -> Result<usize> {
-        let (baked, images, skipped) =
-            bake_bytes(bp_path, profile, extra_params, &mut self.seen, Some(&self.stage)).await?;
+        let (baked, images, skipped) = bake_bytes(
+            bp_path,
+            profile,
+            extra_params,
+            &mut self.seen,
+            Some(&self.stage),
+        )
+        .await?;
         self.skipped.extend(skipped);
         let taken = baked.len() + images.len();
         self.images.extend(images);
@@ -69,7 +75,12 @@ impl Baker {
             // 再存只是把 BlobEntry 收进清单,不会写第二份字节。
             let entry = self.stage.store_blob(&b.source, &b.bytes)?;
             if !b.source.starts_with(OS_PKG_SCHEME) {
-                println!("  ✓ {:<28} {:>9}  {}", b.name, human(entry.size), &entry.sha256[..12]);
+                println!(
+                    "  ✓ {:<28} {:>9}  {}",
+                    b.name,
+                    human(entry.size),
+                    &entry.sha256[..12]
+                );
             }
             self.blobs.push(entry);
         }
@@ -101,9 +112,20 @@ impl Baker {
             }
         }
         bundle::pack(self.stage.root.as_path(), out)?;
-        let imgs = if nimg > 0 { format!(",{nimg} 个镜像") } else { String::new() };
-        println!("\n闭包 → {} ({count} 份物料{imgs},{})", out.display(), human(total));
-        println!("现场用法:crater apply -f <蓝图或栈> --closure {}", out.display());
+        let imgs = if nimg > 0 {
+            format!(",{nimg} 个镜像")
+        } else {
+            String::new()
+        };
+        println!(
+            "\n闭包 → {} ({count} 份物料{imgs},{})",
+            out.display(),
+            human(total)
+        );
+        println!(
+            "现场用法:crater apply -f <蓝图或栈> --closure {}",
+            out.display()
+        );
         Ok(())
     }
 }
@@ -129,13 +151,22 @@ pub async fn build(bp_path: &Path, out: &Path, profile: &[String], sets: &[Strin
 /// 现场只需要拿一个文件走。各蓝图的闭包按内容寻址取并集:同一个 URL 只下载
 /// 一次,相同字节只落盘一份 —— 栈里多份蓝图共用 containerd 是常态,
 /// 逐个 build 会把它复制 N 遍。
-pub async fn build_stack(stack_path: &Path, out: &Path, profile: &[String], sets: &[String]) -> Result<()> {
+pub async fn build_stack(
+    stack_path: &Path,
+    out: &Path,
+    profile: &[String],
+    sets: &[String],
+) -> Result<()> {
     let st = crater_ir::stack::from_path(stack_path)?;
     let dir = stack_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let tmp = tempfile::tempdir()?;
     let mut baker = Baker::new(tmp.path().to_path_buf())?;
 
-    println!("烘焙栈 `{}` 的离线闭包 —— {} 份蓝图\n", st.name, st.uses.len());
+    println!(
+        "烘焙栈 `{}` 的离线闭包 —— {} 份蓝图\n",
+        st.name,
+        st.uses.len()
+    );
     for (i, u) in st.uses.iter().enumerate() {
         let bp_path = crater_ir::stack::resolve_ref(&u.blueprint, &dir)?;
         println!("── [{}/{}] {} ──", i + 1, st.uses.len(), u.label());
@@ -162,7 +193,11 @@ pub async fn build_stack(stack_path: &Path, out: &Path, profile: &[String], sets
 #[cfg(test)]
 fn load(
     path: &Path,
-) -> Result<(Box<dyn crate::blob_source::BlobSource>, BlobMap, crate::material_ctx::ImageMap)> {
+) -> Result<(
+    Box<dyn crate::blob_source::BlobSource>,
+    BlobMap,
+    crate::material_ctx::ImageMap,
+)> {
     let (src, images) = crate::blob_source::open(Some(path))?;
     let map = crate::blob_source::blob_map(src.as_ref())?;
     Ok((src, map, images))
@@ -252,7 +287,12 @@ pub(crate) async fn bake_bytes(
                 .pull_image(&plan.source)
                 .await
                 .with_context(|| format!("烘焙镜像 {}({})", item.label(), plan.source))?;
-            println!("  ✓ {:<28} {:>9}  {}", item.name, "镜像", &img.manifest_digest[..12]);
+            println!(
+                "  ✓ {:<28} {:>9}  {}",
+                item.name,
+                "镜像",
+                &img.manifest_digest[..12]
+            );
             images.push(img);
             continue;
         }
@@ -270,8 +310,17 @@ pub(crate) async fn bake_bytes(
                     continue;
                 }
                 let entry = stage.store_blob(&key, &bytes)?;
-                println!("  ✓ {:<28} {:>9}  {}", file, human(entry.size), &entry.sha256[..12]);
-                out.push(Baked { name: item.name.clone(), source: key, bytes });
+                println!(
+                    "  ✓ {:<28} {:>9}  {}",
+                    file,
+                    human(entry.size),
+                    &entry.sha256[..12]
+                );
+                out.push(Baked {
+                    name: item.name.clone(),
+                    source: key,
+                    bytes,
+                });
             }
             continue;
         }
@@ -309,7 +358,11 @@ pub(crate) async fn bake_bytes(
                 .with_context(|| format!("物料 {}:从 zip 抽取 `{member}`", item.label()))?,
             None => bytes,
         };
-        out.push(Baked { name: item.name.clone(), source: plan.source.clone(), bytes });
+        out.push(Baked {
+            name: item.name.clone(),
+            source: plan.source.clone(),
+            bytes,
+        });
     }
     Ok((out, images, skipped))
 }
@@ -334,23 +387,33 @@ async fn bake_os_package(
     let image = profile
         .iter()
         .find_map(|kv| kv.strip_prefix("os_image="))
-        .ok_or_else(|| anyhow::anyhow!(
-            "物料 `{name}` 是系统包 —— 需要知道**在什么系统上解依赖**才能烤。\n\
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "物料 `{name}` 是系统包 —— 需要知道**在什么系统上解依赖**才能烤。\n\
              加一句 `--for os_image=ubuntu:24.04`(或 rockylinux:9 等),\n\
              用与目标机同族同版本的镜像,否则依赖集对不上。"
-        ))?
+            )
+        })?
         .to_string();
 
     let runner = ["docker", "podman"]
         .into_iter()
-        .find(|c| std::process::Command::new(c)
-            .arg("--version").stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false))
-        .ok_or_else(|| anyhow::anyhow!(
-            "烤系统包需要控制端有 docker 或 podman —— 依赖解析只能交给发行版\n\
+        .find(|c| {
+            std::process::Command::new(c)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "烤系统包需要控制端有 docker 或 podman —— 依赖解析只能交给发行版\n\
              自己的包管理器,在同族容器里跑一次。\n\
              (目标机不需要它们;这只是构建期的事。)"
-        ))?;
+            )
+        })?;
 
     // 家族按镜像里有什么命令判定,不按镜像名猜 —— `ubuntu`/`debian`/`ghcr.io/...`
     // 各种写法都有,猜名字必然漏。
@@ -388,7 +451,10 @@ async fn bake_os_package(
         if pkgs.is_empty() {
             continue;
         }
-        println!("  · {name}({family}):在 {image} 里解 {} 个包的依赖", pkgs.len());
+        println!(
+            "  · {name}({family}):在 {image} 里解 {} 个包的依赖",
+            pkgs.len()
+        );
         let status = std::process::Command::new(runner)
             .args(["run", "--rm", "-v"])
             .arg(format!("{}:/out", out.display()))
@@ -408,7 +474,11 @@ async fn bake_os_package(
         if !p.is_file() {
             continue;
         }
-        let fname = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let fname = p
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         if !(fname.ends_with(".deb") || fname.ends_with(".rpm")) {
             continue;
         }
@@ -551,7 +621,10 @@ mod tests {
         // 闭包运的就是二进制。少一个字节,现场装上的就是坏文件。
         let (_d, _bp, out) = bake_fixture().await;
         let (_tmp, map, _imgs) = load(&out).unwrap();
-        let blob = map.values().find(|p| std::fs::read(p).unwrap().len() == 5).unwrap();
+        let blob = map
+            .values()
+            .find(|p| std::fs::read(p).unwrap().len() == 5)
+            .unwrap();
         assert_eq!(std::fs::read(blob).unwrap(), vec![0u8, 1, 2, 255, 0]);
     }
 
@@ -587,7 +660,10 @@ mod tests {
         ]
         .join("\n");
         std::fs::write(&bp, yaml).unwrap();
-        let err = build(&bp, &dir.path().join("c.tar"), &[], &[]).await.unwrap_err().to_string();
+        let err = build(&bp, &dir.path().join("c.tar"), &[], &[])
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("--for"), "报错要给出下一步动作:{err}");
     }
 
@@ -641,7 +717,9 @@ mod tests {
         // 栈里多份蓝图共用 containerd 是常态;逐个 build 会把它复制 N 遍。
         let d = stack_fixture();
         let out = d.path().join("c.tar");
-        build_stack(&d.path().join("s.stack.yaml"), &out, &[], &[]).await.unwrap();
+        build_stack(&d.path().join("s.stack.yaml"), &out, &[], &[])
+            .await
+            .unwrap();
         let (_tmp, map, _imgs) = load(&out).unwrap();
         // shared + a 自己的 + b 自己的 = 3,而不是 4。
         assert_eq!(map.len(), 3, "共用物料被存了不止一份:{map:?}");
@@ -654,13 +732,18 @@ mod tests {
         // —— 闭包看起来完整,现场装上的是另一个版本。
         let d = stack_fixture();
         let out = d.path().join("c.tar");
-        build_stack(&d.path().join("s.stack.yaml"), &out, &[], &[]).await.unwrap();
+        build_stack(&d.path().join("s.stack.yaml"), &out, &[], &[])
+            .await
+            .unwrap();
         let (_tmp, map, _imgs) = load(&out).unwrap();
         assert!(
             map.keys().any(|k| k.ends_with("v-2.0.bin")),
             "栈的 version=2.0 没进 URL:{map:?}"
         );
-        assert!(!map.keys().any(|k| k.ends_with("v-1.0.bin")), "烤成了蓝图默认值");
+        assert!(
+            !map.keys().any(|k| k.ends_with("v-1.0.bin")),
+            "烤成了蓝图默认值"
+        );
     }
 
     #[tokio::test]
@@ -668,7 +751,9 @@ mod tests {
         // 部署侧不需要知道闭包是从蓝图还是从栈烤出来的 —— 同一个格式。
         let d = stack_fixture();
         let out = d.path().join("c.tar");
-        build_stack(&d.path().join("s.stack.yaml"), &out, &[], &[]).await.unwrap();
+        build_stack(&d.path().join("s.stack.yaml"), &out, &[], &[])
+            .await
+            .unwrap();
         assert!(load(&out).is_ok());
     }
 
@@ -787,8 +872,13 @@ mod unzip_tests {
         )
         .unwrap();
         let out = dir.path().join("c.tar");
-        build(&bp, &out, &[], &[]).await.expect("zip 摘要对得上就该烤成");
+        build(&bp, &out, &[], &[])
+            .await
+            .expect("zip 摘要对得上就该烤成");
         let (_tmp, map, _imgs) = load(&out).unwrap();
-        assert_eq!(std::fs::read(map.values().next().unwrap()).unwrap(), b"payload");
+        assert_eq!(
+            std::fs::read(map.values().next().unwrap()).unwrap(),
+            b"payload"
+        );
     }
 }

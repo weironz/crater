@@ -97,7 +97,9 @@ impl ImageStore {
     }
 
     fn read_index(&self) -> crate::Result<serde_json::Value> {
-        Ok(serde_json::from_slice(&std::fs::read(self.root.join("index.json"))?)?)
+        Ok(serde_json::from_slice(&std::fs::read(
+            self.root.join("index.json"),
+        )?)?)
     }
     fn write_index(&self, v: &serde_json::Value) -> crate::Result<()> {
         // Atomic replace (D-078④): `fs::write` truncates THEN writes, so a
@@ -117,7 +119,10 @@ impl ImageStore {
                 let digest = m["digest"].as_str().unwrap_or("").to_string();
                 let (content_size, disk_usage) = self.artifact_sizes(&digest).unwrap_or((0, 0));
                 out.push(StoredImage {
-                    reference: m["annotations"][ANN_REF].as_str().unwrap_or("<untagged>").to_string(),
+                    reference: m["annotations"][ANN_REF]
+                        .as_str()
+                        .unwrap_or("<untagged>")
+                        .to_string(),
                     digest,
                     size: m["size"].as_u64().unwrap_or(0),
                     content_size,
@@ -170,8 +175,13 @@ impl ImageStore {
         let idx = self.read_index()?;
         let entry = idx["manifests"]
             .as_array()
-            .and_then(|a| a.iter().find(|m| m["annotations"][ANN_REF].as_str() == Some(src)))
-            .ok_or_else(|| anyhow::anyhow!("image '{src}' not in local store (pull/build/load it first)"))?;
+            .and_then(|a| {
+                a.iter()
+                    .find(|m| m["annotations"][ANN_REF].as_str() == Some(src))
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("image '{src}' not in local store (pull/build/load it first)")
+            })?;
         let digest = strip(entry["digest"].as_str().unwrap_or("")).to_string();
         let size = entry["size"].as_u64().unwrap_or(0);
         self.tag(dst, &digest, size)
@@ -220,7 +230,12 @@ impl ImageStore {
         let mut keep: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut queue: Vec<String> = idx["manifests"]
             .as_array()
-            .map(|a| a.iter().filter_map(|m| m["digest"].as_str()).map(|d| strip(d).to_string()).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m["digest"].as_str())
+                    .map(|d| strip(d).to_string())
+                    .collect()
+            })
             .unwrap_or_default();
         while let Some(d) = queue.pop() {
             if !keep.insert(d.clone()) {
@@ -228,14 +243,23 @@ impl ImageStore {
             }
             // A reachable blob that parses as JSON may reference further blobs
             // (manifest: config+layers; nested index: manifests).
-            let Ok(bytes) = std::fs::read(self.blob_path(&d)) else { continue };
-            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+            let Ok(bytes) = std::fs::read(self.blob_path(&d)) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                continue;
+            };
             if let Some(c) = v["config"]["digest"].as_str() {
                 queue.push(strip(c).to_string());
             }
             for arr in [&v["layers"], &v["manifests"]] {
                 if let Some(items) = arr.as_array() {
-                    queue.extend(items.iter().filter_map(|l| l["digest"].as_str()).map(|s| strip(s).to_string()));
+                    queue.extend(
+                        items
+                            .iter()
+                            .filter_map(|l| l["digest"].as_str())
+                            .map(|s| strip(s).to_string()),
+                    );
                 }
             }
         }
@@ -281,8 +305,12 @@ impl ImageStore {
     /// 一个字节物料都没有的 store 也算"闭包完整"。issue #3 的空 tar 之所以
     /// 能一路装作成功,这是其中一环。
     pub fn has_all_layers(&self, reference: &str) -> bool {
-        let Ok(digest) = self.manifest_digest(reference) else { return false };
-        let Ok(c) = self.closure_of(&digest) else { return false };
+        let Ok(digest) = self.manifest_digest(reference) else {
+            return false;
+        };
+        let Ok(c) = self.closure_of(&digest) else {
+            return false;
+        };
         c.unreadable.is_empty() && c.blobs.iter().all(|d| self.blob_path(d).exists())
     }
 
@@ -301,7 +329,11 @@ impl ImageStore {
         if !c.unreadable.is_empty() || !c.blobs.iter().all(|b| self.blob_path(b).exists()) {
             return None;
         }
-        let size = if s > 0 { s } else { std::fs::metadata(self.blob_path(&d)).ok()?.len() };
+        let size = if s > 0 {
+            s
+        } else {
+            std::fs::metadata(self.blob_path(&d)).ok()?.len()
+        };
         Some((d, size))
     }
 
@@ -381,10 +413,16 @@ impl ImageStore {
             };
             let sub = pick(want)
                 .or_else(|| pick("amd64"))
-                .or_else(|| entries.iter().find(|e| e["platform"]["architecture"].is_string()))
-                .ok_or_else(|| anyhow::anyhow!(
-                    "'{reference}' 的 index 里没有 linux/{want},也没有任何带架构的条目"
-                ))?;
+                .or_else(|| {
+                    entries
+                        .iter()
+                        .find(|e| e["platform"]["architecture"].is_string())
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "'{reference}' 的 index 里没有 linux/{want},也没有任何带架构的条目"
+                    )
+                })?;
             let sub_dig = sub["digest"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("manifest list entry missing digest"))?
@@ -398,7 +436,9 @@ impl ImageStore {
             let (sub_raw, _) = client
                 .pull_manifest_raw(&digest_ref, &auth, &accepted)
                 .await
-                .map_err(|e| anyhow::anyhow!("pull sub-manifest {sub_dig} of '{reference}': {e}"))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("pull sub-manifest {sub_dig} of '{reference}': {e}")
+                })?;
             sub_raw.to_vec()
         } else {
             raw.to_vec()
@@ -420,7 +460,9 @@ impl ImageStore {
                 // ⇒ embedded (old artifacts pull in full — safe).
                 if thin {
                     let mt_l = l["mediaType"].as_str().unwrap_or("");
-                    let fetch = l["annotations"][ANN_MATERIAL_FETCH].as_str().unwrap_or("embedded");
+                    let fetch = l["annotations"][ANN_MATERIAL_FETCH]
+                        .as_str()
+                        .unwrap_or("embedded");
                     if mt_l == MT_MATERIAL && fetch == "dependency" {
                         continue;
                     }
@@ -631,14 +673,19 @@ impl ImageStore {
         let idx = self.read_index()?;
         let md = idx["manifests"]
             .as_array()
-            .and_then(|a| a.iter().find(|m| m["annotations"][ANN_REF].as_str() == Some(reference)))
+            .and_then(|a| {
+                a.iter()
+                    .find(|m| m["annotations"][ANN_REF].as_str() == Some(reference))
+            })
             .and_then(|m| m["digest"].as_str())
             .ok_or_else(|| anyhow::anyhow!("image '{reference}' not in local store"))?;
         Ok(strip(md).to_string())
     }
 
     fn manifest_blob(&self, reference: &str) -> crate::Result<Vec<u8>> {
-        Ok(std::fs::read(self.blob_path(&self.manifest_digest(reference)?))?)
+        Ok(std::fs::read(
+            self.blob_path(&self.manifest_digest(reference)?),
+        )?)
     }
 
     /// Import one unpacked index entry: copy its manifest/config/layer blobs in
@@ -673,7 +720,11 @@ impl ImageStore {
                  多半是用修复前的 `crater save` 打的多架构包(只装了顶层索引):\n\
                  回联网机上重打一次。",
                 c.unreadable.len(),
-                c.unreadable.iter().map(|d| &d[..12.min(d.len())]).collect::<Vec<_>>().join(", ")
+                c.unreadable
+                    .iter()
+                    .map(|d| &d[..12.min(d.len())])
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
         for d in &c.blobs {
@@ -706,7 +757,9 @@ impl ImageStore {
     fn platform_child(&self, manifest_digest: &str) -> crate::Result<Option<(String, u64)>> {
         let man: serde_json::Value =
             serde_json::from_slice(&std::fs::read(self.blob_path(strip(manifest_digest)))?)?;
-        let Some(subs) = man["manifests"].as_array() else { return Ok(None) };
+        let Some(subs) = man["manifests"].as_array() else {
+            return Ok(None);
+        };
         let want = crate::arch::detect_local();
         let want = want.as_str();
         let pick = |a: &str| {
@@ -717,16 +770,21 @@ impl ImageStore {
         };
         let sub = pick(want)
             .or_else(|| pick("amd64"))
-            .or_else(|| subs.iter().find(|e| e["platform"]["architecture"].is_string()))
+            .or_else(|| {
+                subs.iter()
+                    .find(|e| e["platform"]["architecture"].is_string())
+            })
             .ok_or_else(|| {
                 anyhow::anyhow!("这个包的 index 里没有 linux/{want},也没有任何带架构的条目")
             })?;
         let d = sub["digest"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("index 条目没有 digest"))?;
-        let size = sub["size"]
-            .as_u64()
-            .unwrap_or_else(|| std::fs::metadata(self.blob_path(strip(d))).map(|m| m.len()).unwrap_or(0));
+        let size = sub["size"].as_u64().unwrap_or_else(|| {
+            std::fs::metadata(self.blob_path(strip(d)))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        });
         Ok(Some((strip(d).to_string(), size)))
     }
 
@@ -754,11 +812,20 @@ impl ImageStore {
         let tmp = std::env::temp_dir().join(format!("crater-import-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         crate::bundle::unpack(archive, &tmp)?;
-        let index: serde_json::Value = serde_json::from_slice(&std::fs::read(tmp.join("index.json"))?)?;
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.join("index.json"))?)?;
         let entry = index["manifests"]
             .as_array()
-            .and_then(|a| a.iter().find(|m| m["annotations"][ANN_REF].as_str().is_some()))
-            .ok_or_else(|| anyhow::anyhow!("{}: no image manifest (ref.name) in archive", archive.display()))?;
+            .and_then(|a| {
+                a.iter()
+                    .find(|m| m["annotations"][ANN_REF].as_str().is_some())
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{}: no image manifest (ref.name) in archive",
+                    archive.display()
+                )
+            })?;
         let root = strip(entry["digest"].as_str().unwrap_or_default()).to_string();
         let reference = self.import_entry(&tmp, entry, as_ref)?;
         let _ = std::fs::remove_dir_all(&tmp);
@@ -771,10 +838,14 @@ impl ImageStore {
         let tmp = std::env::temp_dir().join(format!("crater-import-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         crate::bundle::unpack(archive, &tmp)?;
-        let index: serde_json::Value = serde_json::from_slice(&std::fs::read(tmp.join("index.json"))?)?;
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.join("index.json"))?)?;
         let mut refs = Vec::new();
         if let Some(ms) = index["manifests"].as_array() {
-            for entry in ms.iter().filter(|m| m["annotations"][ANN_REF].as_str().is_some()) {
+            for entry in ms
+                .iter()
+                .filter(|m| m["annotations"][ANN_REF].as_str().is_some())
+            {
                 refs.push(self.import_entry(&tmp, entry, None)?);
             }
         }
@@ -793,7 +864,10 @@ impl ImageStore {
         let find = |reference: &str| -> crate::Result<(String, u64)> {
             let entry = idx["manifests"]
                 .as_array()
-                .and_then(|a| a.iter().find(|m| m["annotations"][ANN_REF].as_str() == Some(reference)))
+                .and_then(|a| {
+                    a.iter()
+                        .find(|m| m["annotations"][ANN_REF].as_str() == Some(reference))
+                })
                 .ok_or_else(|| anyhow::anyhow!("image '{reference}' not in local store"))?;
             Ok((
                 entry["digest"].as_str().unwrap_or("").to_string(),
@@ -847,7 +921,11 @@ impl ImageStore {
                     "{r}:本地缺 {} 份清单({})—— 导出的会是个残包。\n\
                      先 `crater pkg pull {r} --full` 补齐再 save。",
                     c.unreadable.len(),
-                    c.unreadable.iter().map(|d| &d[..12.min(d.len())]).collect::<Vec<_>>().join(", ")
+                    c.unreadable
+                        .iter()
+                        .map(|d| &d[..12.min(d.len())])
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
             for d in &c.blobs {
@@ -879,9 +957,10 @@ impl ImageStore {
         // 新 docker/ctr/nerdctl 读 index.json,互不干扰。B 类 artifact
         // (artifactType)永远不会被 docker load,不加。
         if manifest["artifactType"].as_str().is_none() {
-            if let (Some(cfg), Some(ls)) =
-                (manifest["config"]["digest"].as_str(), manifest["layers"].as_array())
-            {
+            if let (Some(cfg), Some(ls)) = (
+                manifest["config"]["digest"].as_str(),
+                manifest["layers"].as_array(),
+            ) {
                 let layers: Vec<String> = ls
                     .iter()
                     .filter_map(|l| l["digest"].as_str())
@@ -892,7 +971,10 @@ impl ImageStore {
                     "RepoTags": [reference],
                     "Layers": layers,
                 }]);
-                std::fs::write(tmp.join("manifest.json"), serde_json::to_vec_pretty(&docker_manifest)?)?;
+                std::fs::write(
+                    tmp.join("manifest.json"),
+                    serde_json::to_vec_pretty(&docker_manifest)?,
+                )?;
             }
         }
         crate::bundle::pack(&tmp, out)?;
@@ -907,10 +989,16 @@ impl ImageStore {
 
     /// Parse the LOCKED project out of a project-artifact manifest (D-098):
     /// its recipe layer is the project yaml with play `source`s = task refs.
-    pub fn project_recipe(&self, manifest: &serde_json::Value) -> crate::Result<crate::project::Project> {
+    pub fn project_recipe(
+        &self,
+        manifest: &serde_json::Value,
+    ) -> crate::Result<crate::project::Project> {
         let d = manifest["layers"]
             .as_array()
-            .and_then(|ls| ls.iter().find(|l| l["mediaType"].as_str() == Some(MT_RECIPE)))
+            .and_then(|ls| {
+                ls.iter()
+                    .find(|l| l["mediaType"].as_str() == Some(MT_RECIPE))
+            })
             .and_then(|l| l["digest"].as_str())
             .ok_or_else(|| anyhow::anyhow!("project artifact has no recipe layer"))?;
         let bytes = std::fs::read(self.blob_path(strip(d)))?;
@@ -967,7 +1055,11 @@ pub(crate) fn closure_walk(
     root: &str,
     read: &dyn Fn(&str) -> Option<Vec<u8>>,
 ) -> crate::Result<Closure> {
-    let mut c = Closure { blobs: Vec::new(), manifests: Vec::new(), unreadable: Vec::new() };
+    let mut c = Closure {
+        blobs: Vec::new(),
+        manifests: Vec::new(),
+        unreadable: Vec::new(),
+    };
     let mut seen = std::collections::BTreeSet::new();
     let mut queue = vec![strip(root).to_string()];
     while let Some(d) = queue.pop() {
@@ -1134,7 +1226,9 @@ pub fn registry_of(reference: &str) -> String {
 /// `crater registry login` 一句话就能补上。
 fn docker_login(registry: &str) -> Option<(String, String)> {
     let home = std::env::var("HOME").ok()?;
-    let path = std::path::Path::new(&home).join(".docker").join("config.json");
+    let path = std::path::Path::new(&home)
+        .join(".docker")
+        .join("config.json");
     let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     docker_login_in(&v, registry)
 }
@@ -1145,10 +1239,14 @@ fn docker_login_in(v: &serde_json::Value, registry: &str) -> Option<(String, Str
     let auths = v.get("auths")?.as_object()?;
     // docker.io 在那个文件里的键是历史遗留的 v1 端点,不是主机名。
     let keys: Vec<String> = if registry == "docker.io" {
-        ["https://index.docker.io/v1/", "index.docker.io", "docker.io"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
+        [
+            "https://index.docker.io/v1/",
+            "index.docker.io",
+            "docker.io",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
     } else {
         vec![registry.to_string(), format!("https://{registry}")]
     };
@@ -1234,7 +1332,10 @@ pub fn save_login(registry: &str, username: &str, password: &str) -> crate::Resu
         .unwrap_or_default();
     f.registries.insert(
         registry.to_string(),
-        Cred { username: username.to_string(), password: password.to_string() },
+        Cred {
+            username: username.to_string(),
+            password: password.to_string(),
+        },
     );
     std::fs::write(&path, serde_json::to_vec_pretty(&f)?)?;
     Ok(())
@@ -1270,7 +1371,9 @@ mod tests {
 
     /// Minimal store on disk: index → manifest → {config, layer}; one orphan.
     fn fake_store(dir: &std::path::Path) -> ImageStore {
-        let store = ImageStore { root: dir.to_path_buf() };
+        let store = ImageStore {
+            root: dir.to_path_buf(),
+        };
         std::fs::create_dir_all(store.blobs_dir()).unwrap();
         // 名字只为读代码时看清这是哪个 blob;内容寻址不需要它。
         let put = |_name: &str, data: &[u8]| {
@@ -1294,7 +1397,11 @@ mod tests {
             "size": manifest.len(),
             "annotations": { ANN_REF: "t/x:1" }
         } ] });
-        std::fs::write(store.root.join("index.json"), serde_json::to_vec(&idx).unwrap()).unwrap();
+        std::fs::write(
+            store.root.join("index.json"),
+            serde_json::to_vec(&idx).unwrap(),
+        )
+        .unwrap();
         store
     }
 
@@ -1316,9 +1423,17 @@ mod tests {
         for h in handles {
             h.await.unwrap();
         }
-        let refs: Vec<String> = store.list().unwrap().into_iter().map(|s| s.reference).collect();
+        let refs: Vec<String> = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.reference)
+            .collect();
         for i in 0..10 {
-            assert!(refs.contains(&format!("t/alias:{i}")), "alias {i} lost; got {refs:?}");
+            assert!(
+                refs.contains(&format!("t/alias:{i}")),
+                "alias {i} lost; got {refs:?}"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1356,7 +1471,9 @@ mod tests {
     /// 本机架构一定在里面 —— `platform_child` 按本机架构挑,写死 amd64 的话
     /// 这些用例在 arm64 机器上就测的是另一条分支。
     fn fake_multiarch_store(dir: &std::path::Path) -> (ImageStore, Vec<String>) {
-        let store = ImageStore { root: dir.to_path_buf() };
+        let store = ImageStore {
+            root: dir.to_path_buf(),
+        };
         std::fs::create_dir_all(store.blobs_dir()).unwrap();
         let put = |data: &[u8]| {
             let d = crate::bundle::sha256_hex(data);
@@ -1400,7 +1517,11 @@ mod tests {
             "size": index_blob.len(),
             "annotations": { ANN_REF: "reg/t/yq:4.44.3" }
         } ] });
-        std::fs::write(store.root.join("index.json"), serde_json::to_vec(&idx).unwrap()).unwrap();
+        std::fs::write(
+            store.root.join("index.json"),
+            serde_json::to_vec(&idx).unwrap(),
+        )
+        .unwrap();
         (store, all)
     }
 
@@ -1429,13 +1550,20 @@ mod tests {
                 .flatten()
                 .map(|e| e.file_name().to_string_lossy().into_owned())
                 .collect();
-        assert_eq!(got.len(), 7, "tar 里只有 {} 个 blob,应有 7 个:{got:?}", got.len());
+        assert_eq!(
+            got.len(),
+            7,
+            "tar 里只有 {} 个 blob,应有 7 个:{got:?}",
+            got.len()
+        );
         for b in &blobs {
             assert!(got.contains(b), "tar 里缺 blob {b}");
         }
 
         // ② load 进一个全新的 store,字节一个不少。
-        let b = ImageStore { root: dir.join("B") };
+        let b = ImageStore {
+            root: dir.join("B"),
+        };
         std::fs::create_dir_all(b.blobs_dir()).unwrap();
         std::fs::write(
             b.root.join("index.json"),
@@ -1452,7 +1580,10 @@ mod tests {
         // ③ 落位与在线 pull 一致:引用指向**有 config 的**那份子清单,
         //    不是 index。否则 `install` 一上来就是 "manifest 没有 config"。
         let m = b.resolve_manifest(&r).unwrap();
-        assert!(m["manifests"].as_array().is_none(), "引用还指着 index,install 读不到契约");
+        assert!(
+            m["manifests"].as_array().is_none(),
+            "引用还指着 index,install 读不到契约"
+        );
         assert_eq!(m["config"]["mediaType"].as_str(), Some(MT_PKG_CONFIG));
         let cfg: serde_json::Value = serde_json::from_slice(
             &std::fs::read(b.blob_path(strip(m["config"]["digest"].as_str().unwrap()))).unwrap(),
@@ -1473,7 +1604,9 @@ mod tests {
                 std::fs::remove_file(blob.path()).unwrap();
             }
         }
-        let e = a.export_oci_archive("reg/t/yq:4.44.3", &dir.join("gap.tar")).unwrap_err();
+        let e = a
+            .export_oci_archive("reg/t/yq:4.44.3", &dir.join("gap.tar"))
+            .unwrap_err();
         assert!(format!("{e:#}").contains("残包"), "错误没说清是残包:{e:#}");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1489,7 +1622,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("crater-mularch-gap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let (store, _) = fake_multiarch_store(&dir);
-        assert!(store.has_all_layers("reg/t/yq:4.44.3"), "对照组:齐的时候要说 true");
+        assert!(
+            store.has_all_layers("reg/t/yq:4.44.3"),
+            "对照组:齐的时候要说 true"
+        );
 
         // 只留索引 blob —— 这正是修复前的 `crater save` 打出来的那种残包。
         let root = store.manifest_digest("reg/t/yq:4.44.3").unwrap();

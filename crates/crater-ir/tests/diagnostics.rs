@@ -23,7 +23,11 @@ fn lint_err(yaml: &str, expect: &[&str]) -> String {
     let diags = lint::lint(&bp);
     let errs = lint::errors(&diags);
     assert!(!errs.is_empty(), "本应 lint 报错:\n{yaml}");
-    let joined = errs.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n");
+    let joined = errs
+        .iter()
+        .map(|d| d.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
     for kw in expect {
         assert!(joined.contains(kw), "诊断缺 `{kw}`:\n{joined}");
     }
@@ -52,7 +56,9 @@ fn typo_in_argument_name_is_caught() {
 fn typo_in_param_reference_is_caught_with_a_suggestion() {
     // 改了参数名却忘了改引用 —— Ansible 会安静地渲染成空字符串。
     lint_err(
-        &format!("{HEAD}resources:\n  - file: {{ path: \"/x/${{params.prot}}\", state: directory }}\n"),
+        &format!(
+            "{HEAD}resources:\n  - file: {{ path: \"/x/${{params.prot}}\", state: directory }}\n"
+        ),
         &["未声明的参数", "params.prot", "port"],
     );
 }
@@ -60,7 +66,9 @@ fn typo_in_param_reference_is_caught_with_a_suggestion() {
 #[test]
 fn out_of_scope_root_variable_is_caught() {
     lint_err(
-        &format!("{HEAD}resources:\n  - file: {{ path: \"/x/${{hostvars.a}}\", state: directory }}\n"),
+        &format!(
+            "{HEAD}resources:\n  - file: {{ path: \"/x/${{hostvars.a}}\", state: directory }}\n"
+        ),
         &["作用域外", "hostvars"],
     );
 }
@@ -143,7 +151,10 @@ fn bare_shell_without_check_is_flagged_as_modelling_debt() {
     let diags = lint::lint(&bp);
     // 接住,不羞辱:是 warn 不是 error —— 但必须可见。
     assert!(lint::errors(&diags).is_empty(), "裸 shell 不该阻断部署");
-    let warns = diags.iter().filter(|d| d.severity == lint::Severity::Warn).count();
+    let warns = diags
+        .iter()
+        .filter(|d| d.severity == lint::Severity::Warn)
+        .count();
     assert!(warns >= 1);
     assert!(diags.iter().any(|d| d.msg.contains("模型化欠债")));
 }
@@ -188,7 +199,10 @@ fn entry_without_any_module_key_is_rejected() {
 
 #[test]
 fn unknown_top_level_field_is_rejected_with_a_suggestion() {
-    parse_err("name: t\nresource:\n  - file: {}\n", &["未知字段", "resources"]);
+    parse_err(
+        "name: t\nresource:\n  - file: {}\n",
+        &["未知字段", "resources"],
+    );
 }
 
 #[test]
@@ -220,7 +234,10 @@ fn bad_selector_is_rejected_at_parse_time() {
 
 #[test]
 fn material_without_exactly_one_source_is_rejected() {
-    parse_err("name: t\nmaterials:\n  - { name: a }\n", &["恰好一个来源 key"]);
+    parse_err(
+        "name: t\nmaterials:\n  - { name: a }\n",
+        &["恰好一个来源 key"],
+    );
     parse_err(
         "name: t\nmaterials:\n  - { name: a, file: \"http://x\", image: y }\n",
         &["来源 key 出现了多个"],
@@ -239,7 +256,9 @@ fn custom_type_must_have_an_observe_probe() {
 #[test]
 fn cel_syntax_error_points_at_the_column() {
     let e = parse_err(
-        &format!("{HEAD}resources:\n  - file: {{ path: \"${{params.port +}}\", state: directory }}\n"),
+        &format!(
+            "{HEAD}resources:\n  - file: {{ path: \"${{params.port +}}\", state: directory }}\n"
+        ),
         &["Syntax error"],
     );
     assert!(e.contains('^'), "CEL 错误应带位置标记:{e}");
@@ -298,9 +317,12 @@ fn conditions_keep_full_cel_expressiveness() {
          when: \"params.port > 1024 && has(params.port)\"\n"
     ))
     .unwrap();
-    assert!(lint::errors(&lint::lint(&bp)).is_empty(), "{:#?}", lint::lint(&bp));
+    assert!(
+        lint::errors(&lint::lint(&bp)).is_empty(),
+        "{:#?}",
+        lint::lint(&bp)
+    );
 }
-
 
 #[test]
 fn the_old_on_keyword_is_refused_with_the_reason() {
@@ -310,7 +332,10 @@ fn the_old_on_keyword_is_refused_with_the_reason() {
         &format!("{HEAD}resources:\n  - file: {{ path: /x, state: directory }}\n    on: all\n"),
         &["已改名为 `target:`", "YAML 1.1"],
     );
-    assert!(err.contains("PyYAML") || err.contains("CI"), "要说清谁会踩到:{err}");
+    assert!(
+        err.contains("PyYAML") || err.contains("CI"),
+        "要说清谁会踩到:{err}"
+    );
 }
 
 #[test]

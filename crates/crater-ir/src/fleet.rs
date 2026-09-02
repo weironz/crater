@@ -79,7 +79,10 @@ pub enum SelectError {
     ///
     /// 这必须是**错误而非静默跳过**:否则一个拼错的组名会让整段资源悄悄不执行,
     /// 而 plan 看起来一切正常 —— 那是最难查的一类故障。
-    UnknownRole { role: String, known: Vec<String> },
+    UnknownRole {
+        role: String,
+        known: Vec<String>,
+    },
     /// `first()` / `rest()` 里嵌了 `where`。
     Nested(String),
     Eval(String),
@@ -111,8 +114,14 @@ impl std::error::Error for SelectError {}
 impl Fleet {
     /// 组集合从成员推导 —— 适合测试与没有显式 inventory 的场景。
     pub fn new(members: Vec<Member>) -> Self {
-        let declared_roles = members.iter().flat_map(|m| m.roles.iter().cloned()).collect();
-        Fleet { members, declared_roles }
+        let declared_roles = members
+            .iter()
+            .flat_map(|m| m.roles.iter().cloned())
+            .collect();
+        Fleet {
+            members,
+            declared_roles,
+        }
     }
 
     /// 带上 inventory **显式声明**的组(含空组)。
@@ -184,7 +193,10 @@ impl Fleet {
         for (name, gc) in &contract.groups {
             let have = self.members.iter().filter(|m| m.in_role(name)).count();
             if !self.declared_roles.contains(name) && gc.min > 0 {
-                errs.push(format!("inventory 缺少组 `{name}`(蓝图要求至少 {} 台)", gc.min));
+                errs.push(format!(
+                    "inventory 缺少组 `{name}`(蓝图要求至少 {} 台)",
+                    gc.min
+                ));
             } else if have < gc.min {
                 errs.push(format!(
                     "组 `{name}` 只有 {have} 台,蓝图要求至少 {} 台",
@@ -288,7 +300,10 @@ mod tests {
     fn scope_with_arch(arch: &str) -> Scope {
         let mut substrate = BTreeMap::new();
         substrate.insert("arch".to_string(), Yaml::from(arch));
-        Scope { substrate, ..Default::default() }
+        Scope {
+            substrate,
+            ..Default::default()
+        }
     }
 
     fn hits(f: &Fleet, s: &str) -> Vec<String> {
@@ -308,7 +323,10 @@ mod tests {
     fn role_selects_only_group_members() {
         // 这就是那个真 bug 的反面:此前 `on: role.worker` 会在**四台**上都跑。
         assert_eq!(hits(&fleet(), "role.worker"), vec!["w01"]);
-        assert_eq!(hits(&fleet(), "role.controlplane"), vec!["n11", "n12", "n13"]);
+        assert_eq!(
+            hits(&fleet(), "role.controlplane"),
+            vec!["n11", "n12", "n13"]
+        );
     }
 
     #[test]
@@ -320,7 +338,10 @@ mod tests {
     fn first_and_rest_partition_a_group_in_declaration_order() {
         // HA 场景的核心:首台 init,其余 join。旧模型只能"全组跑 + check 守卫跳过首台"。
         assert_eq!(hits(&fleet(), "first(role.controlplane)"), vec!["n11"]);
-        assert_eq!(hits(&fleet(), "rest(role.controlplane)"), vec!["n12", "n13"]);
+        assert_eq!(
+            hits(&fleet(), "rest(role.controlplane)"),
+            vec!["n12", "n13"]
+        );
     }
 
     #[test]
@@ -356,7 +377,9 @@ mod tests {
         // 组存在、只是空的 —— 这是合法配置,不该被当成拼错的组名拒绝。
         let f = Fleet::new(vec![Member::new("n1", &["controlplane"])])
             .with_declared_roles(["worker".to_string()]);
-        assert!(!f.matches(&sel("role.worker"), "n1", &Scope::default()).unwrap());
+        assert!(!f
+            .matches(&sel("role.worker"), "n1", &Scope::default())
+            .unwrap());
         assert!(f.static_select(&sel("role.worker")).unwrap().is_empty());
         // 而首台仍然选得中
         assert!(f
@@ -379,12 +402,17 @@ mod tests {
     #[test]
     fn a_lone_localhost_says_it_has_no_groups_at_all() {
         let f = Fleet::single("localhost");
-        assert!(f.matches(&sel("all"), "localhost", &Scope::default()).unwrap());
+        assert!(f
+            .matches(&sel("all"), "localhost", &Scope::default())
+            .unwrap());
         let msg = f
             .matches(&sel("role.controlplane"), "localhost", &Scope::default())
             .unwrap_err()
             .to_string();
-        assert!(msg.contains("需要 `-i inventory.yaml`"), "要给出下一步:{msg}");
+        assert!(
+            msg.contains("需要 `-i inventory.yaml`"),
+            "要给出下一步:{msg}"
+        );
     }
 
     #[test]
@@ -411,7 +439,9 @@ mod tests {
     #[test]
     fn a_host_not_in_the_fleet_matches_nothing_positional() {
         let f = fleet();
-        assert!(!f.matches(&sel("role.worker"), "ghost", &Scope::default()).unwrap());
+        assert!(!f
+            .matches(&sel("role.worker"), "ghost", &Scope::default())
+            .unwrap());
         assert!(!f
             .matches(&sel("first(role.controlplane)"), "ghost", &Scope::default())
             .unwrap());
@@ -425,7 +455,10 @@ mod contract_tests {
 
     fn contract(pairs: &[(&str, usize)]) -> FleetContract {
         FleetContract {
-            groups: pairs.iter().map(|(n, m)| (n.to_string(), GroupContract { min: *m })).collect(),
+            groups: pairs
+                .iter()
+                .map(|(n, m)| (n.to_string(), GroupContract { min: *m }))
+                .collect(),
         }
     }
 
@@ -435,16 +468,23 @@ mod contract_tests {
             Member::new("cp1", &["controlplane"]),
             Member::new("w1", &["worker"]),
         ]);
-        assert!(f.check_contract(&contract(&[("controlplane", 1), ("worker", 1)])).is_ok());
+        assert!(f
+            .check_contract(&contract(&[("controlplane", 1), ("worker", 1)]))
+            .is_ok());
     }
 
     #[test]
     fn an_ha_blueprint_rejects_a_single_master_before_touching_anything() {
         // 这正是契约存在的理由:不满足在 plan 之前就说清,而不是跑到 rest() 那步才炸。
         let f = Fleet::new(vec![Member::new("cp1", &["controlplane"])]);
-        let errs = f.check_contract(&contract(&[("controlplane", 3)])).unwrap_err();
+        let errs = f
+            .check_contract(&contract(&[("controlplane", 3)]))
+            .unwrap_err();
         assert_eq!(errs.len(), 1);
-        assert!(errs[0].contains("只有 1 台") && errs[0].contains("至少 3 台"), "{errs:?}");
+        assert!(
+            errs[0].contains("只有 1 台") && errs[0].contains("至少 3 台"),
+            "{errs:?}"
+        );
     }
 
     #[test]
@@ -452,14 +492,18 @@ mod contract_tests {
         // 单节点拓扑:worker 组存在但没成员,是合法拓扑而不是打错字。
         let f = Fleet::new(vec![Member::new("cp1", &["controlplane"])])
             .with_declared_roles(["worker".to_string()]);
-        assert!(f.check_contract(&contract(&[("controlplane", 1), ("worker", 0)])).is_ok());
+        assert!(f
+            .check_contract(&contract(&[("controlplane", 1), ("worker", 0)]))
+            .is_ok());
     }
 
     #[test]
     fn a_missing_group_is_reported_as_missing_not_as_undersized() {
         // "缺少组"和"组太小"是两种不同的修法:一个改 inventory 结构,一个加机器。
         let f = Fleet::new(vec![Member::new("cp1", &["controlplane"])]);
-        let errs = f.check_contract(&contract(&[("controlplane", 1), ("etcd", 3)])).unwrap_err();
+        let errs = f
+            .check_contract(&contract(&[("controlplane", 1), ("etcd", 3)]))
+            .unwrap_err();
         assert!(errs[0].contains("缺少组 `etcd`"), "{errs:?}");
     }
 
@@ -468,7 +512,11 @@ mod contract_tests {
         // 修 inventory 的人应当一趟改完,而不是修一条重跑一次再看下一条。
         let f = Fleet::new(vec![Member::new("cp1", &["controlplane"])]);
         let errs = f
-            .check_contract(&contract(&[("controlplane", 3), ("etcd", 3), ("worker", 2)]))
+            .check_contract(&contract(&[
+                ("controlplane", 3),
+                ("etcd", 3),
+                ("worker", 2),
+            ]))
             .unwrap_err();
         assert_eq!(errs.len(), 3, "{errs:?}");
     }
@@ -476,7 +524,10 @@ mod contract_tests {
     #[test]
     fn extra_roles_in_the_inventory_are_not_an_error() {
         // 同一批机器常同时承载多个蓝图,多出来的角色是常态而非错误。
-        let f = Fleet::new(vec![Member::new("cp1", &["controlplane", "monitoring", "ingress"])]);
+        let f = Fleet::new(vec![Member::new(
+            "cp1",
+            &["controlplane", "monitoring", "ingress"],
+        )]);
         assert!(f.check_contract(&contract(&[("controlplane", 1)])).is_ok());
     }
 }
@@ -494,16 +545,27 @@ mod remap_tests {
     }
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
     }
 
     #[test]
     fn a_blueprint_sees_its_own_group_names() {
         // 蓝图写 role.controlplane,inventory 叫 k8s_masters —— 栈把两个词接上,
         // 蓝图本身一字不改。这是蓝图能被复用的前提。
-        let f = fleet().remap(&map(&[("controlplane", "k8s_masters"), ("worker", "k8s_workers")]));
-        let cp = f.static_select(&Selector::Role("controlplane".into())).unwrap();
-        assert_eq!(cp.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), vec!["m1", "m2"]);
+        let f = fleet().remap(&map(&[
+            ("controlplane", "k8s_masters"),
+            ("worker", "k8s_workers"),
+        ]));
+        let cp = f
+            .static_select(&Selector::Role("controlplane".into()))
+            .unwrap();
+        assert_eq!(
+            cp.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["m1", "m2"]
+        );
         let w = f.static_select(&Selector::Role("worker".into())).unwrap();
         assert_eq!(w.len(), 1);
     }
@@ -512,7 +574,9 @@ mod remap_tests {
     fn unmapped_groups_still_match_by_name() {
         // 大多数组名本来就对得上,不该逼人把它们全列一遍。
         let f = fleet().remap(&map(&[("controlplane", "k8s_masters")]));
-        let s = f.static_select(&Selector::Role("storage_nodes".into())).unwrap();
+        let s = f
+            .static_select(&Selector::Role("storage_nodes".into()))
+            .unwrap();
         assert_eq!(s.len(), 1);
     }
 
@@ -525,8 +589,13 @@ mod remap_tests {
             Member::new("decoy", &["controlplane"]),
         ])
         .remap(&map(&[("controlplane", "k8s_masters")]));
-        let cp = f.static_select(&Selector::Role("controlplane".into())).unwrap();
-        assert_eq!(cp.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), vec!["real"]);
+        let cp = f
+            .static_select(&Selector::Role("controlplane".into()))
+            .unwrap();
+        assert_eq!(
+            cp.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["real"]
+        );
     }
 
     #[test]
@@ -543,16 +612,29 @@ mod remap_tests {
         // 否则栈里会退化成"这个组不存在",契约随之误报。
         let f = Fleet::new(vec![Member::new("m1", &["k8s_masters"])])
             .with_declared_roles(["k8s_workers".to_string()])
-            .remap(&map(&[("controlplane", "k8s_masters"), ("worker", "k8s_workers")]));
-        assert!(f.declared_roles.contains("worker"), "{:?}", f.declared_roles);
-        assert!(f.static_select(&Selector::Role("worker".into())).unwrap().is_empty());
+            .remap(&map(&[
+                ("controlplane", "k8s_masters"),
+                ("worker", "k8s_workers"),
+            ]));
+        assert!(
+            f.declared_roles.contains("worker"),
+            "{:?}",
+            f.declared_roles
+        );
+        assert!(f
+            .static_select(&Selector::Role("worker".into()))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn a_remapped_fleet_still_satisfies_its_contract() {
         // 端到端:重映射之后契约用的是**蓝图的**组名。
         use crate::ir::{FleetContract, GroupContract};
-        let f = fleet().remap(&map(&[("controlplane", "k8s_masters"), ("worker", "k8s_workers")]));
+        let f = fleet().remap(&map(&[
+            ("controlplane", "k8s_masters"),
+            ("worker", "k8s_workers"),
+        ]));
         let contract = FleetContract {
             groups: [("controlplane", 2usize), ("worker", 1)]
                 .iter()

@@ -13,9 +13,9 @@ use crater_core::executor::Executor;
 use crater_core::spec::Host;
 use crater_ir::ctx::LocalCtx;
 use crater_ir::eval::Yaml;
+use crater_ir::fleet::{Fleet, Member};
 use crater_ir::plan::{self, Plan, RunReport};
 use crater_ir::procedure::{self, Targets};
-use crater_ir::fleet::{Fleet, Member};
 use crater_ir::state::{self, DeploymentRecord, DriftVerdict, FileStore, Store};
 use crater_ir::verbs::{Change, Ctx};
 use crater_ir::{lint, parse, Blueprint};
@@ -93,7 +93,9 @@ pub fn is_blueprint_file(path: &Path) -> bool {
     let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(&text) else {
         return false;
     };
-    let Some(m) = v.as_mapping() else { return false };
+    let Some(m) = v.as_mapping() else {
+        return false;
+    };
     // 旧 task 的标志字段优先 —— 免得把待迁移文件误抓进新管线。
     if m.contains_key(serde_yaml::Value::from("actions"))
         || m.contains_key(serde_yaml::Value::from("plays"))
@@ -173,7 +175,15 @@ pub(crate) async fn destroy_lensed(
     // apply 时资源要先就位(kubeadm 得先有 containerd);退役时若先卸掉
     // containerd/kubelet,etcd 里那个成员就成了永远清不掉的孤儿。
     if yes {
-        let rc = RunCtx { bp: &bp, fleet: &fleet, overrides: &overrides, path, target, blobs: &blobs, images: &images };
+        let rc = RunCtx {
+            bp: &bp,
+            fleet: &fleet,
+            overrides: &overrides,
+            path,
+            target,
+            blobs: &blobs,
+            images: &images,
+        };
         let targets = connect_fleet(&rc, &hosts).await?;
         let dances = {
             let first = fleet.members.first().map(|m| m.name.clone());
@@ -282,7 +292,11 @@ pub(crate) async fn destroy_lensed(
 }
 
 fn print_destroy_plan(bp: &Blueprint, p: &Plan, will_execute: bool) {
-    let mode = if will_execute { "退役(随后执行)" } else { "退役预演(零写入)" };
+    let mode = if will_execute {
+        "退役(随后执行)"
+    } else {
+        "退役预演(零写入)"
+    };
     say!("blueprint {} —— {mode}\n", bp.name);
     for item in &p.items {
         // 退役计划里 `-` 是"将删除",`✓` 是"本就不在" —— 后者不是成功,
@@ -348,7 +362,9 @@ pub async fn verify_blueprint_json(
 ) -> Result<()> {
     VERIFY_JSON.with(|v| *v.borrow_mut() = Some(Vec::new()));
     let r = run_on_targets(path, target, sets, Mode::Verify, &Lens::default()).await;
-    let entries = VERIFY_JSON.with(|v| v.borrow_mut().take()).unwrap_or_default();
+    let entries = VERIFY_JSON
+        .with(|v| v.borrow_mut().take())
+        .unwrap_or_default();
     if let Some(out) = json_out {
         let doc = serde_json::json!({
             "blueprint": path.display().to_string(),
@@ -406,7 +422,9 @@ fn verdict_json(
 
 /// 期望态文件的 sha256(读不到返回 None —— 指纹缺失按 Unknown 处理,不误报)。
 fn file_sha(p: &Path) -> Option<String> {
-    std::fs::read(p).ok().map(|b| crater_core::bundle::sha256_hex(&b))
+    std::fs::read(p)
+        .ok()
+        .map(|b| crater_core::bundle::sha256_hex(&b))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -447,7 +465,15 @@ async fn run_on_targets(
 
     // 准入断言:在**碰任何机器之前**。plan 也跑它 —— preflight 是只读的,
     // 而 plan 正是闸门:等到 apply 才发现不满足,那道闸门就白设了。
-    let rc = RunCtx { bp: &bp, fleet: &fleet, overrides: &overrides, path, target, blobs: &blobs, images: &images };
+    let rc = RunCtx {
+        bp: &bp,
+        fleet: &fleet,
+        overrides: &overrides,
+        path,
+        target,
+        blobs: &blobs,
+        images: &images,
+    };
     run_preflight(&rc, &hosts).await?;
 
     let mut failures = 0usize;
@@ -494,306 +520,382 @@ async fn run_on_targets(
     //
     // 顺带补上了 skipped 的信息:某台没有某个资源(选择器/when 没选中它)时
     // 格子是 `·` —— 此前那种情况在输出里直接消失,分不清"跳过"和"没这条"。
-    let mut mx_rows: Vec<String> = Vec::new();               // 资源 id,首现顺序
+    let mut mx_rows: Vec<String> = Vec::new(); // 资源 id,首现顺序
     let mut mx_label: BTreeMap<String, String> = BTreeMap::new();
     let mut mx: BTreeMap<String, BTreeMap<String, char>> = BTreeMap::new();
     let note = |rows: &mut Vec<String>,
-                    lab: &mut BTreeMap<String, String>,
-                    cells: &mut BTreeMap<String, BTreeMap<String, char>>,
-                    host: &str,
-                    id: &str,
-                    label: &str,
-                    c: char| {
+                lab: &mut BTreeMap<String, String>,
+                cells: &mut BTreeMap<String, BTreeMap<String, char>>,
+                host: &str,
+                id: &str,
+                label: &str,
+                c: char| {
         if !lab.contains_key(id) {
             rows.push(id.to_string());
             lab.insert(id.to_string(), label.to_string());
         }
-        cells.entry(id.to_string()).or_default().insert(host.to_string(), c);
+        cells
+            .entry(id.to_string())
+            .or_default()
+            .insert(host.to_string(), c);
     };
     let batches = crate::target::batches(&hosts, target.serial.as_deref())?;
     let n_batches = batches.len();
     'outer: for (bi, batch) in batches.iter().enumerate() {
-    if n_batches > 1 {
-        crate::out::leave();
-        say!(
-            "── 批次 {}/{}({})──",
-            bi + 1,
-            n_batches,
-            batch.iter().map(|h| h.name.as_str()).collect::<Vec<_>>().join(", ")
-        );
-    }
-    let batch_fail_before = failures;
-    for host in batch {
-        let transport = build_transport(host).await?;
-        crate::out::enter(&host.name);
-        // `@local` 是本机哨兵值,直接渲染出来是 `root@@local:22`,像个 bug。
-        if host.is_local() {
-            say!("本机执行");
-        } else {
-            say!("连接 {}@{}:{}", host.user, host.address, host.port);
+        if n_batches > 1 {
+            crate::out::leave();
+            say!(
+                "── 批次 {}/{}({})──",
+                bi + 1,
+                n_batches,
+                batch
+                    .iter()
+                    .map(|h| h.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
-        crate::events::emit(serde_json::json!({
-            "e": "host_start", "host": host.name, "label": host_label(host),
-        }));
-
-        // 先探目标侧事实(裁定 C):物料的多架构变体、`when:` 条件都靠它判定,
-        // 所以必须在求计划之前拿到。白名单 + 一次性采全,之后求值零往返。
-        let facts = crater_ir::facts::Facts::new(transport.as_ref())
-            .gather_all()
-            .with_context(|| format!("{}:采集目标事实", host_label(host)))?;
-        let mut scope = plan::with_overrides(plan::scope_from_defaults(&bp), &overrides);
-        scope.substrate = facts;
-        scope.fleet = Some(fleet.clone());
-        scope.identify(&fleet_name(host), &host.roles);
-        equip_scope(&bp, host, &mut scope).await?;
-
-        // 再包上物料解析能力 —— 传输层不该知道"物料"是什么。
-        let ctx = MaterialCtx::new(transport, &bp, scope.clone(), blobs.clone(), base_dir(path))
-            .with_images(images.clone());
-
-        // 审计语境不传播上游变更 —— verify 要回答"哪里漂了",不是"该重启什么"。
-        let intent = if mode == Mode::Verify {
-            plan::Intent::Audit
-        } else {
-            plan::Intent::Converge
-        };
-        let plan = plan::plan_with(&bp, &scope, &ctx, intent)
-            .with_context(|| format!("{}:对 {} 求计划", host_label(host), path.display()))?;
-        // 三个动词共用:audit 语境下 ok = 同步、非 ok = 漂移候选;
-        // converge 语境下则是"待执行预告",之后被 step 事件逐条定案。
-        for item in &plan.items {
-            crate::events::emit(serde_json::json!({
-                "e": "plan_item", "host": host.name,
-                "id": item.id, "change": change_kind(&item.change),
-            }));
-        }
-
-        // 记录 id 用**机群名**(inventory 的 name),不用展示标签:
-        // 标签会因为地址/端口变化而改,记录会因此对不上。
-        let record_id = DeploymentRecord::make_id(&bp.name, &fleet_name(host));
-        let previous = store.load(&record_id).unwrap_or(None);
-
-        if mode == Mode::Verify {
-            // 只读路径:不打印"将创建"之类的动作语,只回答"还对不对"。
-            let verdict = state::assess(&plan, previous.as_ref());
-            let vj = verdict_json(&fleet_name(host), &record_id, &verdict, previous.as_ref());
-            crate::events::emit(serde_json::json!({
-                "e": "verify", "host": host.name, "report": vj.clone(),
-            }));
-            verify_collect(vj);
-            // 核对本身就是一次"上次什么时候看过"的证据 —— 回写 verified_at,
-            // UI 的"多久没核对"才有数据;资源快照保持 apply 时的孪生,不动。
-            if let Some(mut prev) = previous.clone() {
-                prev.verified_at = Some(std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
-                let _ = store.save(&prev);
+        let batch_fail_before = failures;
+        for host in batch {
+            let transport = build_transport(host).await?;
+            crate::out::enter(&host.name);
+            // `@local` 是本机哨兵值,直接渲染出来是 `root@@local:22`,像个 bug。
+            if host.is_local() {
+                say!("本机执行");
+            } else {
+                say!("连接 {}@{}:{}", host.user, host.address, host.port);
             }
-            let failed = report_drift(&verdict, previous.as_ref());
-            for item in &plan.items {
-                note(&mut mx_rows, &mut mx_label, &mut mx, &host.name, &item.id, &item.label(), '✓');
-            }
-            let n_drift = match &verdict {
-                crater_ir::state::DriftVerdict::Drifted(d) => d.len(),
-                crater_ir::state::DriftVerdict::Indeterminate { drifted, .. } => drifted.len(),
-                _ => 0,
+            crate::events::emit(serde_json::json!({
+                "e": "host_start", "host": host.name, "label": host_label(host),
+            }));
+
+            // 先探目标侧事实(裁定 C):物料的多架构变体、`when:` 条件都靠它判定,
+            // 所以必须在求计划之前拿到。白名单 + 一次性采全,之后求值零往返。
+            let facts = crater_ir::facts::Facts::new(transport.as_ref())
+                .gather_all()
+                .with_context(|| format!("{}:采集目标事实", host_label(host)))?;
+            let mut scope = plan::with_overrides(plan::scope_from_defaults(&bp), &overrides);
+            scope.substrate = facts;
+            scope.fleet = Some(fleet.clone());
+            scope.identify(&fleet_name(host), &host.roles);
+            equip_scope(&bp, host, &mut scope).await?;
+
+            // 再包上物料解析能力 —— 传输层不该知道"物料"是什么。
+            let ctx =
+                MaterialCtx::new(transport, &bp, scope.clone(), blobs.clone(), base_dir(path))
+                    .with_images(images.clone());
+
+            // 审计语境不传播上游变更 —— verify 要回答"哪里漂了",不是"该重启什么"。
+            let intent = if mode == Mode::Verify {
+                plan::Intent::Audit
+            } else {
+                plan::Intent::Converge
             };
-            if let crater_ir::state::DriftVerdict::Drifted(d) = &verdict {
-                for it in d {
-                    if let Some(row) = mx.get_mut(&it.id) {
-                        row.insert(host.name.clone(), '✗');
+            let plan = plan::plan_with(&bp, &scope, &ctx, intent)
+                .with_context(|| format!("{}:对 {} 求计划", host_label(host), path.display()))?;
+            // 三个动词共用:audit 语境下 ok = 同步、非 ok = 漂移候选;
+            // converge 语境下则是"待执行预告",之后被 step 事件逐条定案。
+            for item in &plan.items {
+                crate::events::emit(serde_json::json!({
+                    "e": "plan_item", "host": host.name,
+                    "id": item.id, "change": change_kind(&item.change),
+                }));
+            }
+
+            // 记录 id 用**机群名**(inventory 的 name),不用展示标签:
+            // 标签会因为地址/端口变化而改,记录会因此对不上。
+            let record_id = DeploymentRecord::make_id(&bp.name, &fleet_name(host));
+            let previous = store.load(&record_id).unwrap_or(None);
+
+            if mode == Mode::Verify {
+                // 只读路径:不打印"将创建"之类的动作语,只回答"还对不对"。
+                let verdict = state::assess(&plan, previous.as_ref());
+                let vj = verdict_json(&fleet_name(host), &record_id, &verdict, previous.as_ref());
+                crate::events::emit(serde_json::json!({
+                    "e": "verify", "host": host.name, "report": vj.clone(),
+                }));
+                verify_collect(vj);
+                // 核对本身就是一次"上次什么时候看过"的证据 —— 回写 verified_at,
+                // UI 的"多久没核对"才有数据;资源快照保持 apply 时的孪生,不动。
+                if let Some(mut prev) = previous.clone() {
+                    prev.verified_at = Some(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0),
+                    );
+                    let _ = store.save(&prev);
+                }
+                let failed = report_drift(&verdict, previous.as_ref());
+                for item in &plan.items {
+                    note(
+                        &mut mx_rows,
+                        &mut mx_label,
+                        &mut mx,
+                        &host.name,
+                        &item.id,
+                        &item.label(),
+                        '✓',
+                    );
+                }
+                let n_drift = match &verdict {
+                    crater_ir::state::DriftVerdict::Drifted(d) => d.len(),
+                    crater_ir::state::DriftVerdict::Indeterminate { drifted, .. } => drifted.len(),
+                    _ => 0,
+                };
+                if let crater_ir::state::DriftVerdict::Drifted(d) = &verdict {
+                    for it in d {
+                        if let Some(row) = mx.get_mut(&it.id) {
+                            row.insert(host.name.clone(), '✗');
+                        }
                     }
                 }
-            }
-            recap.push((
-                host.name.clone(),
-                Tally {
-                    // 逐资源计数,而不是"这台漂没漂" —— 一台漂了 1 项和漂了 15 项
-                    // 是两回事,汇总要能一眼看出轻重。
-                    ok: plan.items.len().saturating_sub(n_drift),
-                    drifted: n_drift,
-                    failed: usize::from(failed && n_drift == 0), // 连不上之类
-                    ..Default::default()
-                },
-            ));
-            crate::events::emit(serde_json::json!({
-                "e": "host_done", "host": host.name,
-                "result": if failed { "drifted" } else { "ok" },
-            }));
-            if failed {
-                failures += 1;
-            }
-            continue;
-        }
-
-        print_plan(&bp, &plan, converge);
-        report_closure(&bp, &scope);
-
-        if converge {
-            if !plan.has_changes() {
-                say!("跳过执行(无变更)");
-                // 未变更的机器**也要进汇总** —— 汇总缺了它们,就无法回答
-                // "这次到底覆盖了几台",而那正是多机部署后第一个要确认的事。
-                for item in &plan.items {
-                    note(&mut mx_rows, &mut mx_label, &mut mx, &host.name,
-                         &item.id, &item.label(), '✓');
-                }
-                // 已是期望态 ≠ 什么都没发生:这些资源都被观察过、判定为符合。
-                // 报 ok=0 会让"全都对"和"一个都没查"看起来一样。
                 recap.push((
                     host.name.clone(),
                     Tally {
-                        ok: plan.items.iter()
+                        // 逐资源计数,而不是"这台漂没漂" —— 一台漂了 1 项和漂了 15 项
+                        // 是两回事,汇总要能一眼看出轻重。
+                        ok: plan.items.len().saturating_sub(n_drift),
+                        drifted: n_drift,
+                        failed: usize::from(failed && n_drift == 0), // 连不上之类
+                        ..Default::default()
+                    },
+                ));
+                crate::events::emit(serde_json::json!({
+                    "e": "host_done", "host": host.name,
+                    "result": if failed { "drifted" } else { "ok" },
+                }));
+                if failed {
+                    failures += 1;
+                }
+                continue;
+            }
+
+            print_plan(&bp, &plan, converge);
+            report_closure(&bp, &scope);
+
+            if converge {
+                if !plan.has_changes() {
+                    say!("跳过执行(无变更)");
+                    // 未变更的机器**也要进汇总** —— 汇总缺了它们,就无法回答
+                    // "这次到底覆盖了几台",而那正是多机部署后第一个要确认的事。
+                    for item in &plan.items {
+                        note(
+                            &mut mx_rows,
+                            &mut mx_label,
+                            &mut mx,
+                            &host.name,
+                            &item.id,
+                            &item.label(),
+                            '✓',
+                        );
+                    }
+                    // 已是期望态 ≠ 什么都没发生:这些资源都被观察过、判定为符合。
+                    // 报 ok=0 会让"全都对"和"一个都没查"看起来一样。
+                    recap.push((
+                        host.name.clone(),
+                        Tally {
+                            ok: plan
+                                .items
+                                .iter()
+                                .filter(|i| matches!(i.change, crater_ir::verbs::Change::Ok))
+                                .count(),
+                            ..Default::default()
+                        },
+                    ));
+                    crate::events::emit(serde_json::json!({
+                        "e": "host_done", "host": host.name, "result": "noop",
+                    }));
+                    continue;
+                }
+                let step_host = host.name.clone();
+                let on_step = move |id: &str, oc: crater_ir::verbs::Outcome| {
+                    use crater_ir::verbs::Outcome as O;
+                    crate::events::emit(serde_json::json!({
+                        "e": "step", "host": step_host, "id": id,
+                        "outcome": match oc { O::Ok => "ok", O::Changed => "changed", O::Warn => "warn" },
+                    }));
+                };
+                match plan::converge_with(&bp, &scope, &ctx, &on_step) {
+                    Ok(report) => {
+                        print_report(&report);
+                        let by_id: BTreeMap<&str, String> = plan
+                            .items
+                            .iter()
+                            .map(|i| (i.id.as_str(), i.label()))
+                            .collect();
+                        for (id, oc) in &report.steps {
+                            use crater_ir::verbs::Outcome as O;
+                            let c = match oc {
+                                O::Ok => '✓',
+                                O::Changed => '~',
+                                O::Warn => '!',
+                            };
+                            let lab = by_id
+                                .get(id.as_str())
+                                .cloned()
+                                .unwrap_or_else(|| id.clone());
+                            note(
+                                &mut mx_rows,
+                                &mut mx_label,
+                                &mut mx,
+                                &host.name,
+                                id,
+                                &lab,
+                                c,
+                            );
+                        }
+                        recap.push((
+                            host.name.clone(),
+                            Tally {
+                                ok: report.ok(),
+                                changed: report.changed(),
+                                warn: report
+                                    .steps
+                                    .iter()
+                                    .filter(|(_, o)| *o == crater_ir::verbs::Outcome::Warn)
+                                    .count(),
+                                ..Default::default()
+                            },
+                        ));
+                        dances.extend(report.procedures_needed.iter().cloned());
+                        // 收敛后**重新观察一次**再记账:记录的是现实,不是意图。
+                        match plan::plan(&bp, &scope, &ctx) {
+                            Ok(after) => {
+                                let mut rec = DeploymentRecord::from_plan(
+                                    &bp.name,
+                                    bp.version.as_deref(),
+                                    &fleet_name(host),
+                                    &after,
+                                );
+                                // 期望态指纹:OutOfDate 检测的地基 —— 当前文件 hash ≠
+                                // 记录 hash 时,UI 能判"期望态已改、尚未收敛"。
+                                rec.blueprint_sha256 = file_sha(path);
+                                rec.inventory_sha256 =
+                                    target.inventory.as_deref().and_then(file_sha);
+                                if let Some(prev) = &previous {
+                                    rec.applied_at = prev.applied_at; // 首次部署时间不该被刷新
+                                }
+                                if let Err(e) = store.save(&rec) {
+                                    oops!("(记账失败,不影响本次部署:{e})");
+                                }
+                                // 两类不该算进"没达成",理由不同:
+                                //
+                                // - **自定义类型**:舞在逐台循环之后才跳,此刻本就
+                                //   还没弥合,当成收敛失败是吓人。
+                                // - **`Unknown`**:那是"判不出",不是"没达成"
+                                //   (D-135)。物料没声明 sha256 又没有闭包时,复观察
+                                //   照样说不清 —— 而此时文件**已经正确地放好了**。
+                                //   真机上的表现是:`changed=1` 紧跟着一句"仍有 1 项
+                                //   未达期望态",而目标机上那个二进制明明是对的。
+                                //   D-135 把"判不出 ≠ 一致"说清了,这里漏的是它的
+                                //   另一半:**判不出 ≠ 没达成**。
+                                let stuck = after
+                                    .changing()
+                                    .filter(|i| bp.custom_type(&i.ty).is_none())
+                                    .filter(|i| {
+                                        !matches!(i.change, crater_ir::verbs::Change::Unknown(_))
+                                    })
+                                    .count();
+                                if stuck > 0 {
+                                    say!("注意:收敛后仍有 {stuck} 项未达期望态 —— 见上方 plan");
+                                }
+                                // 说不清的单独说一句 —— 它既不是成功也不是失败,
+                                // 混进上面那句会让人以为部署坏了,只字不提又会让
+                                // "其实没验过"变成隐形的。
+                                let unsure = after
+                                    .changing()
+                                    .filter(|i| {
+                                        matches!(i.change, crater_ir::verbs::Change::Unknown(_))
+                                    })
+                                    .count();
+                                if unsure > 0 {
+                                    say!(
+                                        "({unsure} 项收敛后仍判不出 —— 已按计划执行,只是无从复核)"
+                                    );
+                                }
+                            }
+                            Err(e) => oops!("(收敛后复观察失败:{e})"),
+                        }
+                    }
+                    Err(e) => {
+                        failures += 1;
+                        for item in &plan.items {
+                            note(
+                                &mut mx_rows,
+                                &mut mx_label,
+                                &mut mx,
+                                &host.name,
+                                &item.id,
+                                &item.label(),
+                                '✗',
+                            );
+                        }
+                        recap.push((
+                            host.name.clone(),
+                            Tally {
+                                failed: 1,
+                                ..Default::default()
+                            },
+                        ));
+                        oops!("执行失败 —— {e}");
+                        crate::events::emit(serde_json::json!({
+                            "e": "host_done", "host": host.name, "result": "failed",
+                            "detail": format!("{e:#}"),
+                        }));
+                        continue;
+                    }
+                }
+                crate::events::emit(serde_json::json!({
+                    "e": "host_done", "host": host.name, "result": "ok",
+                }));
+            } else {
+                for item in &plan.items {
+                    note(
+                        &mut mx_rows,
+                        &mut mx_label,
+                        &mut mx,
+                        &host.name,
+                        &item.id,
+                        &item.label(),
+                        item.change.sigil(),
+                    );
+                }
+                // plan 不执行,但"有几项已符合"是它算出来的结论,该报。
+                recap.push((
+                    host.name.clone(),
+                    Tally {
+                        ok: plan
+                            .items
+                            .iter()
                             .filter(|i| matches!(i.change, crater_ir::verbs::Change::Ok))
+                            .count(),
+                        changed: plan
+                            .items
+                            .iter()
+                            .filter(|i| !matches!(i.change, crater_ir::verbs::Change::Ok))
                             .count(),
                         ..Default::default()
                     },
                 ));
                 crate::events::emit(serde_json::json!({
-                    "e": "host_done", "host": host.name, "result": "noop",
+                    "e": "host_done", "host": host.name, "result": "planned",
                 }));
-                continue;
             }
-            let step_host = host.name.clone();
-            let on_step = move |id: &str, oc: crater_ir::verbs::Outcome| {
-                use crater_ir::verbs::Outcome as O;
-                crate::events::emit(serde_json::json!({
-                    "e": "step", "host": step_host, "id": id,
-                    "outcome": match oc { O::Ok => "ok", O::Changed => "changed", O::Warn => "warn" },
-                }));
-            };
-            match plan::converge_with(&bp, &scope, &ctx, &on_step) {
-                Ok(report) => {
-                    print_report(&report);
-                    let by_id: BTreeMap<&str, String> =
-                        plan.items.iter().map(|i| (i.id.as_str(), i.label())).collect();
-                    for (id, oc) in &report.steps {
-                        use crater_ir::verbs::Outcome as O;
-                        let c = match oc { O::Ok => '✓', O::Changed => '~', O::Warn => '!' };
-                        let lab = by_id.get(id.as_str()).cloned().unwrap_or_else(|| id.clone());
-                        note(&mut mx_rows, &mut mx_label, &mut mx, &host.name, id, &lab, c);
-                    }
-                    recap.push((
-                        host.name.clone(),
-                        Tally {
-                            ok: report.ok(),
-                            changed: report.changed(),
-                            warn: report.steps.iter()
-                                .filter(|(_, o)| *o == crater_ir::verbs::Outcome::Warn)
-                                .count(),
-                            ..Default::default()
-                        },
-                    ));
-                    dances.extend(report.procedures_needed.iter().cloned());
-                    // 收敛后**重新观察一次**再记账:记录的是现实,不是意图。
-                    match plan::plan(&bp, &scope, &ctx) {
-                        Ok(after) => {
-                            let mut rec = DeploymentRecord::from_plan(
-                                &bp.name,
-                                bp.version.as_deref(),
-                                &fleet_name(host),
-                                &after,
-                            );
-                            // 期望态指纹:OutOfDate 检测的地基 —— 当前文件 hash ≠
-                            // 记录 hash 时,UI 能判"期望态已改、尚未收敛"。
-                            rec.blueprint_sha256 = file_sha(path);
-                            rec.inventory_sha256 =
-                                target.inventory.as_deref().and_then(file_sha);
-                            if let Some(prev) = &previous {
-                                rec.applied_at = prev.applied_at; // 首次部署时间不该被刷新
-                            }
-                            if let Err(e) = store.save(&rec) {
-                                oops!("(记账失败,不影响本次部署:{e})");
-                            }
-                            // 两类不该算进"没达成",理由不同:
-                            //
-                            // - **自定义类型**:舞在逐台循环之后才跳,此刻本就
-                            //   还没弥合,当成收敛失败是吓人。
-                            // - **`Unknown`**:那是"判不出",不是"没达成"
-                            //   (D-135)。物料没声明 sha256 又没有闭包时,复观察
-                            //   照样说不清 —— 而此时文件**已经正确地放好了**。
-                            //   真机上的表现是:`changed=1` 紧跟着一句"仍有 1 项
-                            //   未达期望态",而目标机上那个二进制明明是对的。
-                            //   D-135 把"判不出 ≠ 一致"说清了,这里漏的是它的
-                            //   另一半:**判不出 ≠ 没达成**。
-                            let stuck = after
-                                .changing()
-                                .filter(|i| bp.custom_type(&i.ty).is_none())
-                                .filter(|i| !matches!(i.change, crater_ir::verbs::Change::Unknown(_)))
-                                .count();
-                            if stuck > 0 {
-                                say!("注意:收敛后仍有 {stuck} 项未达期望态 —— 见上方 plan");
-                            }
-                            // 说不清的单独说一句 —— 它既不是成功也不是失败,
-                            // 混进上面那句会让人以为部署坏了,只字不提又会让
-                            // "其实没验过"变成隐形的。
-                            let unsure = after
-                                .changing()
-                                .filter(|i| matches!(i.change, crater_ir::verbs::Change::Unknown(_)))
-                                .count();
-                            if unsure > 0 {
-                                say!("({unsure} 项收敛后仍判不出 —— 已按计划执行,只是无从复核)");
-                            }
-                        }
-                        Err(e) => oops!("(收敛后复观察失败:{e})"),
-                    }
-                }
-                Err(e) => {
-                    failures += 1;
-                    for item in &plan.items {
-                        note(&mut mx_rows, &mut mx_label, &mut mx, &host.name,
-                             &item.id, &item.label(), '✗');
-                    }
-                    recap.push((
-                        host.name.clone(),
-                        Tally { failed: 1, ..Default::default() },
-                    ));
-                    oops!("执行失败 —— {e}");
-                    crate::events::emit(serde_json::json!({
-                        "e": "host_done", "host": host.name, "result": "failed",
-                        "detail": format!("{e:#}"),
-                    }));
-                    continue;
-                }
-            }
-            crate::events::emit(serde_json::json!({
-                "e": "host_done", "host": host.name, "result": "ok",
-            }));
-        } else {
-            for item in &plan.items {
-                note(&mut mx_rows, &mut mx_label, &mut mx, &host.name,
-                     &item.id, &item.label(), item.change.sigil());
-            }
-            // plan 不执行,但"有几项已符合"是它算出来的结论,该报。
-            recap.push((
-                host.name.clone(),
-                Tally {
-                    ok: plan.items.iter()
-                        .filter(|i| matches!(i.change, crater_ir::verbs::Change::Ok))
-                        .count(),
-                    changed: plan.items.iter()
-                        .filter(|i| !matches!(i.change, crater_ir::verbs::Change::Ok))
-                        .count(),
-                    ..Default::default()
-                },
-            ));
-            crate::events::emit(serde_json::json!({
-                "e": "host_done", "host": host.name, "result": "planned",
-            }));
         }
-    }
-    // 这一批出事就停 —— 滚动的意义正在于此:出事时还剩大半个机群是好的。
-    // 继续推下去,等于把一个已知会失败的变更铺满全场。
-    if failures > batch_fail_before && bi + 1 < n_batches {
-        crate::out::leave();
-        oops!(
-            "批次 {}/{} 有 {} 处失败 —— 停止滚动,剩余 {} 批未执行",
-            bi + 1,
-            n_batches,
-            failures - batch_fail_before,
-            n_batches - bi - 1
-        );
-        break 'outer;
-    }
+        // 这一批出事就停 —— 滚动的意义正在于此:出事时还剩大半个机群是好的。
+        // 继续推下去,等于把一个已知会失败的变更铺满全场。
+        if failures > batch_fail_before && bi + 1 < n_batches {
+            crate::out::leave();
+            oops!(
+                "批次 {}/{} 有 {} 处失败 —— 停止滚动,剩余 {} 批未执行",
+                bi + 1,
+                n_batches,
+                failures - batch_fail_before,
+                n_batches - bi - 1
+            );
+            break 'outer;
+        }
     }
     // 机群汇总。逐台的 `执行:...` 散在几百行中间,五台跑完拼不出全貌 ——
     // 这一段就是 ansible 的 PLAY RECAP 干的事。
@@ -807,7 +909,12 @@ async fn run_on_targets(
 
     if recap.len() > 1 {
         say!("── 汇总 ──");
-        let w = recap.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0).max(8);
+        let w = recap
+            .iter()
+            .map(|(n, _)| n.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(8);
         for (name, t) in &recap {
             // 固定列、恒定出现(哪怕是 0)—— 只在非零时才印的计数器,
             // 会让"这次没有失败"和"这个字段忘了统计"看起来一模一样。
@@ -818,7 +925,11 @@ async fn run_on_targets(
                 t.changed,
                 t.warn,
                 t.failed,
-                if mode == Mode::Verify { format!(" drifted={}", t.drifted) } else { String::new() },
+                if mode == Mode::Verify {
+                    format!(" drifted={}", t.drifted)
+                } else {
+                    String::new()
+                },
                 w = w
             );
         }
@@ -856,7 +967,11 @@ async fn run_on_targets(
         bail!(
             "{failures}/{} 台目标{}",
             hosts.len(),
-            if mode == Mode::Verify { "未通过核对" } else { "执行失败" }
+            if mode == Mode::Verify {
+                "未通过核对"
+            } else {
+                "执行失败"
+            }
         );
     }
     Ok(())
@@ -882,12 +997,18 @@ async fn equip_scope(
     // 派生事实多半要调探针函数,所以 prober 必须先就位。
     let probe_ctx: std::sync::Arc<dyn Ctx> = build_transport(host).await?.into();
     scope.prober = Some(std::sync::Arc::new(move |cmd: &str| {
-        probe_ctx.probe(cmd).map(|(_code, out)| out).map_err(|e| e.to_string())
+        probe_ctx
+            .probe(cmd)
+            .map(|(_code, out)| out)
+            .map_err(|e| e.to_string())
     }));
     // 在事实探全之后求值一次,逐台各算各的 —— 网卡名本就因机而异。
     for (name, expr) in &bp.facts {
         let v = scope.eval(expr).map_err(|e| {
-            anyhow::anyhow!("{}:派生事实 `facts.{name}` 求值失败 —— {e}", host_label(host))
+            anyhow::anyhow!(
+                "{}:派生事实 `facts.{name}` 求值失败 —— {e}",
+                host_label(host)
+            )
         })?;
         scope.facts.insert(name.clone(), v);
     }
@@ -901,7 +1022,10 @@ async fn build_transport(host: &Host) -> Result<Box<dyn Ctx>> {
     let exec = connect_executor(host, true)
         .await
         .with_context(|| format!("连接 {}", host_label(host)))?;
-    Ok(Box::new(RemoteCtx { exec, rt: tokio::runtime::Handle::current() }))
+    Ok(Box::new(RemoteCtx {
+        exec,
+        rt: tokio::runtime::Handle::current(),
+    }))
 }
 
 /// 报出这台机器实际会用到的闭包 —— air-gap 场景下这就是"要带走什么"的清单。
@@ -949,7 +1073,9 @@ fn report_closure(bp: &Blueprint, scope: &plan::Scope) {
 /// 逐台执行要等最后一台跑完,才会发现第三步早在第二台上就炸了 —— 而那时
 /// 第一台已经被改完了。
 async fn run_linear(rc: &RunCtx<'_>, hosts: &[Host], store: &FileStore) -> Result<()> {
-    let RunCtx { bp, path, target, .. } = *rc;
+    let RunCtx {
+        bp, path, target, ..
+    } = *rc;
     use crater_ir::verbs::Outcome as O;
 
     crate::out::fleet(&hosts.iter().map(|h| h.name.clone()).collect::<Vec<_>>());
@@ -958,7 +1084,11 @@ async fn run_linear(rc: &RunCtx<'_>, hosts: &[Host], store: &FileStore) -> Resul
         "blueprint {} —— 逐资源执行(linear),{} 台目标{}",
         bp.name,
         hosts.len(),
-        if batches.len() > 1 { format!(",分 {} 批", batches.len()) } else { String::new() }
+        if batches.len() > 1 {
+            format!(",分 {} 批", batches.len())
+        } else {
+            String::new()
+        }
     );
 
     let n_batches = batches.len();
@@ -969,175 +1099,186 @@ async fn run_linear(rc: &RunCtx<'_>, hosts: &[Host], store: &FileStore) -> Resul
     let mut dances: BTreeSet<String> = Default::default();
 
     'batches: for (bi, hosts) in batches.iter().enumerate() {
-    if n_batches > 1 {
-        crate::out::leave();
-        say!(
-            "── 批次 {}/{}({})──",
-            bi + 1,
-            n_batches,
-            hosts.iter().map(|h| h.name.as_str()).collect::<Vec<_>>().join(", ")
-        );
-    }
-    let batch_fail_before = failures;
-    // 只连**这一批** —— 滚动的前提是没轮到的机器一根手指都不碰。
-    let targets = connect_fleet(rc, hosts).await?;
+        if n_batches > 1 {
+            crate::out::leave();
+            say!(
+                "── 批次 {}/{}({})──",
+                bi + 1,
+                n_batches,
+                hosts
+                    .iter()
+                    .map(|h| h.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        let batch_fail_before = failures;
+        // 只连**这一批** —— 滚动的前提是没轮到的机器一根手指都不碰。
+        let targets = connect_fleet(rc, hosts).await?;
 
-    // 每台各求各的计划:资源集合可以不同(选择器 / when / each)。
-    let mut plans: BTreeMap<String, plan::Plan> = BTreeMap::new();
-    for host in hosts {
-        let name = fleet_name(host);
-        let sc = targets.scope(&name)?;
-        let p = plan::plan(bp, &sc, targets.ctx(&name)?)
-            .with_context(|| format!("{}:对 {} 求计划", host_label(host), path.display()))?;
-        plans.insert(name, p);
-    }
+        // 每台各求各的计划:资源集合可以不同(选择器 / when / each)。
+        let mut plans: BTreeMap<String, plan::Plan> = BTreeMap::new();
+        for host in hosts {
+            let name = fleet_name(host);
+            let sc = targets.scope(&name)?;
+            let p = plan::plan(bp, &sc, targets.ctx(&name)?)
+                .with_context(|| format!("{}:对 {} 求计划", host_label(host), path.display()))?;
+            plans.insert(name, p);
+        }
 
-    // 资源顺序取**各台计划的并集**,按首现次序 —— 蓝图里的书写顺序即依赖顺序,
-    // 而某台可能没有其中几项(选择器没选中),不能拿任意一台的计划当全集。
-    let mut order: Vec<String> = Vec::new();
-    let mut labels: BTreeMap<String, String> = BTreeMap::new();
-    for host in hosts {
-        for item in &plans[&fleet_name(host)].items {
-            if !labels.contains_key(&item.id) {
-                order.push(item.id.clone());
-                labels.insert(item.id.clone(), item.label());
+        // 资源顺序取**各台计划的并集**,按首现次序 —— 蓝图里的书写顺序即依赖顺序,
+        // 而某台可能没有其中几项(选择器没选中),不能拿任意一台的计划当全集。
+        let mut order: Vec<String> = Vec::new();
+        let mut labels: BTreeMap<String, String> = BTreeMap::new();
+        for host in hosts {
+            for item in &plans[&fleet_name(host)].items {
+                if !labels.contains_key(&item.id) {
+                    order.push(item.id.clone());
+                    labels.insert(item.id.clone(), item.label());
+                }
             }
         }
-    }
 
-    let mut upstream: BTreeMap<String, bool> = hosts.iter().map(|h| (fleet_name(h), false)).collect();
-    // 某台失败后就把它摘出去,后续资源不再对它下手 —— 与 ansible 一致:
-    // 在一台半坏的机器上继续往下做,只会把故障现场搅得更难查。
-    let mut down: BTreeSet<String> = BTreeSet::new();
-    let mut outcomes: BTreeMap<String, BTreeMap<String, char>> = BTreeMap::new();
+        let mut upstream: BTreeMap<String, bool> =
+            hosts.iter().map(|h| (fleet_name(h), false)).collect();
+        // 某台失败后就把它摘出去,后续资源不再对它下手 —— 与 ansible 一致:
+        // 在一台半坏的机器上继续往下做,只会把故障现场搅得更难查。
+        let mut down: BTreeSet<String> = BTreeSet::new();
+        let mut outcomes: BTreeMap<String, BTreeMap<String, char>> = BTreeMap::new();
 
-    for id in &order {
-        let label = &labels[id];
-        let mut row: BTreeMap<String, char> = BTreeMap::new();
-        let mut n_changed = 0usize;
-        let mut n_ok = 0usize;
-        let mut n_fail = 0usize;
+        for id in &order {
+            let label = &labels[id];
+            let mut row: BTreeMap<String, char> = BTreeMap::new();
+            let mut n_changed = 0usize;
+            let mut n_ok = 0usize;
+            let mut n_fail = 0usize;
+            for host in hosts {
+                let name = fleet_name(host);
+                if down.contains(&name) {
+                    row.insert(name, '✗');
+                    continue;
+                }
+                let Some(item) = plans[&name].items.iter().find(|i| &i.id == id) else {
+                    // 这台没有这一项 —— 选择器没选中它。等价于 ansible 的 skipping。
+                    row.insert(name, '·');
+                    continue;
+                };
+                crate::out::enter(&name);
+                if let Some(def) = bp.custom_type(&item.ty) {
+                    if !matches!(item.change, crater_ir::verbs::Change::Ok) {
+                        dances.insert(def.apply.clone());
+                    }
+                    say!("  warn    {label}(自定义类型,交给机群级 procedure)");
+                    row.insert(name, '!');
+                    continue;
+                }
+                match plan::converge_item(bp, targets.ctx(&name)?, item, upstream[&name]) {
+                    Ok((oc, changed)) => {
+                        if changed {
+                            upstream.insert(name.clone(), true);
+                        }
+                        let (tag, c) = match oc {
+                            O::Ok => ("ok     ", '✓'),
+                            O::Changed => ("changed", '~'),
+                            O::Warn => ("warn   ", '!'),
+                        };
+                        match oc {
+                            O::Changed => n_changed += 1,
+                            O::Ok => n_ok += 1,
+                            O::Warn => {}
+                        }
+                        say!("  {tag} {label}");
+                        row.insert(name, c);
+                    }
+                    Err(e) => {
+                        n_fail += 1;
+                        failures += 1;
+                        oops!("failed  {label} —— {e}");
+                        row.insert(name.clone(), '✗');
+                        down.insert(name);
+                    }
+                }
+            }
+            crate::out::leave();
+            // **每个资源做完立刻给全机群的结论** —— 这正是逐台执行给不了的那句话。
+            say!(
+                "→ {label}:changed={n_changed} ok={n_ok} failed={n_fail}{}",
+                if down.is_empty() {
+                    String::new()
+                } else {
+                    format!(",已摘除 {} 台", down.len())
+                }
+            );
+            outcomes.insert(id.clone(), row);
+            if !down.is_empty() && down.len() == hosts.len() {
+                oops!("全部目标已失败,中止");
+                break;
+            }
+        }
+        say!();
+
+        // 记账:收敛后**重新观察**,记的是现实不是意图(与逐台路径同一条纪律)。
         for host in hosts {
             let name = fleet_name(host);
             if down.contains(&name) {
-                row.insert(name, '✗');
                 continue;
             }
-            let Some(item) = plans[&name].items.iter().find(|i| &i.id == id) else {
-                // 这台没有这一项 —— 选择器没选中它。等价于 ansible 的 skipping。
-                row.insert(name, '·');
-                continue;
-            };
-            crate::out::enter(&name);
-            if let Some(def) = bp.custom_type(&item.ty) {
-                if !matches!(item.change, crater_ir::verbs::Change::Ok) {
-                    dances.insert(def.apply.clone());
+            let sc = targets.scope(&name)?;
+            if let Ok(after) = plan::plan(bp, &sc, targets.ctx(&name)?) {
+                let mut rec =
+                    DeploymentRecord::from_plan(&bp.name, bp.version.as_deref(), &name, &after);
+                rec.blueprint_sha256 = file_sha(path);
+                rec.inventory_sha256 = target.inventory.as_deref().and_then(file_sha);
+                if let Ok(Some(prev)) = store.load(&rec.id) {
+                    rec.applied_at = prev.applied_at;
                 }
-                say!("  warn    {label}(自定义类型,交给机群级 procedure)");
-                row.insert(name, '!');
-                continue;
+                if let Err(e) = store.save(&rec) {
+                    oops!("(记账失败,不影响本次部署:{e})");
+                }
             }
-            match plan::converge_item(bp, targets.ctx(&name)?, item, upstream[&name]) {
-                Ok((oc, changed)) => {
-                    if changed {
-                        upstream.insert(name.clone(), true);
+        }
+
+        // 机群级的舞:**每批跑完就跳自己这一批的**(顺序不变:资源先就位再跳舞)。
+        //
+        // 分批时这一步只握着本批的连接 —— 如果某支舞要靠别批机器的 exports,
+        // 它会在这里明确失败,而不是拿到半个机群的事实悄悄算错。
+        if !dances.is_empty() && failures == batch_fail_before {
+            for name in &dances {
+                say!("── procedure {name} ──");
+                match procedure::run(bp, name, &targets, &BTreeMap::new()) {
+                    Ok(r) => print_proc_report(&r),
+                    Err(e) => {
+                        failures += 1;
+                        oops!("procedure {name} 失败 —— {e}");
                     }
-                    let (tag, c) = match oc {
-                        O::Ok => ("ok     ", '✓'),
-                        O::Changed => ("changed", '~'),
-                        O::Warn => ("warn   ", '!'),
-                    };
-                    match oc {
-                        O::Changed => n_changed += 1,
-                        O::Ok => n_ok += 1,
-                        O::Warn => {}
-                    }
-                    say!("  {tag} {label}");
-                    row.insert(name, c);
-                }
-                Err(e) => {
-                    n_fail += 1;
-                    failures += 1;
-                    oops!("failed  {label} —— {e}");
-                    row.insert(name.clone(), '✗');
-                    down.insert(name);
                 }
             }
+            dances.clear();
         }
-        crate::out::leave();
-        // **每个资源做完立刻给全机群的结论** —— 这正是逐台执行给不了的那句话。
-        say!(
-            "→ {label}:changed={n_changed} ok={n_ok} failed={n_fail}{}",
-            if down.is_empty() { String::new() } else { format!(",已摘除 {} 台", down.len()) }
-        );
-        outcomes.insert(id.clone(), row);
-        if !down.is_empty() && down.len() == hosts.len() {
-            oops!("全部目标已失败,中止");
-            break;
-        }
-    }
-    say!();
 
-    // 记账:收敛后**重新观察**,记的是现实不是意图(与逐台路径同一条纪律)。
-    for host in hosts {
-        let name = fleet_name(host);
-        if down.contains(&name) {
-            continue;
-        }
-        let sc = targets.scope(&name)?;
-        if let Ok(after) = plan::plan(bp, &sc, targets.ctx(&name)?) {
-            let mut rec = DeploymentRecord::from_plan(&bp.name, bp.version.as_deref(), &name, &after);
-            rec.blueprint_sha256 = file_sha(path);
-            rec.inventory_sha256 = target.inventory.as_deref().and_then(file_sha);
-            if let Ok(Some(prev)) = store.load(&rec.id) {
-                rec.applied_at = prev.applied_at;
+        // 本批结果并入总表(矩阵与退出码是全局的)。
+        for id in &order {
+            if !all_labels.contains_key(id) {
+                all_order.push(id.clone());
+                all_labels.insert(id.clone(), labels[id].clone());
             }
-            if let Err(e) = store.save(&rec) {
-                oops!("(记账失败,不影响本次部署:{e})");
-            }
+            all_cells
+                .entry(id.clone())
+                .or_default()
+                .extend(outcomes.get(id).cloned().unwrap_or_default());
         }
-    }
 
-    // 机群级的舞:**每批跑完就跳自己这一批的**(顺序不变:资源先就位再跳舞)。
-    //
-    // 分批时这一步只握着本批的连接 —— 如果某支舞要靠别批机器的 exports,
-    // 它会在这里明确失败,而不是拿到半个机群的事实悄悄算错。
-    if !dances.is_empty() && failures == batch_fail_before {
-        for name in &dances {
-            say!("── procedure {name} ──");
-            match procedure::run(bp, name, &targets, &BTreeMap::new()) {
-                Ok(r) => print_proc_report(&r),
-                Err(e) => {
-                    failures += 1;
-                    oops!("procedure {name} 失败 —— {e}");
-                }
-            }
+        if failures > batch_fail_before && bi + 1 < n_batches {
+            crate::out::leave();
+            oops!(
+                "批次 {}/{} 有 {} 处失败 —— 停止滚动,剩余 {} 批未执行",
+                bi + 1,
+                n_batches,
+                failures - batch_fail_before,
+                n_batches - bi - 1
+            );
+            break 'batches;
         }
-        dances.clear();
-    }
-
-    // 本批结果并入总表(矩阵与退出码是全局的)。
-    for id in &order {
-        if !all_labels.contains_key(id) {
-            all_order.push(id.clone());
-            all_labels.insert(id.clone(), labels[id].clone());
-        }
-        all_cells.entry(id.clone()).or_default().extend(
-            outcomes.get(id).cloned().unwrap_or_default(),
-        );
-    }
-
-    if failures > batch_fail_before && bi + 1 < n_batches {
-        crate::out::leave();
-        oops!(
-            "批次 {}/{} 有 {} 处失败 —— 停止滚动,剩余 {} 批未执行",
-            bi + 1,
-            n_batches,
-            failures - batch_fail_before,
-            n_batches - bi - 1
-        );
-        break 'batches;
-    }
     }
 
     let names: Vec<String> = batches.iter().flatten().map(fleet_name).collect();
@@ -1161,7 +1302,12 @@ fn print_matrix(
 ) {
     const LABEL_MAX: usize = 38;
     // 列宽 = 主机名宽(至少 3,给记号留位置)。
-    let colw = hosts.iter().map(|h| h.chars().count()).max().unwrap_or(3).max(3);
+    let colw = hosts
+        .iter()
+        .map(|h| h.chars().count())
+        .max()
+        .unwrap_or(3)
+        .max(3);
     let labw = rows
         .iter()
         .map(|id| labels.get(id).map(|l| l.chars().count()).unwrap_or(0))
@@ -1190,7 +1336,12 @@ fn print_matrix(
                 .iter()
                 .map(|h| format!("{}{}", row.get(h.as_str()).copied().unwrap_or('·'), h))
                 .collect();
-            say!("  {:<labw$}  {}", elide_label(labels, id, LABEL_MAX), names.join(" "), labw = labw);
+            say!(
+                "  {:<labw$}  {}",
+                elide_label(labels, id, LABEL_MAX),
+                names.join(" "),
+                labw = labw
+            );
         }
         if !any {
             say!("  ({} 台全部符合期望态)", hosts.len());
@@ -1210,7 +1361,12 @@ fn print_matrix(
             // 而此前它在输出里完全不可见。
             .map(|h| format!("{:>colw$} ", row.get(h).copied().unwrap_or('·')))
             .collect();
-        say!("  {:<labw$}  {}", elide_label(labels, id, LABEL_MAX), line.trim_end(), labw = labw);
+        say!(
+            "  {:<labw$}  {}",
+            elide_label(labels, id, LABEL_MAX),
+            line.trim_end(),
+            labw = labw
+        );
     }
     say!();
 }
@@ -1285,7 +1441,15 @@ struct RunCtx<'a> {
 
 /// 把整个机群连起来 —— 舞开始之后才发现某台连不上,是最糟的失败时机。
 async fn connect_fleet<'a>(rc: &RunCtx<'a>, hosts: &'a [Host]) -> Result<FleetTargets<'a>> {
-    let RunCtx { bp, fleet, overrides, path, target, blobs, images } = *rc;
+    let RunCtx {
+        bp,
+        fleet,
+        overrides,
+        path,
+        target,
+        blobs,
+        images,
+    } = *rc;
     // 五处调用点原本都传 `&base_dir(path)` 与 `target.parallel`,一字不差 ——
     // 与其让每处各抄一遍,不如就在这里算。
     let base = base_dir(path);
@@ -1308,12 +1472,23 @@ async fn connect_fleet<'a>(rc: &RunCtx<'a>, hosts: &'a [Host]) -> Result<FleetTa
         equip_scope(bp, host, &mut scope).await?;
         ctxs.insert(
             name.clone(),
-            MaterialCtx::new(transport, bp, scope.clone(), blobs.clone(), base.to_path_buf())
-                .with_images(images.clone()),
+            MaterialCtx::new(
+                transport,
+                bp,
+                scope.clone(),
+                blobs.clone(),
+                base.to_path_buf(),
+            )
+            .with_images(images.clone()),
         );
         scopes.insert(name, scope);
     }
-    Ok(FleetTargets { fleet: fleet.clone(), ctxs, scopes, parallel: parallel.max(1) })
+    Ok(FleetTargets {
+        fleet: fleet.clone(),
+        ctxs,
+        scopes,
+        parallel: parallel.max(1),
+    })
 }
 
 fn print_proc_report(report: &procedure::ProcReport) {
@@ -1393,10 +1568,21 @@ pub async fn run_procedure(
     let fleet = build_fleet(&hosts, target.declared_groups());
     enforce_contract(&bp, &fleet)?;
     let (_blob_src, blobs, images) = open_closure(target)?;
-    let rc = RunCtx { bp: &bp, fleet: &fleet, overrides: &overrides, path, target, blobs: &blobs, images: &images };
+    let rc = RunCtx {
+        bp: &bp,
+        fleet: &fleet,
+        overrides: &overrides,
+        path,
+        target,
+        blobs: &blobs,
+        images: &images,
+    };
     let targets = connect_fleet(&rc, &hosts).await?;
 
-    say!("procedure {proc_name} —— {} 台目标\n", targets.fleet.members.len());
+    say!(
+        "procedure {proc_name} —— {} 台目标\n",
+        targets.fleet.members.len()
+    );
     // `--set` 既是 deploy 期参数覆盖,也是过程参数(`--set to=1.37.0`)。
     let args: BTreeMap<String, Yaml> = overrides.iter().cloned().collect();
     let report = procedure::run(&bp, proc_name, &targets, &args)?;
@@ -1475,14 +1661,21 @@ fn open_closure(
     let blobs = crate::blob_source::blob_map(src.as_ref())?;
     // 没给 `--closure` 就一个字不印:那不是"空闭包",是压根没有闭包。
     if target.closure.is_some() {
-        let imgs =
-            if images.is_empty() { String::new() } else { format!(",{} 个镜像", images.len()) };
+        let imgs = if images.is_empty() {
+            String::new()
+        } else {
+            format!(",{} 个镜像", images.len())
+        };
         // 两条来源统一成同一个排版。重构前它们差一个空格(路径后有、
         // `(包内物料)` 后没有),而重构版本一度用 `origin.ends_with(')')`
         // 去还原那点差异 —— 那是拿"以右括号结尾"当代理判据,一个叫
         // `k8s(1).tar` 的闭包会**静默少一个空格**。为保住一处纯装饰性的
         // 不一致背一颗地雷,不划算:这里接受 oci 那行多一个空格。
-        say!("离线闭包 {} —— {} 份物料{imgs}已备好\n", src.origin(), blobs.len());
+        say!(
+            "离线闭包 {} —— {} 份物料{imgs}已备好\n",
+            src.origin(),
+            blobs.len()
+        );
     }
     Ok((src, blobs, images))
 }
@@ -1521,12 +1714,18 @@ async fn run_preflight(rc: &RunCtx<'_>, hosts: &[crater_core::spec::Host]) -> Re
                 Ok(false) => bad.push(format!(
                     "{}:{}",
                     m.name,
-                    a.msg.clone().unwrap_or_else(|| format!("`{}` 不成立", a.expr.src()))
+                    a.msg
+                        .clone()
+                        .unwrap_or_else(|| format!("`{}` 不成立", a.expr.src()))
                 )),
                 // 求值本身出错(引用了不存在的变量、探针函数没实现)**不等于**
                 // 断言为假 —— 混为一谈会让"写错的断言"看起来像"环境不满足",
                 // 而这两者的修法完全不同。
-                Err(e) => bad.push(format!("{}:断言 `{}` 求值失败 —— {e}", m.name, a.expr.src())),
+                Err(e) => bad.push(format!(
+                    "{}:断言 `{}` 求值失败 —— {e}",
+                    m.name,
+                    a.expr.src()
+                )),
             }
         }
     }
@@ -1539,7 +1738,11 @@ async fn run_preflight(rc: &RunCtx<'_>, hosts: &[crater_core::spec::Host]) -> Re
             bad.len()
         );
     }
-    say!("preflight ✓ {} 条断言,{} 台机器全部满足\n", bp.preflight.len(), targets.fleet.members.len());
+    say!(
+        "preflight ✓ {} 条断言,{} 台机器全部满足\n",
+        bp.preflight.len(),
+        targets.fleet.members.len()
+    );
     Ok(())
 }
 
@@ -1548,7 +1751,11 @@ async fn run_preflight(rc: &RunCtx<'_>, hosts: &[crater_core::spec::Host]) -> Re
 /// 报全部不满足项而不是第一条 —— 修 inventory 的人应当一趟改完。
 fn enforce_contract(bp: &crater_ir::ir::Blueprint, fleet: &Fleet) -> Result<()> {
     if let Err(errs) = fleet.check_contract(&bp.fleet) {
-        let body = errs.iter().map(|e| format!("  · {e}")).collect::<Vec<_>>().join("\n");
+        let body = errs
+            .iter()
+            .map(|e| format!("  · {e}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         anyhow::bail!(
             "inventory 不满足蓝图 `{}` 的机群契约:\n{body}\n\n(契约写在蓝图的 `fleet.groups:`)",
             bp.name
@@ -1601,7 +1808,11 @@ pub(crate) fn load(path: &Path) -> Result<Blueprint> {
         for d in &errs {
             oops!("  {d}");
         }
-        bail!("{} 有 {} 处 lint error,先修再 plan", path.display(), errs.len());
+        bail!(
+            "{} 有 {} 处 lint error,先修再 plan",
+            path.display(),
+            errs.len()
+        );
     }
     Ok(bp)
 }
@@ -1694,7 +1905,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod remote_ctx_tests {
     use super::*;
@@ -1710,7 +1920,11 @@ mod remote_ctx_tests {
     impl Executor for MockExec {
         async fn run(&self, cmd: &str) -> crater_core::Result<CmdOutput> {
             self.seen.lock().unwrap().push(cmd.to_string());
-            Ok(CmdOutput { code: 0, stdout: format!("ran:{cmd}"), stderr: String::new() })
+            Ok(CmdOutput {
+                code: 0,
+                stdout: format!("ran:{cmd}"),
+                stderr: String::new(),
+            })
         }
         fn label(&self) -> &str {
             "mock"
@@ -1722,7 +1936,10 @@ mod remote_ctx_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sync_ctx_bridges_onto_the_async_executor() {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let ctx = RemoteCtx { exec: Box::new(MockExec { seen: seen.clone() }), rt: tokio::runtime::Handle::current() };
+        let ctx = RemoteCtx {
+            exec: Box::new(MockExec { seen: seen.clone() }),
+            rt: tokio::runtime::Handle::current(),
+        };
 
         let (code, out) = ctx.probe("stat -c '%a' /etc").unwrap();
         assert_eq!(code, 0);
@@ -1766,13 +1983,20 @@ mod remote_ctx_tests {
         #[async_trait::async_trait]
         impl Executor for Noisy {
             async fn run(&self, _cmd: &str) -> crater_core::Result<CmdOutput> {
-                Ok(CmdOutput { code: 7, stdout: "out".into(), stderr: "boom".into() })
+                Ok(CmdOutput {
+                    code: 7,
+                    stdout: "out".into(),
+                    stderr: "boom".into(),
+                })
             }
             fn label(&self) -> &str {
                 "noisy"
             }
         }
-        let ctx = RemoteCtx { exec: Box::new(Noisy), rt: tokio::runtime::Handle::current() };
+        let ctx = RemoteCtx {
+            exec: Box::new(Noisy),
+            rt: tokio::runtime::Handle::current(),
+        };
         let (code, text) = ctx.run("whatever").unwrap();
         assert_eq!(code, 7);
         // 失败诊断全靠 stderr —— 丢了它,run_ok 的报错就成了空壳。
@@ -1783,7 +2007,12 @@ mod remote_ctx_tests {
     async fn the_bare_transport_refuses_to_resolve_materials() {
         // 分层纪律:传输层只管"把命令送到目标",不知道"物料"是什么。
         // 物料解析由 MaterialCtx 包在外层 —— 裸传输层被直接调用即是内部错误。
-        let ctx = RemoteCtx { exec: Box::new(MockExec { seen: Default::default() }), rt: tokio::runtime::Handle::current() };
+        let ctx = RemoteCtx {
+            exec: Box::new(MockExec {
+                seen: Default::default(),
+            }),
+            rt: tokio::runtime::Handle::current(),
+        };
         let err = ctx
             .place_material("rustfs-bin", "/usr/local/bin/rustfs")
             .unwrap_err()

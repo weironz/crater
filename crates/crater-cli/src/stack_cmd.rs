@@ -34,8 +34,8 @@ pub async fn run(path: &Path, target: &TargetOpts, sets: &[String], mode: StackM
     // 先把引用全部解析掉。少一份蓝图这种错,不该等到第三步才暴露。
     let mut entries = Vec::new();
     for u in &st.uses {
-        let bp_path = stack::resolve_ref(&u.blueprint, &dir)
-            .with_context(|| format!("栈 `{}`", st.name))?;
+        let bp_path =
+            stack::resolve_ref(&u.blueprint, &dir).with_context(|| format!("栈 `{}`", st.name))?;
         entries.push((u, bp_path));
     }
 
@@ -50,7 +50,11 @@ pub async fn run(path: &Path, target: &TargetOpts, sets: &[String], mode: StackM
         println!("══ [{}/{}] {} ══", i + 1, entries.len(), u.label());
         let lens = Lens {
             groups: u.groups.clone(),
-            params: u.params.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            params: u
+                .params
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         };
         let r = blueprint::run_lensed(bp_path, target, sets, mode, &lens).await;
         match r {
@@ -59,7 +63,10 @@ pub async fn run(path: &Path, target: &TargetOpts, sets: &[String], mode: StackM
             // 第一处漂移就中止,等于告诉运维"后面的我没看"。
             // apply 则相反,失败即停:栈有序,containerd 没装上,k8s 装了也不会好。
             Err(e) if mode == StackMode::Verify => {
-                eprintln!("蓝图 `{}` 核对未通过 —— {e:#}\n(继续核对其余蓝图)\n", u.label());
+                eprintln!(
+                    "蓝图 `{}` 核对未通过 —— {e:#}\n(继续核对其余蓝图)\n",
+                    u.label()
+                );
                 verify_failures.push(u.label().to_string());
             }
             Err(e) => {
@@ -110,20 +117,35 @@ pub async fn destroy(path: &Path, target: &TargetOpts, sets: &[String], yes: boo
         "栈 `{}` —— {} 份蓝图,{}(逆序:{})\n",
         st.name,
         entries.len(),
-        if yes { "将逐个退役" } else { "退役预演" },
-        entries.iter().map(|(u, _)| u.label()).collect::<Vec<_>>().join(" → ")
+        if yes {
+            "将逐个退役"
+        } else {
+            "退役预演"
+        },
+        entries
+            .iter()
+            .map(|(u, _)| u.label())
+            .collect::<Vec<_>>()
+            .join(" → ")
     );
 
     for (i, (u, bp_path)) in entries.iter().enumerate() {
         println!("══ [{}/{}] {} ══", i + 1, entries.len(), u.label());
         let lens = Lens {
             groups: u.groups.clone(),
-            params: u.params.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            params: u
+                .params
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         };
         // 退役**不**在失败处停:一份拆不掉不该让其余的继续留在机器上。
         // 与 apply 的"失败即停"相反,因为方向反了 —— 半拆的栈比全拆的栈更糟。
         if let Err(e) = blueprint::destroy_lensed(bp_path, target, sets, yes, &lens).await {
-            eprintln!("蓝图 `{}` 退役失败 —— {e:#}\n(继续退役其余蓝图)\n", u.label());
+            eprintln!(
+                "蓝图 `{}` 退役失败 —— {e:#}\n(继续退役其余蓝图)\n",
+                u.label()
+            );
         }
         println!();
     }
@@ -145,7 +167,10 @@ pub fn lint(path: &Path) -> Result<Stack> {
         // 而"静默失效的参数"是配置类 bug 里最难查的一种。
         for name in u.params.keys() {
             if !bp.params.contains_key(name) {
-                let hint = closest(name, &bp.params.keys().map(String::as_str).collect::<Vec<_>>());
+                let hint = closest(
+                    name,
+                    &bp.params.keys().map(String::as_str).collect::<Vec<_>>(),
+                );
                 anyhow::bail!(
                     "栈给蓝图 `{}` 传了参数 `{name}`,但它没有这个参数{}",
                     u.blueprint,
@@ -256,7 +281,9 @@ mod tests {
     fn a_missing_blueprint_is_caught_before_anything_runs() {
         let d = fixture();
         std::fs::remove_file(d.path().join("base.blueprint.yaml")).unwrap();
-        let err = lint(&d.path().join("s.stack.yaml")).unwrap_err().to_string();
+        let err = lint(&d.path().join("s.stack.yaml"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("base"), "{err}");
     }
 
@@ -265,7 +292,9 @@ mod tests {
         // 静默失效的参数是配置类 bug 里最难查的一种:一切正常,只是没生效。
         let d = fixture();
         let p = d.path().join("s.stack.yaml");
-        let s = std::fs::read_to_string(&p).unwrap().replace("ha: true", "h: true");
+        let s = std::fs::read_to_string(&p)
+            .unwrap()
+            .replace("ha: true", "h: true");
         std::fs::write(&p, s).unwrap();
         let err = lint(&p).unwrap_err().to_string();
         assert!(err.contains("是不是 `ha`"), "{err}");
@@ -300,9 +329,10 @@ mod tests {
         // 没写 fleet: 的蓝图不该因为进了栈就被要求补 fleet:。
         let d = fixture();
         let p = d.path().join("s.stack.yaml");
-        let s = std::fs::read_to_string(&p)
-            .unwrap()
-            .replace("  - blueprint: base", "  - blueprint: base\n    groups: { anything: x }");
+        let s = std::fs::read_to_string(&p).unwrap().replace(
+            "  - blueprint: base",
+            "  - blueprint: base\n    groups: { anything: x }",
+        );
         std::fs::write(&p, s).unwrap();
         assert!(lint(&p).is_ok());
     }

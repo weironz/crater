@@ -58,10 +58,16 @@ pub struct ProcReport {
 
 impl ProcReport {
     pub fn changed(&self) -> usize {
-        self.steps.iter().filter(|(_, _, o)| *o == Outcome::Changed).count()
+        self.steps
+            .iter()
+            .filter(|(_, _, o)| *o == Outcome::Changed)
+            .count()
     }
     pub fn ok(&self) -> usize {
-        self.steps.iter().filter(|(_, _, o)| *o == Outcome::Ok).count()
+        self.steps
+            .iter()
+            .filter(|(_, _, o)| *o == Outcome::Ok)
+            .count()
     }
     pub fn summary(&self) -> String {
         let mut s = format!("changed={} ok={}", self.changed(), self.ok());
@@ -173,7 +179,11 @@ fn run_step(
     let rt = crate::builtins::get(&step.ty)
         .ok_or_else(|| anyhow::anyhow!(where_(&format!("类型 `{}` 没有实现", step.ty))))?;
 
-    targets.note(&format!("     选中 {} 台:{}", members.len(), members.join(", ")));
+    targets.note(&format!(
+        "     选中 {} 台:{}",
+        members.len(),
+        members.join(", ")
+    ));
 
     // 一步之内多台机器互不相干,可以并发;**步骤之间**永远严格按序。
     // `throttle` 只往下压:护 etcd 那种"必须逐台 join"的约束,无论机群并发
@@ -255,7 +265,9 @@ fn run_member(
             Some(v) => base.with_item(v),
             None => base.clone(),
         };
-        let resolved = scope.resolve_args(&step.args).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let resolved = scope
+            .resolve_args(&step.args)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let ctx = targets.ctx(member)?;
 
         // 与资源同一套五动词:先 observe 再 diff —— 有 `check:` 的步骤因此天然幂等,
@@ -271,7 +283,8 @@ fn run_member(
             Change::Ok => Outcome::Ok,
             _ => attempt(rt, ctx, &resolved, &change, step)?,
         };
-        bag.steps.push((step.id.clone(), member.to_string(), outcome));
+        bag.steps
+            .push((step.id.clone(), member.to_string(), outcome));
     }
 
     // 导出 fact:在**产出它的那一步之后、那台机器上**取值。
@@ -397,7 +410,11 @@ pub fn observe_custom(def: &crate::ir::TypeDef, ctx: &dyn Ctx, scope: &Scope) ->
     let (code, out) = ctx.probe(&rendered)?;
     if def.observe.parse.is_empty() {
         // 没给映射就按退出码判定存在与否 —— 最常见的 `test -f …` 形态。
-        return Ok(if code == 0 { Observed::present([]) } else { Observed::absent() });
+        return Ok(if code == 0 {
+            Observed::present([])
+        } else {
+            Observed::absent()
+        });
     }
     // 有映射:输出里出现哪个标记,就置哪个字段。全都没出现 ⇒ 不存在。
     let mut fields = BTreeMap::new();
@@ -409,7 +426,10 @@ pub fn observe_custom(def: &crate::ir::TypeDef, ctx: &dyn Ctx, scope: &Scope) ->
     Ok(if fields.is_empty() {
         Observed::absent()
     } else {
-        Observed { present: true, fields }
+        Observed {
+            present: true,
+            fields,
+        }
     })
 }
 
@@ -430,13 +450,20 @@ pub(crate) mod tests {
     impl FakeTargets {
         pub(crate) fn new(members: Vec<(&str, Vec<&str>)>) -> Self {
             let fleet = Fleet::new(
-                members.iter().map(|(n, roles)| Member::new(*n, roles)).collect(),
+                members
+                    .iter()
+                    .map(|(n, roles)| Member::new(*n, roles))
+                    .collect(),
             );
             let ctxs = members
                 .iter()
                 .map(|(n, _)| (n.to_string(), FakeCtx::new().on("", 0, "")))
                 .collect();
-            FakeTargets { fleet, ctxs, parallel: 1 }
+            FakeTargets {
+                fleet,
+                ctxs,
+                parallel: 1,
+            }
         }
         pub(crate) fn parallel(mut self, n: usize) -> Self {
             self.parallel = n;
@@ -447,7 +474,11 @@ pub(crate) mod tests {
             self
         }
         fn calls_on(&self, member: &str) -> Vec<String> {
-            self.ctxs[member].calls().iter().map(|c| c.text().to_string()).collect()
+            self.ctxs[member]
+                .calls()
+                .iter()
+                .map(|c| c.text().to_string())
+                .collect()
         }
     }
 
@@ -508,7 +539,11 @@ resources:
         let blank = || {
             FakeCtx::new()
                 .on("test -f", 1, "")
-                .on("kubeadm token create", 0, "kubeadm join 10.0.0.1:6443 --token abc\n")
+                .on(
+                    "kubeadm token create",
+                    0,
+                    "kubeadm join 10.0.0.1:6443 --token abc\n",
+                )
                 .on("", 0, "")
         };
         FakeTargets::new(vec![
@@ -532,12 +567,24 @@ resources:
         // init 只在首台
         assert!(t.calls_on("n11").iter().any(|c| c == "kubeadm init"));
         for m in ["n12", "n13", "w01"] {
-            assert!(!t.calls_on(m).iter().any(|c| c == "kubeadm init"), "{m} 不该 init");
+            assert!(
+                !t.calls_on(m).iter().any(|c| c == "kubeadm init"),
+                "{m} 不该 init"
+            );
         }
         // 其余 master 走 control-plane join,worker 走普通 join
-        assert!(t.calls_on("n12").iter().any(|c| c.contains("--control-plane")));
-        assert!(t.calls_on("w01").iter().any(|c| c.starts_with("kubeadm join")));
-        assert!(!t.calls_on("w01").iter().any(|c| c.contains("--control-plane")));
+        assert!(t
+            .calls_on("n12")
+            .iter()
+            .any(|c| c.contains("--control-plane")));
+        assert!(t
+            .calls_on("w01")
+            .iter()
+            .any(|c| c.starts_with("kubeadm join")));
+        assert!(!t
+            .calls_on("w01")
+            .iter()
+            .any(|c| c.contains("--control-plane")));
         assert_eq!(r.changed(), 4, "四台各动一次:{:?}", r.steps);
     }
 
@@ -581,13 +628,19 @@ resources:
                 .on("kubeadm token create", 0, "kubeadm join x\n")
                 .on("", 0, "")
         };
-        let t = FakeTargets::new(vec![("n11", vec!["controlplane"]), ("n12", vec!["controlplane"])])
-            .with_ctx("n11", done())
-            .with_ctx("n12", done());
+        let t = FakeTargets::new(vec![
+            ("n11", vec!["controlplane"]),
+            ("n12", vec!["controlplane"]),
+        ])
+        .with_ctx("n11", done())
+        .with_ctx("n12", done());
         let r = run(&bp, "bootstrap", &t, &BTreeMap::new()).unwrap();
         assert_eq!(r.changed(), 0, "全都已就位:{:?}", r.steps);
         assert_eq!(r.ok(), 2);
-        assert!(!t.calls_on("n11").iter().any(|c| c == "kubeadm init"), "不该重跑 init");
+        assert!(
+            !t.calls_on("n11").iter().any(|c| c == "kubeadm init"),
+            "不该重跑 init"
+        );
     }
 
     #[test]
@@ -595,13 +648,20 @@ resources:
         // 单 master:`rest(controlplane)` 为空是正常的,但要留痕 ——
         // 一支舞"什么都没做"最常见的原因就是组选错了。
         let bp = blueprint_from_str(K8S).unwrap();
-        let t = FakeTargets::new(vec![("n11", vec!["controlplane"])]).with_ctx(
-            "n11",
-            FakeCtx::new().on("test -f", 1, "").on("", 0, "ok\n"),
-        );
+        let t = FakeTargets::new(vec![("n11", vec!["controlplane"])])
+            .with_ctx("n11", FakeCtx::new().on("test -f", 1, "").on("", 0, "ok\n"));
         let r = run(&bp, "bootstrap", &t, &BTreeMap::new()).unwrap();
-        assert_eq!(r.skipped.len(), 2, "rest(cp) 与 role.worker 都为空:{:?}", r.skipped);
-        assert!(r.skipped[0].contains("rest(role.controlplane)"), "{:?}", r.skipped);
+        assert_eq!(
+            r.skipped.len(),
+            2,
+            "rest(cp) 与 role.worker 都为空:{:?}",
+            r.skipped
+        );
+        assert!(
+            r.skipped[0].contains("rest(role.controlplane)"),
+            "{:?}",
+            r.skipped
+        );
         // 组根本不存在时要把线索写进留痕 —— 否则拼错组名就成了静默失败。
         assert!(
             r.skipped[1].contains("worker") && r.skipped[1].contains("已知的组"),
@@ -629,7 +689,9 @@ procedures:
             ("n11", vec!["controlplane"]),
             ("n12", vec!["controlplane"]),
         ]);
-        let err = run(&bp, "boot", &t, &BTreeMap::new()).unwrap_err().to_string();
+        let err = run(&bp, "boot", &t, &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("一个 fact 只能有一个来源"), "{err}");
         assert!(err.contains("first("), "要给出改法:{err}");
     }
@@ -656,7 +718,9 @@ procedures:
         let args = BTreeMap::from([("to".to_string(), Yaml::from("1.37.0"))]);
         run(&bp, "upgrade", &t, &args).unwrap();
         assert!(
-            t.calls_on("n11").iter().any(|c| c == "kubeadm upgrade apply v1.37.0"),
+            t.calls_on("n11")
+                .iter()
+                .any(|c| c == "kubeadm upgrade apply v1.37.0"),
             "{:?}",
             t.calls_on("n11")
         );
@@ -680,8 +744,13 @@ procedures:
         )
         .unwrap();
         let t = FakeTargets::new(vec![("n11", vec![])]);
-        let err = run(&bp, "boot", &t, &BTreeMap::new()).unwrap_err().to_string();
-        assert!(err.contains("procedure `boot`"), "要指到是哪支舞哪一步:{err}");
+        let err = run(&bp, "boot", &t, &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("procedure `boot`"),
+            "要指到是哪支舞哪一步:{err}"
+        );
     }
 
     #[test]
@@ -739,7 +808,9 @@ procedures:
     fn an_unknown_procedure_name_is_a_clear_error() {
         let bp = blueprint_from_str(K8S).unwrap();
         let t = ha_targets();
-        let err = run(&bp, "nope", &t, &BTreeMap::new()).unwrap_err().to_string();
+        let err = run(&bp, "nope", &t, &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("没有名为 `nope`"), "{err}");
     }
 
@@ -755,7 +826,11 @@ procedures:
         assert_eq!(obs.get("joined"), Some("joined"));
 
         let absent = FakeCtx::new().on("test -f", 0, "absent\n");
-        assert!(!observe_custom(def, &absent, &Scope::default()).unwrap().present);
+        assert!(
+            !observe_custom(def, &absent, &Scope::default())
+                .unwrap()
+                .present
+        );
     }
 
     #[test]
@@ -779,7 +854,11 @@ procedures:
                 .unwrap()
                 .present
         );
-        assert!(!observe_custom(def, &FakeCtx::new(), &Scope::default()).unwrap().present);
+        assert!(
+            !observe_custom(def, &FakeCtx::new(), &Scope::default())
+                .unwrap()
+                .present
+        );
     }
 
     #[test]
@@ -800,8 +879,11 @@ mod fleet_concurrency_tests {
 
     /// 三 master 五 worker —— 足够让并发与串行的差别显现。
     fn big_fleet(parallel: usize) -> FakeTargets {
-        let mut members: Vec<(&str, Vec<&str>)> =
-            vec![("cp1", vec!["controlplane"]), ("cp2", vec!["controlplane"]), ("cp3", vec!["controlplane"])];
+        let mut members: Vec<(&str, Vec<&str>)> = vec![
+            ("cp1", vec!["controlplane"]),
+            ("cp2", vec!["controlplane"]),
+            ("cp3", vec!["controlplane"]),
+        ];
         for w in ["w1", "w2", "w3", "w4", "w5"] {
             members.push((w, vec!["worker"]));
         }
@@ -852,7 +934,10 @@ mod fleet_concurrency_tests {
     fn the_fleet_wide_cap_bounds_an_unthrottled_step() {
         let bp = blueprint_from_str(K8S).unwrap();
         let join_worker = bp.procedures["bootstrap"].steps[2].clone();
-        assert_eq!(join_worker.strategy.throttle, None, "worker 那步没写 throttle");
+        assert_eq!(
+            join_worker.strategy.throttle, None,
+            "worker 那步没写 throttle"
+        );
         let limit = join_worker
             .strategy
             .throttle
@@ -920,7 +1005,11 @@ mod concurrency_tests {
         // 并发不该让报告变得不可复现 —— 否则 diff 两次运行的输出就没有意义。
         for limit in [1usize, 3, 16] {
             let out = run_capped(limit, 32, |i| i * i);
-            assert_eq!(out, (0..32).map(|i| i * i).collect::<Vec<_>>(), "limit={limit}");
+            assert_eq!(
+                out,
+                (0..32).map(|i| i * i).collect::<Vec<_>>(),
+                "limit={limit}"
+            );
         }
     }
 
@@ -931,8 +1020,13 @@ mod concurrency_tests {
         let main = std::thread::current().id();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let s = seen.clone();
-        run_capped(1, 4, move |_| s.lock().unwrap().push(std::thread::current().id()));
-        assert!(seen.lock().unwrap().iter().all(|t| *t == main), "串行路径派生了线程");
+        run_capped(1, 4, move |_| {
+            s.lock().unwrap().push(std::thread::current().id())
+        });
+        assert!(
+            seen.lock().unwrap().iter().all(|t| *t == main),
+            "串行路径派生了线程"
+        );
     }
 
     #[test]

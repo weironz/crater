@@ -35,7 +35,10 @@ fn arg_map(args: &ResolvedArgs, key: &str) -> Vec<(String, String)> {
 fn yaml_to_string(v: &Yaml) -> String {
     match v {
         Yaml::String(s) => s.clone(),
-        other => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
+        other => serde_yaml::to_string(other)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
     }
 }
 
@@ -143,13 +146,20 @@ impl ResourceType for Container {
         // 只改运行状态(镜像没动)→ start/stop 就够,不必重建。
         let only_state = change.fields().iter().all(|f| f.field == "state");
         if only_state && !change.fields().is_empty() {
-            let verb = if want_state == "started" { "start" } else { "stop" };
+            let verb = if want_state == "started" {
+                "start"
+            } else {
+                "stop"
+            };
             run_ok(ctx, &format!("{rt} {verb} {}", sh(name)))?;
             return Ok(Outcome::Changed);
         }
 
         // 其余一律重建:先删旧的(可能不存在,所以 `|| true`),再按声明起新的。
-        run_ok(ctx, &format!("{rt} rm -f {} >/dev/null 2>&1 || true", sh(name)))?;
+        run_ok(
+            ctx,
+            &format!("{rt} rm -f {} >/dev/null 2>&1 || true", sh(name)),
+        )?;
         if want_state == "stopped" {
             run_ok(ctx, &format!("{rt} create {}", run_flags(args)?))?;
             return Ok(Outcome::Changed);
@@ -184,7 +194,11 @@ fn normalize_image(r: &str) -> String {
         (Some(_), None) => true,
         _ => false,
     };
-    if has_tag { r.to_string() } else { format!("{r}:latest") }
+    if has_tag {
+        r.to_string()
+    } else {
+        format!("{r}:latest")
+    }
 }
 
 /// 组装 `docker run` 的参数。顺序固定 —— apply 是幂等契约的一部分,
@@ -263,8 +277,22 @@ impl ResourceType for Mount {
         }
         Ok(Observed::present([
             ("mounted", mounted.to_string()),
-            ("src", if mounted { src.to_string() } else { String::new() }),
-            ("fstype", if mounted { fstype.to_string() } else { String::new() }),
+            (
+                "src",
+                if mounted {
+                    src.to_string()
+                } else {
+                    String::new()
+                },
+            ),
+            (
+                "fstype",
+                if mounted {
+                    fstype.to_string()
+                } else {
+                    String::new()
+                },
+            ),
             ("persist", in_fstab.to_string()),
         ]))
     }
@@ -275,7 +303,11 @@ impl ResourceType for Mount {
         let obs = input.observed;
 
         if want_state == "absent" {
-            return if obs.present { Change::Destroy } else { Change::Ok };
+            return if obs.present {
+                Change::Destroy
+            } else {
+                Change::Ok
+            };
         }
         let mounted = obs.present && obs.get("mounted") == Some("true");
         let persisted = obs.present && obs.get("persist") == Some("true");
@@ -358,7 +390,13 @@ impl ResourceType for Mount {
         let cmd = if persist {
             format!("mount {}", sh(path))
         } else {
-            format!("mount -t {} -o {} {} {}", sh(fstype), sh(opts), sh(src), sh(path))
+            format!(
+                "mount -t {} -o {} {} {}",
+                sh(fstype),
+                sh(opts),
+                sh(src),
+                sh(path)
+            )
         };
         run_ok(ctx, &cmd)?;
         Ok(Outcome::Changed)
@@ -372,7 +410,10 @@ impl ResourceType for Mount {
         run_ok(ctx, &format!("umount {} 2>/dev/null || true", sh(path)))?;
         run_ok(
             ctx,
-            &format!("sed -i {} /etc/fstab", sh(&format!("\\#[[:space:]]{path}[[:space:]]#d"))),
+            &format!(
+                "sed -i {} /etc/fstab",
+                sh(&format!("\\#[[:space:]]{path}[[:space:]]#d"))
+            ),
         )?;
         Ok(Outcome::Changed)
     }
@@ -395,7 +436,10 @@ fn cron_marker(name: &str) -> String {
 /// 目标用户的 crontab 读写命令对。
 fn crontab_cmds(args: &ResolvedArgs) -> (String, String) {
     match arg_str_opt(args, "user") {
-        Some(u) => (format!("crontab -l -u {}", sh(u)), format!("crontab -u {} -", sh(u))),
+        Some(u) => (
+            format!("crontab -l -u {}", sh(u)),
+            format!("crontab -u {} -", sh(u)),
+        ),
         None => ("crontab -l".into(), "crontab -".into()),
     }
 }
@@ -427,7 +471,11 @@ impl ResourceType for Cron {
         let obs = input.observed;
 
         if want_state == "absent" {
-            return if obs.present { Change::Destroy } else { Change::Ok };
+            return if obs.present {
+                Change::Destroy
+            } else {
+                Change::Ok
+            };
         }
         let want_schedule = arg_str_opt(input.args, "schedule").unwrap_or("0 0 * * *");
         let want_job = arg_str_opt(input.args, "job").unwrap_or_default();
@@ -528,11 +576,18 @@ mod tests {
     use crate::ctx::FakeCtx;
 
     fn args(pairs: &[(&str, &str)]) -> ResolvedArgs {
-        pairs.iter().map(|(k, v)| (k.to_string(), Yaml::from(*v))).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), Yaml::from(*v)))
+            .collect()
     }
 
     fn diff_of(t: &dyn ResourceType, a: &ResolvedArgs, obs: &Observed) -> Change {
-        t.diff(&DiffInput { args: a, observed: obs, upstream_changed: false })
+        t.diff(&DiffInput {
+            args: a,
+            observed: obs,
+            upstream_changed: false,
+        })
     }
 
     // ------------------------------------------------------------ container
@@ -554,7 +609,11 @@ mod tests {
     fn an_untagged_image_matches_its_latest_tag() {
         // `docker inspect` 回 `nginx:latest`,作者写的是 `nginx`。
         // 不归一,每次 plan 都报一条不存在的镜像变更。
-        let ctx = FakeCtx::new().on("docker inspect", 0, &format!("true{SEP}nginx:latest{SEP}no"));
+        let ctx = FakeCtx::new().on(
+            "docker inspect",
+            0,
+            &format!("true{SEP}nginx:latest{SEP}no"),
+        );
         let a = args(&[("name", "web"), ("image", "nginx")]);
         let obs = Container.observe(&ctx, &a).unwrap();
         assert_eq!(diff_of(&Container, &a, &obs), Change::Ok);
@@ -585,7 +644,10 @@ mod tests {
         Container.apply(&run, &a, &change).unwrap();
         let cmds: Vec<String> = run.calls().iter().map(|c| c.text().to_string()).collect();
         assert!(cmds.iter().any(|c| c.contains("docker start")), "{cmds:?}");
-        assert!(!cmds.iter().any(|c| c.contains("docker run")), "不该重建:{cmds:?}");
+        assert!(
+            !cmds.iter().any(|c| c.contains("docker run")),
+            "不该重建:{cmds:?}"
+        );
     }
 
     #[test]
@@ -593,23 +655,43 @@ mod tests {
         let ctx = FakeCtx::new().on("", 0, "");
         let a = args(&[("name", "web"), ("image", "nginx:1.25")]);
         Container
-            .apply(&ctx, &a, &Change::Update(vec![FieldDiff::change("image", "a", "b")]))
+            .apply(
+                &ctx,
+                &a,
+                &Change::Update(vec![FieldDiff::change("image", "a", "b")]),
+            )
             .unwrap();
         let cmds: Vec<String> = ctx.calls().iter().map(|c| c.text().to_string()).collect();
-        let rm = cmds.iter().position(|c| c.contains("rm -f")).expect("应先删旧的");
-        let run = cmds.iter().position(|c| c.contains("run -d")).expect("再起新的");
+        let rm = cmds
+            .iter()
+            .position(|c| c.contains("rm -f"))
+            .expect("应先删旧的");
+        let run = cmds
+            .iter()
+            .position(|c| c.contains("run -d"))
+            .expect("再起新的");
         assert!(rm < run, "{cmds:?}");
     }
 
     #[test]
     fn run_flags_are_assembled_in_a_stable_order() {
         // apply 是幂等契约的一部分:同样的声明必须每次组出同样的命令。
-        let mut a = args(&[("name", "web"), ("image", "nginx"), ("restart_policy", "always")]);
-        a.insert("ports".into(), serde_yaml::from_str("['80:80', '443:443']").unwrap());
+        let mut a = args(&[
+            ("name", "web"),
+            ("image", "nginx"),
+            ("restart_policy", "always"),
+        ]);
+        a.insert(
+            "ports".into(),
+            serde_yaml::from_str("['80:80', '443:443']").unwrap(),
+        );
         a.insert("env".into(), serde_yaml::from_str("{B: 2, A: 1}").unwrap());
         let once = run_flags(&a).unwrap();
         assert_eq!(once, run_flags(&a).unwrap());
-        assert!(once.starts_with("--name 'web' --restart 'always' -p '80:80'"), "{once}");
+        assert!(
+            once.starts_with("--name 'web' --restart 'always' -p '80:80'"),
+            "{once}"
+        );
         assert!(once.ends_with("'nginx'"), "镜像必须在参数之后:{once}");
     }
 
@@ -627,7 +709,9 @@ mod tests {
     fn destroying_an_absent_container_issues_no_command() {
         let ctx = FakeCtx::new();
         assert_eq!(
-            Container.destroy(&ctx, &args(&[("name", "web")]), &Observed::absent()).unwrap(),
+            Container
+                .destroy(&ctx, &args(&[("name", "web")]), &Observed::absent())
+                .unwrap(),
             Outcome::Ok
         );
         assert!(ctx.calls().is_empty());
@@ -638,8 +722,11 @@ mod tests {
     #[test]
     fn a_mount_that_would_not_survive_a_reboot_is_not_green() {
         // 最伤人的假绿灯:当下挂着,fstab 里没有,要等下次重启才暴露。
-        let ctx = FakeCtx::new()
-            .on("s=$(findmnt", 0, &format!("/dev/sdb1{SEP}ext4{SEP}/data{SEP}"));
+        let ctx = FakeCtx::new().on(
+            "s=$(findmnt",
+            0,
+            &format!("/dev/sdb1{SEP}ext4{SEP}/data{SEP}"),
+        );
         let mut a = args(&[("path", "/data"), ("src", "/dev/sdb1"), ("fstype", "ext4")]);
         a.insert("persist".into(), Yaml::from(true));
         let obs = Mount.observe(&ctx, &a).unwrap();
@@ -672,7 +759,11 @@ mod tests {
             0,
             &format!("/var/lib/pgdisk.img{SEP}ext4{SEP}/srv/pgdata{SEP}/var/lib/pgdisk.img /srv/pgdata ext4"),
         );
-        let mut a = args(&[("path", "/srv/pgdata"), ("src", "/var/lib/pgdisk.img"), ("fstype", "ext4")]);
+        let mut a = args(&[
+            ("path", "/srv/pgdata"),
+            ("src", "/var/lib/pgdisk.img"),
+            ("fstype", "ext4"),
+        ]);
         a.insert("persist".into(), Yaml::from(true));
         let obs = Mount.observe(&ctx, &a).unwrap();
         assert_eq!(diff_of(&Mount, &a, &obs), Change::Ok, "{obs:?}");
@@ -680,8 +771,11 @@ mod tests {
 
     #[test]
     fn a_fully_satisfied_mount_is_a_noop() {
-        let ctx = FakeCtx::new()
-            .on("s=$(findmnt", 0, &format!("/dev/sdb1{SEP}ext4{SEP}/data{SEP}/dev/sdb1 /data ext4"));
+        let ctx = FakeCtx::new().on(
+            "s=$(findmnt",
+            0,
+            &format!("/dev/sdb1{SEP}ext4{SEP}/data{SEP}/dev/sdb1 /data ext4"),
+        );
         let mut a = args(&[("path", "/data"), ("src", "/dev/sdb1"), ("fstype", "ext4")]);
         a.insert("persist".into(), Yaml::from(true));
         let obs = Mount.observe(&ctx, &a).unwrap();
@@ -697,20 +791,41 @@ mod tests {
         a.insert("persist".into(), Yaml::from(true));
         Mount.apply(&ctx, &a, &Change::Create(vec![])).unwrap();
         let cmds: Vec<String> = ctx.calls().iter().map(|c| c.text().to_string()).collect();
-        let fstab = cmds.iter().position(|c| c.contains("/etc/fstab")).expect("写 fstab");
-        let mount = cmds.iter().rposition(|c| c.starts_with("mount ")).expect("挂载");
+        let fstab = cmds
+            .iter()
+            .position(|c| c.contains("/etc/fstab"))
+            .expect("写 fstab");
+        let mount = cmds
+            .iter()
+            .rposition(|c| c.starts_with("mount "))
+            .expect("挂载");
         assert!(fstab < mount, "{cmds:?}");
-        assert!(cmds[mount] == "mount '/data'", "持久挂载应让内核读 fstab:{}", cmds[mount]);
+        assert!(
+            cmds[mount] == "mount '/data'",
+            "持久挂载应让内核读 fstab:{}",
+            cmds[mount]
+        );
     }
 
     #[test]
     fn a_transient_mount_passes_its_options_on_the_command_line() {
         let ctx = FakeCtx::new().on("", 0, "");
-        let a = args(&[("path", "/mnt/x"), ("src", "//srv/s"), ("fstype", "cifs"), ("opts", "ro")]);
+        let a = args(&[
+            ("path", "/mnt/x"),
+            ("src", "//srv/s"),
+            ("fstype", "cifs"),
+            ("opts", "ro"),
+        ]);
         Mount.apply(&ctx, &a, &Change::Create(vec![])).unwrap();
         let cmds: Vec<String> = ctx.calls().iter().map(|c| c.text().to_string()).collect();
-        assert!(cmds.iter().any(|c| c.contains("-t 'cifs' -o 'ro'")), "{cmds:?}");
-        assert!(!cmds.iter().any(|c| c.contains("/etc/fstab")), "没要求持久就别动 fstab");
+        assert!(
+            cmds.iter().any(|c| c.contains("-t 'cifs' -o 'ro'")),
+            "{cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| c.contains("/etc/fstab")),
+            "没要求持久就别动 fstab"
+        );
     }
 
     // ------------------------------------------------------------ cron
@@ -724,7 +839,10 @@ mod tests {
         let obs = Cron.observe(&ctx, &a).unwrap();
         assert!(!obs.present, "标记检索无果就该视为不存在");
         let probe = ctx.calls()[0].text().to_string();
-        assert!(probe.contains("# crater:backup") && probe.contains("grep -A 1"), "{probe}");
+        assert!(
+            probe.contains("# crater:backup") && probe.contains("grep -A 1"),
+            "{probe}"
+        );
     }
 
     #[test]
@@ -732,7 +850,9 @@ mod tests {
         // 历史遗留:标记行在文件末尾、后面没有任务。`grep -A 1 | tail -1`
         // 此时回的是标记行本身 —— 不识别就会把它当成一条命令是 "# crater:x" 的任务。
         let ctx = FakeCtx::new().on("crontab -l", 0, "# crater:backup\n");
-        let obs = Cron.observe(&ctx, &args(&[("name", "backup"), ("job", "j")])).unwrap();
+        let obs = Cron
+            .observe(&ctx, &args(&[("name", "backup"), ("job", "j")]))
+            .unwrap();
         assert!(!obs.present, "{obs:?}");
     }
 
@@ -740,7 +860,11 @@ mod tests {
     fn an_existing_job_with_a_changed_schedule_is_an_update() {
         // 夹具给的是 `grep -A 1 <标记> | tail -1` 的产物,即任务本体那一行。
         let ctx = FakeCtx::new().on("crontab -l", 0, "0 3 * * * /usr/bin/backup\n");
-        let a = args(&[("name", "backup"), ("job", "/usr/bin/backup"), ("schedule", "0 5 * * *")]);
+        let a = args(&[
+            ("name", "backup"),
+            ("job", "/usr/bin/backup"),
+            ("schedule", "0 5 * * *"),
+        ]);
         let obs = Cron.observe(&ctx, &a).unwrap();
         match diff_of(&Cron, &a, &obs) {
             Change::Update(f) => assert_eq!(f[0].to_string(), "schedule: 0 3 * * * → 0 5 * * *"),
@@ -751,7 +875,11 @@ mod tests {
     #[test]
     fn an_identical_job_is_a_noop() {
         let ctx = FakeCtx::new().on("crontab -l", 0, "0 3 * * * /usr/bin/backup\n");
-        let a = args(&[("name", "backup"), ("job", "/usr/bin/backup"), ("schedule", "0 3 * * *")]);
+        let a = args(&[
+            ("name", "backup"),
+            ("job", "/usr/bin/backup"),
+            ("schedule", "0 3 * * *"),
+        ]);
         let obs = Cron.observe(&ctx, &a).unwrap();
         assert_eq!(diff_of(&Cron, &a, &obs), Change::Ok);
     }
@@ -773,11 +901,18 @@ mod tests {
     fn writing_a_cron_job_happens_in_one_pass() {
         // 分两次(先删后加)会留下"任务已消失"的时间窗。
         let ctx = FakeCtx::new().on("", 0, "");
-        let a = args(&[("name", "backup"), ("job", "/usr/bin/backup"), ("schedule", "0 3 * * *")]);
+        let a = args(&[
+            ("name", "backup"),
+            ("job", "/usr/bin/backup"),
+            ("schedule", "0 3 * * *"),
+        ]);
         Cron.apply(&ctx, &a, &Change::Create(vec![])).unwrap();
         assert_eq!(ctx.calls().len(), 1, "{:?}", ctx.calls());
         let cmd = ctx.calls()[0].text().to_string();
-        assert!(cmd.contains("crontab -") && cmd.contains("# crater:backup"), "{cmd}");
+        assert!(
+            cmd.contains("crontab -") && cmd.contains("# crater:backup"),
+            "{cmd}"
+        );
     }
 
     #[test]
@@ -792,7 +927,8 @@ mod tests {
     fn destroying_an_absent_job_issues_no_command() {
         let ctx = FakeCtx::new();
         assert_eq!(
-            Cron.destroy(&ctx, &args(&[("name", "x")]), &Observed::absent()).unwrap(),
+            Cron.destroy(&ctx, &args(&[("name", "x")]), &Observed::absent())
+                .unwrap(),
             Outcome::Ok
         );
         assert!(ctx.calls().is_empty());

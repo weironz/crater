@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-
 /// A fact to capture after a component installs on a host: run `cmd`, store its
 /// stdout as `hostvars.<host>.<name>` for other hosts to reference (D-030).
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -91,8 +90,6 @@ pub enum MaterialKind {
     Image,
     OsPackage,
 }
-
-
 
 /// Action primitives — internally tagged by the `action:` key.
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -33,7 +33,9 @@ pub struct AppDef {
 
 /// 这份 YAML 是不是 app 文件(形状判定,与其它 classify 同思路)。
 pub fn is_app_value(v: &serde_yaml::Value) -> bool {
-    v.get("app").map(|a| a.get("blueprint").is_some()).unwrap_or(false)
+    v.get("app")
+        .map(|a| a.get("blueprint").is_some())
+        .unwrap_or(false)
 }
 
 pub fn parse_app(path: &Path, text: &str) -> Result<AppDef, String> {
@@ -46,7 +48,10 @@ pub fn parse_app(path: &Path, text: &str) -> Result<AppDef, String> {
             let key = k.as_str().unwrap_or_default().to_string();
             let sv = match val {
                 serde_yaml::Value::String(x) => x.clone(),
-                other => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
+                other => serde_yaml::to_string(other)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
             };
             params.push((key, sv));
         }
@@ -60,7 +65,11 @@ pub fn parse_app(path: &Path, text: &str) -> Result<AppDef, String> {
     Ok(AppDef {
         path: path.display().to_string(),
         name: s("name").unwrap_or_else(|| {
-            path.file_stem().unwrap_or_default().to_string_lossy().trim_end_matches(".app").to_string()
+            path.file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .trim_end_matches(".app")
+                .to_string()
         }),
         blueprint: s("blueprint").ok_or("app 缺少 `blueprint:`")?,
         inventory: s("inventory").unwrap_or_default(),
@@ -69,7 +78,11 @@ pub fn parse_app(path: &Path, text: &str) -> Result<AppDef, String> {
         limit: a
             .get("limit")
             .and_then(|x| x.as_sequence())
-            .map(|xs| xs.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .map(|xs| {
+                xs.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default(),
     })
 }
@@ -92,10 +105,14 @@ fn parse_interval(s: &str) -> Result<u64, String> {
 /// 工作目录里全部 app 文件。
 pub fn list_apps() -> Vec<AppDef> {
     let mut out = Vec::new();
-    let Ok(root) = crate::ui_edit::root() else { return out };
+    let Ok(root) = crate::ui_edit::root() else {
+        return out;
+    };
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
             let name = e.file_name().to_string_lossy().into_owned();
@@ -152,12 +169,18 @@ pub fn lint_app(app: &AppDef) -> Vec<serde_json::Value> {
                 let hint = closest(k, &names)
                     .map(|c| format!(",是不是 `{c}`?"))
                     .unwrap_or_default();
-                push("error", format!("params.{k}:蓝图 `{}` 没有这个参数{hint}", bp.name));
+                push(
+                    "error",
+                    format!("params.{k}:蓝图 `{}` 没有这个参数{hint}", bp.name),
+                );
             }
         }
         for (name, spec) in &bp.params {
             if spec.default.is_none() && !app.params.iter().any(|(k, _)| k == name) {
-                push("error", format!("蓝图必填参数 `{name}` 未提供(app.params 里补上,或设为启动时问)"));
+                push(
+                    "error",
+                    format!("蓝图必填参数 `{name}` 未提供(app.params 里补上,或设为启动时问)"),
+                );
             }
         }
     }
@@ -222,7 +245,11 @@ fn dist(a: &str, b: &str) -> usize {
     for (i, ca) in a.iter().enumerate() {
         let mut cur = vec![i + 1];
         for (j, cb) in b.iter().enumerate() {
-            cur.push((prev[j] + usize::from(ca != cb)).min(prev[j + 1] + 1).min(cur[j] + 1));
+            cur.push(
+                (prev[j] + usize::from(ca != cb))
+                    .min(prev[j + 1] + 1)
+                    .min(cur[j] + 1),
+            );
         }
         prev = cur;
     }
@@ -263,7 +290,11 @@ pub async fn lint_project(body: String) -> Response {
         Err((c, m)) => return (c, Json(json!({ "error": m }))).into_response(),
     };
     let Ok(text) = std::fs::read_to_string(&path) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("读不到 {rel}") }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("读不到 {rel}") })),
+        )
+            .into_response();
     };
     // 相对工作目录解析 app 内的引用 —— app 文件里的路径是工作区相对路径。
     let rel_path = PathBuf::from(rel);
@@ -303,8 +334,17 @@ pub struct CreateApp {
 }
 
 pub async fn create_app(Json(req): Json<CreateApp>) -> Response {
-    if req.name.is_empty() || !req.name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "app 名只允许字母数字-_" }))).into_response();
+    if req.name.is_empty()
+        || !req
+            .name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "app 名只允许字母数字-_" })),
+        )
+            .into_response();
     }
     let file = format!("{}.app.yaml", req.name);
     let abs = match crate::ui_edit::confine(&file) {
@@ -312,7 +352,11 @@ pub async fn create_app(Json(req): Json<CreateApp>) -> Response {
         Err((c, m)) => return (c, Json(json!({ "error": m }))).into_response(),
     };
     if abs.exists() {
-        return (StatusCode::CONFLICT, Json(json!({ "error": format!("{file} 已存在") }))).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": format!("{file} 已存在") })),
+        )
+            .into_response();
     }
     let mut body = format!(
         "# {name} —— 把这份蓝图钉在这群机器上。\n\
@@ -345,7 +389,11 @@ pub async fn create_app(Json(req): Json<CreateApp>) -> Response {
     // 动作名里不带 app 名:文件名本来就是 `<name>.app.yaml`,而提交信息里
     // 已经跟着文件名 —— 写两遍只是噪声。
     if let Err(e) = crate::ui_edit::write_file(&abs, body.as_bytes(), "新建 app") {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
     }
     Json(json!({ "ok": true, "path": file })).into_response()
 }
@@ -372,7 +420,9 @@ pub fn start_scheduler() {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             for app in list_apps() {
-                let Some(interval) = app.verify_interval else { continue };
+                let Some(interval) = app.verify_interval else {
+                    continue;
+                };
                 let interval = interval.max(300); // 下限 5 分钟
                 let last = last_verify_ts(&app);
                 if now.saturating_sub(last) < interval {
@@ -418,7 +468,10 @@ fn last_verify_ts(app: &AppDef) -> u64 {
         .map(|b| b.name)
         .unwrap_or_default();
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let dir = PathBuf::from(home).join(".crater").join("ui").join("verify");
+    let dir = PathBuf::from(home)
+        .join(".crater")
+        .join("ui")
+        .join("verify");
     let mut latest = 0u64;
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
@@ -631,7 +684,12 @@ mod tests {
             ..Default::default()
         };
         let diags = lint_app(&app);
-        assert!(diags.iter().any(|d| d["severity"] == "error"
-            && d["message"].as_str().unwrap().contains("version")), "{diags:?}");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d["severity"] == "error"
+                    && d["message"].as_str().unwrap().contains("version")),
+            "{diags:?}"
+        );
     }
 }

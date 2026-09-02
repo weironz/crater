@@ -24,12 +24,18 @@ pub struct Observed {
 
 impl Observed {
     pub fn absent() -> Self {
-        Observed { present: false, fields: Default::default() }
+        Observed {
+            present: false,
+            fields: Default::default(),
+        }
     }
     pub fn present(fields: impl IntoIterator<Item = (&'static str, String)>) -> Self {
         Observed {
             present: true,
-            fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            fields: fields
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
         }
     }
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -94,10 +100,18 @@ pub struct FieldDiff {
 
 impl FieldDiff {
     pub fn set(field: &str, to: impl Into<String>) -> Self {
-        FieldDiff { field: field.into(), from: None, to: Some(to.into()) }
+        FieldDiff {
+            field: field.into(),
+            from: None,
+            to: Some(to.into()),
+        }
     }
     pub fn change(field: &str, from: impl Into<String>, to: impl Into<String>) -> Self {
-        FieldDiff { field: field.into(), from: Some(from.into()), to: Some(to.into()) }
+        FieldDiff {
+            field: field.into(),
+            from: Some(from.into()),
+            to: Some(to.into()),
+        }
     }
 }
 
@@ -143,7 +157,10 @@ pub trait Ctx: Send + Sync {
     /// 真实传输层必须覆盖它。
     fn write_bytes(&self, path: &str, content: &[u8]) -> anyhow::Result<()> {
         let text = std::str::from_utf8(content).map_err(|_| {
-            anyhow::anyhow!("此上下文只有文本通道,写不了二进制({path},{} 字节)", content.len())
+            anyhow::anyhow!(
+                "此上下文只有文本通道,写不了二进制({path},{} 字节)",
+                content.len()
+            )
         })?;
         self.write_file(path, text)
     }
@@ -200,7 +217,8 @@ pub trait ResourceType: Send + Sync {
     fn diff(&self, input: &DiffInput) -> Change;
 
     /// 弥合差异。只在 `diff` 非 noop 时被调用。
-    fn apply(&self, ctx: &dyn Ctx, args: &ResolvedArgs, change: &Change) -> anyhow::Result<Outcome>;
+    fn apply(&self, ctx: &dyn Ctx, args: &ResolvedArgs, change: &Change)
+        -> anyhow::Result<Outcome>;
 
     /// 退役。teardown 由引擎逆序调用它组装,用户不写。
     fn destroy(
@@ -310,6 +328,9 @@ mod tests {
     #[test]
     fn field_diff_renders_both_directions() {
         assert_eq!(FieldDiff::set("mode", "0755").to_string(), "mode: 0755");
-        assert_eq!(FieldDiff::change("mode", "0644", "0755").to_string(), "mode: 0644 → 0755");
+        assert_eq!(
+            FieldDiff::change("mode", "0644", "0755").to_string(),
+            "mode: 0644 → 0755"
+        );
     }
 }

@@ -124,11 +124,17 @@ fn collect(root: &Path) -> Result<(Vec<PackedFile>, Vec<SkippedFile>)> {
     let mut skipped = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let mut entries: Vec<PathBuf> =
-            std::fs::read_dir(&dir)?.flatten().map(|e| e.path()).collect();
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)?
+            .flatten()
+            .map(|e| e.path())
+            .collect();
         entries.sort(); // 可复现:目录序不该影响包的 digest
         for p in entries {
-            let base = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let base = p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             if base.starts_with('.') || matches!(base.as_str(), "target" | "node_modules") {
                 continue;
             }
@@ -158,11 +164,15 @@ fn collect(root: &Path) -> Result<(Vec<PackedFile>, Vec<SkippedFile>)> {
 /// "先换口令再谈清理"是唯一的补救,代价与一次告警不在一个量级。
 fn refuse_literal_secrets(files: &[(String, Vec<u8>, u32)]) -> Result<()> {
     for (rel, data, _) in files {
-        let Ok(text) = std::str::from_utf8(data) else { continue };
+        let Ok(text) = std::str::from_utf8(data) else {
+            continue;
+        };
         for (i, line) in text.lines().enumerate() {
             let t = line.trim_start();
             for key in ["password:", "passwd:", "secret_key:", "token:"] {
-                let Some(v) = t.strip_prefix(key) else { continue };
+                let Some(v) = t.strip_prefix(key) else {
+                    continue;
+                };
                 let v = v.trim().trim_matches(['"', '\'']);
                 // 不是字面口令的四种写法,都放行:
                 // - 空值(块状写法,真值在下一行,由那一行自己受检)
@@ -363,7 +373,11 @@ async fn assemble(
     });
     let d = store.put_manifest(reference, &serde_json::to_vec(&index)?)?;
     say!();
-    say!("闭包 {} —— {} 个架构,index 一个 tag 装下", human(total_mat), per_arch.len());
+    say!(
+        "闭包 {} —— {} 个架构,index 一个 tag 装下",
+        human(total_mat),
+        per_arch.len()
+    );
     Ok(d)
 }
 
@@ -407,28 +421,42 @@ pub async fn pull(reference: &str, into: Option<&Path>, full: bool) -> Result<()
     let cfg = read_config(&store, &m)?;
     warn_if_newer(&cfg);
     let name = cfg["name"].as_str().unwrap_or("pkg").to_string();
-    let dir = into.map(|d| d.to_path_buf()).unwrap_or_else(|| PathBuf::from(&name));
+    let dir = into
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from(&name));
     if dir.exists() && std::fs::read_dir(&dir)?.next().is_some() {
         bail!("{} 已存在且非空 —— 换个 --into,或先移开", dir.display());
     }
     let layer = m["layers"]
         .as_array()
-        .and_then(|ls| ls.iter().find(|l| l["mediaType"].as_str() == Some(MT_PKG_LAYER)))
+        .and_then(|ls| {
+            ls.iter()
+                .find(|l| l["mediaType"].as_str() == Some(MT_PKG_LAYER))
+        })
         .ok_or_else(|| anyhow::anyhow!("{reference} 不是 crater 蓝图包(没有蓝图层)"))?;
     let d = layer["digest"].as_str().unwrap_or_default();
     let bytes = std::fs::read(store.blob_path(d.trim_start_matches("sha256:")))
         .with_context(|| format!("{reference} 的蓝图层不在本地"))?;
     crater_core::bundle::untar_gz_into(&dir, &bytes, 0)?;
     stamp(&dir, reference)?;
-    let n = std::fs::read_dir(&dir).map(|r| r.flatten().count()).unwrap_or(0);
+    let n = std::fs::read_dir(&dir)
+        .map(|r| r.flatten().count())
+        .unwrap_or(0);
     say!("{reference} → {}({n} 项)", dir.display());
     let mats = m["layers"]
         .as_array()
-        .map(|ls| ls.iter().filter(|l| l["mediaType"].as_str() == Some(MT_MATERIAL)).count())
+        .map(|ls| {
+            ls.iter()
+                .filter(|l| l["mediaType"].as_str() == Some(MT_MATERIAL))
+                .count()
+        })
         .unwrap_or(0);
     if full && mats > 0 {
         say!("闭包 {mats} 份物料随包带下 —— 断网部署:");
-        say!("  crater apply -f {}/... -i <机群> --closure oci://{reference}", dir.display());
+        say!(
+            "  crater apply -f {}/... -i <机群> --closure oci://{reference}",
+            dir.display()
+        );
     }
     print_contract(&cfg);
     Ok(())
@@ -438,7 +466,11 @@ pub async fn pull(reference: &str, into: Option<&Path>, full: bool) -> Result<()
 pub async fn inspect(reference: &str) -> Result<()> {
     // 本地有就读本地,省一次往返;没有才问 registry。
     let store = ImageStore::open()?;
-    let cfg = match store.resolve_manifest(reference).ok().and_then(|m| read_config(&store, &m).ok()) {
+    let cfg = match store
+        .resolve_manifest(reference)
+        .ok()
+        .and_then(|m| read_config(&store, &m).ok())
+    {
         Some(c) => {
             say!("(本地 store)");
             c
@@ -467,7 +499,10 @@ pub async fn tags(reference: &str) -> Result<()> {
         say!("  {}", t.replace('_', "+"));
     }
     say!();
-    say!("{} 个版本。`crater pkg inspect <ref>:<版本>` 看契约。", tags.len());
+    say!(
+        "{} 个版本。`crater pkg inspect <ref>:<版本>` 看契约。",
+        tags.len()
+    );
     Ok(())
 }
 
@@ -477,7 +512,9 @@ pub fn ls() -> Result<()> {
     let all = store.list()?;
     let mut rows: Vec<(String, String, String, u64, usize)> = Vec::new();
     for img in &all {
-        let Ok(top) = store.resolve_manifest(&img.reference) else { continue };
+        let Ok(top) = store.resolve_manifest(&img.reference) else {
+            continue;
+        };
         // 多架构包的契约在子清单里 —— 不折这一下,`pkg ls` 看不见它们。
         let m = platform_manifest(&store, &top).unwrap_or(top);
         if m["config"]["mediaType"].as_str() != Some(MT_PKG_CONFIG) {
@@ -486,19 +523,29 @@ pub fn ls() -> Result<()> {
         let cfg = read_config(&store, &m).unwrap_or(json!({}));
         let mats = m["layers"]
             .as_array()
-            .map(|ls| ls.iter().filter(|l| l["mediaType"].as_str() == Some(MT_MATERIAL)).count())
+            .map(|ls| {
+                ls.iter()
+                    .filter(|l| l["mediaType"].as_str() == Some(MT_MATERIAL))
+                    .count()
+            })
             .unwrap_or(0);
         rows.push((
             img.reference.clone(),
             cfg["name"].as_str().unwrap_or("").to_string(),
             cfg["description"].as_str().unwrap_or("").to_string(),
             img.content_size,
-            if store.has_all_layers(&img.reference) { mats } else { usize::MAX },
+            if store.has_all_layers(&img.reference) {
+                mats
+            } else {
+                usize::MAX
+            },
         ));
     }
     if rows.is_empty() {
-        say!("本地还没有蓝图包。`crater pkg push <蓝图目录> <ref>` 做一个,\
-              或 `crater pkg pull <ref>` 拉一个。");
+        say!(
+            "本地还没有蓝图包。`crater pkg push <蓝图目录> <ref>` 做一个,\
+              或 `crater pkg pull <ref>` 拉一个。"
+        );
         return Ok(());
     }
     rows.sort();
@@ -551,14 +598,23 @@ pub fn save(reference: &str, out: &Path) -> Result<()> {
     say!(
         "  {}  {}",
         human(bytes),
-        if plats.is_empty() { "单架构".to_string() } else { format!("{} 个架构:{}", plats.len(), plats.join(" ")) }
+        if plats.is_empty() {
+            "单架构".to_string()
+        } else {
+            format!("{} 个架构:{}", plats.len(), plats.join(" "))
+        }
     );
     for (a, mats, here) in &per_arch {
         say!("  {a:<10} 物料 {here}/{mats} 份在本地");
     }
     say!();
     say!("索引也放同一个目录,对面就能搜:");
-    say!("  crater pkg index --store -o {}/index.yaml", out.parent().map(|p| p.display().to_string()).unwrap_or_else(|| ".".into()));
+    say!(
+        "  crater pkg index --store -o {}/index.yaml",
+        out.parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| ".".into())
+    );
     Ok(())
 }
 
@@ -602,7 +658,10 @@ pub fn load(file: &Path, as_ref: Option<&str>) -> Result<()> {
 fn arch_layers(store: &ImageStore, top: &serde_json::Value) -> Vec<(String, usize, usize)> {
     let count = |m: &serde_json::Value| -> (usize, usize) {
         let ls = m["layers"].as_array().map(|v| v.as_slice()).unwrap_or(&[]);
-        let mats: Vec<_> = ls.iter().filter(|l| l["mediaType"].as_str() == Some(MT_MATERIAL)).collect();
+        let mats: Vec<_> = ls
+            .iter()
+            .filter(|l| l["mediaType"].as_str() == Some(MT_MATERIAL))
+            .collect();
         let here = mats
             .iter()
             .filter(|l| {
@@ -642,13 +701,21 @@ fn arch_layers(store: &ImageStore, top: &serde_json::Value) -> Vec<(String, usiz
 /// 当成"不是 crater 包"跳过:`pkg ls` 说"本地还没有蓝图包",`pkg index
 /// --store` 把它**静默**漏在索引外(store 里只有它时才会撞上"一个包都没收
 /// 进来"那道闸,否则连个响都没有)。issue #3。
-pub(crate) fn platform_manifest(store: &ImageStore, m: &serde_json::Value) -> Option<serde_json::Value> {
+pub(crate) fn platform_manifest(
+    store: &ImageStore,
+    m: &serde_json::Value,
+) -> Option<serde_json::Value> {
     let subs = m["manifests"].as_array()?;
     // 架构优先级与 store 拉取一致(D-127):本机 → amd64 → 任意一条。
     let want = crater_core::arch::detect_local();
     let want = want.as_str();
-    let pick = |a: &str| subs.iter().find(|e| e["platform"]["architecture"].as_str() == Some(a));
-    let sub = pick(want).or_else(|| pick("amd64")).or_else(|| subs.first())?;
+    let pick = |a: &str| {
+        subs.iter()
+            .find(|e| e["platform"]["architecture"].as_str() == Some(a))
+    };
+    let sub = pick(want)
+        .or_else(|| pick("amd64"))
+        .or_else(|| subs.first())?;
     let d = sub["digest"].as_str()?;
     let bytes = std::fs::read(store.blob_path(d.trim_start_matches("sha256:"))).ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -681,7 +748,9 @@ fn stamp(dir: &Path, reference: &str) -> Result<()> {
 /// 这个目录是哪条引用摊出来的。没有印记(手写的蓝图目录)返回 None,
 /// 那种情况下沿用旧行为 —— 人自己的目录,不该由我们判定"版本不对"。
 fn stamped(dir: &Path) -> Option<String> {
-    std::fs::read_to_string(dir.join(STAMP)).ok().map(|s| s.trim().to_string())
+    std::fs::read_to_string(dir.join(STAMP))
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 fn read_config(store: &ImageStore, m: &serde_json::Value) -> Result<serde_json::Value> {
@@ -715,13 +784,19 @@ pub(crate) fn semver_key(v: &str) -> Vec<i64> {
         Some(i) => (&v[..i], &v[i + 1..]),
         None => (v, ""),
     };
-    let mut key: Vec<i64> = core.split('.').map(|p| p.parse::<i64>().unwrap_or(-1)).collect();
+    let mut key: Vec<i64> = core
+        .split('.')
+        .map(|p| p.parse::<i64>().unwrap_or(-1))
+        .collect();
     key.resize(4, 0);
     if pre.is_empty() {
         key.push(i64::MAX); // 正式版胜过它的任何预发布
     } else {
         key.push(0);
-        key.extend(pre.split(['.', '-', '_', '+']).map(|p| p.parse::<i64>().unwrap_or(-1)));
+        key.extend(
+            pre.split(['.', '-', '_', '+'])
+                .map(|p| p.parse::<i64>().unwrap_or(-1)),
+        );
     }
     key
 }
@@ -734,12 +809,19 @@ fn human(n: u64) -> String {
         f /= 1024.0;
         i += 1;
     }
-    if i == 0 { format!("{n} B") } else { format!("{f:.1} {}", U[i]) }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{f:.1} {}", U[i])
+    }
 }
 
 /// 把契约印成人能读的样子 —— 与 `crater inspect` 同一个问题的同一个答案。
 fn print_contract(cfg: &serde_json::Value) {
-    let ver = cfg["version"].as_str().map(|v| format!("  v{v}")).unwrap_or_default();
+    let ver = cfg["version"]
+        .as_str()
+        .map(|v| format!("  v{v}"))
+        .unwrap_or_default();
     say!();
     say!("蓝图 {}{ver}", cfg["name"].as_str().unwrap_or("?"));
     if let Some(d) = cfg["description"].as_str().filter(|s| !s.is_empty()) {
@@ -748,17 +830,30 @@ fn print_contract(cfg: &serde_json::Value) {
     if let Some(ps) = cfg["params"].as_array().filter(|a| !a.is_empty()) {
         say!();
         say!("参数:");
-        let w = ps.iter().map(|p| p["name"].as_str().unwrap_or("").len()).max().unwrap_or(0);
+        let w = ps
+            .iter()
+            .map(|p| p["name"].as_str().unwrap_or("").len())
+            .max()
+            .unwrap_or(0);
         // 必填排前面 —— 读的人最先要知道"我非填不可的是什么"。
         let mut sorted: Vec<&serde_json::Value> = ps.iter().collect();
-        sorted.sort_by_key(|p| (!p["default"].is_null(), p["name"].as_str().unwrap_or("").to_string()));
+        sorted.sort_by_key(|p| {
+            (
+                !p["default"].is_null(),
+                p["name"].as_str().unwrap_or("").to_string(),
+            )
+        });
         for p in sorted {
             let need = if p["default"].is_null() {
                 "必填".to_string()
             } else {
                 format!("默认 {}", compact(&p["default"]))
             };
-            let stage = if p["stage"].as_str() == Some("build") { " [构建期]" } else { "" };
+            let stage = if p["stage"].as_str() == Some("build") {
+                " [构建期]"
+            } else {
+                ""
+            };
             say!(
                 "  {:<w$}  {:<18}  {}{stage}",
                 p["name"].as_str().unwrap_or(""),
@@ -773,7 +868,11 @@ fn print_contract(cfg: &serde_json::Value) {
         say!("需要的机群:");
         for g in gs {
             let min = g["min"].as_u64().unwrap_or(0);
-            let n = if min == 0 { "可为空".to_string() } else { format!("至少 {min} 台") };
+            let n = if min == 0 {
+                "可为空".to_string()
+            } else {
+                format!("至少 {min} 台")
+            };
             say!("  {:<16}  {n}", g["name"].as_str().unwrap_or(""));
         }
     }
@@ -818,8 +917,16 @@ mod tests {
         let bad = vec![("t/a.j2".into(), b"password: hunter2\n".to_vec(), 0o644)];
         assert!(refuse_literal_secrets(&bad).is_err());
         let ok = vec![
-            ("t/a.j2".into(), b"password: \"${env:PW}\"\n".to_vec(), 0o644),
-            ("t/b.j2".into(), b"password: {{ params.pw }}\n".to_vec(), 0o644),
+            (
+                "t/a.j2".into(),
+                b"password: \"${env:PW}\"\n".to_vec(),
+                0o644,
+            ),
+            (
+                "t/b.j2".into(),
+                b"password: {{ params.pw }}\n".to_vec(),
+                0o644,
+            ),
             // 参数**声明**不是泄漏 —— 少了这一条,每份带敏感参数的蓝图都打不了包。
             (
                 "x.blueprint.yaml".into(),
@@ -973,7 +1080,13 @@ fn tag_of(reference: &str) -> String {
 fn pkg_dir_name(name: &str, reference: &str) -> String {
     let tag: String = tag_of(reference)
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+') { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+') {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     format!("{name}-{tag}")
 }
@@ -1029,10 +1142,14 @@ fn compare_to_package(dir: &Path, reference: &str) -> Drift {
         Ok(x) => x,
         Err(e) => return Drift::Unknown(format!("读 {}:{e}", dir.display())),
     };
-    let want: std::collections::BTreeMap<&str, &[u8]> =
-        want.iter().map(|(p, d, _)| (p.as_str(), d.as_slice())).collect();
-    let have: std::collections::BTreeMap<&str, &[u8]> =
-        have.iter().map(|(p, d, _)| (p.as_str(), d.as_slice())).collect();
+    let want: std::collections::BTreeMap<&str, &[u8]> = want
+        .iter()
+        .map(|(p, d, _)| (p.as_str(), d.as_slice()))
+        .collect();
+    let have: std::collections::BTreeMap<&str, &[u8]> = have
+        .iter()
+        .map(|(p, d, _)| (p.as_str(), d.as_slice()))
+        .collect();
     let mut out = Vec::new();
     for (p, d) in &want {
         match have.get(p) {
@@ -1047,7 +1164,11 @@ fn compare_to_package(dir: &Path, reference: &str) -> Drift {
         }
     }
     out.sort();
-    if out.is_empty() { Drift::Same } else { Drift::Changed(out) }
+    if out.is_empty() {
+        Drift::Same
+    } else {
+        Drift::Changed(out)
+    }
 }
 
 /// `<名>.app.yaml` 现在指着哪一份蓝图(文件, 它所在的目录)。
@@ -1059,7 +1180,10 @@ fn app_points_at(app_name: &str) -> Option<(PathBuf, PathBuf)> {
     let text = std::fs::read_to_string(&f).ok()?;
     let def = crate::ui_app::parse_app(&f, &text).ok()?;
     let bp = PathBuf::from(&def.blueprint);
-    let dir = bp.parent().filter(|p| !p.as_os_str().is_empty())?.to_path_buf();
+    let dir = bp
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())?
+        .to_path_buf();
     Some((f, dir))
 }
 
@@ -1077,7 +1201,10 @@ fn upgrade_gate(prev_dir: &Path, prev_ref: &str, source: &str, force: bool) -> R
     say!("换版本:{prev_ref} → {source}");
     match compare_to_package(prev_dir, prev_ref) {
         Drift::Same => {
-            say!("  {} 与包一致 —— 没有会被落下的本地改动", prev_dir.display());
+            say!(
+                "  {} 与包一致 —— 没有会被落下的本地改动",
+                prev_dir.display()
+            );
             Ok(())
         }
         Drift::Changed(items) => {
@@ -1188,7 +1315,11 @@ pub async fn install(
         locate(local)?.0
     } else {
         let store = ImageStore::open()?;
-        if full { store.pull(source).await? } else { store.pull_thin(source).await? }
+        if full {
+            store.pull(source).await?
+        } else {
+            store.pull_thin(source).await?
+        }
         let m = store.resolve_manifest(source)?;
         let cfg = read_config(&store, &m)?;
         warn_if_newer(&cfg);
@@ -1228,7 +1359,10 @@ pub async fn install(
         if !dir.exists() {
             let layer = m["layers"]
                 .as_array()
-                .and_then(|ls| ls.iter().find(|l| l["mediaType"].as_str() == Some(MT_PKG_LAYER)))
+                .and_then(|ls| {
+                    ls.iter()
+                        .find(|l| l["mediaType"].as_str() == Some(MT_PKG_LAYER))
+                })
                 .ok_or_else(|| anyhow::anyhow!("{source} 不是 crater 蓝图包"))?;
             let d = layer["digest"].as_str().unwrap_or_default();
             let bytes = std::fs::read(store.blob_path(d.trim_start_matches("sha256:")))?;
@@ -1254,7 +1388,11 @@ pub async fn install(
                     // 重装同一版不覆盖任何字节,所以这里只报不拦:人要知道
                     // 自己跑的是"包 + 我改过的那几处",不是原样的包。
                     if let Drift::Changed(items) = compare_to_package(&dir, source) {
-                        crate::oops!("{} 有 {} 处本地改动,这次装的是改过的那份:", dir.display(), items.len());
+                        crate::oops!(
+                            "{} 有 {} 处本地改动,这次装的是改过的那份:",
+                            dir.display(),
+                            items.len()
+                        );
                         for i in &items {
                             say!("    {i}");
                         }
@@ -1353,10 +1491,19 @@ pub async fn install(
     if !yes {
         say!();
         say!("以上是计划,**什么都没改**。确认后执行:");
-        say!("  crater apply -f {} -i {} {}",
+        say!(
+            "  crater apply -f {} -i {} {}",
             bp_file.display(),
-            target.inventory.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "<机群>".into()),
-            sets.iter().map(|s| format!("--set {s}")).collect::<Vec<_>>().join(" "));
+            target
+                .inventory
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<机群>".into()),
+            sets.iter()
+                .map(|s| format!("--set {s}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
         say!("  (或重跑本条命令加 --yes)");
         return Ok(());
     }
@@ -1372,9 +1519,17 @@ pub async fn install(
 /// 一个**。扣下来的会连同"下次怎么给"一起报出来,不是静默丢弃。
 fn looks_secret(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    ["password", "passwd", "secret", "token", "apikey", "api_key", "credential"]
-        .iter()
-        .any(|k| n.contains(k))
+    [
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "apikey",
+        "api_key",
+        "credential",
+    ]
+    .iter()
+    .any(|k| n.contains(k))
 }
 
 /// 把 app 文件里的 `blueprint:` 指到新版本;文件里没有这一行返回 `false`。
@@ -1445,8 +1600,13 @@ fn write_app(
         }
         return Ok(());
     }
-    let is_secret = |k: &str| bp.params.get(k).map(|p| p.secret).unwrap_or(false) || looks_secret(k);
-    let secret: Vec<&str> = given.keys().filter(|k| is_secret(k)).map(|s| s.as_str()).collect();
+    let is_secret =
+        |k: &str| bp.params.get(k).map(|p| p.secret).unwrap_or(false) || looks_secret(k);
+    let secret: Vec<&str> = given
+        .keys()
+        .filter(|k| is_secret(k))
+        .map(|s| s.as_str())
+        .collect();
     let mut y = String::new();
     y.push_str(&format!("# {name} —— 把这份蓝图钉在这群机器上。\n"));
     y.push_str("# 这个文件就是\"任务\"本身:可 git、可 diff、可进闭包;改它 = 改任务。\n");
@@ -1465,20 +1625,28 @@ fn write_app(
     if !plain.is_empty() {
         y.push_str("  params:\n");
         for (k, v) in plain {
-            let s = serde_yaml::to_string(v).unwrap_or_default().trim().to_string();
+            let s = serde_yaml::to_string(v)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
             y.push_str(&format!("    {k}: {s}\n"));
         }
     }
     if !secret.is_empty() {
         y.push_str("  # 敏感参数不写进这个文件(它是要进 git 的):\n");
         for k in &secret {
-            y.push_str(&format!("  #   {k} —— 每次用 `--set {k}=…`,或放进机群 vars\n"));
+            y.push_str(&format!(
+                "  #   {k} —— 每次用 `--set {k}=…`,或放进机群 vars\n"
+            ));
         }
     }
     std::fs::write(&out, y)?;
     say!("任务 → {}", out.display());
     if !secret.is_empty() {
-        crate::oops!("敏感参数 {} 未写入 app 文件 —— 每次执行都要重新给。", secret.join(", "));
+        crate::oops!(
+            "敏感参数 {} 未写入 app 文件 —— 每次执行都要重新给。",
+            secret.join(", ")
+        );
     }
     Ok(())
 }

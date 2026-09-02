@@ -75,7 +75,11 @@ async fn probe(target: &TargetOpts) -> Result<()> {
         }
     }
 
-    let namew = rows.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
+    let namew = rows
+        .iter()
+        .map(|(n, _)| n.chars().count())
+        .max()
+        .unwrap_or(0);
     let colw: Vec<usize> = cols
         .iter()
         .enumerate()

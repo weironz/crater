@@ -69,7 +69,8 @@ pub struct JobRun {
 pub async fn write_marker(exec: &dyn Executor, m: &Marker) -> crate::Result<()> {
     exec.run(&format!("mkdir -p {MARKER_DIR}")).await?;
     let json = serde_json::to_vec_pretty(m)?;
-    exec.write_file(&format!("{MARKER_DIR}/{}.json", m.name), &json).await
+    exec.write_file(&format!("{MARKER_DIR}/{}.json", m.name), &json)
+        .await
 }
 
 /// Remove the marker on the target (delete success). Idempotent (`rm -f`).
@@ -111,7 +112,13 @@ pub trait StateStore {
     /// Update a deployment's drift status (D-055), set by `--verify`. `ok`:
     /// Some(true)=ok, Some(false)=drift, None=unknown. No-op if the row is
     /// absent (the deployment was applied from another control machine).
-    async fn record_verify(&self, host: &str, task: &str, ok: Option<bool>, checked_at: i64) -> crate::Result<()>;
+    async fn record_verify(
+        &self,
+        host: &str,
+        task: &str,
+        ok: Option<bool>,
+        checked_at: i64,
+    ) -> crate::Result<()>;
     async fn list_deployments(&self) -> crate::Result<Vec<Deployment>>;
     async fn history(&self, limit: usize) -> crate::Result<Vec<JobRun>>;
 }
@@ -150,7 +157,10 @@ impl TursoStore {
     }
 
     async fn init(&self) -> crate::Result<()> {
-        let conn = self.db.connect().map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS deployments(
                  host TEXT NOT NULL,
@@ -181,7 +191,10 @@ impl TursoStore {
 #[async_trait]
 impl StateStore for TursoStore {
     async fn record_apply(&self, host: &str, m: &Marker) -> crate::Result<()> {
-        let conn = self.db.connect().map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
         // apply runs the verify phase, so a successful apply ⇒ status ok.
         conn.execute(
             "INSERT INTO deployments(host, task, deployment, version, source, applied_at, status, checked_at)
@@ -204,7 +217,10 @@ impl StateStore for TursoStore {
     }
 
     async fn record_delete(&self, host: &str, task: &str, ts: i64) -> crate::Result<()> {
-        let conn = self.db.connect().map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
         conn.execute(
             "DELETE FROM deployments WHERE host=?1 AND task=?2",
             (host, task),
@@ -220,13 +236,22 @@ impl StateStore for TursoStore {
         Ok(())
     }
 
-    async fn record_verify(&self, host: &str, task: &str, ok: Option<bool>, checked_at: i64) -> crate::Result<()> {
+    async fn record_verify(
+        &self,
+        host: &str,
+        task: &str,
+        ok: Option<bool>,
+        checked_at: i64,
+    ) -> crate::Result<()> {
         let status = match ok {
             Some(true) => "ok",
             Some(false) => "drift",
             None => "unknown",
         };
-        let conn = self.db.connect().map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
         conn.execute(
             "UPDATE deployments SET status=?1, checked_at=?2 WHERE host=?3 AND task=?4",
             (status, checked_at, host, task),
@@ -237,7 +262,10 @@ impl StateStore for TursoStore {
     }
 
     async fn list_deployments(&self) -> crate::Result<Vec<Deployment>> {
-        let conn = self.db.connect().map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
         let mut rows = conn
             .query(
                 "SELECT host, task, deployment, version, source, applied_at, status, checked_at
@@ -249,13 +277,25 @@ impl StateStore for TursoStore {
         let mut out = Vec::new();
         while let Some(r) = rows.next().await.map_err(|e| anyhow::anyhow!("row: {e}"))? {
             out.push(Deployment {
-                host: r.get::<String>(0).map_err(|e| anyhow::anyhow!("col: {e}"))?,
-                name: r.get::<String>(1).map_err(|e| anyhow::anyhow!("col: {e}"))?,
-                deployment: r.get::<String>(2).map_err(|e| anyhow::anyhow!("col: {e}"))?,
-                version: r.get::<String>(3).map_err(|e| anyhow::anyhow!("col: {e}"))?,
-                source: r.get::<String>(4).map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                host: r
+                    .get::<String>(0)
+                    .map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                name: r
+                    .get::<String>(1)
+                    .map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                deployment: r
+                    .get::<String>(2)
+                    .map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                version: r
+                    .get::<String>(3)
+                    .map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                source: r
+                    .get::<String>(4)
+                    .map_err(|e| anyhow::anyhow!("col: {e}"))?,
                 applied_at: r.get::<i64>(5).map_err(|e| anyhow::anyhow!("col: {e}"))?,
-                status: r.get::<String>(6).map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                status: r
+                    .get::<String>(6)
+                    .map_err(|e| anyhow::anyhow!("col: {e}"))?,
                 checked_at: r.get::<i64>(7).map_err(|e| anyhow::anyhow!("col: {e}"))?,
             });
         }
@@ -263,7 +303,10 @@ impl StateStore for TursoStore {
     }
 
     async fn history(&self, limit: usize) -> crate::Result<Vec<JobRun>> {
-        let conn = self.db.connect().map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
         let mut rows = conn
             .query(
                 "SELECT ts, action, task, deployment, host, result FROM job_runs
@@ -276,11 +319,21 @@ impl StateStore for TursoStore {
         while let Some(r) = rows.next().await.map_err(|e| anyhow::anyhow!("row: {e}"))? {
             out.push(JobRun {
                 ts: r.get::<i64>(0).map_err(|e| anyhow::anyhow!("col: {e}"))?,
-                action: r.get::<String>(1).map_err(|e| anyhow::anyhow!("col: {e}"))?,
-                task: r.get::<String>(2).map_err(|e| anyhow::anyhow!("col: {e}"))?,
-                deployment: r.get::<String>(3).map_err(|e| anyhow::anyhow!("col: {e}"))?,
-                host: r.get::<String>(4).map_err(|e| anyhow::anyhow!("col: {e}"))?,
-                result: r.get::<String>(5).map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                action: r
+                    .get::<String>(1)
+                    .map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                task: r
+                    .get::<String>(2)
+                    .map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                deployment: r
+                    .get::<String>(3)
+                    .map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                host: r
+                    .get::<String>(4)
+                    .map_err(|e| anyhow::anyhow!("col: {e}"))?,
+                result: r
+                    .get::<String>(5)
+                    .map_err(|e| anyhow::anyhow!("col: {e}"))?,
             });
         }
         Ok(out)

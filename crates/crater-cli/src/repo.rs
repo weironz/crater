@@ -100,7 +100,12 @@ impl Index {
 // ───────────────────────────── 生成 ─────────────────────────────
 
 /// 从一条 config 契约折出索引条目。
-fn entry_of(reference: &str, cfg: &serde_json::Value, platforms: Vec<String>, digest: String) -> (String, Entry) {
+fn entry_of(
+    reference: &str,
+    cfg: &serde_json::Value,
+    platforms: Vec<String>,
+    digest: String,
+) -> (String, Entry) {
     let name = cfg["name"].as_str().unwrap_or("").to_string();
     // **版本取 tag,不取蓝图里的 `version:`。**
     //
@@ -143,7 +148,12 @@ fn entry_of(reference: &str, cfg: &serde_json::Value, platforms: Vec<String>, di
 /// 来源两种:`oci://reg/ns/name`(不带 tag → 走 `tags/list` 收全部版本)、
 /// `--store`(本地 store 里的全部蓝图包)。**没有"扫一个 registry"这一种**
 /// —— 那正是 OCI 问不出来的东西,假装能问只会在别人的 registry 上失败。
-pub async fn index(sources: &[String], from_store: bool, out: &std::path::Path, merge: bool) -> Result<()> {
+pub async fn index(
+    sources: &[String],
+    from_store: bool,
+    out: &std::path::Path,
+    merge: bool,
+) -> Result<()> {
     let mut idx = if merge {
         if out.exists() {
             // 读不动就**报错**,绝不退回空索引 —— `--merge` 的输入正是 `out`
@@ -177,7 +187,10 @@ pub async fn index(sources: &[String], from_store: bool, out: &std::path::Path, 
             //
             // 所以不能一声不吭。仍然不报错:第一次发布必须能跑,否则每条
             // 流水线都要为"第一次"多写一个分支。
-            crate::oops!("  · --merge 的 {} 不存在 —— 当作首次发布,从空索引开始", out.display());
+            crate::oops!(
+                "  · --merge 的 {} 不存在 —— 当作首次发布,从空索引开始",
+                out.display()
+            );
             Index::default()
         }
     } else {
@@ -188,8 +201,12 @@ pub async fn index(sources: &[String], from_store: bool, out: &std::path::Path, 
     if from_store {
         let store = ImageStore::open()?;
         for img in store.list()? {
-            let Ok(m) = store.resolve_manifest(&img.reference) else { continue };
-            let Some(cfg) = crate::pkg::config_of(&store, &m) else { continue };
+            let Ok(m) = store.resolve_manifest(&img.reference) else {
+                continue;
+            };
+            let Some(cfg) = crate::pkg::config_of(&store, &m) else {
+                continue;
+            };
             let plats = crater_core::store::platforms_of(&m);
             let (name, e) = entry_of(&img.reference, &cfg, plats, img.digest.clone());
             if name.is_empty() {
@@ -250,9 +267,17 @@ pub async fn index(sources: &[String], from_store: bool, out: &std::path::Path, 
     // 的增量发布和一次把历史写没的全量重写在终端上长得一模一样。
     let total: usize = idx.entries.values().map(|v| v.len()).sum();
     if merge {
-        say!("索引 → {}({} 个包,{total} 个版本;本次 {n} 个)", out.display(), idx.entries.len());
+        say!(
+            "索引 → {}({} 个包,{total} 个版本;本次 {n} 个)",
+            out.display(),
+            idx.entries.len()
+        );
     } else {
-        say!("索引 → {}({} 个包,{total} 个版本)", out.display(), idx.entries.len());
+        say!(
+            "索引 → {}({} 个包,{total} 个版本)",
+            out.display(),
+            idx.entries.len()
+        );
     }
     say!("托管到任意静态 HTTP,对方 `crater repo add <名> <地址>` 就能搜。");
     Ok(())
@@ -265,9 +290,13 @@ pub async fn index(sources: &[String], from_store: bool, out: &std::path::Path, 
 /// 只流式读归档里的 `index.json`(几百字节)—— 一份包 tar 可以有几百兆,
 /// 为了问一句"你是谁"把它整个摊开是不必要的。
 fn refs_in_archive(tar: &std::path::Path) -> Vec<String> {
-    let Ok(f) = std::fs::File::open(tar) else { return Vec::new() };
+    let Ok(f) = std::fs::File::open(tar) else {
+        return Vec::new();
+    };
     let mut ar = tar::Archive::new(f);
-    let Ok(entries) = ar.entries() else { return Vec::new() };
+    let Ok(entries) = ar.entries() else {
+        return Vec::new();
+    };
     for e in entries.flatten() {
         let Ok(p) = e.path() else { continue };
         if p.file_name().and_then(|n| n.to_str()) != Some("index.json") {
@@ -277,7 +306,9 @@ fn refs_in_archive(tar: &std::path::Path) -> Vec<String> {
         if p.components().count() != 2 && p.components().count() != 1 {
             continue;
         }
-        let Ok(idx) = serde_json::from_reader::<_, serde_json::Value>(e) else { return Vec::new() };
+        let Ok(idx) = serde_json::from_reader::<_, serde_json::Value>(e) else {
+            return Vec::new();
+        };
         return idx["manifests"]
             .as_array()
             .map(|ms| {
@@ -305,21 +336,32 @@ fn attach_local_tars(idx: &mut Index, out: &std::path::Path) -> usize {
             e.urls.clear();
         }
     }
-    let dir = out.parent().filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_path_buf());
+    let dir = out
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf());
     let dir = dir.unwrap_or_else(|| std::path::PathBuf::from("."));
-    let Ok(rd) = std::fs::read_dir(&dir) else { return 0 };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
     let mut files: Vec<PathBuf> = rd
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
-            let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let n = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             p.is_file() && (n.ends_with(".pkg.tar") || n.ends_with(".oci"))
         })
         .collect();
     files.sort();
     let mut used = 0usize;
     for f in &files {
-        let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = f
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let carried = refs_in_archive(f);
         let mut hit = false;
         for versions in idx.entries.values_mut() {
@@ -390,9 +432,14 @@ fn write_atomically(out: &std::path::Path, bytes: &[u8]) -> Result<()> {
 
 fn load_index_file(p: &std::path::Path) -> Result<Index> {
     let text = std::fs::read_to_string(p).with_context(|| format!("读索引 {}", p.display()))?;
-    let idx: Index = serde_yaml::from_str(&text).with_context(|| format!("{} 不是 crater 索引", p.display()))?;
+    let idx: Index =
+        serde_yaml::from_str(&text).with_context(|| format!("{} 不是 crater 索引", p.display()))?;
     if idx.api_version != API_VERSION {
-        bail!("{} 的 apiVersion 是 {},本机认得的是 {API_VERSION}", p.display(), idx.api_version);
+        bail!(
+            "{} 的 apiVersion 是 {},本机认得的是 {API_VERSION}",
+            p.display(),
+            idx.api_version
+        );
     }
     Ok(idx)
 }
@@ -518,7 +565,9 @@ pub fn search(query: &str) -> Result<()> {
     let mut hits: Vec<(String, String, &Entry)> = Vec::new();
     for (rn, idx) in &repos {
         for (name, versions) in &idx.entries {
-            let Some(latest) = versions.first() else { continue };
+            let Some(latest) = versions.first() else {
+                continue;
+            };
             if q.is_empty()
                 || name.to_lowercase().contains(&q)
                 || latest.description.to_lowercase().contains(&q)
@@ -533,20 +582,40 @@ pub fn search(query: &str) -> Result<()> {
     }
     hits.sort_by(|a, b| a.1.cmp(&b.1));
     let wn = hits.iter().map(|h| h.1.chars().count()).max().unwrap_or(0);
-    let wv = hits.iter().map(|h| h.2.version.chars().count()).max().unwrap_or(0);
+    let wv = hits
+        .iter()
+        .map(|h| h.2.version.chars().count())
+        .max()
+        .unwrap_or(0);
     for (repo, name, e) in &hits {
         // 机群契约直接摆出来 —— "要几台机器"是决定装不装的第一个问题,
         // 让人先装再发现 inventory 不满足,是最费时间的顺序。
         let need = if e.fleet.is_empty() {
             String::new()
         } else {
-            let s: Vec<String> = e.fleet.iter().map(|f| format!("{}×{}", f.name, f.min)).collect();
+            let s: Vec<String> = e
+                .fleet
+                .iter()
+                .map(|f| format!("{}×{}", f.name, f.min))
+                .collect();
             format!("  [{}]", s.join(" "))
         };
-        say!("  {:<wn$}  {:<wv$}  {}/{}{need}  {}", name, e.version, repo, name, e.description, wn = wn, wv = wv);
+        say!(
+            "  {:<wn$}  {:<wv$}  {}/{}{need}  {}",
+            name,
+            e.version,
+            repo,
+            name,
+            e.description,
+            wn = wn,
+            wv = wv
+        );
     }
     say!();
-    say!("{} 个包。`crater pkg inspect <ref>` 看契约,`crater install <名>` 装。", hits.len());
+    say!(
+        "{} 个包。`crater pkg inspect <ref>` 看契约,`crater install <名>` 装。",
+        hits.len()
+    );
     Ok(())
 }
 
@@ -566,7 +635,9 @@ pub fn resolve(name: &str, repo: Option<&str>) -> Result<String> {
         if repo.is_some_and(|r| r != rn) {
             continue;
         }
-        let Some(versions) = idx.entries.get(n) else { continue };
+        let Some(versions) = idx.entries.get(n) else {
+            continue;
+        };
         let pick = match want_ver {
             Some(v) => versions.iter().find(|e| e.version == v),
             None => versions.first(),
@@ -614,7 +685,10 @@ fn offline_hint(repo: &str, e: &Entry) {
     if e.urls.is_empty() {
         return;
     }
-    if ImageStore::open().map(|s| s.has_all_layers(&e.reference)).unwrap_or(false) {
+    if ImageStore::open()
+        .map(|s| s.has_all_layers(&e.reference))
+        .unwrap_or(false)
+    {
         return; // 字节已经在了,没什么好说的
     }
     // urls 是相对索引文件的路径 —— 本地/U 盘索引才解得出绝对位置。
@@ -757,7 +831,10 @@ mod tests {
         merged.upsert("yq", e("4.44.3"));
         merged.upsert("rustfs", e("1.0.0"));
 
-        let vs: Vec<&str> = merged.entries["yq"].iter().map(|x| x.version.as_str()).collect();
+        let vs: Vec<&str> = merged.entries["yq"]
+            .iter()
+            .map(|x| x.version.as_str())
+            .collect();
         assert_eq!(vs, vec!["4.44.3", "4.40.5"], "老版本必须留着,且新的排前面");
         assert!(merged.entries.contains_key("rustfs"), "另一个包也要在");
     }
@@ -781,13 +858,19 @@ mod tests {
             ("empty", String::new()),
             ("garbage", "这不是索引\n".to_string()),
             // 截在半个 token 上(写盘被打断的常见样子)。
-            ("truncated", "apiVersion: crater.pkg/v1\ngenerated: x\nentries:\n  yq:\n  - vers".into()),
+            (
+                "truncated",
+                "apiVersion: crater.pkg/v1\ngenerated: x\nentries:\n  yq:\n  - vers".into(),
+            ),
             ("wrong_api", good.replace(API_VERSION, "crater.pkg/v99")),
         ];
         for (name, body) in cases {
             let p = d.path().join(format!("{name}.yaml"));
             std::fs::write(&p, body).unwrap();
-            assert!(load_index_file(&p).is_err(), "{name}:坏索引却读成功了 —— merge 会把历史写没");
+            assert!(
+                load_index_file(&p).is_err(),
+                "{name}:坏索引却读成功了 —— merge 会把历史写没"
+            );
         }
 
         // 对照组:好索引照常读得出来,免得上面四条是因为读函数整个坏了才过。
@@ -806,10 +889,17 @@ mod tests {
     fn a_truncation_at_the_entries_line_still_parses() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("cut.yaml");
-        std::fs::write(&p, "apiVersion: crater.pkg/v1\ngenerated: 2026-09-02T00:00:00Z\nentries:\n").unwrap();
+        std::fs::write(
+            &p,
+            "apiVersion: crater.pkg/v1\ngenerated: 2026-09-02T00:00:00Z\nentries:\n",
+        )
+        .unwrap();
 
         let idx = load_index_file(&p).expect("截断在 entries: 之后仍是合法 YAML");
-        assert!(idx.entries.is_empty(), "它看起来就是一份'没有任何包'的好索引 —— 危险正在这里");
+        assert!(
+            idx.entries.is_empty(),
+            "它看起来就是一份'没有任何包'的好索引 —— 危险正在这里"
+        );
     }
 
     /// 索引落盘不留"写了一半"的中间态,也不留临时文件。
@@ -891,9 +981,23 @@ mod tests {
         fake_archive(&d.path().join("other.pkg.tar"), &["reg/t/rustfs:1.0"]);
 
         assert_eq!(attach_local_tars(&mut idx, &out), 1, "只有一个 tar 对得上");
-        let by_ver = |v: &str| idx.entries["yq"].iter().find(|x| x.version == v).unwrap().urls.clone();
-        assert_eq!(by_ver("4.40.5"), vec!["yq.pkg.tar".to_string()], "按自报引用配对");
-        assert!(by_ver("4.44.3").is_empty(), "名字像不算数 —— 会把人指到错的版本上");
+        let by_ver = |v: &str| {
+            idx.entries["yq"]
+                .iter()
+                .find(|x| x.version == v)
+                .unwrap()
+                .urls
+                .clone()
+        };
+        assert_eq!(
+            by_ver("4.40.5"),
+            vec!["yq.pkg.tar".to_string()],
+            "按自报引用配对"
+        );
+        assert!(
+            by_ver("4.44.3").is_empty(),
+            "名字像不算数 —— 会把人指到错的版本上"
+        );
     }
 
     /// 重跑 `pkg index` 时旧的 `urls` 要**先清掉**。

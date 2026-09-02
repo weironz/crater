@@ -105,7 +105,10 @@ pub struct RunReport {
 
 impl RunReport {
     pub fn changed(&self) -> usize {
-        self.steps.iter().filter(|(_, o)| *o == Outcome::Changed).count()
+        self.steps
+            .iter()
+            .filter(|(_, o)| *o == Outcome::Changed)
+            .count()
     }
     pub fn ok(&self) -> usize {
         self.steps.iter().filter(|(_, o)| *o == Outcome::Ok).count()
@@ -139,14 +142,19 @@ fn expand(bp: &Blueprint, scope: &Scope) -> Result<Vec<Unit>> {
             continue;
         }
         if let Some(w) = &r.when {
-            if !scope.eval_bool(w).map_err(|e| anyhow::anyhow!("{}:{e}", r.id))? {
+            if !scope
+                .eval_bool(w)
+                .map_err(|e| anyhow::anyhow!("{}:{e}", r.id))?
+            {
                 continue; // 条件不成立 —— 连 plan 都不该出现它
             }
         }
         match &r.each {
             None => out.push(unit(r, scope, &r.id)?),
             Some(each) => {
-                let items = scope.expand_each(each).map_err(|e| anyhow::anyhow!("{}:{e}", r.id))?;
+                let items = scope
+                    .expand_each(each)
+                    .map_err(|e| anyhow::anyhow!("{}:{e}", r.id))?;
                 for (i, item) in items.into_iter().enumerate() {
                     let s = scope.with_item(item);
                     out.push(unit(r, &s, &format!("{}[{i}]", r.id))?);
@@ -203,7 +211,13 @@ pub fn plan_with(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx, intent: Intent) -
             if intent == Intent::Converge && !change.is_noop() {
                 upstream_changed = true;
             }
-            items.push(PlanItem { id: u.id, ty: u.ty, args: u.args, observed, change });
+            items.push(PlanItem {
+                id: u.id,
+                ty: u.ty,
+                args: u.args,
+                observed,
+                change,
+            });
             continue;
         }
         let Some(rt) = resolve_type(bp, &u.ty) else {
@@ -223,10 +237,17 @@ pub fn plan_with(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx, intent: Intent) -
             upstream_changed,
         });
         // 审计语境下不传播:一处漂移不该把后面所有资源染红。
-        if intent == Intent::Converge && !change.is_noop() && !matches!(change, Change::Unknown(_)) {
+        if intent == Intent::Converge && !change.is_noop() && !matches!(change, Change::Unknown(_))
+        {
             upstream_changed = true;
         }
-        items.push(PlanItem { id: u.id, ty: u.ty, args: u.args, observed, change });
+        items.push(PlanItem {
+            id: u.id,
+            ty: u.ty,
+            args: u.args,
+            observed,
+            change,
+        });
     }
     Ok(Plan { items })
 }
@@ -399,7 +420,9 @@ pub fn plan_destroy(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<Plan
 pub fn destroy_dances(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     for u in expand(bp, scope)? {
-        let Some(def) = bp.custom_type(&u.ty) else { continue };
+        let Some(def) = bp.custom_type(&u.ty) else {
+            continue;
+        };
         let Some(dance) = &def.destroy else { continue };
         if crate::procedure::observe_custom(def, ctx, scope)?.present && !out.contains(dance) {
             out.push(dance.clone());
@@ -425,7 +448,13 @@ fn plan_destroy_inner(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<Pl
                     u.ty
                 )),
             };
-            items.push(PlanItem { id: u.id, ty: u.ty, args: u.args, observed, change });
+            items.push(PlanItem {
+                id: u.id,
+                ty: u.ty,
+                args: u.args,
+                observed,
+                change,
+            });
             continue;
         }
         let Some(rt) = resolve_type(bp, &u.ty) else {
@@ -448,7 +477,13 @@ fn plan_destroy_inner(bp: &Blueprint, scope: &Scope, ctx: &dyn Ctx) -> Result<Pl
             // "还留着什么痕迹"。见 ResourceType::destroy_change。
             None => rt.destroy_change(&observed),
         };
-        items.push(PlanItem { id: u.id, ty: u.ty, args: u.args, observed, change });
+        items.push(PlanItem {
+            id: u.id,
+            ty: u.ty,
+            args: u.args,
+            observed,
+            change,
+        });
     }
     Ok(Plan { items })
 }
@@ -509,7 +544,10 @@ pub fn scope_from_defaults(bp: &Blueprint) -> Scope {
         .iter()
         .filter_map(|(k, p)| p.default.clone().map(|d| (k.clone(), d)))
         .collect();
-    Scope { params, ..Default::default() }
+    Scope {
+        params,
+        ..Default::default()
+    }
 }
 
 /// 便捷:覆盖若干参数(`--set k=v`)。

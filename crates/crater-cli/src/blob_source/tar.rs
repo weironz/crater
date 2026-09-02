@@ -62,7 +62,15 @@ impl TarClosure {
             .collect();
 
         let origin = path.display().to_string();
-        Ok((TarClosure { _dir: dir, blobs, manifest, origin }, images))
+        Ok((
+            TarClosure {
+                _dir: dir,
+                blobs,
+                manifest,
+                origin,
+            },
+            images,
+        ))
     }
 }
 

@@ -29,9 +29,16 @@ pub enum ResolveError {
     Undeclared(String),
     /// 声明了,但**没有一个变体**适配这台机器 —— 例如只打了 amd64 却部署到 arm64。
     /// 这必须是响亮的错误:静默跳过会让目标机装上"半套"。
-    NoVariant { name: String, tried: usize, hint: String },
+    NoVariant {
+        name: String,
+        tried: usize,
+        hint: String,
+    },
     /// 多个变体同时成立 —— 作者的条件写重叠了,无法判定该用哪个。
-    Ambiguous { name: String, count: usize },
+    Ambiguous {
+        name: String,
+        count: usize,
+    },
     Eval(String),
 }
 
@@ -83,7 +90,12 @@ pub fn resolve(bp: &Blueprint, name: &str, scope: &Scope) -> Result<MaterialPlan
                 hint: describe_substrate(scope),
             })
         }
-        n => return Err(ResolveError::Ambiguous { name: name.to_string(), count: n }),
+        n => {
+            return Err(ResolveError::Ambiguous {
+                name: name.to_string(),
+                count: n,
+            })
+        }
     };
 
     Ok(MaterialPlan {
@@ -109,7 +121,12 @@ fn describe_substrate(scope: &Scope) -> String {
             .unwrap_or("?")
             .to_string()
     };
-    format!("arch={} distro={} version={}", pick("arch"), pick("distro"), pick("version"))
+    format!(
+        "arch={} distro={} version={}",
+        pick("arch"),
+        pick("distro"),
+        pick("version")
+    )
 }
 
 /// blueprint 在当前 scope 下**实际会用到**的全部物料(去重)。
@@ -289,18 +306,30 @@ resources:
         params.insert("version".to_string(), Yaml::from("1.2.3"));
         let mut substrate = BTreeMap::new();
         substrate.insert("arch".to_string(), Yaml::from(arch));
-        Scope { params, substrate, ..Default::default() }
+        Scope {
+            params,
+            substrate,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn the_target_arch_picks_the_variant_not_the_author() {
         let bp = blueprint_from_str(BP).unwrap();
         let amd = resolve(&bp, "bin", &scope_with_arch("amd64")).unwrap();
-        assert!(amd.source.ends_with("tool-linux-x86_64.tar.gz"), "{}", amd.source);
+        assert!(
+            amd.source.ends_with("tool-linux-x86_64.tar.gz"),
+            "{}",
+            amd.source
+        );
         assert_eq!(amd.sha256.as_deref(), Some("abc"));
 
         let arm = resolve(&bp, "bin", &scope_with_arch("arm64")).unwrap();
-        assert!(arm.source.ends_with("tool-linux-aarch64.tar.gz"), "{}", arm.source);
+        assert!(
+            arm.source.ends_with("tool-linux-aarch64.tar.gz"),
+            "{}",
+            arm.source
+        );
         assert_eq!(arm.sha256, None, "变体各自带自己的摘要");
     }
 
@@ -318,7 +347,10 @@ resources:
         let err = resolve(&bp, "bin", &scope_with_arch("riscv64")).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("2 个变体"), "{msg}");
-        assert!(msg.contains("arch=riscv64"), "报错要说清这台机器长什么样:{msg}");
+        assert!(
+            msg.contains("arch=riscv64"),
+            "报错要说清这台机器长什么样:{msg}"
+        );
         assert!(msg.contains("拒绝装半套"), "{msg}");
     }
 
@@ -381,8 +413,13 @@ procedures:
         )
         .unwrap();
         let names = referenced_names(&bp);
-        for want in ["kubeadm", "kubelet", "kubectl", "unit", "dropin", "manifest"] {
-            assert!(names.contains(&want.to_string()), "闭包漏了 {want}:{names:?}");
+        for want in [
+            "kubeadm", "kubelet", "kubectl", "unit", "dropin", "manifest",
+        ] {
+            assert!(
+                names.contains(&want.to_string()),
+                "闭包漏了 {want}:{names:?}"
+            );
         }
     }
 

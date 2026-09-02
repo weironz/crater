@@ -88,7 +88,13 @@ fn entries(data: &[u8]) -> Result<Vec<Entry>> {
             }
             x += 4 + sz;
         }
-        out.push(Entry { name, method, comp_size: comp, uncomp_size: uncomp, lfh_offset: lfh });
+        out.push(Entry {
+            name,
+            method,
+            comp_size: comp,
+            uncomp_size: uncomp,
+            lfh_offset: lfh,
+        });
         p += 46 + name_len + extra_len + comment_len;
     }
     Ok(out)
@@ -133,7 +139,10 @@ pub fn extract_member(data: &[u8], member: &str) -> Result<Vec<u8>> {
             flate2::read::DeflateDecoder::new(raw).read_to_end(&mut out)?;
             Ok(out)
         }
-        m => bail!("zip 成员 '{}' 用不支持的压缩方法 {m}(只支持 stored/deflate)", e.name),
+        m => bail!(
+            "zip 成员 '{}' 用不支持的压缩方法 {m}(只支持 stored/deflate)",
+            e.name
+        ),
     }
 }
 
@@ -206,9 +215,15 @@ mod tests {
             ("rustfs", b"#!ELF fake binary bytes", true),
             ("README.md", b"docs", false),
         ]);
-        assert_eq!(extract_member(&z, "rustfs").unwrap(), b"#!ELF fake binary bytes");
+        assert_eq!(
+            extract_member(&z, "rustfs").unwrap(),
+            b"#!ELF fake binary bytes"
+        );
         assert_eq!(extract_member(&z, "README.md").unwrap(), b"docs");
-        assert_eq!(extract_member(&z, "./rustfs").unwrap(), b"#!ELF fake binary bytes");
+        assert_eq!(
+            extract_member(&z, "./rustfs").unwrap(),
+            b"#!ELF fake binary bytes"
+        );
         assert_eq!(list_members(&z).unwrap(), vec!["rustfs", "README.md"]);
     }
 
@@ -216,7 +231,10 @@ mod tests {
     fn missing_member_lists_contents() {
         let z = make_zip(&[("bin/tool", b"x", false)]);
         let err = extract_member(&z, "tool").unwrap_err().to_string();
-        assert!(err.contains("bin/tool"), "error should list members, got: {err}");
+        assert!(
+            err.contains("bin/tool"),
+            "error should list members, got: {err}"
+        );
     }
 
     #[test]

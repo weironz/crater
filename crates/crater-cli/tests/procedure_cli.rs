@@ -103,10 +103,20 @@ fn a_fact_produced_on_the_first_host_reaches_the_others() {
     );
     assert!(o.status.success(), "{}", stdout(&o));
 
-    assert_eq!(std::fs::read_to_string(root.join("token")).unwrap().trim(), "THE-TOKEN");
-    assert_eq!(std::fs::read_to_string(root.join("cp-join")).unwrap().trim(), "THE-TOKEN");
     assert_eq!(
-        std::fs::read_to_string(root.join("worker-join")).unwrap().trim(),
+        std::fs::read_to_string(root.join("token")).unwrap().trim(),
+        "THE-TOKEN"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("cp-join"))
+            .unwrap()
+            .trim(),
+        "THE-TOKEN"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("worker-join"))
+            .unwrap()
+            .trim(),
         "THE-TOKEN",
         "worker 也要拿到跨主机 fact"
     );
@@ -123,7 +133,14 @@ fn steps_target_only_the_hosts_their_selector_names() {
 
     let out = stdout(&crater(
         &home,
-        &["procedure", "bootstrap", "-f", bp.to_str().unwrap(), "-i", inv.to_str().unwrap()],
+        &[
+            "procedure",
+            "bootstrap",
+            "-f",
+            bp.to_str().unwrap(),
+            "-i",
+            inv.to_str().unwrap(),
+        ],
     ));
     // 第一步只在 n11;第二步只在 n12;第三步只在 w01
     // 只取步骤行,别把汇总行(`执行:changed=3 …`)也算进来
@@ -182,13 +199,23 @@ inventory:
 
     let o = crater(
         &home,
-        &["procedure", "bootstrap", "-f", bp.to_str().unwrap(), "-i", inv.to_str().unwrap()],
+        &[
+            "procedure",
+            "bootstrap",
+            "-f",
+            bp.to_str().unwrap(),
+            "-i",
+            inv.to_str().unwrap(),
+        ],
     );
     assert!(o.status.success(), "{}", stdout(&o));
     let out = stdout(&o);
     assert!(out.contains("skip"), "空选择要留痕:{out}");
     assert!(out.contains("skipped=2"), "{out}");
-    assert!(!root.join("worker-join").exists(), "没有 worker 就不该有 worker 产物");
+    assert!(
+        !root.join("worker-join").exists(),
+        "没有 worker 就不该有 worker 产物"
+    );
 }
 
 #[test]
@@ -227,22 +254,45 @@ resources:
 
     let o = crater(
         &home,
-        &["apply", "-f", p.to_str().unwrap(), "-i", inv.to_str().unwrap()],
+        &[
+            "apply",
+            "-f",
+            p.to_str().unwrap(),
+            "-i",
+            inv.to_str().unwrap(),
+        ],
     );
     assert!(o.status.success(), "{}", stdout(&o));
     let out = stdout(&o);
     assert!(out.contains("── procedure bootstrap ──"), "{out}");
     // 三台目标,但舞只跳一次
     let ran = std::fs::read_to_string(root.join("ran")).unwrap();
-    assert_eq!(ran.lines().count(), 1, "舞被跳了 {} 遍", ran.lines().count());
+    assert_eq!(
+        ran.lines().count(),
+        1,
+        "舞被跳了 {} 遍",
+        ran.lines().count()
+    );
 
     // 再 apply:探针说已在册 → 不再跳
     let again = stdout(&crater(
         &home,
-        &["apply", "-f", p.to_str().unwrap(), "-i", inv.to_str().unwrap()],
+        &[
+            "apply",
+            "-f",
+            p.to_str().unwrap(),
+            "-i",
+            inv.to_str().unwrap(),
+        ],
     ));
     assert!(!again.contains("── procedure"), "已就位不该再跳:{again}");
-    assert_eq!(std::fs::read_to_string(root.join("ran")).unwrap().lines().count(), 1);
+    assert_eq!(
+        std::fs::read_to_string(root.join("ran"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -276,9 +326,18 @@ resources:
 
     let out = stdout(&crater(
         &home,
-        &["plan", "-f", p.to_str().unwrap(), "-i", inv.to_str().unwrap()],
+        &[
+            "plan",
+            "-f",
+            p.to_str().unwrap(),
+            "-i",
+            inv.to_str().unwrap(),
+        ],
     ));
-    assert!(out.contains("via: procedure bootstrap"), "plan 要说清靠哪支舞:{out}");
+    assert!(
+        out.contains("via: procedure bootstrap"),
+        "plan 要说清靠哪支舞:{out}"
+    );
     assert!(!out.contains("?1"), "自定义类型不该再计入模型化欠债:{out}");
 }
 
@@ -292,7 +351,14 @@ fn an_unknown_procedure_name_lists_the_available_ones() {
 
     let o = crater(
         &home,
-        &["procedure", "nope", "-f", bp.to_str().unwrap(), "-i", inv.to_str().unwrap()],
+        &[
+            "procedure",
+            "nope",
+            "-f",
+            bp.to_str().unwrap(),
+            "-i",
+            inv.to_str().unwrap(),
+        ],
     );
     assert!(!o.status.success());
     let err = String::from_utf8_lossy(&o.stderr);

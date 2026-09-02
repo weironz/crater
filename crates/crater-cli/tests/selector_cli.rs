@@ -82,7 +82,9 @@ fn per_host_counts(out: &str) -> Vec<(String, usize)> {
     let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
     for line in out.lines() {
         // `n1  + copy …` —— 前缀与正文之间是两个空格。
-        let Some((host, body)) = line.split_once("  ") else { continue };
+        let Some((host, body)) = line.split_once("  ") else {
+            continue;
+        };
         let host = host.trim();
         if host.is_empty() || host.contains(' ') {
             continue;
@@ -109,7 +111,13 @@ fn each_host_only_plans_the_resources_selected_for_it() {
 
     let o = crater(
         &home,
-        &["plan", "-f", bp.to_str().unwrap(), "-i", inv.to_str().unwrap()],
+        &[
+            "plan",
+            "-f",
+            bp.to_str().unwrap(),
+            "-i",
+            inv.to_str().unwrap(),
+        ],
     );
     assert!(o.status.success(), "{}", stdout(&o));
     let counts = per_host_counts(&stdout(&o));
@@ -131,13 +139,23 @@ fn first_and_rest_split_the_control_plane() {
 
     let out = stdout(&crater(
         &home,
-        &["plan", "-f", bp.to_str().unwrap(), "-i", inv.to_str().unwrap()],
+        &[
+            "plan",
+            "-f",
+            bp.to_str().unwrap(),
+            "-i",
+            inv.to_str().unwrap(),
+        ],
     ));
     // 按主机前缀归拢各自的行(输出不再有 `── host ──` 段头,
     // 每行自带主机名 —— 这样解析不依赖行的先后顺序)。
     let lines_of = |h: &str| -> String {
         out.lines()
-            .filter(|l| l.split_once("  ").map(|(p, _)| p.trim() == h).unwrap_or(false))
+            .filter(|l| {
+                l.split_once("  ")
+                    .map(|(p, _)| p.trim() == h)
+                    .unwrap_or(false)
+            })
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -168,7 +186,13 @@ fn each_fleet_member_gets_its_own_deployment_record() {
 
     crater(
         &home,
-        &["apply", "-f", bp.to_str().unwrap(), "-i", inv.to_str().unwrap()],
+        &[
+            "apply",
+            "-f",
+            bp.to_str().unwrap(),
+            "-i",
+            inv.to_str().unwrap(),
+        ],
     );
     let dir = home.join(".crater").join("state");
     let mut names: Vec<String> = std::fs::read_dir(&dir)
@@ -179,7 +203,11 @@ fn each_fleet_member_gets_its_own_deployment_record() {
     names.sort();
     assert_eq!(
         names,
-        vec!["sel-demo_n11.yaml", "sel-demo_n12.yaml", "sel-demo_w01.yaml"]
+        vec![
+            "sel-demo_n11.yaml",
+            "sel-demo_n12.yaml",
+            "sel-demo_w01.yaml"
+        ]
     );
 }
 
@@ -201,7 +229,13 @@ fn a_misspelled_group_fails_loudly_instead_of_silently_skipping() {
 
     let o = crater(
         &home,
-        &["plan", "-f", p.to_str().unwrap(), "-i", inv.to_str().unwrap()],
+        &[
+            "plan",
+            "-f",
+            p.to_str().unwrap(),
+            "-i",
+            inv.to_str().unwrap(),
+        ],
     );
     assert!(!o.status.success());
     let err = String::from_utf8_lossy(&o.stderr);
@@ -266,7 +300,13 @@ resources:
 
     let o = crater(
         &home,
-        &["apply", "-f", p.to_str().unwrap(), "-i", inv.to_str().unwrap()],
+        &[
+            "apply",
+            "-f",
+            p.to_str().unwrap(),
+            "-i",
+            inv.to_str().unwrap(),
+        ],
     );
     assert!(o.status.success(), "{}", stdout(&o));
     assert!(root.join("worker-only").is_dir(), "选中的该建");

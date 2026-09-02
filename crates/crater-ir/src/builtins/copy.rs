@@ -43,7 +43,10 @@ impl ResourceType for Copy {
         }
         let mut lines = out.lines();
         let mut obs = Observed::present([
-            ("sha256", lines.next().unwrap_or_default().trim().to_string()),
+            (
+                "sha256",
+                lines.next().unwrap_or_default().trim().to_string(),
+            ),
             ("mode", lines.next().unwrap_or_default().trim().to_string()),
             ("owner", lines.next().unwrap_or_default().trim().to_string()),
             ("group", lines.next().unwrap_or_default().trim().to_string()),
@@ -273,11 +276,12 @@ mod tests {
         .into_iter()
         .collect();
         // 目标上有文件、摘要读到了,但**期望摘要**拿不到(没有 want_sha256)。
-        let observed = Observed::present([
-            ("sha256", "aa".repeat(32)),
-            ("mode", "755".into()),
-        ]);
-        let change = Copy.diff(&DiffInput { args: &args, observed: &observed, upstream_changed: false });
+        let observed = Observed::present([("sha256", "aa".repeat(32)), ("mode", "755".into())]);
+        let change = Copy.diff(&DiffInput {
+            args: &args,
+            observed: &observed,
+            upstream_changed: false,
+        });
         match change {
             Change::Unknown(why) => {
                 assert!(why.contains("yq-bin"), "要说清是哪份物料: {why}");
@@ -301,7 +305,11 @@ mod tests {
             ("want_sha256", "bb".repeat(32)),
         ]);
         assert!(matches!(
-            Copy.diff(&DiffInput { args: &args, observed: &observed, upstream_changed: false }),
+            Copy.diff(&DiffInput {
+                args: &args,
+                observed: &observed,
+                upstream_changed: false
+            }),
             Change::Ok
         ));
     }
@@ -310,10 +318,17 @@ mod tests {
     use crate::eval::Yaml;
 
     fn args(pairs: &[(&str, &str)]) -> ResolvedArgs {
-        pairs.iter().map(|(k, v)| (k.to_string(), Yaml::from(*v))).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), Yaml::from(*v)))
+            .collect()
     }
     fn diff_of(a: &ResolvedArgs, o: &Observed, upstream: bool) -> Change {
-        Copy.diff(&DiffInput { args: a, observed: o, upstream_changed: upstream })
+        Copy.diff(&DiffInput {
+            args: a,
+            observed: o,
+            upstream_changed: upstream,
+        })
     }
 
     #[test]
@@ -367,7 +382,10 @@ mod tests {
         // 变的是另一半:此前它断言 `Change::Ok`,而那是**谎报一致**
         // (期望摘要根本拿不到,凭什么说一致?)。现在报 `Unknown`:
         // 不谎报变更,也不谎报一致(D-135)。
-        let a = args(&[("dest", "/usr/local/bin/rustfs"), ("material", "rustfs-bin")]);
+        let a = args(&[
+            ("dest", "/usr/local/bin/rustfs"),
+            ("material", "rustfs-bin"),
+        ]);
         let obs = Observed::present([("sha256", "deadbeef".into())]);
         assert!(matches!(diff_of(&a, &obs, false), Change::Unknown(_)));
         assert!(matches!(diff_of(&a, &obs, true), Change::Update(_)));
@@ -396,7 +414,10 @@ mod tests {
         let a = args(&[("dest", "/etc/x"), ("content", "body"), ("mode", "0600")]);
         Copy.apply(&ctx, &a, &Change::Create(vec![])).unwrap();
         assert_eq!(ctx.written_file("/etc/x").as_deref(), Some("body"));
-        assert!(ctx.calls().iter().any(|c| c.text().starts_with("chmod '0600'")));
+        assert!(ctx
+            .calls()
+            .iter()
+            .any(|c| c.text().starts_with("chmod '0600'")));
     }
 
     #[test]
@@ -411,7 +432,10 @@ mod tests {
     fn destroying_something_already_gone_is_a_noop() {
         let ctx = FakeCtx::new();
         let a = args(&[("dest", "/etc/x")]);
-        assert_eq!(Copy.destroy(&ctx, &a, &Observed::absent()).unwrap(), Outcome::Ok);
+        assert_eq!(
+            Copy.destroy(&ctx, &a, &Observed::absent()).unwrap(),
+            Outcome::Ok
+        );
         assert!(ctx.calls().is_empty());
     }
 }

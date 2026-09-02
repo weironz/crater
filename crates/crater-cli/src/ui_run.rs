@@ -52,12 +52,20 @@ fn gate_dir() -> PathBuf {
 fn gate_key(blueprint: &str, inventory: &str) -> String {
     format!("{blueprint}|{inventory}")
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
 fn file_sha(rel: &str) -> Option<String> {
-    std::fs::read(rel).ok().map(|b| crater_core::bundle::sha256_hex(&b))
+    std::fs::read(rel)
+        .ok()
+        .map(|b| crater_core::bundle::sha256_hex(&b))
 }
 
 /// 参数 + 限定一起进快照。
@@ -90,7 +98,12 @@ fn write_gate(blueprint: &str, inventory: &str, sets: &[String], limit: &[String
 }
 
 /// 校验闸门。Ok(()) = 放行;Err(原因) = 409。
-fn check_gate(blueprint: &str, inventory: &str, sets: &[String], limit: &[String]) -> Result<(), String> {
+fn check_gate(
+    blueprint: &str,
+    inventory: &str,
+    sets: &[String],
+    limit: &[String],
+) -> Result<(), String> {
     let path = gate_dir().join(format!("{}.json", gate_key(blueprint, inventory)));
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Err("还没有对应的 Plan —— 先 Plan 看清将发生什么,再 Apply".into());
@@ -191,7 +204,13 @@ pub fn list() -> Vec<JobMeta> {
 }
 
 /// 起一个 job:spawn 本体 CLI,行式追加日志,退出时改写 meta。
-pub fn spawn(title: String, verb: String, blueprint: String, inventory: String, args: Vec<String>) -> String {
+pub fn spawn(
+    title: String,
+    verb: String,
+    blueprint: String,
+    inventory: String,
+    args: Vec<String>,
+) -> String {
     // 时间戳 + 计数后缀:同一秒多次提交也不撞。
     let base = format!("{}", now());
     let mut id = base.clone();
@@ -228,7 +247,10 @@ pub fn spawn(title: String, verb: String, blueprint: String, inventory: String, 
         // 开发期热换二进制后,/proc/self/exe 会带 " (deleted)" 后缀 ——
         // 磁盘上的新文件就在原路径,剥掉后缀即可;生产环境这行恒等。
         let exe = PathBuf::from(
-            exe.display().to_string().trim_end_matches(" (deleted)").to_string(),
+            exe.display()
+                .to_string()
+                .trim_end_matches(" (deleted)")
+                .to_string(),
         );
         // **子进程直写日志文件,不经 UI 管道中转。**
         //
@@ -366,9 +388,20 @@ pub struct RunReq {
 
 pub async fn run(Json(req): Json<RunReq>) -> Response {
     // 动词白名单:HTTP 面能起什么进程,必须是穷举的。
-    const VERBS: &[&str] = &["plan", "apply", "verify", "destroy", "lint", "build", "procedure"];
+    const VERBS: &[&str] = &[
+        "plan",
+        "apply",
+        "verify",
+        "destroy",
+        "lint",
+        "build",
+        "procedure",
+    ];
     if !VERBS.contains(&req.verb.as_str()) {
-        return err(StatusCode::BAD_REQUEST, format!("不支持的动词 `{}`(可用:{})", req.verb, VERBS.join("/")));
+        return err(
+            StatusCode::BAD_REQUEST,
+            format!("不支持的动词 `{}`(可用:{})", req.verb, VERBS.join("/")),
+        );
     }
     // 路径禁闭复用编辑器那套:canonicalize 后必须落在工作目录内。
     let bp = match crate::ui_edit::confine(&req.blueprint) {
@@ -376,7 +409,10 @@ pub async fn run(Json(req): Json<RunReq>) -> Response {
         Err((c, m)) => return err(c, m),
     };
     if !bp.is_file() {
-        return err(StatusCode::BAD_REQUEST, format!("蓝图不存在:{}", req.blueprint));
+        return err(
+            StatusCode::BAD_REQUEST,
+            format!("蓝图不存在:{}", req.blueprint),
+        );
     }
     let mut args: Vec<String> = vec![req.verb.clone(), bp.display().to_string()];
     if !req.inventory.is_empty() {
@@ -457,7 +493,10 @@ pub async fn run(Json(req): Json<RunReq>) -> Response {
         args.push("-o".into());
         // 输出路径可指定;不指定沿用 `<蓝图名>.closure.tar`(仍落在工作区内)。
         args.push(if req.output.trim().is_empty() {
-            format!("{}.closure.tar", bp.file_stem().unwrap_or_default().to_string_lossy())
+            format!(
+                "{}.closure.tar",
+                bp.file_stem().unwrap_or_default().to_string_lossy()
+            )
         } else {
             match crate::ui_edit::confine(req.output.trim()) {
                 Ok(p) => p.display().to_string(),
@@ -468,8 +507,15 @@ pub async fn run(Json(req): Json<RunReq>) -> Response {
     let title = format!(
         "{} {}{}",
         req.verb,
-        Path::new(&req.blueprint).file_name().unwrap_or_default().to_string_lossy(),
-        if req.inventory.is_empty() { String::new() } else { format!(" @ {}", req.inventory) }
+        Path::new(&req.blueprint)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy(),
+        if req.inventory.is_empty() {
+            String::new()
+        } else {
+            format!(" @ {}", req.inventory)
+        }
     );
     let id = spawn(title, req.verb, req.blueprint, req.inventory, args);
     Json(json!({ "ok": true, "job": id })).into_response()
@@ -520,7 +566,10 @@ pub async fn tail(AxPath(id): AxPath<String>, Query(q): Query<TailQuery>) -> Res
     let code = if done && chunk.is_empty() { 286 } else { 200 };
     (
         StatusCode::from_u16(code).unwrap(),
-        [("X-Log-Cursor", next.to_string()), ("X-Job-Status", m.status.clone())],
+        [
+            ("X-Log-Cursor", next.to_string()),
+            ("X-Job-Status", m.status.clone()),
+        ],
         text.into_owned(),
     )
         .into_response()
@@ -574,19 +623,24 @@ fn fmt_ts(secs: u64) -> String {
 /// 与日志尾巴同一套游标哲学:客户端记字节位,服务端只回增量。
 /// 断尾防御:`emit` 逐条 flush,但读的瞬间最后一行可能只写了一半 ——
 /// 只消费到最后一个换行,余下的字节留给下一轮。
-pub async fn events(
-    AxPath(id): AxPath<String>,
-    Query(q): Query<TailQuery>,
-) -> Response {
+pub async fn events(AxPath(id): AxPath<String>, Query(q): Query<TailQuery>) -> Response {
     let Some(m) = read_meta(&id) else {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"没有这个 job"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error":"没有这个 job"})),
+        )
+            .into_response();
     };
     let path = jobs_root().join(&id).join("events.ndjson");
     let bytes = std::fs::read(&path).unwrap_or_default();
     let start = (q.after as usize).min(bytes.len());
     let chunk = &bytes[start..];
     // 只到最后一个换行为止 —— 半行不算数。
-    let end = chunk.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+    let end = chunk
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
     let events: Vec<serde_json::Value> = std::str::from_utf8(&chunk[..end])
         .unwrap_or("")
         .lines()
@@ -608,7 +662,9 @@ fn events_say_drifted(id: &str) -> bool {
 }
 
 fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// `GET /view/jobs`

@@ -65,11 +65,18 @@ fn apply_creates_reality_then_reruns_clean() {
     // 1) 第一次:全部创建
     let first = crater(&["apply", "-f", bp]);
     assert!(first.status.success(), "{}", stdout(&first));
-    assert!(stdout(&first).contains("changed=2 ok=0"), "{}", stdout(&first));
+    assert!(
+        stdout(&first).contains("changed=2 ok=0"),
+        "{}",
+        stdout(&first)
+    );
 
     // 2) 磁盘上确实成了期望的样子(含权限 —— 不看权限就等于没验)
     assert!(root.join("data").is_dir());
-    assert_eq!(std::fs::read_to_string(root.join("app.env")).unwrap(), "PORT=9000\n");
+    assert_eq!(
+        std::fs::read_to_string(root.join("app.env")).unwrap(),
+        "PORT=9000\n"
+    );
     assert_eq!(mode_of(&root.join("data")), 0o750);
     assert_eq!(mode_of(&root.join("app.env")), 0o600);
 
@@ -94,7 +101,10 @@ fn apply_repairs_only_what_drifted() {
     let out = stdout(&crater(&["apply", "-f", bp]));
     assert!(out.contains("~1"), "只该修一处:{out}");
     assert!(out.contains("✓1"), "没漂的那项该保持不动:{out}");
-    assert_eq!(std::fs::read_to_string(root.join("app.env")).unwrap(), "PORT=9000\n");
+    assert_eq!(
+        std::fs::read_to_string(root.join("app.env")).unwrap(),
+        "PORT=9000\n"
+    );
 }
 
 #[test]
@@ -115,7 +125,10 @@ fn set_overrides_reach_the_written_file() {
     let bp = blueprint(d.path(), &root);
 
     crater(&["apply", "-f", bp.to_str().unwrap(), "--set", "port=9443"]);
-    assert_eq!(std::fs::read_to_string(root.join("app.env")).unwrap(), "PORT=9443\n");
+    assert_eq!(
+        std::fs::read_to_string(root.join("app.env")).unwrap(),
+        "PORT=9443\n"
+    );
 }
 
 #[test]
@@ -176,7 +189,10 @@ fn material_backed_copy_downloads_selects_variant_and_verifies_digest() {
     std::fs::write(&upstream, "hello-material").unwrap();
     let digest = sha256_of("hello-material");
 
-    let arch = std::process::Command::new("uname").arg("-m").output().unwrap();
+    let arch = std::process::Command::new("uname")
+        .arg("-m")
+        .output()
+        .unwrap();
     let arch = String::from_utf8_lossy(&arch.stdout).trim().to_string();
     let this_arch = match arch.as_str() {
         "x86_64" | "amd64" => "amd64",
@@ -211,8 +227,15 @@ resources:
     let o = crater(&["apply", "-f", p.to_str().unwrap()]);
     assert!(o.status.success(), "{}", stdout(&o));
     // 变体按**目标机实际架构**选出,不是作者猜的
-    assert!(stdout(&o).contains(&"upstream.bin".to_string()), "闭包清单要报出来:{}", stdout(&o));
-    assert_eq!(std::fs::read_to_string(root.join("tool")).unwrap(), "hello-material");
+    assert!(
+        stdout(&o).contains(&"upstream.bin".to_string()),
+        "闭包清单要报出来:{}",
+        stdout(&o)
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("tool")).unwrap(),
+        "hello-material"
+    );
     assert_eq!(mode_of(&root.join("tool")), 0o755);
 
     // 幂等:内容寻址一致 → 第二次零变更

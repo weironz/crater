@@ -52,10 +52,14 @@ fn merge_onto_a_broken_index_fails_and_leaves_it_alone() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("index.yaml");
     // 写了一半被打断的样子 —— YAML 截在半路。
-    let broken = "apiVersion: crater.pkg/v1\ngenerated: 2026-09-02T00:00:00Z\nentries:\n  yq:\n  - vers";
+    let broken =
+        "apiVersion: crater.pkg/v1\ngenerated: 2026-09-02T00:00:00Z\nentries:\n  yq:\n  - vers";
     std::fs::write(&p, broken).unwrap();
 
-    let o = index(d.path(), &["-o", "index.yaml", "--merge", "oci://127.0.0.1:1/ns/x:1"]);
+    let o = index(
+        d.path(),
+        &["-o", "index.yaml", "--merge", "oci://127.0.0.1:1/ns/x:1"],
+    );
 
     assert!(!o.status.success(), "坏索引却退出 0:\n{}", stderr(&o));
     assert!(
@@ -63,7 +67,11 @@ fn merge_onto_a_broken_index_fails_and_leaves_it_alone() {
         "报错要说清是索引读不动,而不是别的:\n{}",
         stderr(&o)
     );
-    assert_eq!(std::fs::read(&p).unwrap(), broken.as_bytes(), "原文件被动过了");
+    assert_eq!(
+        std::fs::read(&p).unwrap(),
+        broken.as_bytes(),
+        "原文件被动过了"
+    );
 }
 
 /// **反证(真机上复现过的那条)**:截断恰好落在 `entries:` 之后的索引是
@@ -80,9 +88,16 @@ fn merge_onto_an_index_truncated_at_entries_refuses_to_wipe_history() {
     let cut = "apiVersion: crater.pkg/v1\ngenerated: 2026-09-02T00:00:00Z\nentries:\n";
     std::fs::write(&p, cut).unwrap();
 
-    let o = index(d.path(), &["-o", "index.yaml", "--merge", "oci://127.0.0.1:1/ns/x:1"]);
+    let o = index(
+        d.path(),
+        &["-o", "index.yaml", "--merge", "oci://127.0.0.1:1/ns/x:1"],
+    );
 
-    assert!(!o.status.success(), "零个包的索引被当成了合法底本:\n{}", stderr(&o));
+    assert!(
+        !o.status.success(),
+        "零个包的索引被当成了合法底本:\n{}",
+        stderr(&o)
+    );
     assert!(stderr(&o).contains("零个包"), "{}", stderr(&o));
     assert_eq!(std::fs::read(&p).unwrap(), cut.as_bytes(), "原文件被动过了");
 }
@@ -92,14 +107,27 @@ fn merge_onto_an_index_truncated_at_entries_refuses_to_wipe_history() {
 fn merge_onto_a_foreign_api_version_fails_and_leaves_it_alone() {
     let d = tempfile::tempdir().unwrap();
     let (p, bytes) = seed(d.path());
-    let swapped = String::from_utf8(bytes).unwrap().replace("crater.pkg/v1", "crater.pkg/v99");
+    let swapped = String::from_utf8(bytes)
+        .unwrap()
+        .replace("crater.pkg/v1", "crater.pkg/v99");
     std::fs::write(&p, &swapped).unwrap();
 
-    let o = index(d.path(), &["-o", "index.yaml", "--merge", "oci://127.0.0.1:1/ns/x:1"]);
+    let o = index(
+        d.path(),
+        &["-o", "index.yaml", "--merge", "oci://127.0.0.1:1/ns/x:1"],
+    );
 
-    assert!(!o.status.success(), "apiVersion 不认得却退出 0:\n{}", stderr(&o));
+    assert!(
+        !o.status.success(),
+        "apiVersion 不认得却退出 0:\n{}",
+        stderr(&o)
+    );
     assert!(stderr(&o).contains("apiVersion"), "{}", stderr(&o));
-    assert_eq!(std::fs::read(&p).unwrap(), swapped.as_bytes(), "原文件被动过了");
+    assert_eq!(
+        std::fs::read(&p).unwrap(),
+        swapped.as_bytes(),
+        "原文件被动过了"
+    );
 }
 
 /// 不带 `--merge` 覆盖时,一个包都没收到就**拒绝写** —— 钉住现有行为。
@@ -130,5 +158,8 @@ fn merge_without_an_existing_index_says_so() {
     let o = index(d.path(), &["-o", "index.yaml", "--merge"]);
 
     let e = stderr(&o);
-    assert!(e.contains("--merge") && e.contains("不存在"), "没提示 merge 目标不存在:\n{e}");
+    assert!(
+        e.contains("--merge") && e.contains("不存在"),
+        "没提示 merge 目标不存在:\n{e}"
+    );
 }

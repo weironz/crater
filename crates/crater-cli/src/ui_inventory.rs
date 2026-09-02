@@ -116,8 +116,7 @@ fn scalar(v: &str) -> String {
 
 fn read_text(rel: &str) -> Result<String, (StatusCode, String)> {
     let path = crate::ui_edit::confine(rel)?;
-    std::fs::read_to_string(&path)
-        .map_err(|e| (StatusCode::NOT_FOUND, format!("读不到 {rel}:{e}")))
+    std::fs::read_to_string(&path).map_err(|e| (StatusCode::NOT_FOUND, format!("读不到 {rel}:{e}")))
 }
 
 /// 写回:与编辑器保存同款,旧版留 `.bak`(误操作要能拖回来)。
@@ -283,7 +282,11 @@ fn render_host(req: &HostFields, indent: usize) -> String {
     if let Some(p) = req.port.filter(|p| *p != 22) {
         fields.push(format!("port: {p}"));
     }
-    let user = if req.user.trim().is_empty() { "root" } else { req.user.trim() };
+    let user = if req.user.trim().is_empty() {
+        "root"
+    } else {
+        req.user.trim()
+    };
     fields.push(format!("user: {}", scalar(user)));
     // 优先级刻意如此:密钥 > 口令文件 > 字面口令。
     // inventory 常要进 git,而 git 历史删不掉 —— 字面口令是最后的退路,
@@ -291,11 +294,17 @@ fn render_host(req: &HostFields, indent: usize) -> String {
     if !req.key.trim().is_empty() {
         fields.push(format!("key: {}", scalar(req.key.trim())));
     } else if !req.password_file.trim().is_empty() {
-        fields.push(format!("password_file: {}", scalar(req.password_file.trim())));
+        fields.push(format!(
+            "password_file: {}",
+            scalar(req.password_file.trim())
+        ));
     } else if !req.password.is_empty() {
         // 口令恒加引号 —— 纯数字口令裸写会被解析成整数,反序列化直接失败。
         // `${env:VAR}` 写进来也一样合法,执行前才解析。
-        fields.push(format!("password: \"{}\"", req.password.replace('"', "\\\"")));
+        fields.push(format!(
+            "password: \"{}\"",
+            req.password.replace('"', "\\\"")
+        ));
     }
     if !req.vars.is_empty() {
         let vs: Vec<String> = req
@@ -333,7 +342,11 @@ fn ensure_block(lines: &[String], key: &str) -> Option<Vec<String>> {
 /// `POST /api/inventory/host` —— 新增一台主机(在 `hosts:` 块末尾**插一行**)。
 pub async fn host_add(Json(req): Json<HostAdd>) -> Response {
     if req.f.name.is_empty()
-        || !req.f.name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        || !req
+            .f
+            .name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
     {
         return err(StatusCode::BAD_REQUEST, "主机名只允许字母数字-_");
     }
@@ -346,14 +359,24 @@ pub async fn host_add(Json(req): Json<HostAdd>) -> Response {
     };
     let lines: Vec<&str> = text.lines().collect();
     if find_host_line(&lines, &req.f.name).is_some() {
-        return err(StatusCode::CONFLICT, format!("主机 `{}` 已存在", req.f.name));
+        return err(
+            StatusCode::CONFLICT,
+            format!("主机 `{}` 已存在", req.f.name),
+        );
     }
     // 缺 hosts: 块就补一个 —— 这不是"看不懂的结构",只是还没写。
-    let patched = ensure_block(&lines.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "hosts");
-    let owned: Vec<String> = patched.unwrap_or_else(|| lines.iter().map(|s| s.to_string()).collect());
+    let patched = ensure_block(
+        &lines.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        "hosts",
+    );
+    let owned: Vec<String> =
+        patched.unwrap_or_else(|| lines.iter().map(|s| s.to_string()).collect());
     let lines: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
     let Some(b) = block_of(&lines, "hosts") else {
-        return err(StatusCode::CONFLICT, "这份文件没有顶层 `inventory:` —— 请直接改文本");
+        return err(
+            StatusCode::CONFLICT,
+            "这份文件没有顶层 `inventory:` —— 请直接改文本",
+        );
     };
 
     let entry = render_host(&req.f, b.item_indent);
@@ -390,16 +413,26 @@ pub async fn host_update(Json(req): Json<HostUpdate>) -> Response {
     };
     let lines: Vec<&str> = text.lines().collect();
     let Some(i) = find_host_line(&lines, &req.old_name) else {
-        return err(StatusCode::NOT_FOUND, format!("找不到主机 `{}`", req.old_name));
+        return err(
+            StatusCode::NOT_FOUND,
+            format!("找不到主机 `{}`", req.old_name),
+        );
     };
     if !is_single_line(&lines, i) {
         return err(StatusCode::CONFLICT, "这是块式条目(多行)—— 请直接改文本");
     }
     if req.host.name != req.old_name && find_host_line(&lines, &req.host.name).is_some() {
-        return err(StatusCode::CONFLICT, format!("主机 `{}` 已存在", req.host.name));
+        return err(
+            StatusCode::CONFLICT,
+            format!("主机 `{}` 已存在", req.host.name),
+        );
     }
     if req.host.name.is_empty()
-        || !req.host.name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        || !req
+            .host
+            .name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
     {
         return err(StatusCode::BAD_REQUEST, "主机名只允许字母数字-_");
     }
@@ -428,7 +461,9 @@ pub async fn host_update(Json(req): Json<HostUpdate>) -> Response {
         let targets: Vec<usize> = match block_of(&refreshed, "groups") {
             Some(b) => (b.key_line + 1..refreshed.len())
                 .take_while(|&j| is_blank(refreshed[j]) || indent_of(refreshed[j]) > b.key_indent)
-                .filter(|&j| !is_blank(refreshed[j]) && contains_member(refreshed[j], &req.old_name))
+                .filter(|&j| {
+                    !is_blank(refreshed[j]) && contains_member(refreshed[j], &req.old_name)
+                })
                 .collect(),
             None => Vec::new(),
         };
@@ -445,8 +480,9 @@ pub async fn host_update(Json(req): Json<HostUpdate>) -> Response {
         &join(&out, text.ends_with('\n')),
         &format!("改主机 {}", host.name),
     ) {
-        Ok(()) => Json(json!({ "ok": true, "host": host.name, "manual_groups": manual }))
-            .into_response(),
+        Ok(()) => {
+            Json(json!({ "ok": true, "host": host.name, "manual_groups": manual })).into_response()
+        }
         Err((c, m)) => err(c, m),
     }
 }
@@ -484,14 +520,22 @@ fn rename_member(line: &str, from: &str, to: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
     while let Some(open) = rest.find('[') {
-        let Some(close_rel) = rest[open..].find(']') else { break };
+        let Some(close_rel) = rest[open..].find(']') else {
+            break;
+        };
         let close = open + close_rel;
         out.push_str(&rest[..=open]);
         let inner: Vec<String> = rest[open + 1..close]
             .split(',')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .map(|s| if s == from || s.trim_matches('"') == from { to.to_string() } else { s.to_string() })
+            .map(|s| {
+                if s == from || s.trim_matches('"') == from {
+                    to.to_string()
+                } else {
+                    s.to_string()
+                }
+            })
             .collect();
         out.push_str(&inner.join(", "));
         out.push(']');
@@ -572,7 +616,9 @@ fn drop_member(line: &str, name: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
     while let Some(open) = rest.find('[') {
-        let Some(close_rel) = rest[open..].find(']') else { break };
+        let Some(close_rel) = rest[open..].find(']') else {
+            break;
+        };
         let close = open + close_rel;
         out.push_str(&rest[..=open]);
         let inner: Vec<&str> = rest[open + 1..close]
@@ -601,7 +647,10 @@ pub struct GroupSet {
 /// `POST /api/inventory/group` —— 建组或改组成员(换一行 / 插一行)。
 pub async fn group_set(Json(req): Json<GroupSet>) -> Response {
     if req.name.is_empty()
-        || !req.name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        || !req
+            .name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
     {
         return err(StatusCode::BAD_REQUEST, "组名只允许字母数字-_");
     }
@@ -615,7 +664,10 @@ pub async fn group_set(Json(req): Json<GroupSet>) -> Response {
     let owned = ensure_block(&lines0, "groups").unwrap_or(lines0);
     let lines: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
     let Some(b) = block_of(&lines, "groups") else {
-        return err(StatusCode::CONFLICT, "这份文件没有顶层 `inventory:` —— 请直接改文本");
+        return err(
+            StatusCode::CONFLICT,
+            "这份文件没有顶层 `inventory:` —— 请直接改文本",
+        );
     };
     // 成员必须是本文件里真实存在的主机 —— 幽灵成员是最难查的一类问题。
     for h in &req.hosts {
@@ -732,7 +784,9 @@ pub struct InvCreate {
 pub async fn inv_create(Json(req): Json<InvCreate>) -> Response {
     let stem = req.name.trim().trim_end_matches(".yaml");
     if stem.is_empty()
-        || !stem.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        || !stem
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
     {
         return err(StatusCode::BAD_REQUEST, "文件名只允许字母数字-_.");
     }
@@ -810,7 +864,15 @@ fn kick(h: crater_core::spec::Host) {
     // 本机不走 SSH:连自己还要握手一次是白费的,而且本机永远"在线"。
     if h.is_local() {
         let mut c = cache().lock().unwrap();
-        c.insert(key, Live { ok: true, detail: "本机".into(), ts: now(), probing: false });
+        c.insert(
+            key,
+            Live {
+                ok: true,
+                detail: "本机".into(),
+                ts: now(),
+                probing: false,
+            },
+        );
         return;
     }
     {
@@ -836,7 +898,15 @@ fn kick(h: crater_core::spec::Host) {
             Ok(Ok(s)) => (true, s),
         };
         let mut c = cache().lock().unwrap();
-        c.insert(key, Live { ok, detail, ts: now(), probing: false });
+        c.insert(
+            key,
+            Live {
+                ok,
+                detail,
+                ts: now(),
+                probing: false,
+            },
+        );
     });
 }
 
@@ -1062,7 +1132,7 @@ const HOSTS_HTML: &str = r##"<section class="panel">
   </div>
   <div id="inv-body"></div>
 </section>
-"## ;
+"##;
 
 const GROUPS_HTML: &str = r##"<section class="panel">
   <h2><span class="mk">⊞</span> 主机组</h2>
