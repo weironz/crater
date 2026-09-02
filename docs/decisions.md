@@ -1933,3 +1933,29 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   制品**(文档写的是企业版专属),不收就用 Docker Hub / zot。
 - **调研的局限**:四条线并行完成,交叉核对因配额只做了一部分;BuildKit
   注解分变体的先例引用已更正为其 attestation storage 文档。
+
+### D-124:`crater pkg` 落地 —— 蓝图包成 OCI 制品(D-123 第一阶段)
+
+- **做了什么**:`crater pkg push/build/pull/inspect/tags/ls`。蓝图目录 →
+  一个 manifest:config 是**契约本身**(参数/机群/物料/规模),一层是蓝图
+  目录的 tar.gz。**不设 `artifactType`** —— 制品身份靠 `config.mediaType`,
+  1.0 写法,ACR 那堵墙绕开。
+- **不是新造语法,是接线**:自定义类型过线(D-033)、增量拉(D-078)、
+  瘦拉(D-087)都是旧 task 管线验过的,新蓝图管线此前只有 `closure.tar`
+  一个出口 —— 一个只能靠 U 盘走的文件。
+- **契约收敛成一处**(`pkg::contract`):UI 目录卡片、`pkg inspect`、远端
+  registry 上那份 config blob 现在是同一份数据。此前 UI 自己算一遍,
+  三边迟早会漂。
+- **凭据永不进包**:inventory 全数排除并逐个报出;余下文件扫字面口令,
+  撞上**拒绝打包**(不是告警 —— 推上 registry 之后"先换口令再谈清理"是
+  唯一补救)。扫描放行 `${env:}`/`{{ }}`/以 `{` 开头的映射:
+  `secret_key: { default: "changeme" }` 是**参数声明**不是泄漏,漏了这条
+  每份带敏感参数的蓝图都打不了包(第一次跑就撞上了)。
+- **顺手修了一个真 bug**:`untar_gz_into` 不建父目录,于是只有文件条目、
+  没有目录条目的 tar(合法,也正是 `tar_gz_files` 打出来的)会以 ENOENT
+  失败,报错还只说"文件不存在"。现存唯一调用方就是新代码,影响面为零。
+- **验收**(见 pkg-design.md「第一阶段验收记录」):zot 与 distribution
+  两家 registry 自定义类型原样过线;inspect 零层下载(store 仍 118 B);
+  往返逐字节一致;拉回的 yq 包 apply 到 sshd 容器装成并幂等。
+- **两个缺口**:ACR / Docker Hub 未实测(本地无凭据);实验室 73.x 被本机
+  Meta 代理截断,真机改用 sshd 容器代替。

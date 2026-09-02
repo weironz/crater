@@ -22,7 +22,7 @@ use std::path::Path;
 ///
 /// 只给**语义**,不给 HTML —— 前端据此决定用数字框还是开关。类型是登记在
 /// 蓝图里的事实,渲染方式是前端的事,两边不该互相硬编码。
-fn param_type_json(t: &crater_ir::schema::ParamType) -> serde_json::Value {
+pub(crate) fn param_type_json(t: &crater_ir::schema::ParamType) -> serde_json::Value {
     use crater_ir::schema::ParamType as P;
     match t {
         P::String => json!({ "kind": "string" }),
@@ -37,52 +37,31 @@ fn param_type_json(t: &crater_ir::schema::ParamType) -> serde_json::Value {
     }
 }
 
-fn yaml_to_json(v: &serde_yaml::Value) -> serde_json::Value {
+pub(crate) fn yaml_to_json(v: &serde_yaml::Value) -> serde_json::Value {
     serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
 }
 
 /// 一张蓝图在目录里的样子。
+///
+/// 主体直接取包的契约([`crate::pkg::contract`])—— 目录卡片、`pkg inspect`
+/// 与远端 registry 上那份 config blob 因此是同一份数据。前端已有的字段名
+/// (`groups` 与几个计数)在这里做一次映射,不去动线上契约的形状。
 fn entry(path: &Path) -> Option<serde_json::Value> {
     let bp = crate::blueprint::load(path).ok()?;
-    let params: Vec<serde_json::Value> = bp
-        .params
-        .values()
-        .map(|p| {
-            json!({
-                "name": p.name,
-                "type": param_type_json(&p.ty),
-                // 默认值是"不填会怎样"的答案 —— 表单预填它,人只改要改的。
-                "default": p.default.as_ref().map(yaml_to_json),
-                "required": p.required,
-                // 敏感值:表单用密码框,且**不预填**(默认值往往是占位符,
-                // 预填出来会被当成真值直接提交)。
-                "secret": p.secret,
-                // build 阶段的参数在烤闭包时就定死,部署时改它不生效 ——
-                // 表单要标出来,否则人会以为改了。
-                "stage": if p.stage == crater_ir::schema::Stage::Build { "build" } else { "deploy" },
-                "desc": p.desc,
-            })
-        })
-        .collect();
-    let groups: Vec<serde_json::Value> = bp
-        .fleet
-        .groups
-        .iter()
-        .map(|(name, c)| json!({ "name": name, "min": c.min }))
-        .collect();
+    let c = crate::pkg::contract(&bp);
     Some(json!({
         "path": path.display().to_string(),
-        "name": bp.name,
-        "version": bp.version,
-        "description": bp.description,
-        "params": params,
-        "groups": groups,
+        "name": c["name"],
+        "version": c["version"],
+        "description": c["description"],
+        "params": c["params"],
+        "groups": c["fleet"],
         // 规模:一眼看出这是个小工具还是一整套子系统。
-        "resources": bp.resources.len(),
-        "materials": bp.materials.len(),
-        "procedures": bp.procedures.len(),
-        "health": bp.health.len(),
-        "custom_types": bp.types.len(),
+        "resources": c["counts"]["resources"],
+        "materials": c["materials"].as_array().map(|a| a.len()).unwrap_or(0),
+        "procedures": c["counts"]["procedures"],
+        "health": c["counts"]["health"],
+        "custom_types": c["counts"]["custom_types"],
     }))
 }
 

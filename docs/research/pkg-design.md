@@ -316,13 +316,33 @@ entries:
 
 | 阶段 | 内容 | 验收(全部真机) |
 | --- | --- | --- |
-| **1. 制品格式 + push/pull** | 蓝图目录 → manifest(config + 蓝图层);`pkg push/pull/ls/inspect`;瘦拉;复用 `store.rs` | 在 zot(library 蓝图起一个)与 Docker Hub 上:push rustfs 包 → 干净工作区 `pkg pull` → `apply` 装到真机;`pkg inspect` 的网络量只有 manifest + config;**实测 ACR 个人版收不收** |
+| **1. 制品格式 + push/pull** ✅ 已落地 | 蓝图目录 → manifest(config + 蓝图层);`pkg push/build/pull/ls/inspect/tags`;瘦拉;复用 `store.rs` | 见下方"第一阶段验收记录"。**ACR 个人版仍未实测**(本地无凭据) |
 | **2. 闭包层 + 多架构** | `--with-closure --for arch=`,物料层 `fetch=embedded/dependency`;image index 按 platform;`pull --full` | 同一 tag 推 amd64+arm64;蓝图层 digest 相同(registry 只存一份);瘦拉字节数 ≈ 旧管线 16K 量级,`--full` 拉到闭包;离线机上 `apply --closure` 走通 |
 | **3. install** | `crater install` 串起 pull → 契约 → fit → app → plan 闸门;UI 目录加远端源 | 空工作区一条命令装 yq 到真机,plan 停在闸门、`--yes` 过闸;UI 从远端源建任务 |
 | **4. 索引与搜索** | `pkg index` 生成 `index.yaml`;`repo add/update`;`search` | 索引托管在 rustfs(S3 静态)上;U 盘场景:tar + index 离线搬运后 `search` 能查、`install` 能装 |
 
 每阶段之间没有强依赖;1 是其余的前提。阶段 4 的价值取决于包的数量 —— 库里现在
 8 个,`ls` 就够,**不要在阶段 1 之前做它**。
+
+### 第一阶段验收记录(2026-09-02,本机 + 容器目标)
+
+| 判据 | 结果 |
+| --- | --- |
+| 自定义类型过线保真 | zot 与 distribution(`registry:2`,Docker Hub 的参考实现)读回的 manifest 里 `config.mediaType` 与层 mediaType **原样**,`artifactType` 未设 |
+| `pkg inspect` 零层下载 | 干净 `CRATER_HOME` 下 inspect 完,本地 store 仍是 118 B(只有 `oci-layout` + 空 index),契约完整印出 |
+| 传输量 | manifest 810 B + config 2323 B = **3133 B**;蓝图层另 3109 B(rustfs 包) |
+| 往返保真 | 空工作区 `pkg pull` 摊出的目录与 `library/rustfs` **逐字节一致**,只少了刻意排除的 `inventory.example.yaml` |
+| 凭据不进包 | inventory 全数排除并逐个报出;字面口令扫描拒绝打包(**参数声明例外** —— `secret_key: { default: … }` 是登记不是泄漏) |
+| 拉下来能跑 | 拉回的 yq 包在空工作区 `lint` 通过 → `apply` 到 sshd 容器 → `yq --version` 报 v4.44.3;二次 apply `+0 ~0 -0 ✓1` 幂等 |
+| 内容寻址去重 | 同内容的两个 tag,第二次 pull 只多落一份 manifest(747 B),层零下载 |
+| semver 排序 | `1.10.0 > 1.1 > 1.1.0-rc1 > 1.0` |
+
+**没验到的**:阿里云 ACR 与 Docker Hub —— 凭据在 GitHub secrets 里,本地没有。
+ACR 个人版收不收自定义制品仍是**第二阶段开工前必须实测**的那一条。
+
+**真机没用上实验室**:192.168.73.x 的路由被本机的 Meta 代理截住(TCP 连得上、
+SSH 握手即断),隧道也没起。改用一个 sshd 容器当目标 —— 对 crater 而言它就是
+一台开着 22 端口、要口令登录的机器,验的东西一样。
 
 ## 十一、不做什么(边界)
 

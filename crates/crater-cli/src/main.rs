@@ -38,6 +38,7 @@ mod ui_overview;
 mod events;
 mod facts_cmd;
 mod out;
+mod pkg;
 mod ui_catalog;
 mod ui_inventory;
 mod ui_run;
@@ -457,6 +458,14 @@ enum Cmd {
         #[command(flatten)]
         target: TargetOpts,
     },
+    /// 蓝图包 —— 把一份蓝图打成 OCI 制品,推上去、拉下来、看契约(D-123)。
+    ///
+    /// 与 `crater images` 的分工:那条管旧 task 制品与普通镜像,这条只管
+    /// 蓝图包(config 类型是 `vnd.crater.blueprint.config.v1+json`)。
+    Pkg {
+        #[command(subcommand)]
+        cmd: PkgCmd,
+    },
     /// Registry credentials.
     Registry {
         #[command(subcommand)]
@@ -480,6 +489,40 @@ enum Cmd {
     /// Shortcut: `crater <component> [flags]`.
     #[command(external_subcommand)]
     Component(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum PkgCmd {
+    /// 组装并推到 registry。仓库名取蓝图 name,tag 取 version(同 Helm)。
+    Push {
+        /// 蓝图文件或它所在的目录(目录会连模板、静态文件一起打包)。
+        path: PathBuf,
+        /// 目标引用,如 registry.example.com/ns/rustfs:1.0
+        reference: String,
+    },
+    /// 只组装进本地 store,不推 —— 想先看看包成什么样时用。
+    Build {
+        path: PathBuf,
+        #[arg(short = 't', long = "tag")]
+        reference: String,
+    },
+    /// 拉下来并摊回文件。默认瘦拉(物料层留在 registry,在线部署用不到)。
+    Pull {
+        reference: String,
+        /// 摊到哪个目录(默认:当前目录下以包名新建)。
+        #[arg(long)]
+        into: Option<PathBuf>,
+        /// 连物料层一起拉 —— 离线现场才需要。
+        #[arg(long)]
+        full: bool,
+    },
+    /// 看契约:要给什么参数、要什么样的机群。只拉 manifest + config,
+    /// **一层都不下载** —— 几百字节就能回答"这东西要我给什么"。
+    Inspect { reference: String },
+    /// 远端有哪些版本(`/v2/<repo>/tags/list`,OCI 唯一的内容发现端点)。
+    Tags { reference: String },
+    /// 本地 store 里的蓝图包。
+    Ls,
 }
 
 #[derive(Subcommand)]
@@ -704,6 +747,16 @@ async fn main() -> Result<()> {
             chmod,
         } => push_file(&host, &user, password, port, &src, &dst, chmod).await,
         Cmd::Images => images::list_images().await,
+        Cmd::Pkg { cmd } => match cmd {
+            PkgCmd::Push { path, reference } => pkg::push(&path, &reference).await,
+            PkgCmd::Build { path, reference } => pkg::build(&path, &reference),
+            PkgCmd::Pull { reference, into, full } => {
+                pkg::pull(&reference, into.as_deref(), full).await
+            }
+            PkgCmd::Inspect { reference } => pkg::inspect(&reference).await,
+            PkgCmd::Tags { reference } => pkg::tags(&reference).await,
+            PkgCmd::Ls => pkg::ls(),
+        },
         Cmd::Pull { reference } => images::pull_image(&reference).await,
         Cmd::Push { reference } => images::push_image(&reference).await,
         Cmd::Load { file, as_ref } => {

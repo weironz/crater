@@ -24,7 +24,7 @@
 //! verify by digest, run the plan feeding pre-fetched blobs instead of `curl`.
 
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -502,6 +502,28 @@ fn tar_dir_to_vec(dir: &Path) -> crate::Result<Vec<u8>> {
 
 /// Extract a (optionally gzip) tar archive into `dest_dir`, dropping `strip`
 /// leading path components — the pure-Rust equivalent of the target's
+/// 把一组 (相对路径, 字节, mode) 打成 tar.gz —— 蓝图包那一层就是它。
+///
+/// 输入是**列表而不是目录**:哪些文件该进包是调用方的策略(凭据文件、
+/// 闭包、备份都不该进),让这里去猜等于把策略藏在最底层。
+pub fn tar_gz_files(files: &[(String, Vec<u8>, u32)]) -> crate::Result<Vec<u8>> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    let mut builder = tar::Builder::new(Vec::new());
+    for (path, data, mode) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(*mode);
+        header.set_mtime(0); // 可复现:同样的内容打出同样的字节
+        header.set_cksum();
+        builder.append_data(&mut header, path.trim_start_matches('/'), data.as_slice())?;
+    }
+    let tar = builder.into_inner()?;
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    gz.write_all(&tar)?;
+    Ok(gz.finish()?)
+}
+
 /// `tar -xf … --strip-components`, used to bake an `extract` action into a
 /// rootfs layer at build time (`crater build --image`).
 pub fn untar_gz_into(dest_dir: &Path, data: &[u8], strip: u32) -> crate::Result<()> {
@@ -523,7 +545,14 @@ pub fn untar_gz_into(dest_dir: &Path, data: &[u8], strip: u32) -> crate::Result<
         if stripped.as_os_str().is_empty() {
             continue;
         }
-        entry.unpack(dest_dir.join(stripped))?;
+        // 一个**只有文件条目、没有目录条目**的 tar 是合法的(`tar_gz_files`
+        // 打出来的就是),而 `unpack` 不会替你建父目录 —— 少了这一句,
+        // `templates/x.j2` 会以 ENOENT 失败,报错还只说"文件不存在"。
+        let out = dest_dir.join(stripped);
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        entry.unpack(out)?;
     }
     Ok(())
 }

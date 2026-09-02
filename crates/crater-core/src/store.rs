@@ -23,6 +23,11 @@ const ANN_MATERIAL_FETCH: &str = "org.crater.material.fetch";
 // Project artifact typing (D-098) — kept in sync with bundle.rs.
 const AT_PROJECT: &str = "application/vnd.crater.project.v1";
 const MT_RECIPE: &str = "application/vnd.crater.recipe.v1+yaml";
+// 蓝图包(D-123)。刻意**不设 `artifactType`**:制品身份靠 `config.mediaType`,
+// 那是 OCI 1.0 时代的老约定,也是唯一跨得过 ACR / Docker Hub / GHCR / Harbor /
+// zot 的写法 —— `artifactType` + 空 config 描述符是 1.1 写法,ACR 会拒收。
+pub const MT_PKG_CONFIG: &str = "application/vnd.crater.blueprint.config.v1+json";
+pub const MT_PKG_LAYER: &str = "application/vnd.crater.blueprint.v1.tar+gzip";
 
 #[derive(Debug, Clone)]
 pub struct StoredImage {
@@ -275,7 +280,6 @@ impl ImageStore {
     }
 
     async fn pull_layers(&self, reference: &str, thin: bool) -> crate::Result<()> {
-        use oci_client::manifest as mt;
         use oci_client::Reference;
 
         let r: Reference = reference
@@ -283,17 +287,7 @@ impl ImageStore {
             .map_err(|e| anyhow::anyhow!("bad image ref '{reference}': {e}"))?;
         let client = registry_client();
         let auth = auth_for(reference);
-        let accepted = vec![
-            mt::IMAGE_MANIFEST_MEDIA_TYPE,
-            mt::IMAGE_MANIFEST_LIST_MEDIA_TYPE,
-            mt::OCI_IMAGE_MEDIA_TYPE,       // ghcr & others use OCI manifest
-            mt::OCI_IMAGE_INDEX_MEDIA_TYPE, // ...and OCI image index (multi-arch)
-            mt::IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE,
-            mt::IMAGE_LAYER_GZIP_MEDIA_TYPE,
-            mt::IMAGE_LAYER_MEDIA_TYPE,
-            mt::IMAGE_CONFIG_MEDIA_TYPE,
-            mt::IMAGE_DOCKER_CONFIG_MEDIA_TYPE,
-        ];
+        let accepted = accepted_media_types();
         let (raw, _digest) = client
             .pull_manifest_raw(&r, &auth, &accepted)
             .await
@@ -416,6 +410,85 @@ impl ImageStore {
             .await
             .map_err(|e| anyhow::anyhow!("push '{reference}': {e}"))?;
         Ok(())
+    }
+
+    /// 存一份 blob,返回 (sha256, size)。内容寻址,重复写入是幂等的。
+    pub fn put_blob(&self, data: &[u8]) -> crate::Result<(String, u64)> {
+        self.store_raw(data)
+    }
+
+    /// 存下一份 manifest 并打上引用 —— `pkg push` 之前把制品落进本地 store,
+    /// 于是"推上去的"与"本地留着的"是同一份字节,而不是各算一遍。
+    pub fn put_manifest(&self, reference: &str, manifest: &[u8]) -> crate::Result<String> {
+        let (d, sz) = self.store_raw(manifest)?;
+        self.tag(reference, &d, sz)?;
+        Ok(d)
+    }
+
+    /// 只取 manifest 与 config,**一层都不下载**,也不写本地 store。
+    ///
+    /// `pkg inspect` 与 UI 的远端目录靠它:契约(参数/机群/物料清单)全在
+    /// config 里,几百字节就能回答"这东西要我给什么"。多架构时按 platform
+    /// 挑一份子 manifest —— 契约与架构无关,取哪份都一样。
+    pub async fn fetch_contract(reference: &str) -> crate::Result<(serde_json::Value, Vec<u8>)> {
+        use oci_client::Reference;
+        let r: Reference = reference
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad ref '{reference}': {e}"))?;
+        let client = registry_client();
+        let auth = auth_for(reference);
+        let (raw, _) = client
+            .pull_manifest_raw(&r, &auth, &accepted_media_types())
+            .await
+            .map_err(|e| anyhow::anyhow!("pull manifest '{reference}': {e}"))?;
+        let top: serde_json::Value = serde_json::from_slice(&raw)?;
+        let m: serde_json::Value = if top.get("manifests").and_then(|v| v.as_array()).is_some() {
+            let sub = top["manifests"]
+                .as_array()
+                .unwrap()
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("'{reference}' 的 index 里一个 manifest 都没有"))?;
+            let dig = sub["digest"].as_str().unwrap_or_default();
+            let dref: Reference = format!("{}/{}@{}", r.registry(), r.repository(), dig)
+                .parse()
+                .map_err(|e| anyhow::anyhow!("bad digest ref for {reference}: {e}"))?;
+            let (sub_raw, _) = client
+                .pull_manifest_raw(&dref, &auth, &accepted_media_types())
+                .await
+                .map_err(|e| anyhow::anyhow!("pull sub-manifest of '{reference}': {e}"))?;
+            serde_json::from_slice(&sub_raw)?
+        } else {
+            top
+        };
+        let cd = m["config"]["digest"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("'{reference}' 的 manifest 没有 config"))?
+            .to_string();
+        let mut cfg: Vec<u8> = Vec::new();
+        client
+            .pull_blob(&r, cd.as_str(), &mut cfg)
+            .await
+            .map_err(|e| anyhow::anyhow!("pull config {cd} of '{reference}': {e}"))?;
+        Ok((m, cfg))
+    }
+
+    /// 远端有哪些版本 —— `/v2/<repo>/tags/list`。
+    ///
+    /// OCI 只定义了这一个内容发现端点(`_catalog` 根本不在规范里,Docker Hub
+    /// 也有意不提供),所以"这个包有哪几版"只能这么问,"registry 里有哪些包"
+    /// 则问不出来 —— 那要靠索引文件(D-123 第七节)。
+    pub async fn list_tags(reference: &str) -> crate::Result<Vec<String>> {
+        use oci_client::Reference;
+        let r: Reference = reference
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad ref '{reference}': {e}"))?;
+        let client = registry_client();
+        let auth = auth_for(reference);
+        let resp = client
+            .list_tags(&r, &auth, None, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("list tags '{reference}': {e}"))?;
+        Ok(resp.tags)
     }
 
     fn manifest_blob(&self, reference: &str) -> crate::Result<Vec<u8>> {
@@ -656,6 +729,26 @@ impl ImageStore {
 
 fn strip(digest: &str) -> &str {
     digest.strip_prefix("sha256:").unwrap_or(digest)
+}
+
+/// 拉 manifest 时声明能收哪些类型。
+///
+/// 自定义类型(crater 的 recipe / material / blueprint 层)不在这张表里 ——
+/// 表管的是 **manifest** 的 Accept 头,层的类型只出现在 manifest 正文里,
+/// 靠 `pull_blob` 按 digest 取,不经过内容协商(D-033)。
+fn accepted_media_types() -> Vec<&'static str> {
+    use oci_client::manifest as mt;
+    vec![
+        mt::IMAGE_MANIFEST_MEDIA_TYPE,
+        mt::IMAGE_MANIFEST_LIST_MEDIA_TYPE,
+        mt::OCI_IMAGE_MEDIA_TYPE,       // ghcr & others use OCI manifest
+        mt::OCI_IMAGE_INDEX_MEDIA_TYPE, // ...and OCI image index (multi-arch)
+        mt::IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE,
+        mt::IMAGE_LAYER_GZIP_MEDIA_TYPE,
+        mt::IMAGE_LAYER_MEDIA_TYPE,
+        mt::IMAGE_CONFIG_MEDIA_TYPE,
+        mt::IMAGE_DOCKER_CONFIG_MEDIA_TYPE,
+    ]
 }
 
 /// An oci-client honoring `$CRATER_INSECURE_REGISTRIES` (comma-separated hosts
