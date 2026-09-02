@@ -458,6 +458,28 @@ enum Cmd {
         #[command(flatten)]
         target: TargetOpts,
     },
+    /// 一键安装:拉包 → 读契约 → 对账机群 → 落任务文件 → plan(D-123)。
+    ///
+    /// **闸门一步不省** —— 默认停在计划上,`--yes` 才继续执行。"一键"省的是
+    /// 找包、抄参数、比对组名那几步,不是"先看 diff 再动手"。
+    Install {
+        /// OCI 引用(如 reg/ns/rustfs:1.0),或本地已有的蓝图目录 / 文件。
+        source: String,
+        /// 任务名(默认取蓝图名)—— 决定落成哪个 `<名>.app.yaml`。
+        #[arg(long)]
+        name: Option<String>,
+        /// 参数覆盖,可给多次。
+        #[arg(long = "set", value_name = "K=V")]
+        set: Vec<String>,
+        /// 过闸执行,不只是看计划。
+        #[arg(long)]
+        yes: bool,
+        /// 连物料层一起拉 —— 离线现场才需要。
+        #[arg(long)]
+        full: bool,
+        #[command(flatten)]
+        target: TargetOpts,
+    },
     /// 蓝图包 —— 把一份蓝图打成 OCI 制品,推上去、拉下来、看契约(D-123)。
     ///
     /// 与 `crater images` 的分工:那条管旧 task 制品与普通镜像,这条只管
@@ -747,6 +769,9 @@ async fn main() -> Result<()> {
             chmod,
         } => push_file(&host, &user, password, port, &src, &dst, chmod).await,
         Cmd::Images => images::list_images().await,
+        Cmd::Install { source, name, set, yes, full, target } => {
+            pkg::install(&source, &target, &set, name.as_deref(), yes, full).await
+        }
         Cmd::Pkg { cmd } => match cmd {
             PkgCmd::Push { path, reference } => pkg::push(&path, &reference).await,
             PkgCmd::Build { path, reference } => pkg::build(&path, &reference),

@@ -526,9 +526,224 @@ mod tests {
     }
 
     #[test]
+    fn credential_shaped_names_stay_out_of_the_app_file() {
+        // 蓝图漏标 `secret:` 是真会发生的(本仓库的 rustfs 就漏过),而 app
+        // 文件是要进 git 的 —— 这条兜底比"相信声明"重要。
+        assert!(looks_secret("secret_key"));
+        assert!(looks_secret("root_password"));
+        assert!(looks_secret("API_TOKEN"));
+        // 不该误伤的:端口、路径、公钥路径不是凭据。
+        assert!(!looks_secret("port"));
+        assert!(!looks_secret("data_dir"));
+        assert!(!looks_secret("version"));
+    }
+
+    #[test]
     fn semver_sorts_newest_first_and_prerelease_below_release() {
         let mut v = vec!["1.2.0", "1.10.0", "1.2.0-rc1", "0.9.9", "1.2"];
         v.sort_by(|a, b| semver_key(b).cmp(&semver_key(a)));
         assert_eq!(v, vec!["1.10.0", "1.2.0", "1.2", "1.2.0-rc1", "0.9.9"]);
     }
+}
+
+// ───────────────────────────── install ─────────────────────────────
+
+/// `crater install <引用|目录> -i <机群> [--set k=v]… [--yes]`
+///
+/// 把散在五条命令里的动作串成一条:拉包 → 读契约 → 对账机群 → 落 app 文件
+/// → plan。**闸门一步不省** —— `--yes` 才继续 apply,否则停在计划上。
+/// "一键"省掉的是找包、抄参数、比对组名那几步,不是"先看 diff 再动手"。
+///
+/// 顺序是刻意的:**契约与机群都在本地对完账,才连第一台机器**。参数少给一个、
+/// 组名写错一个,在 SSH 之前就该说清楚 —— 那时候纠正的代价是改一行命令,
+/// 连上之后再发现就已经在改机器了。
+pub async fn install(
+    source: &str,
+    target: &crate::target::TargetOpts,
+    sets: &[String],
+    name: Option<&str>,
+    yes: bool,
+    full: bool,
+) -> Result<()> {
+    // ① 取到蓝图 —— 本地路径就地用,否则当成 registry 引用拉下来。
+    let local = Path::new(source);
+    let bp_file = if local.exists() {
+        locate(local)?.0
+    } else {
+        let store = ImageStore::open()?;
+        if full { store.pull(source).await? } else { store.pull_thin(source).await? }
+        let m = store.resolve_manifest(source)?;
+        let cfg = read_config(&store, &m)?;
+        warn_if_newer(&cfg);
+        let pkg_name = cfg["name"].as_str().unwrap_or("pkg").to_string();
+        let dir = PathBuf::from(&pkg_name);
+        if !dir.exists() {
+            let layer = m["layers"]
+                .as_array()
+                .and_then(|ls| ls.iter().find(|l| l["mediaType"].as_str() == Some(MT_PKG_LAYER)))
+                .ok_or_else(|| anyhow::anyhow!("{source} 不是 crater 蓝图包"))?;
+            let d = layer["digest"].as_str().unwrap_or_default();
+            let bytes = std::fs::read(store.blob_path(d.trim_start_matches("sha256:")))?;
+            crater_core::bundle::untar_gz_into(&dir, &bytes, 0)?;
+            say!("{source} → {}/", dir.display());
+        } else {
+            // 目录已在:这是升级或重装,不覆盖本地改动。包在 store 里,
+            // 真要换成包里那份,`pkg pull --into` 明确说出来。
+            say!("{} 已存在 —— 用本地这份(包已在 store)", dir.display());
+        }
+        locate(&dir)?.0
+    };
+
+    let bp = crate::blueprint::load(&bp_file)?;
+    let app_name = name.unwrap_or(&bp.name).to_string();
+    let given: std::collections::BTreeMap<String, serde_yaml::Value> =
+        crate::blueprint::parse_sets(sets)?.into_iter().collect();
+
+    // ② 契约对账:必填参数一个都不能缺。
+    //
+    // 刻意**不交互追问** —— 部署工具在管道里挂住等输入是最难查的一类故障。
+    // 缺什么就连同现成的 `--set` 一起报出来,人贴一行就能重来。
+    let missing: Vec<&str> = bp
+        .params
+        .values()
+        .filter(|p| p.required && p.default.is_none() && !given.contains_key(&p.name))
+        .map(|p| p.name.as_str())
+        .collect();
+    if !missing.is_empty() {
+        let flags: Vec<String> = missing.iter().map(|n| format!("--set {n}=…")).collect();
+        bail!(
+            "{} 还缺 {} 个必填参数:{}\n补上再来:crater install {source} … {}",
+            bp.name,
+            missing.len(),
+            missing.join(", "),
+            flags.join(" ")
+        );
+    }
+
+    // ③ 机群对账 —— 在连机器**之前**。组名写错时,这里说"没有 storage 组",
+    // 连上之后才发现则要从一堆 SSH 报错里往回猜。
+    if !bp.fleet.groups.is_empty() {
+        let inv_path = target
+            .inventory
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("{} 声明了机群契约,需要 `-i <inventory>`", bp.name))?;
+        let text = std::fs::read_to_string(&inv_path)
+            .with_context(|| format!("读机群 {}", inv_path.display()))?;
+        let spec: crater_core::spec::CraterSpec = serde_yaml::from_str(&text)?;
+        let inv = spec.inventory;
+        let mut bad = Vec::new();
+        say!("机群对账({}):", inv_path.display());
+        for (g, c) in &bp.fleet.groups {
+            let declared = inv.groups.contains_key(g);
+            let have = inv.groups.get(g).map(|x| x.hosts.len()).unwrap_or(0);
+            // 三种状态要分得开:没这个组 / 有但台数不够 / 满足。
+            // "没有 worker 组"与"worker 组是空的"是两回事 —— 后者在
+            // `min: 0` 的单节点拓扑里完全合法。
+            let (mark, why) = if !declared {
+                ("✗", format!("机群里没有 `{g}` 组"))
+            } else if have < c.min {
+                ("✗", format!("`{g}` 只有 {have} 台,要 {} 台", c.min))
+            } else {
+                ("✓", String::new())
+            };
+            say!("  {mark} {:<16} 需要 {:<3} 现有 {}", g, c.min, have);
+            if !why.is_empty() {
+                bad.push(why);
+            }
+        }
+        if !bad.is_empty() {
+            bail!(
+                "机群不满足契约,一台机器都没碰:\n  {}\n\
+                 改 {} 里的组,或用 `crater pkg inspect` 再看一遍契约。",
+                bad.join("\n  "),
+                inv_path.display()
+            );
+        }
+    }
+
+    // ④ 落 app 文件 —— 这次安装的正身,可 git 可 diff。
+    write_app(&app_name, &bp_file, target, &bp, &given)?;
+
+    // ⑤ 闸门。
+    say!();
+    crate::blueprint::plan_blueprint(&bp_file, target, sets).await?;
+    if !yes {
+        say!();
+        say!("以上是计划,**什么都没改**。确认后执行:");
+        say!("  crater apply -f {} -i {} {}",
+            bp_file.display(),
+            target.inventory.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "<机群>".into()),
+            sets.iter().map(|s| format!("--set {s}")).collect::<Vec<_>>().join(" "));
+        say!("  (或重跑本条命令加 --yes)");
+        return Ok(());
+    }
+    say!();
+    crate::blueprint::apply_blueprint(&bp_file, target, sets).await
+}
+
+/// 名字看起来像凭据 —— 蓝图**没标** `secret:` 时的兜底。
+///
+/// 为什么要兜底:`install` 拉的是别人做的包,而那份包的作者有没有认真标
+/// `secret:` 不由我们决定 —— 本仓库自己的 rustfs 蓝图就漏标过。写进 app
+/// 文件的东西是要进 git 的,而 git 历史删不掉:**宁可多扣一个,不可漏放
+/// 一个**。扣下来的会连同"下次怎么给"一起报出来,不是静默丢弃。
+fn looks_secret(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    ["password", "passwd", "secret", "token", "apikey", "api_key", "credential"]
+        .iter()
+        .any(|k| n.contains(k))
+}
+
+/// 写 `<名>.app.yaml`:这次安装绑定了哪份蓝图、哪个机群、改了哪些参数。
+///
+/// **敏感参数不落盘。** 它们的值来自 `--set`,写进一个可 git 的文件就等于
+/// 把口令提交进版本库 —— 与 D-121 把凭据挪出 inventory 是同一条纪律。
+fn write_app(
+    name: &str,
+    bp_file: &Path,
+    target: &crate::target::TargetOpts,
+    bp: &Blueprint,
+    given: &std::collections::BTreeMap<String, serde_yaml::Value>,
+) -> Result<()> {
+    let out = PathBuf::from(format!("{name}.app.yaml"));
+    if out.exists() {
+        say!("{} 已存在 —— 保留不动(改它就是改这次安装)", out.display());
+        return Ok(());
+    }
+    let is_secret = |k: &str| bp.params.get(k).map(|p| p.secret).unwrap_or(false) || looks_secret(k);
+    let secret: Vec<&str> = given.keys().filter(|k| is_secret(k)).map(|s| s.as_str()).collect();
+    let mut y = String::new();
+    y.push_str(&format!("# {name} —— 把这份蓝图钉在这群机器上。\n"));
+    y.push_str("# 这个文件就是\"任务\"本身:可 git、可 diff、可进闭包;改它 = 改任务。\n");
+    y.push_str("app:\n");
+    y.push_str(&format!("  name: {name}\n"));
+    y.push_str(&format!("  blueprint: {}\n", bp_file.display()));
+    if let Some(i) = &target.inventory {
+        y.push_str(&format!("  inventory: {}\n", i.display()));
+    }
+    if let Some(l) = &target.limit {
+        let items: Vec<String> = l.split(',').map(|s| format!("{}", s.trim())).collect();
+        y.push_str(&format!("  limit: [{}]\n", items.join(", ")));
+    }
+    let plain: Vec<(&String, &serde_yaml::Value)> =
+        given.iter().filter(|(k, _)| !is_secret(k)).collect();
+    if !plain.is_empty() {
+        y.push_str("  params:\n");
+        for (k, v) in plain {
+            let s = serde_yaml::to_string(v).unwrap_or_default().trim().to_string();
+            y.push_str(&format!("    {k}: {s}\n"));
+        }
+    }
+    if !secret.is_empty() {
+        y.push_str("  # 敏感参数不写进这个文件(它是要进 git 的):\n");
+        for k in &secret {
+            y.push_str(&format!("  #   {k} —— 每次用 `--set {k}=…`,或放进机群 vars\n"));
+        }
+    }
+    std::fs::write(&out, y)?;
+    say!("任务 → {}", out.display());
+    if !secret.is_empty() {
+        crate::oops!("敏感参数 {} 未写入 app 文件 —— 每次执行都要重新给。", secret.join(", "));
+    }
+    Ok(())
 }

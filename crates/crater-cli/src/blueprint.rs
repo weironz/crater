@@ -1477,7 +1477,7 @@ pub(crate) fn load(path: &Path) -> Result<Blueprint> {
 
 /// `--set k=v` → 参数覆盖。值按 YAML 解析,于是 `--set port=9443` 是整数、
 /// `--set ha=true` 是布尔 —— 不会像旧模型那样一律变成字符串。
-fn parse_sets(sets: &[String]) -> Result<Vec<(String, Yaml)>> {
+pub(crate) fn parse_sets(sets: &[String]) -> Result<Vec<(String, Yaml)>> {
     sets.iter()
         .map(|kv| {
             let (k, v) = kv

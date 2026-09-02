@@ -318,7 +318,7 @@ entries:
 | --- | --- | --- |
 | **1. 制品格式 + push/pull** ✅ 已落地 | 蓝图目录 → manifest(config + 蓝图层);`pkg push/build/pull/ls/inspect/tags`;瘦拉;复用 `store.rs` | 见下方"第一阶段验收记录"。**ACR 个人版仍未实测**(本地无凭据) |
 | **2. 闭包层 + 多架构** | `--with-closure --for arch=`,物料层 `fetch=embedded/dependency`;image index 按 platform;`pull --full` | 同一 tag 推 amd64+arm64;蓝图层 digest 相同(registry 只存一份);瘦拉字节数 ≈ 旧管线 16K 量级,`--full` 拉到闭包;离线机上 `apply --closure` 走通 |
-| **3. install** | `crater install` 串起 pull → 契约 → fit → app → plan 闸门;UI 目录加远端源 | 空工作区一条命令装 yq 到真机,plan 停在闸门、`--yes` 过闸;UI 从远端源建任务 |
+| **3. install** ✅ 已落地(UI 远端源除外) | `crater install` 串起 pull → 契约 → fit → app → plan 闸门 | 见下方"第三阶段验收记录"。**UI 远端源未做** |
 | **4. 索引与搜索** | `pkg index` 生成 `index.yaml`;`repo add/update`;`search` | 索引托管在 rustfs(S3 静态)上;U 盘场景:tar + index 离线搬运后 `search` 能查、`install` 能装 |
 
 每阶段之间没有强依赖;1 是其余的前提。阶段 4 的价值取决于包的数量 —— 库里现在
@@ -343,6 +343,29 @@ ACR 个人版收不收自定义制品仍是**第二阶段开工前必须实测**
 **真机没用上实验室**:192.168.73.x 的路由被本机的 Meta 代理截住(TCP 连得上、
 SSH 握手即断),隧道也没起。改用一个 sshd 容器当目标 —— 对 crater 而言它就是
 一台开着 22 端口、要口令登录的机器,验的东西一样。
+
+### 第三阶段验收记录(2026-09-02)
+
+`crater install <引用|目录> -i <机群> [--set …] [--yes]` —— 三道门按顺序在
+**连第一台机器之前**关完:
+
+| 判据 | 结果 |
+| --- | --- |
+| 空工作区一条引用装成 | `install …/yq:4.44.3 -i lab.inventory.yaml --yes` → 目标机 `yq --version` 报 v4.44.3 |
+| 闸门 | 不带 `--yes` 时打印计划后停住,并给出照抄即可的 `crater apply` 命令 |
+| 机群契约 | rustfs 要 `storage` 组,inventory 没有 → 打印对账表后报错,**一台机器都没碰** |
+| 必填参数 | 缺 `endpoint` → 报出现成的 `--set endpoint=…`,不追问(管道里挂住等输入是最难查的一类故障) |
+| 顺序 | 蓝图 lint → 必填参数 → 机群对账 → 落 app → plan;前三道全在本地 |
+| 敏感参数不落盘 | `--set secret_key=…` **不写进** app 文件,改写成一行"下次怎么给"的注释 |
+
+**过程中揪出一个真缺陷**:`library/rustfs` 的 `secret_key` **漏标了
+`secret: true`**(试金石 fixture 标了、库里那份没标),于是第一次跑就把真值
+写进了 app 文件。修法是两层:补上声明,再加一道**按名字**的兜底 ——
+`install` 拉的是别人做的包,作者标没标不由我们决定,而 app 文件是要进 git 的。
+宁可多扣一个(连同"下次怎么给"一起报出来),不可漏放一个。
+
+**没做**:UI 目录的"远端源"选项卡。它要的数据(`pkg inspect` 的契约)已经
+就位,是纯前端接线,与第四阶段的索引一起做更顺。
 
 ## 十一、不做什么(边界)
 

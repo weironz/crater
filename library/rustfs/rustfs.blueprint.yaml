@@ -24,7 +24,7 @@ params:
   console_port: { type: port, default: 9001, desc: "控制台" }
   data_dir:   { default: "/srv/rustfs", desc: "本机数据目录(各节点同路径)" }
   access_key: { default: "crater-admin", desc: "生产务必用 --set 或 app 文件覆盖" }
-  secret_key: { default: "crater-changeme", desc: "生产务必覆盖" }
+  secret_key: { default: "crater-changeme", secret: true, desc: "生产务必覆盖" }
   # 多个数据目录落在同一块物理盘时 rustfs 会拒启(磁盘独立性校验)。
   # 测试/CI 的 loop 盘要开;生产保持 false。
   bypass_disk_check: { type: bool, default: false }
