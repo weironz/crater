@@ -342,7 +342,9 @@ pub async fn create_app(Json(req): Json<CreateApp>) -> Response {
             req.verify_interval
         ));
     }
-    if let Err(e) = std::fs::write(&abs, &body) {
+    // 动作名里不带 app 名:文件名本来就是 `<name>.app.yaml`,而提交信息里
+    // 已经跟着文件名 —— 写两遍只是噪声。
+    if let Err(e) = crate::ui_edit::write_file(&abs, body.as_bytes(), "新建 app") {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
     }
     Json(json!({ "ok": true, "path": file })).into_response()
