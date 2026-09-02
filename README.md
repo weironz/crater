@@ -83,12 +83,25 @@ scripts/build-musl.sh all        # 双架构 musl 静态 → dist/
 
 ## 🚀 快速开始
 
-**从仓库装一个包**(helm 那种用法):
+**从 OCI 装一个包**(helm 那种用法,两条路都有):
 
 ```bash
-crater repo add lab https://example.com/index.yaml   # 一次性:订阅一个索引
+# 一、直连引用 —— 不需要配任何仓库
+crater apply oci://ghcr.io/acme/yq:4.44.3 -i inventory.yaml
+
+# 二、订阅索引,之后用名字
+crater repo add lab https://example.com/index.yaml   # 一次性
 crater search yq                                     # 有什么
 crater apply yq -i inventory.yaml                    # 拉下来 → 印计划 → 收敛
+```
+
+索引只为回答"**有哪些包**":OCI 规范里没有搜索端点,所以那件事必须靠一个
+索引文件 —— 好处是它能随闭包一起进 U 盘。而**版本发现**不需要索引,
+`tags/list` 就够:
+
+```bash
+crater pkg tags ghcr.io/acme/yq        # 远端有哪些版本(semver 序,最新在前)
+crater pkg index oci://ghcr.io/acme/yq -o index.yaml   # 把它们做成可搜的索引
 ```
 
 装过之后机群与参数都记在 `yq.app.yaml` 里,后面就是一个词:

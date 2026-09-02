@@ -166,19 +166,28 @@ enum Cmd {
     ///
     /// `<source>` 按这个顺序解,**先本地后远端**:
     ///
-    ///   1. 一个存在的文件  → 蓝图或栈(按内容分辨,不看文件名)
-    ///   2. `<名字>.app.yaml` → 已装的任务:蓝图、机群、参数都从它来
-    ///   3. 都不是,且像个名字 → 去已配仓库的索引里找,拉下来再跑
+    ///   1. 一个存在的文件    → 蓝图或栈(按内容分辨,不看文件名)
+    ///   2. `<名字>.app.yaml`  → 已装的任务:蓝图、机群、参数都从它来
+    ///   3. `oci://reg/ns/x:1` → OCI 引用,直连 registry(不需要配任何仓库)
+    ///      `reg/ns/x:1`         同上,协议头可省
+    ///   4. `yq` / `yq:4.44.3` → 包名,去已配仓库的索引里查
     ///
-    /// 第 3 条就是 `crater apply yq` —— helm 那种用法。它会先印出计划再收敛:
-    /// 拉下来的字节是别人做的,而下一步要改的是生产机。
+    /// 第 3、4 条就是 helm 的两种用法:引用直连,或先 `repo add` 再用名字。
+    /// 索引只为回答"**有哪些包**" —— OCI 规范里没有搜索,所以那件事必须靠
+    /// 一个索引文件,而它能随闭包一起进 U 盘。
+    ///
+    /// 远端这两条都会**先印出计划再收敛**:拉下来的字节是别人做的,而下一步
+    /// 要改的是生产机。
     ///
     /// 命令行给的 `-i` / `--set` **盖过** app 文件里记的。
     #[command(
         verbatim_doc_comment,
         after_help = "\
 用法示例:
-  # 最短的那条:从仓库拉一个包,装到机群上
+  # 直连 OCI 引用 —— 不需要配任何仓库
+  crater apply oci://ghcr.io/acme/yq:4.44.3 -i inventory.yaml
+
+  # 或者先订阅一个索引,之后用名字
   crater repo add lab https://example.com/index.yaml
   crater apply yq -i inventory.yaml
 
@@ -230,8 +239,8 @@ enum Cmd {
     ///
     /// 不想连机器就用 `crater apply --dry-run`,它只打印静态计划。
     ///
-    /// `<source>` 与 `apply` 同一套解法:文件 → `<名字>.app.yaml` → 仓库索引。
-    /// `crater plan yq` 在本地没装过时会把包拉下来、印出计划,**停在那里**。
+    /// `<source>` 与 `apply` 同一套解法:文件 → `<名字>.app.yaml` → OCI 引用
+    /// → 仓库索引。本地没装过时会把包拉下来、印出计划,**停在那里**。
     #[command(
         verbatim_doc_comment,
         after_help = "\
@@ -239,8 +248,9 @@ enum Cmd {
   # 已装的任务
   crater plan yq
 
-  # 仓库里的包:拉下来看计划,不收敛
+  # 仓库里的包 / 直连引用:拉下来看计划,不收敛
   crater plan yq -i inventory.yaml
+  crater plan oci://ghcr.io/acme/yq:4.44.3 -i inventory.yaml
 
   # 一份蓝图文件
   crater plan -f web.blueprint.yaml -i inventory.yaml
@@ -1065,20 +1075,18 @@ fn source_of(
         }));
     }
     match source {
-        Some(s) if named::looks_like_a_name(s) => named::resolve(s, target, sets),
+        // 只有裸名字才可能对应本地任务;引用不会有 `<引用>.app.yaml`。
+        Some(s) if !s.contains('/') && !s.starts_with("oci://") => named::resolve(s, target, sets),
         _ => Ok(None),
     }
 }
 
-/// `<source>` 该不该拿去仓库里找。
+/// `<source>` 该不该拿去包那条路解决(包名走索引,引用直连 registry)。
 fn remote_name(file: &Option<PathBuf>, source: &Option<String>) -> Option<String> {
     if file.is_some() {
         return None; // 给了 `-f` 就是要一份文件,不该悄悄跑去联网
     }
-    source
-        .as_deref()
-        .filter(|s| named::looks_like_a_name(s))
-        .map(str::to_string)
+    source.as_deref().and_then(named::remote_ref)
 }
 
 /// 本地没有这个名字 → 去仓库把包拉下来跑(helm 那种用法)。
@@ -1090,7 +1098,10 @@ fn remote_name(file: &Option<PathBuf>, source: &Option<String>) -> Option<String
 /// 照印,然后执行 —— 拉下来的字节是别人做的,而下一步要改的是生产机,
 /// 那一眼不能省。
 async fn from_repo(name: &str, target: &TargetOpts, sets: &[String], converge: bool) -> Result<()> {
-    say!("本地没有 {name}.app.yaml —— 去仓库找");
+    // 引用是直连 registry,没有"本地找过了"这一步 —— 说了反而误导。
+    if !name.contains('/') {
+        say!("本地没有 {name}.app.yaml —— 去仓库找");
+    }
     pkg::install(
         name,
         target,

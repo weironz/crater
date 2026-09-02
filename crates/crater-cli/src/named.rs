@@ -115,17 +115,39 @@ pub(crate) fn apps_in(dir: &Path) -> Vec<String> {
     here
 }
 
-/// 这个 `<source>` 该不该当成名字试一把。
+/// `<source>` 是不是"该去包那条路解决"的东西,是的话给出规范化后的形式。
 ///
-/// 只有"不是现存路径、也不像引用或文件名"的才算。带 `/` 的是 OCI 引用或
-/// 路径;带 `.` 的多半是文件名 —— 把 `web.blueprint.yam`(手滑少个 l)当成
-/// 任务名去找,只会给出一个答非所问的错误,而真正的原因是文件名打错了。
-pub(crate) fn looks_like_a_name(source: &str) -> bool {
-    !source.is_empty()
-        && !Path::new(source).exists()
-        && !source.contains('/')
-        && !source.contains('\\')
-        && !source.contains('.')
+/// 认三种,都对应 helm 有的用法:
+///
+/// - `oci://reg/ns/yq:1.0` —— 显式协议头(helm 3.8+ 的写法)。前缀剥掉,
+///   因为下游 `ImageStore` 收的是裸引用
+/// - `reg/ns/yq:1.0` —— 裸 OCI 引用。判据是**带 `/`**:引用一定有仓库路径
+/// - `yq` / `yq:4.44.3` —— 包名,去已配仓库的索引里查
+///
+/// **不认**的:现存路径(那是文件,先于本模块处理),以及名字部分带 `.` 的
+/// ——`web.blueprint.yam`(手滑少个 l)当成包名去查,只会给出一个答非所问的
+/// 错误,而真正的原因是文件名打错了。
+///
+/// 名字后面的 `:版本` 先摘掉再判:`yq:4.44.3` 的版本号里全是点,不摘就会被
+/// 当成文件名扔掉。
+pub(crate) fn remote_ref(source: &str) -> Option<String> {
+    let s = source.strip_prefix("oci://").unwrap_or(source);
+    if s.is_empty() || Path::new(s).exists() {
+        return None;
+    }
+    // **长得像路径的一律不碰**,哪怕那个文件此刻不在。OCI 引用不会以 `./`
+    // `../` `/` `~` 开头 —— 而一个打错的路径被拿去连 registry,报的会是
+    // "仓库里没有 ./web.yaml",把人引向仓库配置,而真正的问题是路径写错了。
+    if s.starts_with('.') || s.starts_with('/') || s.starts_with('~') {
+        return None;
+    }
+    // 带仓库路径的就是 OCI 引用,直接给下游
+    if s.contains('/') || s.contains('\\') {
+        return Some(s.to_string());
+    }
+    // 剩下的当包名:摘掉 `:版本` 再看名字部分像不像文件名
+    let name = s.split_once(':').map(|(a, _)| a).unwrap_or(s);
+    (!name.is_empty() && !name.contains('.')).then(|| s.to_string())
 }
 
 #[cfg(test)]
@@ -224,14 +246,37 @@ mod tests {
         assert_eq!(apps_in(d.path()), vec!["web".to_string()]);
     }
 
+    /// 包名、裸引用、`oci://` 三种都该走包那条路 —— helm 有的用法我们都要有。
     #[test]
-    fn a_path_or_a_reference_is_not_a_name() {
-        assert!(looks_like_a_name("yq"));
-        assert!(looks_like_a_name("k8s-ha"));
-        assert!(!looks_like_a_name("registry.example.com/ns/yq:1.0"));
-        // 手滑打错的文件名不该被当成任务名 —— 那样报的错会答非所问
-        assert!(!looks_like_a_name("web.blueprint.yam"));
-        assert!(!looks_like_a_name("./web.yaml"));
-        assert!(!looks_like_a_name(""));
+    fn names_and_references_both_route_to_the_package_path() {
+        // 包名(去索引里查)
+        assert_eq!(remote_ref("yq").as_deref(), Some("yq"));
+        assert_eq!(remote_ref("k8s-ha").as_deref(), Some("k8s-ha"));
+        // 名字带版本:`:4.44.3` 里全是点,摘掉版本再判才不会被当成文件名
+        assert_eq!(remote_ref("yq:4.44.3").as_deref(), Some("yq:4.44.3"));
+        // 裸 OCI 引用
+        assert_eq!(
+            remote_ref("registry-1.docker.io/ns/yq:1.0").as_deref(),
+            Some("registry-1.docker.io/ns/yq:1.0")
+        );
+        // `oci://` 前缀剥掉 —— 下游 ImageStore 收的是裸引用
+        assert_eq!(
+            remote_ref("oci://registry-1.docker.io/ns/yq:1.0").as_deref(),
+            Some("registry-1.docker.io/ns/yq:1.0")
+        );
+    }
+
+    /// 手滑打错的文件名不该被当成包名 —— 那样报的错会答非所问。
+    #[test]
+    fn a_misspelled_filename_is_not_a_package_name() {
+        assert_eq!(remote_ref("web.blueprint.yam"), None);
+        assert_eq!(remote_ref(""), None);
+        assert_eq!(remote_ref("oci://"), None);
+        // 长得像路径的一律不碰 —— 哪怕文件此刻不在。打错的路径被拿去连
+        // registry,报的会是"仓库里没有 ./web.yaml",把人引向仓库配置。
+        assert_eq!(remote_ref("./web.yaml"), None);
+        assert_eq!(remote_ref("../a/b.yaml"), None);
+        assert_eq!(remote_ref("/etc/x.blueprint.yaml"), None);
+        assert_eq!(remote_ref("~/blueprints/web.yaml"), None);
     }
 }
