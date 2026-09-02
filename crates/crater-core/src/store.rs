@@ -457,7 +457,11 @@ impl ImageStore {
     /// `pkg inspect` 与 UI 的远端目录靠它:契约(参数/机群/物料清单)全在
     /// config 里,几百字节就能回答"这东西要我给什么"。多架构时按 platform
     /// 挑一份子 manifest —— 契约与架构无关,取哪份都一样。
-    pub async fn fetch_contract(reference: &str) -> crate::Result<(serde_json::Value, Vec<u8>)> {
+    /// 返回 (子 manifest, config 字节, 支持的 `os/arch` 清单)。
+    /// 单 manifest 的包 platforms 为空 —— 它不按架构分变体。
+    pub async fn fetch_contract(
+        reference: &str,
+    ) -> crate::Result<(serde_json::Value, Vec<u8>, Vec<String>)> {
         use oci_client::Reference;
         let r: Reference = reference
             .parse()
@@ -469,6 +473,7 @@ impl ImageStore {
             .await
             .map_err(|e| anyhow::anyhow!("pull manifest '{reference}': {e}"))?;
         let top: serde_json::Value = serde_json::from_slice(&raw)?;
+        let platforms = platforms_of(&top);
         let m: serde_json::Value = if top.get("manifests").and_then(|v| v.as_array()).is_some() {
             let sub = top["manifests"]
                 .as_array()
@@ -496,7 +501,7 @@ impl ImageStore {
             .pull_blob(&r, cd.as_str(), &mut cfg)
             .await
             .map_err(|e| anyhow::anyhow!("pull config {cd} of '{reference}': {e}"))?;
-        Ok((m, cfg))
+        Ok((m, cfg, platforms))
     }
 
     /// 远端有哪些版本 —— `/v2/<repo>/tags/list`。
@@ -796,6 +801,23 @@ impl ImageStore {
 
 fn strip(digest: &str) -> &str {
     digest.strip_prefix("sha256:").unwrap_or(digest)
+}
+
+/// 一个 manifest / index 支持哪些 `os/arch`。单 manifest 返回空 —— 它不分变体,
+/// 说"支持 linux/amd64"是编出来的(制品里没有这个事实)。
+pub fn platforms_of(top: &serde_json::Value) -> Vec<String> {
+    top["manifests"]
+        .as_array()
+        .map(|ms| {
+            ms.iter()
+                .filter_map(|e| {
+                    let a = e["platform"]["architecture"].as_str()?;
+                    let o = e["platform"]["os"].as_str().unwrap_or("linux");
+                    Some(format!("{o}/{a}"))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// 拉 manifest 时声明能收哪些类型。

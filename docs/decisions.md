@@ -2024,3 +2024,28 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **验收**:瘦拉 20K vs 全量 9.6M(且只拉本机架构那份,不是两架构的 18.8M);
   真断网目标机(`iptables OUTPUT --ctstate NEW -j REJECT`)上 `install --full`
   装成;**反证**同一台机不带 `--full` 报 `Could not resolve host`,装不上。
+
+### D-128:索引文件与搜索(D-123 第四阶段,四阶段收官)
+
+- **为什么不是 registry API**:OCI 只定义了 `tags/list`(某仓库有哪些版本);
+  "这个 registry 上有哪些包"根本问不出来 —— `_catalog` 不在规范里,Docker
+  Hub 还有意禁用。Helm 撞的是同一堵墙,答案是静态 `index.yaml`。索引另有
+  两处便宜:能随闭包进 U 盘;任何静态 HTTP 都能托管(含 rustfs 这类 S3)。
+- **索引的 `version` 取 tag,不取蓝图的 `version:`。** 头一版反了,结果 yq
+  的 4.44.3 与 4.40.5 双双报成蓝图修订号 `1`,后一条**静默**覆盖前一条。
+  索引存在的意义是把"包名+版本"翻译成一条**能拉的引用**,而能拉的只有 tag。
+  蓝图版本降为 `blueprint_version` 字段(同 Helm 的 version / appVersion),
+  不一致时 `pkg push` 提醒一句 —— 不报错,两种约定都合理。
+- **摊包时留 `.crater-pkg` 印记**:包目录按包名命名,`install yq:4.40.5` 会
+  复用上次 `install yq` 摊下的 4.44.3 目录并**静默装错版本**。印记对不上就
+  拒绝,并给出换目录的命令。点开头,所以不会被打进下一个包。
+- **`search` 只查本地缓存,不连网**:搜索要能在断网机房用,而且"每次搜都
+  往外发请求"是把使用习惯与网络状况绑死。要新的就 `repo update`,那是一个
+  明确动作。坏索引先落临时文件再校验,不覆盖上一份好的 —— `repo update`
+  最容易在断网时撞上,而那时旧索引正是救命的。
+- **`pkg index` 没有"扫一个 registry"这种来源**:那正是 OCI 问不出来的东西,
+  假装能问只会在别人的 registry 上失败。来源只有显式引用与 `--store`。
+- **顺带写明一条既有限制**:物料没声明 `sha256:` 且没有闭包时判不出漂移
+  (既有测试 `a_remote_material_without_a_digest_admits_it_cannot_tell`),
+  换版本时目标机保留旧字节并报"无变更"。带 `--full` 或声明 `sha256:` 即正常
+  ——实测 `--full` 降级 4.44.3 → 4.40.5 成功。

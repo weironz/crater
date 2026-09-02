@@ -39,6 +39,7 @@ mod events;
 mod facts_cmd;
 mod out;
 mod pkg;
+mod repo;
 mod ui_catalog;
 mod ui_inventory;
 mod ui_run;
@@ -468,6 +469,9 @@ enum Cmd {
         /// 任务名(默认取蓝图名)—— 决定落成哪个 `<名>.app.yaml`。
         #[arg(long)]
         name: Option<String>,
+        /// 从哪个仓库找这个包(名字在多个仓库里都有时用)。
+        #[arg(long)]
+        repo: Option<String>,
         /// 参数覆盖,可给多次。
         #[arg(long = "set", value_name = "K=V")]
         set: Vec<String>,
@@ -479,6 +483,19 @@ enum Cmd {
         full: bool,
         #[command(flatten)]
         target: TargetOpts,
+    },
+    /// 包仓库 —— 一个索引文件的地址。OCI 里没有搜索(`_catalog` 不在规范
+    /// 里、Docker Hub 还禁用它),所以"有哪些包"靠索引文件回答,而它能随
+    /// 闭包一起进 U 盘。
+    Repo {
+        #[command(subcommand)]
+        cmd: RepoCmd,
+    },
+    /// 在已配仓库的索引里搜包。只查本地缓存,不连网 —— 要新的先 `repo update`。
+    Search {
+        /// 关键词(匹配包名与描述);留空列全部。
+        #[arg(default_value = "")]
+        query: String,
     },
     /// 蓝图包 —— 把一份蓝图打成 OCI 制品,推上去、拉下来、看契约(D-123)。
     ///
@@ -556,6 +573,34 @@ enum PkgCmd {
     Tags { reference: String },
     /// 本地 store 里的蓝图包。
     Ls,
+    /// 生成索引文件 —— 别人 `repo add` 它,就能 `search` 和 `install`。
+    ///
+    /// 只读 manifest + config,一层都不下载。**没有"扫一个 registry"这种
+    /// 来源** —— 那正是 OCI 问不出来的东西(`_catalog` 不在规范里)。
+    Index {
+        /// `oci://reg/ns/name`(不带 tag → 收全部版本)或带 tag 只收一版。
+        sources: Vec<String>,
+        /// 把本地 store 里的蓝图包也收进来。
+        #[arg(long)]
+        store: bool,
+        #[arg(short = 'o', long, default_value = "index.yaml")]
+        out: PathBuf,
+        /// 并入已有索引而不是重写(增量发布)。
+        #[arg(long)]
+        merge: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RepoCmd {
+    /// 记下一个索引地址并同步一次。地址可以是 http(s)、本地路径或 U 盘路径。
+    Add { name: String, url: String },
+    /// 拉取索引(不给名字则全部)。
+    Update { name: Option<String> },
+    /// 已配的仓库及其同步状态。
+    List,
+    /// 移除一个仓库及其缓存。
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]
@@ -780,8 +825,8 @@ async fn main() -> Result<()> {
             chmod,
         } => push_file(&host, &user, password, port, &src, &dst, chmod).await,
         Cmd::Images => images::list_images().await,
-        Cmd::Install { source, name, set, yes, full, target } => {
-            pkg::install(&source, &target, &set, name.as_deref(), yes, full).await
+        Cmd::Install { source, name, repo, set, yes, full, target } => {
+            pkg::install(&source, &target, &set, name.as_deref(), repo.as_deref(), yes, full).await
         }
         Cmd::Pkg { cmd } => match cmd {
             PkgCmd::Push { path, reference, arch, fors } => {
@@ -796,7 +841,17 @@ async fn main() -> Result<()> {
             PkgCmd::Inspect { reference } => pkg::inspect(&reference).await,
             PkgCmd::Tags { reference } => pkg::tags(&reference).await,
             PkgCmd::Ls => pkg::ls(),
+            PkgCmd::Index { sources, store, out, merge } => {
+                repo::index(&sources, store, &out, merge).await
+            }
         },
+        Cmd::Repo { cmd } => match cmd {
+            RepoCmd::Add { name, url } => repo::add(&name, &url).await,
+            RepoCmd::Update { name } => repo::update(name.as_deref()).await,
+            RepoCmd::List => repo::list(),
+            RepoCmd::Remove { name } => repo::remove(&name),
+        },
+        Cmd::Search { query } => repo::search(&query),
         Cmd::Pull { reference } => images::pull_image(&reference).await,
         Cmd::Push { reference } => images::push_image(&reference).await,
         Cmd::Load { file, as_ref } => {

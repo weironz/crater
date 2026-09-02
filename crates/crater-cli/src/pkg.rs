@@ -236,6 +236,15 @@ async fn assemble(
     let (lay_d, lay_s) = store.put_blob(&layer)?;
 
     say!("包 {reference} —— {} 个文件,{}", files.len(), human(lay_s));
+    // tag 与蓝图 version 不一致只是**提醒**,不是错误:两种约定都合理
+    // (Helm 也分 chart version 与 appVersion),而索引按 tag 组织,
+    // 不会因此错乱。提醒的价值在于——不一致往往是手滑打错了 tag。
+    if let Some(bv) = bp.version.as_deref() {
+        let tag = reference.rsplit(':').next().unwrap_or("");
+        if !tag.is_empty() && tag != bv {
+            say!("  · tag `{tag}` 与蓝图 version `{bv}` 不同 —— 索引与 install 按 tag 走");
+        }
+    }
     for (rel, why) in &skipped {
         say!("  · 排除 {rel}({why})");
     }
@@ -428,6 +437,7 @@ pub async fn pull(reference: &str, into: Option<&Path>, full: bool) -> Result<()
     let bytes = std::fs::read(store.blob_path(d.trim_start_matches("sha256:")))
         .with_context(|| format!("{reference} 的蓝图层不在本地"))?;
     crater_core::bundle::untar_gz_into(&dir, &bytes, 0)?;
+    stamp(&dir, reference)?;
     let n = std::fs::read_dir(&dir).map(|r| r.flatten().count()).unwrap_or(0);
     say!("{reference} → {}({n} 项)", dir.display());
     let mats = m["layers"]
@@ -452,7 +462,7 @@ pub async fn inspect(reference: &str) -> Result<()> {
             c
         }
         None => {
-            let (_m, bytes) = ImageStore::fetch_contract(reference).await?;
+            let (_m, bytes, _plats) = ImageStore::fetch_contract(reference).await?;
             serde_json::from_slice(&bytes)
                 .with_context(|| format!("{reference} 的 config 不是 crater 契约"))?
         }
@@ -524,6 +534,32 @@ pub fn ls() -> Result<()> {
 
 // ───────────────────────────── 小工具 ─────────────────────────────
 
+/// 读 config;不是 crater 包(或读不动)就是 None —— 调用方多半在遍历
+/// 一整个 store,一条读不动不该让整趟失败。
+pub(crate) fn config_of(store: &ImageStore, m: &serde_json::Value) -> Option<serde_json::Value> {
+    if m["config"]["mediaType"].as_str() != Some(MT_PKG_CONFIG) {
+        return None;
+    }
+    read_config(store, m).ok()
+}
+
+/// 摊出来的包目录里留一行"我是从哪来的"。
+///
+/// 点开头,所以 [`packable`] 会把它排除在外 —— 再打包时不会把上一次的
+/// 来源带进新包。
+const STAMP: &str = ".crater-pkg";
+
+fn stamp(dir: &Path, reference: &str) -> Result<()> {
+    std::fs::write(dir.join(STAMP), format!("{reference}\n"))?;
+    Ok(())
+}
+
+/// 这个目录是哪条引用摊出来的。没有印记(手写的蓝图目录)返回 None,
+/// 那种情况下沿用旧行为 —— 人自己的目录,不该由我们判定"版本不对"。
+fn stamped(dir: &Path) -> Option<String> {
+    std::fs::read_to_string(dir.join(STAMP)).ok().map(|s| s.trim().to_string())
+}
+
 fn read_config(store: &ImageStore, m: &serde_json::Value) -> Result<serde_json::Value> {
     let d = m["config"]["digest"]
         .as_str()
@@ -549,7 +585,7 @@ fn warn_if_newer(cfg: &serde_json::Value) {
 /// 两处不显然的地方:主版本段**补齐到四位**,否则 `1.2` 会排在 `1.2.0`
 /// 之前(短的 Vec 更小);预发布段在正式版**之后**读到一个哨兵,于是
 /// `1.2.0-rc1 < 1.2.0` —— 少了这一条,`pkg tags` 会把 rc 当成最新版推荐。
-fn semver_key(v: &str) -> Vec<i64> {
+pub(crate) fn semver_key(v: &str) -> Vec<i64> {
     let v = v.trim_start_matches('v');
     let (core, pre) = match v.find(['-', '+', '_']) {
         Some(i) => (&v[..i], &v[i + 1..]),
@@ -703,16 +739,29 @@ mod tests {
 /// 顺序是刻意的:**契约与机群都在本地对完账,才连第一台机器**。参数少给一个、
 /// 组名写错一个,在 SSH 之前就该说清楚 —— 那时候纠正的代价是改一行命令,
 /// 连上之后再发现就已经在改机器了。
+#[allow(clippy::too_many_arguments)]
 pub async fn install(
     source: &str,
     target: &crate::target::TargetOpts,
     sets: &[String],
     name: Option<&str>,
+    repo: Option<&str>,
     yes: bool,
     full: bool,
 ) -> Result<()> {
     // ① 取到蓝图 —— 本地路径就地用,否则当成 registry 引用拉下来。
     let local = Path::new(source);
+    // `crater install mysql` 里的 `mysql` 不是引用,是包名 —— 去仓库索引里
+    // 查它对应哪条引用。判据是"有没有 `/`":OCI 引用一定带仓库路径,
+    // 而包名一定不带。
+    let resolved;
+    let source = if !local.exists() && !source.contains('/') {
+        resolved = crate::repo::resolve(source, repo)?;
+        say!("{source} → {resolved}");
+        resolved.as_str()
+    } else {
+        source
+    };
     let bp_file = if local.exists() {
         locate(local)?.0
     } else {
@@ -731,11 +780,25 @@ pub async fn install(
             let d = layer["digest"].as_str().unwrap_or_default();
             let bytes = std::fs::read(store.blob_path(d.trim_start_matches("sha256:")))?;
             crater_core::bundle::untar_gz_into(&dir, &bytes, 0)?;
+            stamp(&dir, source)?;
             say!("{source} → {}/", dir.display());
         } else {
-            // 目录已在:这是升级或重装,不覆盖本地改动。包在 store 里,
-            // 真要换成包里那份,`pkg pull --into` 明确说出来。
-            say!("{} 已存在 —— 用本地这份(包已在 store)", dir.display());
+            // 目录已在:默认用本地那份(它可能有本地改动,重装不该冲掉)。
+            //
+            // 但**必须先确认它就是这次要装的那个版本**:包目录按包名命名,
+            // `install yq:4.40.5` 会撞上上次 `install yq` 摊下的 4.44.3,
+            // 然后**静默**装成 4.44.3 —— 引用解析对了、日志也对,装上去的
+            // 却是另一版。这一条是那次事故的封条。
+            match stamped(&dir) {
+                Some(prev) if prev != source => bail!(
+                    "{} 里是 `{prev}`,这次要装的是 `{source}` —— 版本对不上。\n\
+                     换个位置:`crater pkg pull {source} --into <目录>`,\n\
+                     或先把 {} 移开。",
+                    dir.display(),
+                    dir.display()
+                ),
+                _ => say!("{} 已存在 —— 用本地这份(包已在 store)", dir.display()),
+            }
         }
         locate(&dir)?.0
     };

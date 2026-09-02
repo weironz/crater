@@ -339,7 +339,7 @@ Docker Hub 上 `config` 535 B、蓝图层 572 B —— `pkg inspect` 的全部�
 | **1. 制品格式 + push/pull** ✅ 已落地 | 蓝图目录 → manifest(config + 蓝图层);`pkg push/build/pull/ls/inspect/tags`;瘦拉;复用 `store.rs` | 见下方"第一阶段验收记录"。**ACR 个人版仍未实测**(本地无凭据) |
 | **2. 闭包层 + 多架构** ✅ 已落地 | `pkg push --arch amd64 --arch arm64`,物料层 `fetch=dependency`;image index 按 platform;`pull --full`;`--closure oci://<ref>` | 见下方"第二阶段验收记录" |
 | **3. install** ✅ 已落地(UI 远端源除外) | `crater install` 串起 pull → 契约 → fit → app → plan 闸门 | 见下方"第三阶段验收记录"。**UI 远端源未做** |
-| **4. 索引与搜索** | `pkg index` 生成 `index.yaml`;`repo add/update`;`search` | 索引托管在 rustfs(S3 静态)上;U 盘场景:tar + index 离线搬运后 `search` 能查、`install` 能装 |
+| **4. 索引与搜索** ✅ 已落地 | `pkg index` 生成 `index.yaml`;`repo add/update/list/remove`;`search`;`install <包名>` | 见下方"第四阶段验收记录" |
 
 每阶段之间没有强依赖;1 是其余的前提。阶段 4 的价值取决于包的数量 —— 库里现在
 8 个,`ls` 就够,**不要在阶段 1 之前做它**。
@@ -363,6 +363,41 @@ ACR 个人版收不收自定义制品仍是**第二阶段开工前必须实测**
 **真机没用上实验室**:192.168.73.x 的路由被本机的 Meta 代理截住(TCP 连得上、
 SSH 握手即断),隧道也没起。改用一个 sshd 容器当目标 —— 对 crater 而言它就是
 一台开着 22 端口、要口令登录的机器,验的东西一样。
+
+### 第四阶段验收记录(2026-09-02)
+
+命令面:`crater pkg index` 生成、`crater repo add/update/list/remove` 订阅、
+`crater search` 查、`crater install <包名>` 装。
+
+| 判据 | 结果 |
+| --- | --- |
+| 生成索引 | 4 个版本 / 3 个包,只读 manifest + config,零层下载 |
+| 托管 | `python3 -m http.server` 就够 —— 任何静态 HTTP,`file://` 与裸路径同样认 |
+| 订阅 | `repo add lab http://…/index.yaml` 当场同步并报"3 个包" |
+| 搜索 | 匹配包名与描述;**机群契约直接印在结果里**(`rustfs 1.0 lab/rustfs [storage×1]`)—— "要几台机器"是决定装不装的第一个问题 |
+| 按名字装 | `crater install yq` → 解析成 `…/lib/yq:4.44.3` → 装成 |
+| 指定版本 | `crater install yq:4.40.5` 解析到对应引用 |
+| 离线 | `search` 只查本地缓存,不连网;坏索引不覆盖上一份好的 |
+
+**两个真缺陷是被这一阶段的测试逼出来的:**
+
+1. **索引按蓝图 `version:` 组织会静默丢版本。** 头一版这么写,结果 yq 的
+   4.44.3 与 4.40.5 双双报成 `1`(蓝图自己的修订号),后一条覆盖了前一条。
+   改成 **`version` 取 tag** —— 索引存在的意义是把"包名 + 版本"翻译成一条能
+   拉的引用,而能拉的只有 tag。蓝图的 `version:` 降为 `blueprint_version`
+   字段(与 Helm 的 chart version / appVersion 同构),两者不一致时
+   `pkg push` 提醒一句。
+2. **`install <包名>:<版本>` 会撞上同名目录并静默装错版本。** 包目录按包名
+   命名,`install yq:4.40.5` 复用了上次 `install yq` 摊下的 4.44.3 目录 ——
+   引用解析对了、日志也对,装上去的却是另一版。修法是摊包时留一个
+   `.crater-pkg` 印记,来源对不上就**拒绝**并给出换目录的命令。
+
+**一条既有限制值得写明**:物料没有声明 `sha256:` 且没有闭包时,crater
+**判不出漂移**(既有测试 `a_remote_material_without_a_digest_admits_it_cannot_tell`
+就是它的封条)—— 换版本时目标机会保留旧字节并报"无变更"。带 `--full`
+(字节在本地,能算摘要)或在蓝图里声明 `sha256:` 就正常:实测
+`install …yq:4.40.5 --full` 判出 `~ 将修改`,降级成功,`yq --version`
+从 4.44.3 变成 4.40.5。
 
 ### 第二阶段验收记录(2026-09-02)
 

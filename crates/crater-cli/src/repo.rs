@@ -1,0 +1,522 @@
+//! 索引文件与搜索(D-123 第七节)—— registry 管字节,索引管"有什么"。
+//!
+//! 这不是没想过用 registry 的 API。**OCI 里没有搜索**:内容发现只定义了
+//! `tags/list`(某个仓库有哪些版本),"这个 registry 上有哪些包"根本问不出来
+//! —— `_catalog` 不在规范里,Docker Hub 还有意禁用它。Helm 遇到同一堵墙,
+//! 答案是经典 repo 的静态 `index.yaml`;timoni / Flux / KitOps 干脆不做搜索。
+//!
+//! 走索引文件另有两处便宜:
+//!
+//! - **断网也成立。** 索引可以和 `pkg save` 的 tar 一起塞进 U 盘;registry API
+//!   在断网机房里根本调不到。
+//! - **任何静态 HTTP 都能托管**,包括 rustfs 这类 S3 —— 与 storage-design 的
+//!   分层一致:registry 管不可变字节,索引管列举。
+//!
+//! 索引是**派生数据**,随时能从 registry 重算,所以永远不手改:谁推包谁重跑
+//! `crater pkg index`。
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use anyhow::{bail, Context as _, Result};
+use crater_core::store::ImageStore;
+use serde::{Deserialize, Serialize};
+
+use crate::say;
+
+const API_VERSION: &str = "crater.pkg/v1";
+
+/// 索引里的一个版本条目。
+///
+/// 记的全是**读 config 就能拿到**的东西(契约、规模、架构),一层都不用下载。
+/// 于是给一百个包生成索引只是一百次 manifest+config 往返,几秒钟的事。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Entry {
+    /// **tag** —— 索引唯一能保证可寻址的东西。
+    pub version: String,
+    /// 蓝图自己声明的修订号(可与 tag 不同,如 Helm 的 version / appVersion)。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub blueprint_version: String,
+    /// 完整 OCI 引用 —— `install` 直接拿它去拉。
+    pub reference: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub digest: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// 机群契约:不进 inventory 就装不上,搜索结果里就该看见。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fleet: Vec<FleetNeed>,
+    #[serde(default)]
+    pub params: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<String>,
+    /// 离线镜像时指向同目录的 `.pkg.tar`(相对路径)。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FleetNeed {
+    pub name: String,
+    pub min: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Index {
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+    pub generated: String,
+    /// 包名 → 版本条目(新的排前面)。
+    pub entries: BTreeMap<String, Vec<Entry>>,
+}
+
+impl Default for Index {
+    fn default() -> Self {
+        Index {
+            api_version: API_VERSION.into(),
+            generated: now_rfc3339(),
+            entries: BTreeMap::new(),
+        }
+    }
+}
+
+impl Index {
+    /// 并入一条,同名同版本则替换 —— 重跑 `pkg index` 是幂等的。
+    fn upsert(&mut self, name: &str, e: Entry) {
+        let v = self.entries.entry(name.to_string()).or_default();
+        v.retain(|x| x.version != e.version);
+        v.push(e);
+        // semver 降序:读的人先看见最新的那个。
+        v.sort_by(|a, b| crate::pkg::semver_key(&b.version).cmp(&crate::pkg::semver_key(&a.version)));
+    }
+}
+
+// ───────────────────────────── 生成 ─────────────────────────────
+
+/// 从一条 config 契约折出索引条目。
+fn entry_of(reference: &str, cfg: &serde_json::Value, platforms: Vec<String>, digest: String) -> (String, Entry) {
+    let name = cfg["name"].as_str().unwrap_or("").to_string();
+    // **版本取 tag,不取蓝图里的 `version:`。**
+    //
+    // 索引存在的意义是把"包名 + 版本"翻译成一条能拉的引用,而能拉的只有
+    // tag。蓝图的 `version:` 是它自己的修订号,与被装的那个东西的版本
+    // 未必一致(library/yq 声明 `version: "1"`,tag 是 yq 的 4.44.3 ——
+    // 两个都合理,Helm 也分 chart version 与 appVersion)。
+    //
+    // 这条是被测试逼出来的:先按蓝图 version 组织时,yq 的 4.44.3 与
+    // 4.40.5 双双报成 "1",后一条**静默**覆盖了前一条。
+    let version = reference.rsplit(':').next().unwrap_or("latest").to_string();
+    let e = Entry {
+        version,
+        blueprint_version: cfg["version"].as_str().unwrap_or_default().to_string(),
+        reference: reference.to_string(),
+        digest,
+        description: cfg["description"].as_str().unwrap_or("").to_string(),
+        fleet: cfg["fleet"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|g| {
+                        Some(FleetNeed {
+                            name: g["name"].as_str()?.to_string(),
+                            min: g["min"].as_u64().unwrap_or(0) as usize,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        params: cfg["params"].as_array().map(|a| a.len()).unwrap_or(0),
+        platforms,
+        urls: Vec::new(),
+    };
+    (name, e)
+}
+
+/// `crater pkg index <来源>… [-o out] [--merge]`
+///
+/// 来源两种:`oci://reg/ns/name`(不带 tag → 走 `tags/list` 收全部版本)、
+/// `--store`(本地 store 里的全部蓝图包)。**没有"扫一个 registry"这一种**
+/// —— 那正是 OCI 问不出来的东西,假装能问只会在别人的 registry 上失败。
+pub async fn index(sources: &[String], from_store: bool, out: &std::path::Path, merge: bool) -> Result<()> {
+    let mut idx = if merge && out.exists() {
+        load_index_file(out)?
+    } else {
+        Index::default()
+    };
+    let mut n = 0usize;
+
+    if from_store {
+        let store = ImageStore::open()?;
+        for img in store.list()? {
+            let Ok(m) = store.resolve_manifest(&img.reference) else { continue };
+            let Some(cfg) = crate::pkg::config_of(&store, &m) else { continue };
+            let plats = crater_core::store::platforms_of(&m);
+            let (name, e) = entry_of(&img.reference, &cfg, plats, img.digest.clone());
+            if name.is_empty() {
+                continue;
+            }
+            say!("  + {name} {} ← 本地 store", e.version);
+            idx.upsert(&name, e);
+            n += 1;
+        }
+    }
+
+    for src in sources {
+        let src = src.trim_start_matches("oci://");
+        // 带 tag 就只收那一版;不带就问 registry 有哪些版本。
+        let refs: Vec<String> = if src.rsplit('/').next().unwrap_or("").contains(':') {
+            vec![src.to_string()]
+        } else {
+            let tags = ImageStore::list_tags(src)
+                .await
+                .with_context(|| format!("列 {src} 的版本"))?;
+            tags.iter().map(|t| format!("{src}:{t}")).collect()
+        };
+        for r in refs {
+            // 一个 tag 读不动(不是 crater 包、或权限不够)不该让整份索引失败 ——
+            // 一个仓库里混着别的制品是常态。报出来,继续。
+            match ImageStore::fetch_contract(&r).await {
+                Ok((_m, bytes, plats)) => {
+                    let Ok(cfg) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                        crate::oops!("  · {r} 的 config 不是 crater 契约,跳过");
+                        continue;
+                    };
+                    let (name, e) = entry_of(&r, &cfg, plats, String::new());
+                    if name.is_empty() {
+                        crate::oops!("  · {r} 没有包名,跳过");
+                        continue;
+                    }
+                    say!("  + {name} {}", e.version);
+                    idx.upsert(&name, e);
+                    n += 1;
+                }
+                Err(e) => crate::oops!("  · {r} 读不到契约({e}),跳过"),
+            }
+        }
+    }
+
+    if n == 0 {
+        bail!("一个包都没收进来 —— 索引不写了(免得把已有的覆盖成空)");
+    }
+    idx.generated = now_rfc3339();
+    std::fs::write(out, serde_yaml::to_string(&idx)?)?;
+    say!();
+    say!("索引 → {}({} 个包,{} 个版本)", out.display(), idx.entries.len(), n);
+    say!("托管到任意静态 HTTP,对方 `crater repo add <名> <地址>` 就能搜。");
+    Ok(())
+}
+
+// ───────────────────────────── 仓库 ─────────────────────────────
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Repos {
+    #[serde(default)]
+    repos: BTreeMap<String, String>,
+}
+
+fn repos_file() -> PathBuf {
+    ImageStore::home().join("repos.yaml")
+}
+fn cache_dir() -> PathBuf {
+    ImageStore::home().join("repos")
+}
+fn cache_of(name: &str) -> PathBuf {
+    cache_dir().join(format!("{name}.yaml"))
+}
+
+fn load_repos() -> Repos {
+    std::fs::read(repos_file())
+        .ok()
+        .and_then(|b| serde_yaml::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_repos(r: &Repos) -> Result<()> {
+    let p = repos_file();
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    std::fs::write(p, serde_yaml::to_string(r)?)?;
+    Ok(())
+}
+
+fn load_index_file(p: &std::path::Path) -> Result<Index> {
+    let text = std::fs::read_to_string(p).with_context(|| format!("读索引 {}", p.display()))?;
+    let idx: Index = serde_yaml::from_str(&text).with_context(|| format!("{} 不是 crater 索引", p.display()))?;
+    if idx.api_version != API_VERSION {
+        bail!("{} 的 apiVersion 是 {},本机认得的是 {API_VERSION}", p.display(), idx.api_version);
+    }
+    Ok(idx)
+}
+
+/// 取一份索引的字节。http(s) 走网络,其余当本地路径 —— `file://` 前缀可选,
+/// 因为 U 盘场景下人多半直接写路径。
+async fn fetch_index(url: &str) -> Result<Vec<u8>> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return crater_core::source::fetch(url).await;
+    }
+    let p = url.strip_prefix("file://").unwrap_or(url);
+    std::fs::read(p).with_context(|| format!("读索引 {p}"))
+}
+
+pub async fn add(name: &str, url: &str) -> Result<()> {
+    let mut r = load_repos();
+    if let Some(old) = r.repos.get(name) {
+        if old != url {
+            say!("{name} 原指向 {old},改为 {url}");
+        }
+    }
+    r.repos.insert(name.to_string(), url.to_string());
+    save_repos(&r)?;
+    // 当场拉一次:地址写错要现在就知道,而不是下次 search 空手而归时。
+    update(Some(name)).await
+}
+
+pub fn remove(name: &str) -> Result<()> {
+    let mut r = load_repos();
+    if r.repos.remove(name).is_none() {
+        bail!("没有名叫 `{name}` 的仓库");
+    }
+    save_repos(&r)?;
+    let _ = std::fs::remove_file(cache_of(name));
+    say!("已移除 {name}");
+    Ok(())
+}
+
+pub fn list() -> Result<()> {
+    let r = load_repos();
+    if r.repos.is_empty() {
+        say!("还没有配仓库。`crater repo add <名> <索引地址>`");
+        say!("索引由 `crater pkg index` 生成,托管在任意静态 HTTP 或 U 盘上。");
+        return Ok(());
+    }
+    let w = r.repos.keys().map(|k| k.chars().count()).max().unwrap_or(0);
+    for (n, u) in &r.repos {
+        let c = cache_of(n);
+        let stat = match load_index_file(&c) {
+            Ok(i) => format!("{} 个包", i.entries.len()),
+            Err(_) => "未同步".to_string(),
+        };
+        say!("  {:<w$}  {:<10}  {}", n, stat, u, w = w);
+    }
+    Ok(())
+}
+
+pub async fn update(only: Option<&str>) -> Result<()> {
+    let r = load_repos();
+    if r.repos.is_empty() {
+        bail!("还没有配仓库。`crater repo add <名> <索引地址>`");
+    }
+    std::fs::create_dir_all(cache_dir())?;
+    let mut bad = 0;
+    for (n, u) in &r.repos {
+        if only.is_some_and(|o| o != n) {
+            continue;
+        }
+        match fetch_index(u).await {
+            Ok(bytes) => {
+                // 先落到临时文件再校验,坏索引不该把上一份好的冲掉 ——
+                // `repo update` 在断网时最容易撞上,而那时旧索引正是救命的。
+                let tmp = cache_of(n).with_extension("tmp");
+                std::fs::write(&tmp, &bytes)?;
+                match load_index_file(&tmp) {
+                    Ok(i) => {
+                        std::fs::rename(&tmp, cache_of(n))?;
+                        say!("  ✓ {n}  {} 个包", i.entries.len());
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&tmp);
+                        crate::oops!("  ✗ {n}  {e}(保留上一份)");
+                        bad += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                crate::oops!("  ✗ {n}  取不到({e})(保留上一份)");
+                bad += 1;
+            }
+        }
+    }
+    if bad > 0 && only.is_some() {
+        bail!("{} 同步失败", only.unwrap());
+    }
+    Ok(())
+}
+
+/// 全部已缓存的索引:(仓库名, 索引)。
+fn cached() -> Vec<(String, Index)> {
+    load_repos()
+        .repos
+        .keys()
+        .filter_map(|n| load_index_file(&cache_of(n)).ok().map(|i| (n.clone(), i)))
+        .collect()
+}
+
+// ───────────────────────────── 搜索 ─────────────────────────────
+
+/// `crater search <关键词>` —— 只查本地缓存,不连网。
+///
+/// 不连网是刻意的:搜索要能在断网机房用,而且"每次搜都往外发一串请求"是
+/// 把使用习惯和网络状况绑死。要新的就 `crater repo update`,那是一个明确动作。
+pub fn search(query: &str) -> Result<()> {
+    let repos = cached();
+    if repos.is_empty() {
+        say!("还没有可搜的索引。`crater repo add <名> <地址>` 再 `crater repo update`。");
+        return Ok(());
+    }
+    let q = query.to_lowercase();
+    let mut hits: Vec<(String, String, &Entry)> = Vec::new();
+    for (rn, idx) in &repos {
+        for (name, versions) in &idx.entries {
+            let Some(latest) = versions.first() else { continue };
+            if q.is_empty()
+                || name.to_lowercase().contains(&q)
+                || latest.description.to_lowercase().contains(&q)
+            {
+                hits.push((rn.clone(), name.clone(), latest));
+            }
+        }
+    }
+    if hits.is_empty() {
+        say!("没有匹配 `{query}` 的包。`crater repo update` 拉一次新的?");
+        return Ok(());
+    }
+    hits.sort_by(|a, b| a.1.cmp(&b.1));
+    let wn = hits.iter().map(|h| h.1.chars().count()).max().unwrap_or(0);
+    let wv = hits.iter().map(|h| h.2.version.chars().count()).max().unwrap_or(0);
+    for (repo, name, e) in &hits {
+        // 机群契约直接摆出来 —— "要几台机器"是决定装不装的第一个问题,
+        // 让人先装再发现 inventory 不满足,是最费时间的顺序。
+        let need = if e.fleet.is_empty() {
+            String::new()
+        } else {
+            let s: Vec<String> = e.fleet.iter().map(|f| format!("{}×{}", f.name, f.min)).collect();
+            format!("  [{}]", s.join(" "))
+        };
+        say!("  {:<wn$}  {:<wv$}  {}/{}{need}  {}", name, e.version, repo, name, e.description, wn = wn, wv = wv);
+    }
+    say!();
+    say!("{} 个包。`crater pkg inspect <ref>` 看契约,`crater install <名>` 装。", hits.len());
+    Ok(())
+}
+
+/// 包名(可带 `:版本`)→ OCI 引用。`install` 用它把 `crater install mysql`
+/// 变成一条真引用。
+///
+/// 名字撞车时**报错而不是猜**:两个仓库都有 `mysql` 时选错一个,装上去的
+/// 是别人的东西,而这件事要到出问题才会被发现。
+pub fn resolve(name: &str, repo: Option<&str>) -> Result<String> {
+    let (n, want_ver) = match name.split_once(':') {
+        Some((a, b)) => (a, Some(b)),
+        None => (name, None),
+    };
+    let mut found: Vec<(String, &Entry)> = Vec::new();
+    let repos = cached();
+    for (rn, idx) in &repos {
+        if repo.is_some_and(|r| r != rn) {
+            continue;
+        }
+        let Some(versions) = idx.entries.get(n) else { continue };
+        let pick = match want_ver {
+            Some(v) => versions.iter().find(|e| e.version == v),
+            None => versions.first(),
+        };
+        if let Some(e) = pick {
+            found.push((rn.clone(), e));
+        }
+    }
+    match found.len() {
+        0 if repos.is_empty() => bail!(
+            "`{name}` 不像 OCI 引用,而本机一个仓库都没配。\n\
+             `crater repo add <名> <索引地址>`,或直接给完整引用。"
+        ),
+        0 => bail!(
+            "仓库里没有 `{name}`{}。`crater search {n}` 看看有什么。",
+            want_ver.map(|v| format!(" 的 {v} 版")).unwrap_or_default()
+        ),
+        1 => Ok(found[0].1.reference.clone()),
+        _ => {
+            let rs: Vec<&str> = found.iter().map(|(r, _)| r.as_str()).collect();
+            bail!(
+                "`{n}` 在 {} 个仓库里都有:{} —— 用 `--repo <名>` 指明是哪个。",
+                found.len(),
+                rs.join(", ")
+            )
+        }
+    }
+}
+
+fn now_rfc3339() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // 只为可读性,不参与任何判定 —— 不值得为它引一个日期库。
+    let days = secs / 86400;
+    let (y, m, d) = civil_from_days(days as i64);
+    let (hh, mm, ss) = ((secs % 86400) / 3600, (secs % 3600) / 60, secs % 60);
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// Howard Hinnant 的 civil_from_days —— 天数 → 年月日,无依赖。
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn e(v: &str) -> Entry {
+        Entry {
+            version: v.into(),
+            blueprint_version: String::new(),
+            reference: format!("reg/ns/x:{v}"),
+            digest: String::new(),
+            description: String::new(),
+            fleet: vec![],
+            params: 0,
+            platforms: vec![],
+            urls: vec![],
+        }
+    }
+
+    #[test]
+    fn upsert_is_idempotent_and_keeps_newest_first() {
+        // 索引是派生数据,重跑 `pkg index` 必须幂等 —— 否则每跑一次条目翻倍。
+        let mut i = Index::default();
+        i.upsert("x", e("1.2.0"));
+        i.upsert("x", e("1.10.0"));
+        i.upsert("x", e("1.2.0"));
+        let vs: Vec<&str> = i.entries["x"].iter().map(|x| x.version.as_str()).collect();
+        assert_eq!(vs, vec!["1.10.0", "1.2.0"]);
+    }
+
+    #[test]
+    fn version_comes_from_the_tag_not_the_blueprint() {
+        // 蓝图的 version 与 tag 不一致是常态(library/yq 声明 "1",tag 是
+        // 工具版本 4.44.3)。按蓝图 version 组织会让同一包的多个 tag 互相
+        // **静默**覆盖 —— 这个测试就是那次事故的封条。
+        let cfg = serde_json::json!({ "name": "x", "version": "1" });
+        let (n, ent) = entry_of("reg/ns/x:4.44.3", &cfg, vec![], String::new());
+        assert_eq!(n, "x");
+        assert_eq!(ent.version, "4.44.3");
+        assert_eq!(ent.blueprint_version, "1");
+    }
+
+    #[test]
+    fn dates_render_correctly() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(20698), (2026, 9, 2));
+        assert_eq!(civil_from_days(19723), (2024, 1, 1)); // 闰年边界
+    }
+}
