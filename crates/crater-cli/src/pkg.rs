@@ -472,7 +472,9 @@ pub fn ls() -> Result<()> {
     let all = store.list()?;
     let mut rows: Vec<(String, String, String, u64, usize)> = Vec::new();
     for img in &all {
-        let Ok(m) = store.resolve_manifest(&img.reference) else { continue };
+        let Ok(top) = store.resolve_manifest(&img.reference) else { continue };
+        // 多架构包的契约在子清单里 —— 不折这一下,`pkg ls` 看不见它们。
+        let m = platform_manifest(&store, &top).unwrap_or(top);
         if m["config"]["mediaType"].as_str() != Some(MT_PKG_CONFIG) {
             continue; // 不是蓝图包(旧 task 制品、普通镜像)—— `crater images` 管那些
         }
@@ -509,15 +511,155 @@ pub fn ls() -> Result<()> {
     Ok(())
 }
 
+// ─────────────────────────── 离线搬运(U 盘) ───────────────────────────
+
+/// `crater pkg save <ref> -o <包>.pkg.tar`
+///
+/// 与裸 `crater save` 的区别全在**说清楚搬走的是什么**:几个架构、几份物料、
+/// 多大。断网机房里包不对的代价是白跑一趟,而 tar 里缺没缺东西在甲机上是
+/// 看得出来的 —— 只要有人报。
+pub fn save(reference: &str, out: &Path) -> Result<()> {
+    let store = ImageStore::open()?;
+    let top = store
+        .resolve_manifest(reference)
+        .with_context(|| format!("{reference} 不在本地 store(`crater pkg ls` 看有哪些)"))?;
+
+    // **瘦包不该被当成离线包搬走。** 蓝图层齐了就能在线部署,于是 save 会
+    // 成功、tar 会生成、`load` 会成功 —— 一直到断网机上 apply 去取物料时才
+    // 报错,而那时 U 盘已经在另一栋楼里了。
+    //
+    // 判据是"字节在不在盘上",不是层上的 `fetch=dependency` 标注 —— 后者说的
+    // 是这份物料**从哪来**(一个远端 URL),不是它有没有被烤进包。两者只在
+    // 瘦拉时才分开,拿它当判据会把每一个正常的离线包都拦下来。
+    let per_arch = arch_layers(&store, &top);
+    if !store.has_all_layers(reference) {
+        bail!(
+            "{reference} 的闭包不完整 —— 物料层还在 registry,tar 里不会有字节。\n\
+             搬到断网机上装不了。先补齐:`crater pkg pull {reference} --full`,再 save。"
+        );
+    }
+
+    store.export_oci_archive(reference, out)?;
+    let bytes = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+    let plats = crater_core::store::platforms_of(&top);
+    say!("{reference} → {}", out.display());
+    say!(
+        "  {}  {}",
+        human(bytes),
+        if plats.is_empty() { "单架构".to_string() } else { format!("{} 个架构:{}", plats.len(), plats.join(" ")) }
+    );
+    for (a, mats, here) in &per_arch {
+        say!("  {a:<10} 物料 {here}/{mats} 份在本地");
+    }
+    say!();
+    say!("索引也放同一个目录,对面就能搜:");
+    say!("  crater pkg index --store -o {}/index.yaml", out.parent().map(|p| p.display().to_string()).unwrap_or_else(|| ".".into()));
+    Ok(())
+}
+
+/// `crater pkg load <包>.pkg.tar`
+///
+/// 收进来之后**当场复核闭包**。`import` 只保证"归档里有的都进来了";
+/// 这里回答的是断网机上唯一要紧的那个问题 —— 装得了装不了。
+pub fn load(file: &Path, as_ref: Option<&str>) -> Result<()> {
+    let store = ImageStore::open()?;
+    let (reference, root) = store.import_oci_archive_rooted(file, as_ref)?;
+    // 报的是**归档的根**,不是 tag 落到的那份子清单 —— 多架构包收进来之后
+    // 引用指向本机架构那一份(与在线 pull 一致),而"tar 里有几个架构"是
+    // 另一个问题,也是搬错了才看得出来的那个。
+    let top: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.blob_path(&root))?).unwrap_or(json!({}));
+    let plats = crater_core::store::platforms_of(&top);
+    say!("{} → {reference}", file.display());
+    if !plats.is_empty() {
+        say!("  {} 个架构:{}", plats.len(), plats.join(" "));
+    }
+    for (a, mats, here) in arch_layers(&store, &top) {
+        say!("  {a:<10} 物料 {here}/{mats} 份在本地");
+    }
+    if !store.has_all_layers(&reference) {
+        bail!(
+            "{reference} 收进来了,但闭包不完整 —— 装不了。\n\
+             回联网机上 `crater pkg pull {reference} --full` 再 `crater pkg save`。"
+        );
+    }
+    say!();
+    say!("闭包完整,不用连网。`crater install {reference} -i <机群>` 就能装。");
+    Ok(())
+}
+
+/// 每个架构的 (架构名, 声明的物料层数, 字节确实在本地的层数)。
+///
+/// 两个数分开报,是因为它们不等价正是离线搬运唯一会翻车的地方:清单上写着
+/// 一份物料,盘上却没有那个 blob —— 瘦拉的包就长这样。
+///
+/// 单架构包返回一条,名字用 `-`。
+fn arch_layers(store: &ImageStore, top: &serde_json::Value) -> Vec<(String, usize, usize)> {
+    let count = |m: &serde_json::Value| -> (usize, usize) {
+        let ls = m["layers"].as_array().map(|v| v.as_slice()).unwrap_or(&[]);
+        let mats: Vec<_> = ls.iter().filter(|l| l["mediaType"].as_str() == Some(MT_MATERIAL)).collect();
+        let here = mats
+            .iter()
+            .filter(|l| {
+                l["digest"]
+                    .as_str()
+                    .map(|d| store.blob_path(d.trim_start_matches("sha256:")).exists())
+                    .unwrap_or(false)
+            })
+            .count();
+        (mats.len(), here)
+    };
+    match top["manifests"].as_array() {
+        Some(subs) => subs
+            .iter()
+            .filter_map(|s| {
+                let a = s["platform"]["architecture"].as_str()?.to_string();
+                let d = s["digest"].as_str()?;
+                let bytes = std::fs::read(store.blob_path(d.trim_start_matches("sha256:"))).ok()?;
+                let m: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+                let (b, dp) = count(&m);
+                Some((a, b, dp))
+            })
+            .collect(),
+        None => {
+            let (b, d) = count(top);
+            vec![("-".to_string(), b, d)]
+        }
+    }
+}
+
 // ───────────────────────────── 小工具 ─────────────────────────────
+
+/// 一条本地清单折到**带 config 的那一份**上。
+///
+/// 单架构包原样返回;多架构包的顶层是 image index —— 它没有 config,契约在
+/// 子清单里。不折这一下,`pkg ls` 与 `pkg index --store` 会把每一个多架构包
+/// 当成"不是 crater 包"跳过:`pkg ls` 说"本地还没有蓝图包",`pkg index
+/// --store` 把它**静默**漏在索引外(store 里只有它时才会撞上"一个包都没收
+/// 进来"那道闸,否则连个响都没有)。issue #3。
+pub(crate) fn platform_manifest(store: &ImageStore, m: &serde_json::Value) -> Option<serde_json::Value> {
+    let subs = m["manifests"].as_array()?;
+    // 架构优先级与 store 拉取一致(D-127):本机 → amd64 → 任意一条。
+    let want = crater_core::arch::detect_local();
+    let want = want.as_str();
+    let pick = |a: &str| subs.iter().find(|e| e["platform"]["architecture"].as_str() == Some(a));
+    let sub = pick(want).or_else(|| pick("amd64")).or_else(|| subs.first())?;
+    let d = sub["digest"].as_str()?;
+    let bytes = std::fs::read(store.blob_path(d.trim_start_matches("sha256:"))).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
 
 /// 读 config;不是 crater 包(或读不动)就是 None —— 调用方多半在遍历
 /// 一整个 store,一条读不动不该让整趟失败。
 pub(crate) fn config_of(store: &ImageStore, m: &serde_json::Value) -> Option<serde_json::Value> {
+    let m = match platform_manifest(store, m) {
+        Some(sub) => sub,
+        None => m.clone(),
+    };
     if m["config"]["mediaType"].as_str() != Some(MT_PKG_CONFIG) {
         return None;
     }
-    read_config(store, m).ok()
+    read_config(store, &m).ok()
 }
 
 /// 摊出来的包目录里留一行"我是从哪来的"。

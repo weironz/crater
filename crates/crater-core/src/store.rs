@@ -128,27 +128,33 @@ impl ImageStore {
         Ok(out)
     }
 
-    /// Sum an artifact's real sizes from its manifest: `content_size` = config +
-    /// layers (declared); `disk_usage` = on-disk bytes of manifest + config +
-    /// layer blobs (what it actually costs locally).
+    /// Sum an artifact's real sizes from its manifest tree: `content_size` =
+    /// config + layers (declared, across every sub-manifest); `disk_usage` =
+    /// on-disk bytes of every blob in the closure.
     fn artifact_sizes(&self, manifest_digest: &str) -> crate::Result<(u64, u64)> {
         let on_disk = |digest: &str| -> u64 {
             std::fs::metadata(self.blob_path(strip(digest)))
                 .map(|m| m.len())
                 .unwrap_or(0)
         };
-        let man_path = self.blob_path(strip(manifest_digest));
-        let man: serde_json::Value = serde_json::from_slice(&std::fs::read(&man_path)?)?;
-        let mut content = man["config"]["size"].as_u64().unwrap_or(0);
-        let mut disk = on_disk(manifest_digest)
-            + man["config"]["digest"].as_str().map(on_disk).unwrap_or(0);
-        if let Some(layers) = man["layers"].as_array() {
-            for l in layers {
-                content += l["size"].as_u64().unwrap_or(0);
-                disk += l["digest"].as_str().map(on_disk).unwrap_or(0);
+        let c = self.closure_of(manifest_digest)?;
+        let mut content = 0u64;
+        for (_, man) in &c.manifests {
+            content += man["config"]["size"].as_u64().unwrap_or(0);
+            if let Some(layers) = man["layers"].as_array() {
+                for l in layers {
+                    content += l["size"].as_u64().unwrap_or(0);
+                }
             }
         }
+        let disk = c.blobs.iter().map(|d| on_disk(d)).sum();
         Ok((content, disk))
+    }
+
+    /// 一件制品的**全部 blob**,从本地 store 读清单树算出来。
+    /// 见 [`closure_walk`] —— 那里写了为什么这件事必须只有一份实现。
+    fn closure_of(&self, manifest_digest: &str) -> crate::Result<Closure> {
+        closure_walk(manifest_digest, &|d| std::fs::read(self.blob_path(d)).ok())
     }
 
     pub fn has(&self, reference: &str) -> bool {
@@ -266,25 +272,82 @@ impl ImageStore {
         self.pull_layers(reference, true).await
     }
 
-    /// True iff every blob (config + all layers) this artifact's manifest
-    /// references is present locally (D-087): distinguishes a full local copy
-    /// from a thin pull, so an `--offline` apply can re-pull in full if needed.
+    /// True iff every blob this artifact's manifest **tree** references is
+    /// present locally (D-087): distinguishes a full local copy from a thin
+    /// pull, so an `--offline` apply can re-pull in full if needed.
+    ///
+    /// 走整棵树而不是一层:多架构包的顶层 index 没有 config 也没有 layers,
+    /// 按"没有就算通过"的老写法它**永远回答 true** —— 一个只有索引 blob、
+    /// 一个字节物料都没有的 store 也算"闭包完整"。issue #3 的空 tar 之所以
+    /// 能一路装作成功,这是其中一环。
     pub fn has_all_layers(&self, reference: &str) -> bool {
-        let Ok(m) = self.resolve_manifest(reference) else { return false };
-        let cfg_ok = m["config"]["digest"]
-            .as_str()
-            .map(|d| self.blob_path(strip(d)).exists())
-            .unwrap_or(true);
-        let layers_ok = m["layers"].as_array().map(|ls| {
-            ls.iter().all(|l| {
-                l["digest"].as_str().map(|d| self.blob_path(strip(d)).exists()).unwrap_or(false)
-            })
-        }).unwrap_or(true);
-        cfg_ok && layers_ok
+        let Ok(digest) = self.manifest_digest(reference) else { return false };
+        let Ok(c) = self.closure_of(&digest) else { return false };
+        c.unreadable.is_empty() && c.blobs.iter().all(|d| self.blob_path(d).exists())
+    }
+
+    /// 本机架构那份清单的 (摘要, 字节数) —— 仅当它的闭包**整个在本地**。
+    ///
+    /// 多架构包只需要本机那一份的字节就能装,所以这里问的是子树而不是整棵树:
+    /// 拿整棵树当判据,会因为另一个架构的物料没搬过来就判定"要联网",而那份
+    /// 字节这台机器根本用不上。
+    fn local_platform_manifest(&self, reference: &str) -> Option<(String, u64)> {
+        let root = self.manifest_digest(reference).ok()?;
+        let (d, s) = match self.platform_child(&root).ok()? {
+            Some(child) => child,
+            None => (root, 0),
+        };
+        let c = self.closure_of(&d).ok()?;
+        if !c.unreadable.is_empty() || !c.blobs.iter().all(|b| self.blob_path(b).exists()) {
+            return None;
+        }
+        let size = if s > 0 { s } else { std::fs::metadata(self.blob_path(&d)).ok()?.len() };
+        Some((d, size))
+    }
+
+    /// registry 够不着时的报错 —— **先说字节在不在本地**,再说网络怎么了。
+    ///
+    /// 断网机房里裸露的 `pull manifest '...': error sending request` 把人引到
+    /// 错的方向去查(防火墙?证书?),而真正该做的动作是"把包 load 进来"。
+    /// 本地已经有一部分(瘦拉过、或 tar 缺了层)与"一个字节都没有"要分开说:
+    /// 前者是搬运漏了东西,后者是根本没搬。
+    fn unreachable(&self, reference: &str, e: impl std::fmt::Display) -> anyhow::Error {
+        let partial = self.has(reference);
+        let hint = if partial {
+            "本地有这条引用,但闭包不完整(瘦拉的,或 tar 里缺了层)"
+        } else {
+            "字节不在本地"
+        };
+        anyhow::anyhow!(
+            "{reference}:{hint},而 registry 也够不着({e})。\n\
+             断网现场先把包搬进来:`crater pkg save {reference} -o <包>.pkg.tar`(联网机)\n\
+             → 拷过去 → `crater pkg load <包>.pkg.tar`(本机),再重来。"
+        )
     }
 
     async fn pull_layers(&self, reference: &str, thin: bool) -> crate::Result<()> {
         use oci_client::Reference;
+
+        // **字节已经全在本地就不连 registry。**
+        //
+        // 断网机房里这一条是成立与否的分界:`crater pkg load yq.pkg.tar` 之后
+        // 闭包就在盘上了,而 install 仍然无条件先去拉一次 manifest —— 在断网
+        // 机上那是一次长超时,然后失败。字节是内容寻址的,本地那份和 registry
+        // 那份按定义相同,这一趟网络除了失败没有别的产出(issue #3)。
+        //
+        // 代价说清楚:tag 是可移动的,`latest` 指到了新 digest 时这里不会发现。
+        // 所以要**说出来**,并给一条强制重取的路 —— 静默地用旧字节才是更坏的
+        // 那个。同一笔取舍 `ensure_pulled(--offline)` 早就在做。
+        if let Some((d, s)) = self.local_platform_manifest(reference) {
+            // 顺手把引用落到本机架构那份子清单上 —— 这正是走网络那条路
+            // 结尾做的事(D-127)。不做的话 `install` 拿到的是一份没有
+            // config 的 index,而它本来只是想读契约。纯本地操作,不联网。
+            if self.manifest_digest(reference).ok().as_deref() != Some(d.as_str()) {
+                self.tag(reference, &d, s)?;
+            }
+            tracing::info!("{reference}: closure already local — not contacting the registry (force a refetch with `crater rmi {reference}`)");
+            return Ok(());
+        }
 
         let r: Reference = reference
             .parse()
@@ -295,7 +358,7 @@ impl ImageStore {
         let (raw, _digest) = client
             .pull_manifest_raw(&r, &auth, &accepted)
             .await
-            .map_err(|e| anyhow::anyhow!("pull manifest '{reference}': {e}"))?;
+            .map_err(|e| self.unreachable(reference, e))?;
 
         let top: serde_json::Value = serde_json::from_slice(&raw)?;
         // Multi-arch images are a manifest list / image index — resolve to a
@@ -563,15 +626,19 @@ impl ImageStore {
         Ok(())
     }
 
-    fn manifest_blob(&self, reference: &str) -> crate::Result<Vec<u8>> {
+    /// 这条引用在本地 store 里指向哪个清单摘要(已剥 `sha256:`)。
+    fn manifest_digest(&self, reference: &str) -> crate::Result<String> {
         let idx = self.read_index()?;
         let md = idx["manifests"]
             .as_array()
             .and_then(|a| a.iter().find(|m| m["annotations"][ANN_REF].as_str() == Some(reference)))
             .and_then(|m| m["digest"].as_str())
-            .ok_or_else(|| anyhow::anyhow!("image '{reference}' not in local store"))?
-            .to_string();
-        Ok(std::fs::read(self.blob_path(strip(&md)))?)
+            .ok_or_else(|| anyhow::anyhow!("image '{reference}' not in local store"))?;
+        Ok(strip(md).to_string())
+    }
+
+    fn manifest_blob(&self, reference: &str) -> crate::Result<Vec<u8>> {
+        Ok(std::fs::read(self.blob_path(&self.manifest_digest(reference)?))?)
     }
 
     /// Import one unpacked index entry: copy its manifest/config/layer blobs in
@@ -597,21 +664,70 @@ impl ImageStore {
             self.store_raw(&data)?;
             Ok(())
         };
-        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(src_blob(mdig))?)?;
-        copy_in(mdig)?;
-        if let Some(c) = manifest["config"]["digest"].as_str() {
-            copy_in(c)?;
+        // 走整棵清单树 —— 多架构包的顶层 index 没有 config / layers,只按
+        // 一层收会把子清单连同全部物料一起丢掉,而且**一声不吭**(issue #3)。
+        let c = closure_walk(mdig, &|d| std::fs::read(src_blob(d)).ok())?;
+        if !c.unreadable.is_empty() {
+            anyhow::bail!(
+                "归档里缺 {} 份清单({})—— 这份包是残的,不导进来。\n\
+                 多半是用修复前的 `crater save` 打的多架构包(只装了顶层索引):\n\
+                 回联网机上重打一次。",
+                c.unreadable.len(),
+                c.unreadable.iter().map(|d| &d[..12.min(d.len())]).collect::<Vec<_>>().join(", ")
+            );
         }
-        if let Some(ls) = manifest["layers"].as_array() {
-            for l in ls {
-                if let Some(d) = l["digest"].as_str() {
-                    copy_in(d)?;
-                }
-            }
+        for d in &c.blobs {
+            copy_in(d)?;
         }
-        let msize = entry["size"].as_u64().unwrap_or(0);
-        self.tag(&reference, mdig, msize)?;
+
+        // **落位得和在线 `pull` 落得一模一样。**
+        //
+        // 多架构包的根是 index。`pull_layers` 把 index 折到本机架构那一份
+        // 子清单上再 tag(D-127),于是 store 里这条引用指向一份**有 config、
+        // 有 layers** 的具体清单 —— `install` 读契约、找蓝图层都指着它。
+        // 而 import 原来直接 tag 了 index:字节全都进来了,引用却指着一份
+        // 没有 config 的东西,`install` 当场报 "manifest 没有 config"。
+        //
+        // 同一个 store,联网装得上、U 盘搬过去装不上,差的就是这一下(issue #3)。
+        // 全部架构的 blob 都已经收进来了,这里只决定这条引用**指向谁**。
+        let (tag_dig, tag_size) = match self.platform_child(mdig)? {
+            Some(child) => child,
+            None => (mdig.to_string(), entry["size"].as_u64().unwrap_or(0)),
+        };
+        self.tag(&reference, &tag_dig, tag_size)?;
         Ok(reference)
+    }
+
+    /// index → 本机该用的那份子清单 (摘要, 字节数);不是 index 就是 None。
+    ///
+    /// 架构优先级与 `pull_layers` 一致(D-127):本机 → amd64 → 任意一条带
+    /// 架构的。两处必须同序,否则同一个包在线拉和离线搬会落到不同架构上,
+    /// 而这件事要到目标机 exec 报 `Exec format error` 才看得见。
+    fn platform_child(&self, manifest_digest: &str) -> crate::Result<Option<(String, u64)>> {
+        let man: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(self.blob_path(strip(manifest_digest)))?)?;
+        let Some(subs) = man["manifests"].as_array() else { return Ok(None) };
+        let want = crate::arch::detect_local();
+        let want = want.as_str();
+        let pick = |a: &str| {
+            subs.iter().find(|e| {
+                e["platform"]["architecture"].as_str() == Some(a)
+                    && e["platform"]["os"].as_str().unwrap_or("linux") == "linux"
+            })
+        };
+        let sub = pick(want)
+            .or_else(|| pick("amd64"))
+            .or_else(|| subs.iter().find(|e| e["platform"]["architecture"].is_string()))
+            .ok_or_else(|| {
+                anyhow::anyhow!("这个包的 index 里没有 linux/{want},也没有任何带架构的条目")
+            })?;
+        let d = sub["digest"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("index 条目没有 digest"))?;
+        let size = sub["size"]
+            .as_u64()
+            .unwrap_or_else(|| std::fs::metadata(self.blob_path(strip(d))).map(|m| m.len()).unwrap_or(0));
+        Ok(Some((strip(d).to_string(), size)))
     }
 
     /// Import an oci-archive (e.g. `crater save` / `build` output) into the store
@@ -622,6 +738,19 @@ impl ImageStore {
         archive: &std::path::Path,
         as_ref: Option<&str>,
     ) -> crate::Result<String> {
+        Ok(self.import_oci_archive_rooted(archive, as_ref)?.0)
+    }
+
+    /// 同 [`Self::import_oci_archive`],外加归档的**根清单摘要**。
+    ///
+    /// 多架构包收进来之后引用是 tag 在子清单上的(与在线 `pull` 一致),
+    /// 于是"这个 tar 里装了几个架构"就只剩根清单知道 —— `pkg load` 要把它
+    /// 报出来,不然搬错架构要到目标机上才发现。
+    pub fn import_oci_archive_rooted(
+        &self,
+        archive: &std::path::Path,
+        as_ref: Option<&str>,
+    ) -> crate::Result<(String, String)> {
         let tmp = std::env::temp_dir().join(format!("crater-import-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         crate::bundle::unpack(archive, &tmp)?;
@@ -630,9 +759,10 @@ impl ImageStore {
             .as_array()
             .and_then(|a| a.iter().find(|m| m["annotations"][ANN_REF].as_str().is_some()))
             .ok_or_else(|| anyhow::anyhow!("{}: no image manifest (ref.name) in archive", archive.display()))?;
+        let root = strip(entry["digest"].as_str().unwrap_or_default()).to_string();
         let reference = self.import_entry(&tmp, entry, as_ref)?;
         let _ = std::fs::remove_dir_all(&tmp);
-        Ok(reference)
+        Ok((reference, root))
     }
 
     /// Import EVERY tagged manifest from an oci-archive (a `crater build` output
@@ -706,19 +836,27 @@ impl ImageStore {
             let mdig = strip(mdig_full);
             let man: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(self.blob_path(mdig))?)?;
-            copy(mdig)?;
-            if let Some(c) = man["config"]["digest"].as_str() {
-                copy(c)?;
+            // 整棵清单树,不是一层。多架构包顶层是 image index:没有 config、
+            // 没有 layers,只有 `manifests`。照着"config + layers"收,得到的是
+            // **空集而不是错误** —— 于是 save 写出一个只有索引 blob 的 6 KB
+            // tar,打印 "saved",退出 0。U 盘插到断网机上才发现 18 MB 物料一个
+            // 字节都没跟过来(issue #3)。
+            let c = self.closure_of(mdig)?;
+            if !c.unreadable.is_empty() {
+                anyhow::bail!(
+                    "{r}:本地缺 {} 份清单({})—— 导出的会是个残包。\n\
+                     先 `crater pkg pull {r} --full` 补齐再 save。",
+                    c.unreadable.len(),
+                    c.unreadable.iter().map(|d| &d[..12.min(d.len())]).collect::<Vec<_>>().join(", ")
+                );
             }
-            if let Some(ls) = man["layers"].as_array() {
-                for l in ls {
-                    if let Some(d) = l["digest"].as_str() {
-                        copy(d)?;
-                    }
-                }
+            for d in &c.blobs {
+                copy(d)?;
             }
             let mut m_entry = json!({
-                "mediaType": MT_MANIFEST,
+                // 多架构包的根是 index,不是 manifest —— 照实写,别让归档
+                // 自称一件它不是的东西。
+                "mediaType": man["mediaType"].as_str().unwrap_or(MT_MANIFEST),
                 "digest": mdig_full,
                 "size": msize,
                 "annotations": { ANN_REF: r }
@@ -801,6 +939,79 @@ impl ImageStore {
 
 fn strip(digest: &str) -> &str {
     digest.strip_prefix("sha256:").unwrap_or(digest)
+}
+
+/// 一件制品的 blob 闭包:清单树 + 每份清单的 config 与 layers。
+pub(crate) struct Closure {
+    /// 全部 blob 摘要(已剥 `sha256:`),根清单在最前。
+    pub blobs: Vec<String>,
+    /// 树里**读得出来**的每一份清单:(摘要, 解析结果)。
+    pub manifests: Vec<(String, serde_json::Value)>,
+    /// 树里读不出来的清单摘要 —— 多架构包缺子清单时就是它。
+    pub unreadable: Vec<String>,
+}
+
+/// 走一件制品的清单树,收齐它引用的全部 blob。
+///
+/// **这个函数存在的唯一理由是"只看 config + layers"这个假设会静默失真。**
+/// 多架构包的顶层是 image index:它既没有 `config` 也没有 `layers`,只有
+/// `manifests`。于是每一处照着"config + layers"写的遍历,在多架构包上都
+/// **收到空集而不是报错** —— `save` 写出一个只装着索引本身的 6 KB tar 并打印
+/// "saved"、`load` 收下它并打印 "loaded"、`has_all_layers` 回答 true、
+/// `images` 报 0B。四处各写一份同样的假设,就一起错了四次,而且全程退出 0
+/// (issue #3:U 盘搬到断网机上才发现字节根本没跟过来)。
+///
+/// `read` 只会被用在**清单**上(根与子清单,都是几百字节),不会去读 layer ——
+/// 存不存在由调用方按需查,免得为了数一数就把几百兆读进内存。
+pub(crate) fn closure_walk(
+    root: &str,
+    read: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> crate::Result<Closure> {
+    let mut c = Closure { blobs: Vec::new(), manifests: Vec::new(), unreadable: Vec::new() };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut queue = vec![strip(root).to_string()];
+    while let Some(d) = queue.pop() {
+        if !seen.insert(d.clone()) {
+            continue;
+        }
+        c.blobs.push(d.clone());
+        let Some(bytes) = read(&d) else {
+            c.unreadable.push(d);
+            continue;
+        };
+        let Ok(man) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            c.unreadable.push(d);
+            continue;
+        };
+        // index → 继续往下走子清单;image manifest → config 与 layers 是叶子。
+        if let Some(subs) = man["manifests"].as_array() {
+            for s in subs {
+                if let Some(sd) = s["digest"].as_str() {
+                    queue.push(strip(sd).to_string());
+                }
+            }
+        }
+        let leaves = man["config"]["digest"]
+            .as_str()
+            .into_iter()
+            .chain(
+                man["layers"]
+                    .as_array()
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|l| l["digest"].as_str()),
+            )
+            .map(|d| strip(d).to_string())
+            .collect::<Vec<_>>();
+        for l in leaves {
+            if seen.insert(l.clone()) {
+                c.blobs.push(l);
+            }
+        }
+        c.manifests.push((d, man));
+    }
+    Ok(c)
 }
 
 /// 一个 manifest / index 支持哪些 `os/arch`。单 manifest 返回空 —— 它不分变体,
@@ -1092,6 +1303,163 @@ mod tests {
         assert!(!store.remove("t/x:1").unwrap(), "second remove is a no-op");
         let (swept, _) = store.gc(false).unwrap();
         assert_eq!((swept, n_blobs()), (3, 0), "unreferenced chain swept");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ───────────────── 多架构包的离线搬运(issue #3) ─────────────────
+
+    /// 一个**多架构**蓝图包:index → 两份子清单 → 各自的 config + 物料层。
+    ///
+    /// 本机架构一定在里面 —— `platform_child` 按本机架构挑,写死 amd64 的话
+    /// 这些用例在 arm64 机器上就测的是另一条分支。
+    fn fake_multiarch_store(dir: &std::path::Path) -> (ImageStore, Vec<String>) {
+        let store = ImageStore { root: dir.to_path_buf() };
+        std::fs::create_dir_all(store.blobs_dir()).unwrap();
+        let put = |data: &[u8]| {
+            let d = crate::bundle::sha256_hex(data);
+            std::fs::write(store.blobs_dir().join(&d), data).unwrap();
+            d
+        };
+        let local = crate::arch::detect_local().as_str().to_string();
+        let other = if local == "amd64" { "arm64" } else { "amd64" };
+        let mut all = Vec::new();
+        let mut subs = Vec::new();
+        for a in [local.as_str(), other] {
+            let cfg = put(format!("{{\"name\":\"yq\",\"arch\":\"{a}\"}}").as_bytes());
+            let mat = put(format!("material-bytes-for-{a}").as_bytes());
+            let man = serde_json::to_vec(&json!({
+                "schemaVersion": 2,
+                "mediaType": MT_MANIFEST,
+                "config": { "digest": format!("sha256:{cfg}"), "mediaType": MT_PKG_CONFIG },
+                "layers": [ { "digest": format!("sha256:{mat}"), "mediaType": MT_MATERIAL } ],
+            }))
+            .unwrap();
+            let md = put(&man);
+            subs.push(json!({
+                "mediaType": MT_MANIFEST,
+                "digest": format!("sha256:{md}"),
+                "size": man.len(),
+                "platform": { "architecture": a, "os": "linux" },
+            }));
+            all.extend([cfg, mat, md]);
+        }
+        let index_blob = serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": subs,
+        }))
+        .unwrap();
+        let idig = put(&index_blob);
+        all.push(idig.clone());
+        let idx = json!({ "schemaVersion": 2, "manifests": [ {
+            "mediaType": MT_MANIFEST,
+            "digest": format!("sha256:{idig}"),
+            "size": index_blob.len(),
+            "annotations": { ANN_REF: "reg/t/yq:4.44.3" }
+        } ] });
+        std::fs::write(store.root.join("index.json"), serde_json::to_vec(&idx).unwrap()).unwrap();
+        (store, all)
+    }
+
+    /// **issue #3 的封条。** 多架构包 save → load 必须把**全部字节**搬过去,
+    /// 而且落位得和在线 pull 一样(引用指向本机架构那份子清单)。
+    ///
+    /// 修复前:export 只看顶层的 `config`/`layers`,而 index 两者皆无 ——
+    /// 于是导出一个只装着索引 blob 的 tar,打印 "saved",退出 0;import 收下
+    /// 它,打印 "loaded",退出 0;`install` 到断网机上才发现一个字节都没来。
+    /// 全程没有任何一处报错,这正是它能活到验收之后的原因。
+    #[test]
+    fn a_multiarch_package_survives_save_and_load() {
+        let dir = std::env::temp_dir().join(format!("crater-mularch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (a, blobs) = fake_multiarch_store(&dir.join("A"));
+
+        let tar = dir.join("yq.pkg.tar");
+        a.export_oci_archive("reg/t/yq:4.44.3", &tar).unwrap();
+
+        // ① tar 里必须有全部 7 个 blob:index + 2 子清单 + 2 config + 2 物料。
+        let unpacked = dir.join("unpacked");
+        crate::bundle::unpack(&tar, &unpacked).unwrap();
+        let got: std::collections::BTreeSet<String> =
+            std::fs::read_dir(unpacked.join("blobs").join("sha256"))
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+        assert_eq!(got.len(), 7, "tar 里只有 {} 个 blob,应有 7 个:{got:?}", got.len());
+        for b in &blobs {
+            assert!(got.contains(b), "tar 里缺 blob {b}");
+        }
+
+        // ② load 进一个全新的 store,字节一个不少。
+        let b = ImageStore { root: dir.join("B") };
+        std::fs::create_dir_all(b.blobs_dir()).unwrap();
+        std::fs::write(
+            b.root.join("index.json"),
+            br#"{"schemaVersion":2,"manifests":[]}"#,
+        )
+        .unwrap();
+        let r = b.import_oci_archive(&tar, None).unwrap();
+        assert_eq!(r, "reg/t/yq:4.44.3");
+        for blob in &blobs {
+            assert!(b.blob_path(blob).exists(), "load 之后缺 blob {blob}");
+        }
+        assert!(b.has_all_layers(&r), "闭包应判定为完整");
+
+        // ③ 落位与在线 pull 一致:引用指向**有 config 的**那份子清单,
+        //    不是 index。否则 `install` 一上来就是 "manifest 没有 config"。
+        let m = b.resolve_manifest(&r).unwrap();
+        assert!(m["manifests"].as_array().is_none(), "引用还指着 index,install 读不到契约");
+        assert_eq!(m["config"]["mediaType"].as_str(), Some(MT_PKG_CONFIG));
+        let cfg: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(b.blob_path(strip(m["config"]["digest"].as_str().unwrap()))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg["arch"].as_str(),
+            Some(crate::arch::detect_local().as_str()),
+            "挑错了架构 —— 装上去要到目标机 exec 才报 Exec format error"
+        );
+
+        // ④ **反证**:字节残缺的 store 导出必须报错,不再静默产出残 tar。
+        //    (与 ①②③ 同一个用例,是因为 save/import 的临时目录按 PID 命名,
+        //    同进程里并行跑两个导出会互相删掉对方的临时目录。)
+        for blob in std::fs::read_dir(a.blobs_dir()).unwrap().flatten() {
+            let n = blob.file_name().to_string_lossy().into_owned();
+            if n != a.manifest_digest("reg/t/yq:4.44.3").unwrap() {
+                std::fs::remove_file(blob.path()).unwrap();
+            }
+        }
+        let e = a.export_oci_archive("reg/t/yq:4.44.3", &dir.join("gap.tar")).unwrap_err();
+        assert!(format!("{e:#}").contains("残包"), "错误没说清是残包:{e:#}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **反证**:多架构包缺了子清单的字节,`has_all_layers` 必须说 false。
+    ///
+    /// 老写法对 index 问的是它自己的 `config`/`layers` —— 两个都不存在,于是
+    /// "没有就算通过",一个只有索引 blob 的空 store 也被判成闭包完整。那正是
+    /// 空 tar 能一路装作成功、直到断网机上才炸的那一环。
+    #[test]
+    fn a_multiarch_package_missing_its_bytes_is_not_complete() {
+        let dir = std::env::temp_dir().join(format!("crater-mularch-gap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (store, _) = fake_multiarch_store(&dir);
+        assert!(store.has_all_layers("reg/t/yq:4.44.3"), "对照组:齐的时候要说 true");
+
+        // 只留索引 blob —— 这正是修复前的 `crater save` 打出来的那种残包。
+        let root = store.manifest_digest("reg/t/yq:4.44.3").unwrap();
+        for e in std::fs::read_dir(store.blobs_dir()).unwrap().flatten() {
+            if e.file_name().to_string_lossy() != root {
+                std::fs::remove_file(e.path()).unwrap();
+            }
+        }
+        assert!(
+            !store.has_all_layers("reg/t/yq:4.44.3"),
+            "只剩一个索引 blob 却说闭包完整 —— 空包就是这样混过验收的"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
