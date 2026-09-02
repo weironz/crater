@@ -209,13 +209,110 @@ mod tests {
 /// 这一页刻意**不出现 YAML**:卡片来自蓝图的 description 与契约,表单来自
 /// params 声明。UI 不硬编码任何参数名 —— 与登记表驱动字段卡是同一条原则,
 /// 只是对象从"资源类型"换成了"蓝图参数"。
+/// `GET /api/repos` —— 远端源:配了哪些仓库、里面有什么。
+///
+/// 数据全部来自**本地缓存的索引**,不连网。于是这一页在断网机房里照样能开,
+/// 而"要不要联网"是使用者按"同步"时的一个明确决定。
+pub async fn repos() -> Response {
+    let ws = crate::ui_edit::root().ok();
+    let items: Vec<serde_json::Value> = crate::repo::latest_entries()
+        .into_iter()
+        .map(|(repo, name, e)| {
+            // 工作区里已经有同名目录 → 卡片上标出来,免得人反复拉同一个包。
+            let here = ws.as_ref().map(|r| r.join(&name).is_dir()).unwrap_or(false);
+            json!({
+                "repo": repo, "name": name, "version": e.version,
+                "reference": e.reference, "description": e.description,
+                "groups": e.fleet.iter().map(|f| json!({"name": f.name, "min": f.min}))
+                    .collect::<Vec<_>>(),
+                "params": e.params, "platforms": e.platforms,
+                "in_workspace": here,
+            })
+        })
+        .collect();
+    let repos: Vec<serde_json::Value> = crate::repo::repo_status()
+        .into_iter()
+        .map(|(name, url, n)| json!({ "name": name, "url": url, "packages": n }))
+        .collect();
+    Json(json!({ "repos": repos, "items": items })).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct RepoAddReq {
+    pub name: String,
+    pub url: String,
+}
+
+/// `POST /api/repos/add` —— 记下一个索引地址并同步一次。
+pub async fn repo_add(Json(q): Json<RepoAddReq>) -> Response {
+    match crate::repo::add(&q.name, &q.url).await {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::CONFLICT, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// `POST /api/repos/update` —— 拉一次全部索引。这是这一页**唯一**联网的动作。
+pub async fn repo_update() -> Response {
+    match crate::repo::update(None).await {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::CONFLICT, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RepoPullReq {
+    pub reference: String,
+    /// 连物料层一起拉(离线现场)。
+    #[serde(default)]
+    pub full: bool,
+}
+
+/// `POST /api/repos/pull` —— 把远端的包摊进工作区。
+///
+/// 摊进来之后它就是一张普通的本地蓝图,**后面的路一步不变**:参数表单 →
+/// 机群对账 → 建任务 → plan 闸门。远端源这一页因此没有第二套表单逻辑 ——
+/// 它只负责"把东西弄进来",不负责"怎么装"。
+pub async fn repo_pull(Json(q): Json<RepoPullReq>) -> Response {
+    let Ok(root) = crate::ui_edit::root() else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "工作区不可读" })))
+            .into_response();
+    };
+    // 目录名取包名:与 CLI 的 `pkg pull` 一致,人在两边看到的是同一棵树。
+    let name = q
+        .reference
+        .rsplit('/')
+        .next()
+        .and_then(|s| s.split(':').next())
+        .unwrap_or("pkg")
+        .to_string();
+    let dir = root.join(&name);
+    match crate::pkg::pull(&q.reference, Some(&dir), q.full).await {
+        Ok(()) => Json(json!({ "ok": true, "dir": name })).into_response(),
+        Err(e) => (StatusCode::CONFLICT, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
 pub async fn view_catalog() -> axum::response::Html<&'static str> {
     axum::response::Html(CATALOG_HTML)
 }
 
 const CATALOG_HTML: &str = r##"<section class="panel">
   <h2><span class="mk">▦</span> 目录</h2>
+  <div class="cat-tabs">
+    <button id="tab-local" class="cat-tab on" onclick="catTab('local')">工作区</button>
+    <button id="tab-remote" class="cat-tab" onclick="catTab('remote')">远端源</button>
+  </div>
   <div id="cat-wall" class="cat-wall"></div>
+  <div id="cat-remote" style="display:none">
+    <div class="rp-bar">
+      <span id="rp-list" class="rp-list"></span>
+      <span style="flex:1"></span>
+      <button class="btn" onclick="repoSync()">同步索引</button>
+      <button class="btn" onclick="repoAddUI()">添加仓库</button>
+    </div>
+    <div id="rp-msg" class="cf-msg"></div>
+    <div id="rp-wall" class="cat-wall"></div>
+  </div>
   <div id="cat-form"></div>
 </section>
 <style>
@@ -252,6 +349,14 @@ const CATALOG_HTML: &str = r##"<section class="panel">
   .cf-act .btn.primary{background:var(--accent);color:#fff;border:0}
   .cf-msg{font-size:12.5px;color:var(--muted)}
   .cf-msg.bad{color:var(--drift)}
+  .cat-tabs{display:flex;gap:6px;margin-bottom:14px}
+  .cat-tab{background:transparent;color:var(--muted);border:1px solid var(--border);
+    border-radius:8px;padding:5px 14px;font:inherit;font-size:13px;cursor:pointer}
+  .cat-tab.on{color:var(--text);border-color:var(--accent);background:var(--tint)}
+  .rp-bar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+  .rp-list{font-size:12px;color:var(--faint)}
+  .cat-card.have{opacity:.62}
+  .cat-card .badge{font-size:11px;color:var(--accent)}
 </style>
 <script>
 (function(){
@@ -283,6 +388,99 @@ const CATALOG_HTML: &str = r##"<section class="panel">
       </div>`;
     }).join('');
   }
+
+  // ── 远端源 ────────────────────────────────────────────────────────────
+  //
+  // 这一页只做一件事:把远端的包**弄进工作区**。弄进来之后它就是一张普通
+  // 的本地蓝图,参数表单、机群对账、建任务、plan 闸门一步不变 —— 所以这里
+  // 没有第二套表单逻辑,也就没有两套逻辑迟早跑偏的问题。
+  let remote = [];
+
+  window.catTab = function(which){
+    const isL = which === 'local';
+    document.getElementById('tab-local').classList.toggle('on', isL);
+    document.getElementById('tab-remote').classList.toggle('on', !isL);
+    wall.style.display = isL ? '' : 'none';
+    document.getElementById('cat-remote').style.display = isL ? 'none' : '';
+    form.innerHTML = '';
+    if (!isL) loadRemote();
+  };
+
+  async function loadRemote(){
+    const d = await fetch('/api/repos').then(r=>r.json());
+    remote = d.items || [];
+    const rl = document.getElementById('rp-list');
+    rl.textContent = (d.repos||[]).length
+      ? (d.repos||[]).map(r=>`${r.name}(${r.packages==null?'未同步':r.packages+' 个包'})`).join(' · ')
+      : '还没有配仓库';
+    const rw = document.getElementById('rp-wall');
+    if (!remote.length){
+      rw.innerHTML = '<div class="cat-empty">还没有可浏览的包。<br><br>'
+        + '包的作者用 <code>crater pkg index</code> 生成索引文件,托管在任意静态 HTTP 上;'
+        + '你「添加仓库」填那个地址即可。<br>'
+        + 'OCI 本身没有搜索接口,所以「有哪些包」由索引文件回答 —— 它也能随闭包进 U 盘。</div>';
+      return;
+    }
+    rw.innerHTML = remote.map((it,i)=>{
+      const g = (it.groups||[]).map(x=>`${esc(x.name)}≥${x.min}`).join(' ') || '不限机群';
+      const plat = (it.platforms||[]).length ? ' · ' + it.platforms.map(esc).join(' ') : '';
+      const have = it.in_workspace ? '<span class="badge">✓ 已在工作区</span>' : '';
+      return `<div class="cat-card ${it.in_workspace?'have':''}" onclick="repoPull(${i})">
+        <span class="cat-name">${esc(it.name)} <span class="cat-meta">${esc(it.version)}</span> ${have}</span>
+        <span class="cat-desc">${esc(it.description||'(索引里没有描述)')}</span>
+        <span class="cat-meta"><span class="g">${g}</span></span>
+        <span class="cat-meta">${esc(it.repo)} · ${it.params} 参数${plat}</span>
+      </div>`;
+    }).join('');
+  }
+
+  function rpMsg(t, bad){
+    const m = document.getElementById('rp-msg');
+    m.textContent = t; m.className = 'cf-msg' + (bad?' bad':'');
+  }
+
+  window.repoSync = async function(){
+    rpMsg('同步中……');
+    const r = await fetch('/api/repos/update', {method:'POST'});
+    const d = await r.json().catch(()=>({}));
+    if (!r.ok){ rpMsg(d.error||'同步失败', true); return; }
+    rpMsg('已同步'); loadRemote();
+  };
+
+  window.repoAddUI = async function(){
+    const url = prompt('索引地址(http(s):// 或本地路径,由 crater pkg index 生成)');
+    if (!url) return;
+    const name = prompt('给它起个名字', 'lab');
+    if (!name) return;
+    rpMsg('添加中……');
+    const r = await fetch('/api/repos/add', {method:'POST',
+      headers:{'content-type':'application/json'}, body:JSON.stringify({name,url})});
+    const d = await r.json().catch(()=>({}));
+    if (!r.ok){ rpMsg(d.error||'添加失败', true); return; }
+    rpMsg('已添加 '+name); loadRemote();
+  };
+
+  window.repoPull = async function(i){
+    const it = remote[i];
+    if (it.in_workspace){
+      // 已经在工作区了:直接切回去让人接着建任务,而不是再拉一遍。
+      rpMsg(`${it.name} 已在工作区 —— 切到「工作区」标签建任务。`);
+      return;
+    }
+    // 默认瘦拉:在线部署时目标机自己按 URL 取物料,几百兆的层不必经手。
+    const full = confirm(`把 ${it.name} ${it.version} 拉进工作区。\n\n`
+      + '确定 = 连物料字节一起拉(离线现场用,可能几百兆)\n'
+      + '取消 = 只拉蓝图(在线部署够用,通常几十 KB)');
+    rpMsg('拉取中……');
+    const r = await fetch('/api/repos/pull', {method:'POST',
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify({reference: it.reference, full})});
+    const d = await r.json().catch(()=>({}));
+    if (!r.ok){ rpMsg(d.error||'拉取失败', true); return; }
+    rpMsg(`${it.name} 已进工作区 —— 切到「工作区」标签建任务。`);
+    await boot();          // 本地墙要立刻看得见新来的这张
+    loadRemote();
+  };
 
   // 控件由**参数的声明类型**决定,UI 不硬编码任何参数名。
   function control(p){
