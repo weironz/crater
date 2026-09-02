@@ -24,9 +24,6 @@ pub const ANN_MATERIAL_FETCH: &str = "org.crater.material.fetch";
 /// 同名物料按 `when:` 分成多个变体,各有各的 URL)。
 pub const ANN_MATERIAL_SOURCE: &str = "org.crater.material.source";
 pub const ANN_MATERIAL_NAME: &str = "org.crater.material.name";
-// Project artifact typing (D-098) — kept in sync with bundle.rs.
-const AT_PROJECT: &str = "application/vnd.crater.project.v1";
-const MT_RECIPE: &str = "application/vnd.crater.recipe.v1+yaml";
 // 蓝图包(D-123)。刻意**不设 `artifactType`**:制品身份靠 `config.mediaType`,
 // 那是 OCI 1.0 时代的老约定,也是唯一跨得过 ACR / Docker Hub / GHCR / Harbor /
 // zot 的写法 —— `artifactType` + 空 config 描述符是 1.1 写法,ACR 会拒收。
@@ -874,26 +871,12 @@ impl ImageStore {
                 entry["size"].as_u64().unwrap_or(0),
             ))
         };
-        // Closure to export: the ref itself, PLUS — for a project artifact
-        // (D-098) — every play's locked task artifact ref, so one .oci ships
-        // the whole environment (blobs are content-addressed → shared layers
-        // across tasks land once).
+        // 导出这一个引用。旧 task 管线的 project artifact(D-098)会在这里
+        // 把每个 play 锁定的 task 制品一并带上 —— 那条随旧管线一起删了(D-151)。
         let (mdig_full, msize) = find(reference)?;
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(self.blob_path(strip(&mdig_full)))?)?;
-        let mut refs: Vec<(String, String, u64)> = vec![(reference.to_string(), mdig_full, msize)];
-        if manifest["artifactType"].as_str() == Some(AT_PROJECT) {
-            let project = self.project_recipe(&manifest)?;
-            for play in &project.plays {
-                if refs.iter().any(|(r, _, _)| r == &play.source) {
-                    continue; // two plays sharing one task artifact → ship once
-                }
-                let (d, s) = find(&play.source).map_err(|e| {
-                    anyhow::anyhow!("project play source '{}' 不在本地库:{e}(先 crater build -f <project>.yaml)", play.source)
-                })?;
-                refs.push((play.source.clone(), d, s));
-            }
-        }
+        let refs: Vec<(String, String, u64)> = vec![(reference.to_string(), mdig_full, msize)];
 
         let tmp = std::env::temp_dir().join(format!("crater-save-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -985,24 +968,6 @@ impl ImageStore {
     /// The parsed OCI manifest of a stored image (to detect crater artifacts).
     pub fn resolve_manifest(&self, reference: &str) -> crate::Result<serde_json::Value> {
         Ok(serde_json::from_slice(&self.manifest_blob(reference)?)?)
-    }
-
-    /// Parse the LOCKED project out of a project-artifact manifest (D-098):
-    /// its recipe layer is the project yaml with play `source`s = task refs.
-    pub fn project_recipe(
-        &self,
-        manifest: &serde_json::Value,
-    ) -> crate::Result<crate::project::Project> {
-        let d = manifest["layers"]
-            .as_array()
-            .and_then(|ls| {
-                ls.iter()
-                    .find(|l| l["mediaType"].as_str() == Some(MT_RECIPE))
-            })
-            .and_then(|l| l["digest"].as_str())
-            .ok_or_else(|| anyhow::anyhow!("project artifact has no recipe layer"))?;
-        let bytes = std::fs::read(self.blob_path(strip(d)))?;
-        Ok(serde_yaml::from_slice(&bytes)?)
     }
 
     /// blobs/sha256 dir (for materializing artifact layers).

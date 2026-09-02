@@ -131,15 +131,29 @@ fn lint_errors_block_the_plan_before_any_probing() {
 }
 
 #[test]
-fn legacy_task_files_still_go_down_the_old_pipeline() {
-    // 分流不能把待迁移的旧 task 错抓进新管线(它没有 -i/--host 会另行报错,
-    // 但错误绝不该是新管线的解析失败)。
-    let o = plan(&["-f", "library/yq/yq.yaml"]);
-    let combined = format!("{}{}", stdout(&o), String::from_utf8_lossy(&o.stderr));
-    assert!(
-        !combined.contains("未知字段") && !combined.contains("blueprint"),
-        "旧 task 被错误地当成 blueprint:{combined}"
-    );
+fn a_legacy_task_file_gets_a_migration_note_not_a_parse_error() {
+    // 旧 task 管线已删(D-151)。喂给 `plan` 一个旧 task 文件时,**不能**报
+    // 新管线的解析失败(那会让人以为是自己写错了,然后去调字段);要报的是
+    // "这个形状的输入整个不存在了,新的这么写"。
+    //
+    // 这条测试原来钉的是"分流不能把旧 task 错抓进新管线"—— 删掉管线之后
+    // 它当然会失败。改成钉新契约:**给出路,而不只是拒绝**。
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("legacy.yaml");
+    std::fs::write(
+        &p,
+        "name: legacy
+actions:
+  - shell: { cmd: \"true\" }\n",
+    )
+    .unwrap();
+
+    let o = plan(&["-f", p.to_str().unwrap()]);
+    assert!(!o.status.success(), "旧 task 不该被当成能跑的东西");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("蓝图"), "要说清现在接受什么:{err}");
+    assert!(err.contains("resources"), "要给迁移方向:{err}");
+    assert!(err.contains("library/"), "要指出去哪找例子:{err}");
 }
 
 #[cfg(unix)]

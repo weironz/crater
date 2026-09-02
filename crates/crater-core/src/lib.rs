@@ -12,22 +12,16 @@
 //! - [`ai`]        : AI copilot, NL -> validated spec (M4)
 //! - [`diagnose`]  : offline rule-based failure diagnosis (M5)
 
-pub mod ai;
 pub mod arch;
 pub mod bundle;
-pub mod component;
 pub mod dag;
 pub mod diagnose;
-pub mod engine;
 pub mod executor;
-pub mod module;
 pub mod os;
-pub mod project;
 pub mod source;
 pub mod spec;
 pub mod state;
 pub mod store;
-pub mod task;
 pub mod zip;
 
 /// Crate-wide result type.

@@ -15,13 +15,9 @@
 //!   crater run --host H --password P -- <cmd>  # ad-hoc (ansible -m shell style)
 //!   crater agent --task-plan <file>            # internal (runs on the target node)
 
-mod agent;
-mod apply;
 mod blob_source;
 mod blueprint;
-mod build;
 mod closure;
-mod deployments;
 mod events;
 mod facts_cmd;
 mod fmt_cmd;
@@ -48,7 +44,7 @@ mod ui_run;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use clap::{Parser, Subcommand};
 use tracing::info;
 
@@ -139,29 +135,7 @@ enum Cmd {
     /// (D-049). **Opt-in**: only a task that defines `teardown:` has this — there
     /// is NO auto-inversion of `actions:` (real cleanup, e.g. kubeadm reset or
     /// rm /var/lib/mysql, targets runtime state the install never created).
-    Delete {
-        /// `<source>`: a named task, task.yaml, x.oci bundle, or image ref.
-        source: Option<String>,
-        #[arg(short, long)]
-        file: Option<PathBuf>,
-        #[command(flatten)]
-        target: TargetOpts,
-        /// Print the teardown plan without executing.
-        #[arg(long)]
-        dry_run: bool,
-        /// Force the agentless shell executor instead of the default agent.
-        #[arg(long)]
-        shell: bool,
-        /// Override an apply-stage param for teardown rendering (same gate as
-        /// `apply --set`, D-093) — supply the same values the deploy used.
-        #[arg(long = "set", value_name = "KEY=VAL")]
-        set: Vec<String>,
-    },
     /// Inspect deployment state (D-051): what crater put where, and history.
-    Task {
-        #[command(subcommand)]
-        cmd: TaskCmd,
-    },
     /// Serve a web dashboard over the deployment state (D-054). Axum + htmx,
     /// pure Rust, htmx embedded (works offline). Default binds localhost only.
     /// Write actions (Verify/Heal, D-058) use `./inventory.yaml` when present.
@@ -356,12 +330,6 @@ enum Cmd {
     },
     /// AI copilot: natural language -> a validated task yaml.
     /// Configure via CRATER_AI_ENDPOINT / CRATER_AI_KEY / CRATER_AI_MODEL.
-    Ai {
-        #[arg(trailing_var_arg = true, required = true)]
-        request: Vec<String>,
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-    },
     /// Diagnose failures with built-in offline rules (+ optional AI) (M5).
     Doctor {
         /// Analyze this local log/error file (fully offline, no SSH).
@@ -522,19 +490,6 @@ enum Cmd {
         #[command(subcommand)]
         what: CreateWhat,
     },
-    /// Internal: self-bootstrap agent. Runs ON the target node, executing a
-    /// lowered task plan locally (pushed here by the control machine). Not for
-    /// humans — invoked as `crater agent --task-plan <file>` by `apply`/`delete`
-    /// over the agent path (D-019/D-044). Hidden from help.
-    #[command(hide = true)]
-    Agent {
-        /// Path to a serialized task plan (steps + handlers, D-044) to run locally.
-        #[arg(long)]
-        task_plan: PathBuf,
-    },
-    /// Shortcut: `crater <component> [flags]`.
-    #[command(external_subcommand)]
-    Component(Vec<String>),
 }
 
 #[derive(Subcommand)]
@@ -641,36 +596,6 @@ enum RegistryCmd {
         username: String,
         #[arg(short, long)]
         password: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum TaskCmd {
-    /// List deployed tasks, **one row per task** (hosts are an attribute, like
-    /// `helm list`). From the control DB by default; `--host`/`-i` reads the
-    /// authoritative markers on the targets. Drill into one with `task show`.
-    List {
-        #[command(flatten)]
-        target: TargetOpts,
-        /// Drift check: re-run each deployment's verify phase on the target and
-        /// report ok/DRIFT (needs `--host`/`-i` to connect).
-        #[arg(long)]
-        verify: bool,
-    },
-    /// Show one task's per-host instances (version/applied/source per host).
-    Show {
-        /// Task name (as in `task list`).
-        name: String,
-        #[command(flatten)]
-        target: TargetOpts,
-        /// Drift check: re-run the verify phase per host (needs `--host`/`-i`).
-        #[arg(long)]
-        verify: bool,
-    },
-    /// Recent apply/delete history (from the control-side DB).
-    History {
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
     },
 }
 
@@ -796,16 +721,8 @@ async fn main() -> Result<()> {
                 }
                 return blueprint::apply_blueprint(&p, &target, &set).await;
             }
-            // Two positional forms: `apply <source>` or `apply <name> <source>`.
-            let (name, source) = match (arg1, arg2) {
-                (Some(a), Some(b)) => (Some(a), Some(b)),
-                (Some(a), None) => (None, Some(a)),
-                (None, _) => (None, None),
-            };
-            apply::apply_source(
-                name, source, file, target, dry_run, shell, false, offline, &set, false,
-            )
-            .await
+            let _ = (arg1, arg2, shell, offline);
+            bail!(legacy_note("apply"))
         }
         Cmd::Plan {
             source,
@@ -818,38 +735,12 @@ async fn main() -> Result<()> {
             if let Some(p) = stack_source(&file, &source) {
                 return stack_cmd::run(&p, &target, &set, StackMode::Plan).await;
             }
+            let _ = offline;
             match blueprint_source(&file, &source) {
                 Some(p) => blueprint::plan_blueprint(&p, &target, &set).await,
-                None => {
-                    apply::apply_source(
-                        None, source, file, target, false, false, false, offline, &set, true,
-                    )
-                    .await
-                }
+                None => bail!(legacy_note("plan")),
             }
         }
-        Cmd::Delete {
-            source,
-            file,
-            target,
-            dry_run,
-            shell,
-            set,
-        } => {
-            apply::apply_source(
-                None, source, file, target, dry_run, shell, true, false, &set, false,
-            )
-            .await
-        }
-        Cmd::Task { cmd } => match cmd {
-            TaskCmd::List { target, verify } => deployments::task_list(target, verify).await,
-            TaskCmd::Show {
-                name,
-                target,
-                verify,
-            } => deployments::task_show(&name, target, verify).await,
-            TaskCmd::History { limit } => deployments::task_history(limit).await,
-        },
         Cmd::Ui {
             bind,
             port,
@@ -874,10 +765,8 @@ async fn main() -> Result<()> {
                 let out = output.unwrap_or_else(|| default_closure_path(&file, ".blueprint"));
                 return closure::build(&file, &out, &profile, &set).await;
             }
-            if output.is_some() || !profile.is_empty() {
-                anyhow::bail!("`--output` / `--for` 只用于蓝图闭包;task 构建请用 `-t/--tag`");
-            }
-            build::build_to_store(&file, tag, &arch, &set, no_cache).await
+            let _ = (tag, arch, no_cache);
+            bail!(legacy_note("build"))
         }
         Cmd::Inspect {
             source,
@@ -894,7 +783,7 @@ async fn main() -> Result<()> {
                 }
                 return inspect_bp::run(&p);
             }
-            build::inspect_source(&source, gen_inventory).await
+            bail!(legacy_note("inspect"))
         }
         Cmd::Save { reference, output } => {
             ImageStore::open()?.export_oci_archive(&reference, &output)?;
@@ -1062,7 +951,6 @@ async fn main() -> Result<()> {
                 ),
             }
         }
-        Cmd::Ai { request, output } => ai_generate(&request.join(" "), output).await,
         Cmd::Doctor {
             file,
             host,
@@ -1078,8 +966,6 @@ async fn main() -> Result<()> {
             port,
             cmd,
         } => run_adhoc(&host, &user, password, port, &cmd.join(" ")).await,
-        Cmd::Agent { task_plan } => agent::run_agent(&task_plan).await,
-        Cmd::Component(args) => component_shortcut(args).await,
     }
 }
 
@@ -1141,154 +1027,46 @@ async fn push_file(
 
 /// `crater <name> [flags]` ≡ `crater apply <name> [flags]` (D-046): the bare
 /// name routes to the named task `tasks/<name>.yaml`. The old component-spec
-/// shortcut is gone — everything is a task.
-async fn component_shortcut(args: Vec<String>) -> Result<()> {
-    let mut name: Option<String> = None;
-    let mut host: Option<String> = None;
-    let mut user = String::from("root");
-    let mut password: Option<String> = std::env::var("CRATER_SSH_PASSWORD").ok();
-    let mut key: Option<PathBuf> = None;
-    let mut port: u16 = 22;
-    let mut dry_run = false;
-    let mut shell = false;
-    let mut inventory: Option<PathBuf> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--host" => {
-                i += 1;
-                host = args.get(i).cloned();
-            }
-            "--user" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    user = v.clone();
-                }
-            }
-            "--password" => {
-                i += 1;
-                password = args.get(i).cloned();
-            }
-            "--key" => {
-                i += 1;
-                key = args.get(i).map(PathBuf::from);
-            }
-            "--port" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    port = v.parse().map_err(|_| anyhow!("invalid --port: {v}"))?;
-                }
-            }
-            "-i" | "--inventory" => {
-                i += 1;
-                inventory = args.get(i).map(PathBuf::from);
-            }
-            "--dry-run" => dry_run = true,
-            "--shell" => shell = true,
-            s if !s.starts_with('-') && name.is_none() => name = Some(s.to_string()),
-            other => anyhow::bail!(
-                "unknown flag '{other}' for `crater <name>`; use `crater apply` for the full surface"
-            ),
-        }
-        i += 1;
-    }
-    let name = name.ok_or_else(|| anyhow!("missing task name"))?;
-    let target = TargetOpts {
-        inventory,
-        host,
-        user,
-        password,
-        key,
-        port,
-        parallel: 1,
-        closure: None,
-        limit: None,
-        strategy: crate::target::Strategy::Host,
-        serial: None,
-    };
-    apply::apply_source(
-        None,
-        Some(name),
-        None,
-        target,
-        dry_run,
-        shell,
-        false,
-        false,
-        &[],
-        false,
-    )
-    .await
-}
-
-/// systemd unit names mentioned by tasks under `tasks/` (their `service` /
-/// `systemd_unit` actions). `doctor` derives per-unit journal probes from this
-/// data, never hardcoded.
-fn known_systemd_units(tasks_dir: &Path) -> Vec<String> {
-    use crater_core::component::Action;
-    let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(tasks_dir) {
+/// 语法错了就罢工 —— 那恰恰是最需要它的时候。
+fn known_systemd_units(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("yaml") {
+            if p.is_dir() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !name.starts_with('.') && name != "target" {
+                    stack.push(p);
+                }
                 continue;
             }
-            if let Ok(t) = crater_core::task::TaskFile::from_yaml_file(&p) {
-                for step in &t.actions {
-                    if let Action::Service { name, .. } = &step.action {
-                        out.push(name.clone());
+            if !blueprint::is_blueprint_file(&p) {
+                continue;
+            }
+            let Ok(bp) = crater_ir::parse::blueprint_from_path(&p) else {
+                continue;
+            };
+            for r in &bp.resources {
+                if r.ty != "service" && r.ty != "systemd_unit" {
+                    continue;
+                }
+                // 名字可能是 `${params.x}` 插值 —— 那种取不出字面量,跳过。
+                if let Some(crater_ir::ir::Value::Lit(y)) = r.args.get("name") {
+                    if let Some(n) = y.as_str() {
+                        if !out.contains(&n.to_string()) {
+                            out.push(n.to_string());
+                        }
                     }
                 }
             }
         }
     }
-    out.sort();
-    out.dedup();
     out
 }
-
-async fn ai_generate(request: &str, output: Option<PathBuf>) -> Result<()> {
-    use crater_core::ai::{self, AiSettings, OpenAiCompatProvider};
-
-    let settings = AiSettings::from_env().ok_or_else(|| {
-        anyhow!(
-            "AI not configured. Set CRATER_AI_ENDPOINT and CRATER_AI_MODEL (and \
-             CRATER_AI_KEY if your endpoint needs one). Works with OpenAI, DeepSeek, \
-             Qwen, or an on-prem OpenAI-compatible endpoint."
-        )
-    })?;
-    println!(
-        "AI: model={} endpoint={}",
-        settings.model, settings.endpoint
-    );
-
-    let provider = OpenAiCompatProvider::new(settings)?;
-    let (yaml, task) = ai::nl_to_task(&provider, request).await?;
-
-    println!("\n# ---- generated & validated task ----");
-    println!("{yaml}");
-    println!(
-        "# ---- valid task '{}': {} action(s) ----",
-        task.name,
-        task.actions.len()
-    );
-
-    if let Some(out) = output {
-        std::fs::write(&out, &yaml)?;
-        println!("Wrote {}", out.display());
-        println!(
-            "Next: crater apply {} (add --dry-run to preview first)",
-            out.display()
-        );
-    } else {
-        println!("(Tip: -o task.yaml to save, then `crater apply task.yaml`.)");
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// M5: doctor — offline rule-based diagnosis (+ optional AI)
-// ---------------------------------------------------------------------------
 
 async fn doctor(
     file: Option<PathBuf>,
@@ -1342,33 +1120,23 @@ async fn doctor(
         }
     }
 
-    if use_ai {
-        match crater_core::ai::AiSettings::from_env() {
-            Some(settings) => {
-                use crater_core::ai::{AiProvider, OpenAiCompatProvider};
-                println!("--- AI deeper analysis ({}) ---", settings.model);
-                // 建不出客户端就跳过 AI 那一段 —— 诊断本身已经有结论了,
-                // 不该因为一个可选的增强而整条命令失败。
-                let provider = match OpenAiCompatProvider::new(settings) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        println!("(AI analysis unavailable: {e})");
-                        return Ok(());
-                    }
-                };
-                let sys = "You are an SRE assistant. Given logs, identify the root cause \
-                           and give concrete shell commands to fix it. Be concise.";
-                // Cap the log size we send.
-                let snippet: String = text.chars().take(6000).collect();
-                match provider.complete(sys, &snippet).await {
-                    Ok(ans) => println!("{ans}"),
-                    Err(e) => println!("(AI analysis unavailable: {e})"),
-                }
-            }
-            None => println!(
-                "(--ai requested but CRATER_AI_* not configured; rules above stand alone.)"
-            ),
-        }
-    }
+    // `--ai` 那段深度分析随旧管线一起删了(D-151):它调的是
+    // `crater_core::ai`,而那个模块生成的是**旧 task YAML**。
+    let _ = use_ai;
     Ok(())
+}
+
+/// 旧 task 管线已删(D-151)—— 给撞上它的人一条能照做的出路。
+///
+/// 说清三件事:这条路没了、新的怎么写、去哪找例子。只说"不支持"会让人以为
+/// 是自己写错了,然后去调参数 —— 而真相是这个形状的输入整个不再存在。
+fn legacy_note(cmd: &str) -> String {
+    format!(
+        "`crater {cmd}` 现在只接受**蓝图**(`*.blueprint.yaml`)或**栈**\
+         (`*.stack.yaml`)—— 旧 task 管线(顶层 `actions:`)已删除。\n\
+         \n\
+         迁移:一个 task 对应一份蓝图,`actions:` 里的每一步对应 `resources:`\n\
+         里的一条声明(类型名基本同名)。`crater types` 列出全部 26 种类型\n\
+         及其字段;例子在 `library/` 下,`library/_template/` 是最小骨架。"
+    )
 }

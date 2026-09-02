@@ -107,12 +107,19 @@ fn directory_scan_skips_non_blueprints_but_still_reads_named_ones() {
 }
 
 #[test]
-fn legacy_tasks_are_reported_as_pending_migration_not_as_errors() {
+fn the_library_has_no_legacy_tasks_left() {
+    // 旧 task 管线已删(D-151),库里也不该再有那种文件。
+    //
+    // 这条测试原本断言的是反面 ——「旧 task 被标为待迁移而不是错」。那时它
+    // 盯的是"迁移待办有没有被如实计数";现在待办清空了,它该盯的是**别再
+    // 长回来**:任何人往 `library/` 放一个顶层 `actions:` 的文件,这里就红。
     let o = lint(&["library"]);
     let out = stdout(&o);
-    assert!(o.status.success(), "旧 task 不是错:{out}");
-    assert!(out.contains("旧版 task 格式"), "{out}");
-    assert!(out.contains("旧版 task 跳过"), "汇总要有迁移待办计数:{out}");
+    assert!(o.status.success(), "库扫描不该失败:{out}");
+    assert!(
+        !out.contains("旧版 task"),
+        "库里又出现了旧 task 文件 —— 那条管线已经删了:{out}"
+    );
 }
 
 #[test]

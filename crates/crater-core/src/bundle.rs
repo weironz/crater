@@ -651,38 +651,6 @@ pub fn materialize_component(
     }))
 }
 
-/// Read the project artifact out of an unpacked bundle, if present (D-098):
-/// scan the index for [`AT_PROJECT`], read its recipe layer, parse the LOCKED
-/// project (play `source`s are task artifact refs in the same bundle).
-pub fn read_artifact_project(bundle_root: &Path) -> crate::Result<Option<crate::project::Project>> {
-    let blobs_dir = bundle_root.join("blobs").join("sha256");
-    let index: serde_json::Value =
-        serde_json::from_slice(&fs::read(bundle_root.join("index.json"))?)?;
-    let Some(ms) = index["manifests"].as_array() else {
-        return Ok(None);
-    };
-    for m in ms {
-        if m["artifactType"].as_str() != Some(AT_PROJECT) {
-            continue;
-        }
-        let d = m["digest"].as_str().unwrap_or("");
-        let manifest: serde_json::Value = serde_json::from_slice(&fs::read(
-            blobs_dir.join(d.strip_prefix("sha256:").unwrap_or(d)),
-        )?)?;
-        let recipe = manifest["layers"]
-            .as_array()
-            .and_then(|ls| {
-                ls.iter()
-                    .find(|l| l["mediaType"].as_str() == Some(MT_RECIPE))
-            })
-            .and_then(|l| l["digest"].as_str())
-            .ok_or_else(|| anyhow::anyhow!("project artifact has no recipe layer"))?;
-        let bytes = fs::read(blobs_dir.join(recipe.strip_prefix("sha256:").unwrap_or(recipe)))?;
-        return Ok(Some(serde_yaml::from_slice(&bytes)?));
-    }
-    Ok(None)
-}
-
 /// Read all crater component artifacts from an unpacked bundle dir: for each
 /// `index.json` manifest with `artifactType` crater.component, materialize it
 /// (recipe → `out_components_dir`, materials → blobmap). Empty ⇒ not a B 类
@@ -816,64 +784,5 @@ mod tests {
         assert_eq!(entry.path().unwrap().to_str().unwrap(), "usr/local/bin/yq");
         assert_eq!(entry.header().mode().unwrap() & 0o777, 0o755);
         let _ = fs::remove_dir_all(&tmp);
-    }
-}
-
-#[cfg(test)]
-mod project_tests {
-    use super::*;
-
-    /// D-098 round-trip: a bundle holding a project artifact + its task
-    /// artifacts. read_artifact_project returns the LOCKED project;
-    /// read_artifact_components returns the tasks WITH their refs (the lookup
-    /// key plays resolve against) and skips the project entry.
-    #[test]
-    fn project_bundle_roundtrip() {
-        let root = std::env::temp_dir().join(format!("crater-proj-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let stage = BundleStage::new(root.clone()).unwrap();
-
-        let task_recipe = b"name: yq\nactions:\n  - action: shell\n    cmd: \"true\"\n";
-        let t = stage
-            .store_component_artifact(
-                "crater/yq:1.0",
-                "yq",
-                "1.0",
-                "task",
-                task_recipe,
-                &[("bin".into(), false, b"BIN".to_vec())],
-            )
-            .unwrap();
-        let locked = "name: demo\nplays:\n  - source: crater/yq:1.0\n    hosts: all\n";
-        let p = stage
-            .store_project_artifact("crater/demo:latest", "demo", locked.as_bytes())
-            .unwrap();
-        stage.write_artifact_index(&[p, t]).unwrap();
-
-        // Project comes back parsed and locked.
-        let project = read_artifact_project(&root)
-            .unwrap()
-            .expect("project artifact");
-        assert_eq!(project.name, "demo");
-        assert_eq!(project.plays[0].source, "crater/yq:1.0");
-
-        // Tasks come back with reference + blobmap; the project entry is skipped.
-        let out = root.join("components");
-        let mats = read_artifact_components(&root, &out).unwrap();
-        assert_eq!(mats.len(), 1);
-        assert_eq!(mats[0].reference, "crater/yq:1.0");
-        assert_eq!(mats[0].name, "yq");
-        assert!(mats[0].blobmap.contains_key("bin"));
-        assert!(out.join("yq").join("component.yaml").is_file());
-
-        // A task-only bundle has no project.
-        stage
-            .write_artifact_index(&[stage
-                .store_component_artifact("crater/yq:1.0", "yq", "1.0", "task", task_recipe, &[])
-                .unwrap()])
-            .unwrap();
-        assert!(read_artifact_project(&root).unwrap().is_none());
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

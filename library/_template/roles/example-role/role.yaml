@@ -1,7 +1,0 @@
-# 可复用 role(自带 materials + actions + 私有 files/templates)。
-name: example-role
-params: [some_input]
-materials:
-  - { name: cfg, kind: file, src: files/example.conf }   # 私有文件(相对本 role 目录)
-actions:
-  - { id: place_cfg, action: copy, material: cfg, dest: /etc/example.conf, mode: "0644" }

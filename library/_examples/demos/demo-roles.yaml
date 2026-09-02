@@ -1,9 +1,0 @@
-# 示范:task 通过 action: role 引用 yq role,role 的 materials 自动并入闭包(D-080)。
-name: demo-roles
-hosts: all
-actions:
-  - id: install_yq
-    action: role
-    uses: yq
-    with:
-      version: "4.44.3"

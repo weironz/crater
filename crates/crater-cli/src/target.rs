@@ -138,20 +138,6 @@ impl TargetOpts {
             self.port,
         )
     }
-
-    /// Like [`hosts`], but a task with no CLI target falls back to its embedded
-    /// inventory before localhost (D-084).
-    pub(crate) fn task_hosts(&self, task_path: &Path) -> Result<Vec<crater_core::spec::Host>> {
-        task_hosts(
-            task_path,
-            self.inventory.as_deref(),
-            self.host.clone(),
-            &self.user,
-            self.password.clone(),
-            self.key.clone(),
-            self.port,
-        )
-    }
 }
 
 /// Starter inventory written by `crater create inventory`. Comments document
@@ -258,31 +244,6 @@ pub(crate) async fn connect_executor(
         ));
     }
     anyhow::bail!("host {} needs --password or --key", host.name)
-}
-
-/// Resolve targets for a TASK file (D-084): an explicit `-i`/`--host` wins; else
-/// the task's own embedded `inventory:` (self-contained single file); else local.
-pub(crate) fn task_hosts(
-    task_path: &Path,
-    inv: Option<&Path>,
-    host: Option<String>,
-    user: &str,
-    password: Option<String>,
-    key: Option<PathBuf>,
-    port: u16,
-) -> Result<Vec<crater_core::spec::Host>> {
-    if inv.is_some() || host.is_some() {
-        return target_hosts(inv, host, user, password, key, port);
-    }
-    // No CLI target → use the task's embedded inventory if it has hosts, else local.
-    if let Some(mut emb) = crater_core::task::TaskFile::from_yaml_file(task_path)?.inventory {
-        if !emb.hosts.is_empty() {
-            emb.resolve(); // derive roles + merge the three var levels (D-077/082)
-            info!("  目标取自任务内嵌 inventory({} 台)", emb.hosts.len());
-            return Ok(emb.hosts);
-        }
-    }
-    target_hosts(None, None, user, password, key, port) // → localhost
 }
 
 /// `--limit`:在 inventory 里挑一部分**执行目标**(主机名或组名)。
