@@ -1,0 +1,59 @@
+# 包制品的 registry 兼容性实测(D-123 第八节)。
+#
+# 为什么要有这个 workflow:设计把兼容地板定在 "OCI 1.0 风格 —— 自定义
+# config.mediaType + 真实 config blob + 自定义层 mediaType",而这条只有
+# **在真 registry 上推过再读回来**才算成立。zot 与 distribution 参考实现
+# 本地验过了,公有 registry 的白名单要另算 —— Docker Hub 是 2022-10-31
+# 才开始收 OCI artifact 的。
+#
+# 凭据只存在于 GitHub secrets,不落到任何人的开发机上。手动触发。
+name: pkg-compat
+
+on:
+  workflow_dispatch:
+    inputs:
+      registry:
+        description: "验哪家(dockerhub / acr / both)"
+        type: choice
+        options: [dockerhub, acr, both]
+        default: dockerhub
+      repo:
+        description: "仓库名(会在你的命名空间下建 <repo>:<tag>)"
+        default: crater-pkg-compat
+      tag:
+        description: "tag"
+        default: probe
+
+jobs:
+  compat:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 构建 crater
+        run: cargo build --release -p crater-cli
+
+      - name: 推包并读回来 —— Docker Hub
+        if: inputs.registry == 'dockerhub' || inputs.registry == 'both'
+        env:
+          USER_NAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          REPO: ${{ inputs.repo }}
+          TAG: ${{ inputs.tag }}
+        run: ./.github/scripts/pkg-compat.sh docker.io "$USER_NAME/$REPO:$TAG"
+
+      - name: 推包并读回来 —— 阿里云 ACR
+        if: inputs.registry == 'acr' || inputs.registry == 'both'
+        env:
+          USER_NAME: ${{ secrets.ACR_USERNAME }}
+          TOKEN: ${{ secrets.ACR_PASSWORD }}
+          ACR_URL: ${{ secrets.ACR_URL }}
+          REPO: ${{ inputs.repo }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          # ACR_URL 形如 registry.cn-shenzhen.aliyuncs.com/willspace ——
+          # 登录要的是主机,引用要的是完整前缀。
+          HOST="${ACR_URL%%/*}"
+          ./.github/scripts/pkg-compat.sh "$HOST" "$ACR_URL/$REPO:$TAG"
