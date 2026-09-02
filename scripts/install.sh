@@ -142,4 +142,12 @@ echo "下一步:"
 echo "  crater types                     看能声明哪 26 种资源"
 echo "  crater lint <蓝图>               静态检查,不连机器"
 echo "  crater plan -f <蓝图> -i <机群>  零写入预演"
-echo "  crater update                    以后升级用它"
+
+# 装上的这一版到底有没有 `update`?**问它**,不要断言 —— `update` 比 v0.2.0
+# 晚出生,写死"以后用 crater update"会在旧版本上教人敲一个报错的命令。
+if "$PREFIX/crater" update --help >/dev/null 2>&1; then
+    echo "  crater update                    以后升级用它"
+else
+    echo
+    echo "(这一版还没有 crater update,升级请再跑一次本脚本。)"
+fi

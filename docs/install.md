@@ -90,12 +90,15 @@ crater update --version v0.2.0   # 换到指定版本(也能降级)
 - **原子替换。** 先写同目录的临时文件再 `rename`,中途断网留下的是旧的那个,
   不是半个。
 
-### v0.2.0 之前的版本升不了级
+### 现在所有已发布的版本都还没有 `update`
 
-`update` 子命令是 v0.2.0 才有的。手上是更老的版本,`crater update` 会报
-"not a file, image ref, or named task/project" —— 那不是坏了,是那个版本里
-根本没有这个命令。**从 0.1.x 升上来要用安装脚本**,升过一次以后就能用
-`crater update` 了。
+**说清楚**:`crater update` 是 v0.2.0 **发布之后**才写的,所以从 Release
+装下来的 v0.2.0 里没有它,敲了会报 `unrecognized subcommand 'update'`。
+更老的 0.1.x 会报 `not a file, image ref, or named task/project`。两种都不是
+坏了,是那个版本里根本没有这个命令。
+
+**下一个版本起才能自更新。** 在那之前(以及任何时候从更老的版本升上来),
+都用本页开头那条安装脚本 —— 它对已经装过的机器同样有效,直接覆盖。
 
 ## Windows / macOS:目前不支持
 
