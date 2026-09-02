@@ -3,8 +3,8 @@
 //! *action* = one primitive call (`place`/`run_cmd`/…).
 //!
 //! Strictly under D-036: a task is pure DATA. Every action carries only a
-//! primitive + its params + **closed-enum** switches (`when_os`/`when_offline`)
-//! + declarative `needs`. There is NO `when:` expression, NO `loop:`, NO
+//! primitive + its params + **closed-enum** switches (`when_os`/`when_offline`) +
+//! declarative `needs`. There is NO `when:` expression, NO `loop:`, NO
 //! computation — all control flow (filtering, ordering, looping) is done by the
 //! Rust engine in [`crate::engine::plan_from_task`].
 

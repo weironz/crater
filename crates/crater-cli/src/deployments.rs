@@ -203,9 +203,9 @@ pub(crate) async fn task_list(target: TargetOpts, verify: bool) -> Result<()> {
         }
     };
     if verify {
-        println!("{:<16} {:<12} {:<14} {:>6}  {:<14} {}", "DEPLOYMENT", "TASK", "VERSION", "HOSTS", "STATUS", "LAST APPLIED (UTC)");
+        println!("{:<16} {:<12} {:<14} {:>6}  {:<14} LAST APPLIED (UTC)", "DEPLOYMENT", "TASK", "VERSION", "HOSTS", "STATUS");
     } else {
-        println!("{:<16} {:<12} {:<14} {:>6}  {}", "DEPLOYMENT", "TASK", "VERSION", "HOSTS", "LAST APPLIED (UTC)");
+        println!("{:<16} {:<12} {:<14} {:>6}  LAST APPLIED (UTC)", "DEPLOYMENT", "TASK", "VERSION", "HOSTS");
     }
     for (dep, a) in by_dep {
         if verify {
@@ -243,7 +243,7 @@ pub(crate) async fn task_show(name: &str, target: TargetOpts, verify: bool) -> R
         return Ok(());
     }
     if verify {
-        println!("{:<16} {:<12} {:<10} {:<8} {:<20} {}", "HOST", "TASK", "VERSION", "STATUS", "APPLIED (UTC)", "SOURCE");
+        println!("{:<16} {:<12} {:<10} {:<8} {:<20} SOURCE", "HOST", "TASK", "VERSION", "STATUS", "APPLIED (UTC)");
         for r in rows {
             println!(
                 "{:<16} {:<12} {:<10} {:<8} {:<20} {}",
@@ -251,7 +251,7 @@ pub(crate) async fn task_show(name: &str, target: TargetOpts, verify: bool) -> R
             );
         }
     } else {
-        println!("{:<16} {:<12} {:<10} {:<20} {}", "HOST", "TASK", "VERSION", "APPLIED (UTC)", "SOURCE");
+        println!("{:<16} {:<12} {:<10} {:<20} SOURCE", "HOST", "TASK", "VERSION", "APPLIED (UTC)");
         for r in rows {
             println!(
                 "{:<16} {:<12} {:<10} {:<20} {}",
@@ -270,7 +270,7 @@ pub(crate) async fn task_history(limit: usize) -> Result<()> {
         info!("no history recorded in the control DB (~/.crater/state.db)");
         return Ok(());
     }
-    println!("{:<20} {:<8} {:<14} {:<12} {:<16} {}", "WHEN (UTC)", "ACTION", "DEPLOYMENT", "TASK", "HOST", "RESULT");
+    println!("{:<20} {:<8} {:<14} {:<12} {:<16} RESULT", "WHEN (UTC)", "ACTION", "DEPLOYMENT", "TASK", "HOST");
     for r in runs {
         println!(
             "{:<20} {:<8} {:<14} {:<12} {:<16} {}",

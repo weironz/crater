@@ -141,6 +141,7 @@ impl client::Handler for ClientHandler {
 ///   - recorded & matching → proceed;
 ///   - recorded & DIFFERENT → refuse (possible MITM / reinstalled host);
 ///   - `CRATER_HOST_KEY_CHECKING=0|false|no|off` → skip entirely (ephemeral VMs).
+///
 /// crater keeps its own file (not ~/.ssh/known_hosts): it must never corrupt the
 /// operator's OpenSSH state, and `$CRATER_HOME` keeps tests/CI hermetic.
 fn verify_host_key(host: &str, port: u16, key: &russh::keys::key::PublicKey) -> bool {
@@ -296,7 +297,7 @@ impl Executor for SshExecutor {
         let mut stderr: Vec<u8> = Vec::new();
         while let Some(msg) = channel.wait().await {
             match msg {
-                ChannelMsg::ExtendedData { ref data, ext } if ext == 1 => {
+                ChannelMsg::ExtendedData { ref data, ext: 1 } => {
                     stderr.extend_from_slice(data)
                 }
                 ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status as i32),

@@ -202,7 +202,7 @@ impl ResourceType for LineInFile {
             "if grep -qE {p} {f}; then sed -i -E {sub} {f}; else printf '%s\\n' {l} >> {f}; fi",
             p = sh(&pattern),
             f = sh(path),
-            sub = sh(&format!("\\|{}|s|.*|{}|", sed_delim(&pattern), sed_repl(&line))),
+            sub = sh(&format!("\\|{}|s|.*|{}|", sed_delim(&pattern), sed_repl(line))),
             l = sh(line)
         );
         run_ok(ctx, &cmd)?;

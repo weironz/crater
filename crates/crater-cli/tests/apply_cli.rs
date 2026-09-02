@@ -211,7 +211,7 @@ resources:
     let o = crater(&["apply", "-f", p.to_str().unwrap()]);
     assert!(o.status.success(), "{}", stdout(&o));
     // 变体按**目标机实际架构**选出,不是作者猜的
-    assert!(stdout(&o).contains(&format!("upstream.bin")), "闭包清单要报出来:{}", stdout(&o));
+    assert!(stdout(&o).contains(&"upstream.bin".to_string()), "闭包清单要报出来:{}", stdout(&o));
     assert_eq!(std::fs::read_to_string(root.join("tool")).unwrap(), "hello-material");
     assert_eq!(mode_of(&root.join("tool")), 0o755);
 

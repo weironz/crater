@@ -42,9 +42,10 @@ pub(crate) fn musl_candidates(arch: &str) -> Vec<PathBuf> {
 }
 
 /// Choose the agent binary to ship to `exec`'s target. Order:
-/// 1. explicit `--agent-bin`; 2. a bundled musl static for the target's arch
-/// (portable, also dodges glibc skew on the same arch); 3. the control binary
-/// iff the target arch matches; else error with guidance.
+/// 1. explicit `--agent-bin`;
+/// 2. a bundled musl static for the target's arch (portable, also dodges glibc
+///    skew on the same arch);
+/// 3. the control binary iff the target arch matches; else error with guidance.
 pub(crate) async fn select_agent_binary(
     exec: &dyn Executor,
     agent_bin: Option<&Path>,
@@ -70,11 +71,13 @@ pub(crate) async fn select_agent_binary(
     )
 }
 
-/// Self-bootstrap agent mode (D-019/D-027, the default): push the crater binary
-/// + the lowered plan to the target, then run `crater agent --plan` THERE so the
-/// plan executes locally in one shot — fewer SSH round-trips, and the foundation
-/// for OCI unpack / richer local logic. The binary is cached on the target (by
-/// sha256), so it's pushed once per version; only the plan file is transient.
+/// Self-bootstrap agent mode (D-019/D-027, the default): push the crater
+/// binary + the lowered plan to the target, then run `crater agent --plan`
+/// THERE so the plan executes locally in one shot — fewer SSH round-trips, and
+/// the foundation for OCI unpack / richer local logic. The binary is cached on
+/// the target (by sha256), so it's pushed once per version; only the plan file
+/// is transient.
+///
 /// Push the crater binary to the target (cached by sha256 at
 /// `/var/lib/crater/crater`) and return that path. Shared by component
 /// (`--plan`) and task (`--task-plan`) agent runs.

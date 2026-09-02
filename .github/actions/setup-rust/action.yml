@@ -22,6 +22,13 @@ inputs:
     description: "额外要装的 target triple(逗号分隔),如 x86_64-unknown-linux-musl"
     required: false
     default: ""
+  components:
+    description: >
+      额外要装的 rustup 组件(逗号分隔),如 clippy。runner 预装的 stable
+      **恰好**带 clippy,但那是运行环境的巧合而不是约定 —— 要用就点名装,
+      别赌它一直在。
+    required: false
+    default: ""
   cache-key:
     description: "rust-cache 的附加 key —— 矩阵构建按 target 分开缓存,别互相污染"
     required: false
@@ -40,6 +47,7 @@ runs:
     - uses: dtolnay/rust-toolchain@stable
       with:
         targets: ${{ inputs.targets }}
+        components: ${{ inputs.components }}
 
     - uses: Swatinem/rust-cache@v2
       with:

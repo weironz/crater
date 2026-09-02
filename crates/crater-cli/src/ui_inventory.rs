@@ -935,90 +935,6 @@ async fn probe_one(h: crater_core::spec::Host) -> anyhow::Result<String> {
         .join(" · "))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const INV: &str = "\
-# 顶注
-inventory:
-  hosts:
-    - { name: n1, address: 10.0.0.1, user: root }   # 第一台
-    - { name: n2, address: 10.0.0.2, user: root }
-  groups:
-    all: { hosts: [n1, n2] }
-    db:  { hosts: [n1] }
-";
-
-    fn lines(s: &str) -> Vec<&str> {
-        s.lines().collect()
-    }
-
-    #[test]
-    fn locates_inventory_child_blocks() {
-        let ls = lines(INV);
-        let h = block_of(&ls, "hosts").unwrap();
-        assert_eq!(h.key_indent, 2);
-        assert_eq!(h.item_indent, 4);
-        assert_eq!(h.last_content, Some(4), "hosts 块最后一行是 n2");
-        let g = block_of(&ls, "groups").unwrap();
-        assert_eq!(g.last_content, Some(7));
-    }
-
-    /// 组里的 `hosts:` 不该被误认成 inventory 的 hosts 块。
-    #[test]
-    fn nested_block_style_group_hosts_do_not_hijack_the_block() {
-        let src = "inventory:\n  hosts:\n    - { name: n1, address: 10.0.0.1 }\n  groups:\n    all:\n      hosts:\n        - n1\n";
-        let ls = lines(src);
-        let h = block_of(&ls, "hosts").unwrap();
-        assert_eq!(h.key_line, 1, "必须是 inventory 的直接子键那一个");
-    }
-
-    #[test]
-    fn member_matching_is_token_wise() {
-        assert!(contains_member("all: { hosts: [n1, n2] }", "n1"));
-        assert!(
-            !contains_member("all: { hosts: [n11] }", "n1"),
-            "n1 不该命中 n11"
-        );
-    }
-
-    #[test]
-    fn dropping_a_member_leaves_everything_else_byte_identical() {
-        assert_eq!(
-            drop_member("    all: { hosts: [n1, n2, n3] }   # 注", "n2"),
-            "    all: { hosts: [n1, n3] }   # 注"
-        );
-    }
-
-    #[test]
-    fn block_style_entries_are_not_single_line() {
-        let src = "inventory:\n  hosts:\n    - name: n1\n      address: 10.0.0.1\n";
-        let ls = lines(src);
-        assert!(
-            !is_single_line(&ls, 2),
-            "块式主机条目必须判为多行(降级只读)"
-        );
-    }
-
-    #[test]
-    fn passwords_are_always_quoted() {
-        // 纯数字口令裸写会被 YAML 读成整数,反序列化直接失败。
-        assert_eq!(scalar("123456"), "\"123456\"");
-        assert_eq!(scalar("n1"), "n1");
-        assert_eq!(scalar("on"), "\"on\"", "YAML 1.1 的歧义词要引号");
-    }
-
-    #[test]
-    fn finding_a_host_line_is_exact() {
-        let ls = lines(INV);
-        assert_eq!(find_host_line(&ls, "n1"), Some(3));
-        assert_eq!(find_host_line(&ls, "n2"), Some(4));
-        assert_eq!(find_host_line(&ls, "n3"), None);
-        assert_eq!(find_group_line(&ls, "db"), Some(7));
-    }
-}
-
 // ───────────────────────────── 视图 ─────────────────────────────
 
 /// `GET /view/hosts` —— 主机表:选一份 inventory,增删改查 + 连通性探测。
@@ -1411,3 +1327,87 @@ const GROUPS_JS: &str = r##"
   };
   fileList().then(load);
 "##;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INV: &str = "\
+# 顶注
+inventory:
+  hosts:
+    - { name: n1, address: 10.0.0.1, user: root }   # 第一台
+    - { name: n2, address: 10.0.0.2, user: root }
+  groups:
+    all: { hosts: [n1, n2] }
+    db:  { hosts: [n1] }
+";
+
+    fn lines(s: &str) -> Vec<&str> {
+        s.lines().collect()
+    }
+
+    #[test]
+    fn locates_inventory_child_blocks() {
+        let ls = lines(INV);
+        let h = block_of(&ls, "hosts").unwrap();
+        assert_eq!(h.key_indent, 2);
+        assert_eq!(h.item_indent, 4);
+        assert_eq!(h.last_content, Some(4), "hosts 块最后一行是 n2");
+        let g = block_of(&ls, "groups").unwrap();
+        assert_eq!(g.last_content, Some(7));
+    }
+
+    /// 组里的 `hosts:` 不该被误认成 inventory 的 hosts 块。
+    #[test]
+    fn nested_block_style_group_hosts_do_not_hijack_the_block() {
+        let src = "inventory:\n  hosts:\n    - { name: n1, address: 10.0.0.1 }\n  groups:\n    all:\n      hosts:\n        - n1\n";
+        let ls = lines(src);
+        let h = block_of(&ls, "hosts").unwrap();
+        assert_eq!(h.key_line, 1, "必须是 inventory 的直接子键那一个");
+    }
+
+    #[test]
+    fn member_matching_is_token_wise() {
+        assert!(contains_member("all: { hosts: [n1, n2] }", "n1"));
+        assert!(
+            !contains_member("all: { hosts: [n11] }", "n1"),
+            "n1 不该命中 n11"
+        );
+    }
+
+    #[test]
+    fn dropping_a_member_leaves_everything_else_byte_identical() {
+        assert_eq!(
+            drop_member("    all: { hosts: [n1, n2, n3] }   # 注", "n2"),
+            "    all: { hosts: [n1, n3] }   # 注"
+        );
+    }
+
+    #[test]
+    fn block_style_entries_are_not_single_line() {
+        let src = "inventory:\n  hosts:\n    - name: n1\n      address: 10.0.0.1\n";
+        let ls = lines(src);
+        assert!(
+            !is_single_line(&ls, 2),
+            "块式主机条目必须判为多行(降级只读)"
+        );
+    }
+
+    #[test]
+    fn passwords_are_always_quoted() {
+        // 纯数字口令裸写会被 YAML 读成整数,反序列化直接失败。
+        assert_eq!(scalar("123456"), "\"123456\"");
+        assert_eq!(scalar("n1"), "n1");
+        assert_eq!(scalar("on"), "\"on\"", "YAML 1.1 的歧义词要引号");
+    }
+
+    #[test]
+    fn finding_a_host_line_is_exact() {
+        let ls = lines(INV);
+        assert_eq!(find_host_line(&ls, "n1"), Some(3));
+        assert_eq!(find_host_line(&ls, "n2"), Some(4));
+        assert_eq!(find_host_line(&ls, "n3"), None);
+        assert_eq!(find_group_line(&ls, "db"), Some(7));
+    }
+}

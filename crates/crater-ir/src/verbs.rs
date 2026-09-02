@@ -263,7 +263,7 @@ pub fn arg_str_opt<'a>(args: &'a ResolvedArgs, key: &str) -> Option<&'a str> {
 /// 实际拿到系统分配的 999",且因为永远对不上,幂等也一并失效。
 ///
 /// 凡是"这个字段可能被写成数字"的地方(uid/gid/端口/超时),都该用这个。
-pub fn arg_scalar_opt<'a>(args: &'a ResolvedArgs, key: &str) -> Option<String> {
+pub fn arg_scalar_opt(args: &ResolvedArgs, key: &str) -> Option<String> {
     match args.get(key)? {
         Yaml::String(s) => Some(s.clone()),
         Yaml::Number(n) => Some(n.to_string()),

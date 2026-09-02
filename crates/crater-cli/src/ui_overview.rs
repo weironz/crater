@@ -101,7 +101,7 @@ pub async fn overview() -> impl IntoResponse {
             // Progressing 压过一切:有 job 在动这份蓝图时,别的结论都是旧闻。
             let progressing = running.iter().any(|j| {
                 j.blueprint.ends_with(&format!("{}.blueprint.yaml", r.blueprint))
-                    || bp_paths.iter().any(|p| j.blueprint == *p)
+                    || bp_paths.contains(&j.blueprint)
             });
             let out_of_date = match (&r.blueprint_sha256, bp_paths.first()) {
                 (Some(rec_sha), Some(p)) if bp_paths.len() == 1 => std::fs::read(p)

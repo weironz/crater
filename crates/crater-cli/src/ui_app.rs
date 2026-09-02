@@ -442,47 +442,6 @@ fn last_verify_ts(app: &AppDef) -> u64 {
     latest
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_interval_needs_a_unit() {
-        // "30" 当 30 秒还是 30 分?猜错一个数量级,巡检要么打爆 SSH 要么形同虚设。
-        assert!(parse_interval("30").is_err());
-        assert_eq!(parse_interval("30m").unwrap(), 1800);
-        assert_eq!(parse_interval("2h").unwrap(), 7200);
-    }
-
-    #[test]
-    fn an_app_file_parses_with_params_and_interval() {
-        let text = "app:\n  name: web\n  blueprint: b.yaml\n  inventory: i.yaml\n  params:\n    ha: true\n  verify:\n    interval: 30m\n";
-        let a = parse_app(Path::new("web.app.yaml"), text).unwrap();
-        assert_eq!(a.name, "web");
-        assert_eq!(a.params, vec![("ha".into(), "true".into())]);
-        assert_eq!(a.verify_interval, Some(1800));
-    }
-
-    #[test]
-    fn a_misspelled_app_param_is_an_error_not_a_warning() {
-        // 拼错的参数会静默失效(蓝图按默认值跑)—— 配置类 bug 里最难查的一种。
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("b.yaml"),
-            "name: b\nparams:\n  version: { default: \"1\" }\nresources:\n  - file: { path: /x, state: directory }\n",
-        )
-        .unwrap();
-        let app = AppDef {
-            blueprint: dir.path().join("b.yaml").display().to_string(),
-            params: vec![("verion".into(), "2".into())],
-            ..Default::default()
-        };
-        let diags = lint_app(&app);
-        assert!(diags.iter().any(|d| d["severity"] == "error"
-            && d["message"].as_str().unwrap().contains("version")), "{diags:?}");
-    }
-}
-
 /// `GET /view/tasks` —— 任务:app 文件的增删改跑。
 ///
 /// "任务"在新管线里不是数据库里的一行,而是一份 app 文件:蓝图 × 机群 ×
@@ -635,3 +594,44 @@ const TASKS_HTML: &str = r##"<section class="panel">
 })();
 </script>
 "##;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_interval_needs_a_unit() {
+        // "30" 当 30 秒还是 30 分?猜错一个数量级,巡检要么打爆 SSH 要么形同虚设。
+        assert!(parse_interval("30").is_err());
+        assert_eq!(parse_interval("30m").unwrap(), 1800);
+        assert_eq!(parse_interval("2h").unwrap(), 7200);
+    }
+
+    #[test]
+    fn an_app_file_parses_with_params_and_interval() {
+        let text = "app:\n  name: web\n  blueprint: b.yaml\n  inventory: i.yaml\n  params:\n    ha: true\n  verify:\n    interval: 30m\n";
+        let a = parse_app(Path::new("web.app.yaml"), text).unwrap();
+        assert_eq!(a.name, "web");
+        assert_eq!(a.params, vec![("ha".into(), "true".into())]);
+        assert_eq!(a.verify_interval, Some(1800));
+    }
+
+    #[test]
+    fn a_misspelled_app_param_is_an_error_not_a_warning() {
+        // 拼错的参数会静默失效(蓝图按默认值跑)—— 配置类 bug 里最难查的一种。
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("b.yaml"),
+            "name: b\nparams:\n  version: { default: \"1\" }\nresources:\n  - file: { path: /x, state: directory }\n",
+        )
+        .unwrap();
+        let app = AppDef {
+            blueprint: dir.path().join("b.yaml").display().to_string(),
+            params: vec![("verion".into(), "2".into())],
+            ..Default::default()
+        };
+        let diags = lint_app(&app);
+        assert!(diags.iter().any(|d| d["severity"] == "error"
+            && d["message"].as_str().unwrap().contains("version")), "{diags:?}");
+    }
+}
