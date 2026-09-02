@@ -86,13 +86,13 @@ scripts/build-musl.sh all        # 双架构 musl 静态 → dist/
 **从 OCI 装一个包**(helm 那种用法,两条路都有):
 
 ```bash
-# 一、直连引用 —— 不需要配任何仓库
-crater apply oci://ghcr.io/acme/yq:4.44.3 -i inventory.yaml
+# 一、订阅官方索引,之后用名字
+crater repo add crater https://raw.githubusercontent.com/weironz/crater/main/packages/index.yaml
+crater search yq                                  # 有什么
+crater apply yq -i inventory.yaml                 # 拉下来 → 印计划 → 收敛
 
-# 二、订阅索引,之后用名字
-crater repo add lab https://example.com/index.yaml   # 一次性
-crater search yq                                     # 有什么
-crater apply yq -i inventory.yaml                    # 拉下来 → 印计划 → 收敛
+# 二、直连引用 —— 不需要配任何仓库
+crater apply oci://ghcr.io/weironz/crater/yq:4.44.3 -i inventory.yaml
 ```
 
 索引只为回答"**有哪些包**":OCI 规范里没有搜索端点,所以那件事必须靠一个
@@ -100,15 +100,15 @@ crater apply yq -i inventory.yaml                    # 拉下来 → 印计划 �
 `tags/list` 就够:
 
 ```bash
-crater pkg tags ghcr.io/acme/yq        # 远端有哪些版本(semver 序,最新在前)
-crater pkg index oci://ghcr.io/acme/yq -o index.yaml   # 把它们做成可搜的索引
+crater pkg tags ghcr.io/weironz/crater/yq   # 远端有哪些版本(semver 序,最新在前)
+crater pkg index oci://ghcr.io/weironz/crater/yq -o index.yaml  # 做成可搜的索引
 ```
 
 **版本可以写范围**,直连引用和包名两条路都支持 —— 靠 `tags/list` 解析,
 不需要索引:
 
 ```bash
-crater apply 'oci://ghcr.io/acme/yq:4.*'   # 4 这条线上的最新
+crater apply 'oci://ghcr.io/weironz/crater/yq:4.*'   # 4 这条线上的最新
 crater apply 'yq:^4.44'                    # >=4.44,不跨主版本
 crater apply 'yq:~4.44.1'                  # 只放行补丁号
 crater apply 'yq:>=4.10, <4.44'            # 逗号/空格分隔 = 全部满足

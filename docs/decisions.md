@@ -2974,3 +2974,49 @@ socket 连 192.0.2.1:9 都能"连上"。连接阶段根本不会卡住,这条超
 包名与直连引用两条路各跑一遍,结果一致。
 
 四道闸门全绿,16 套 614 个用例(新增 13 个)。
+
+### D-158:官方包发到 ghcr.io(Docker Hub 这台机器到不了),索引进仓库
+
+**本来要发 Docker Hub,发不了 —— 而且不是 crater 的问题:**
+
+```
+registry-1.docker.io → 198.18.0.27   (RFC 2544 基准段 = 沙箱的假 IP)
+docker pull hello-world → TLS handshake timeout
+```
+
+DNS 被劫持指向沙箱代理,TCP 收下但 TLS 永不完成。连 `docker pull hello-world`
+都失败,所以是整台机器到不了 Docker Hub。`auth.docker.io` 与 `ghcr.io` 都通,
+说明不是网络全断,是出网策略挡了 registry 端点。
+
+**ACR 不是备选**:D-129 实测它 403 拒收我们的 manifest class,那条结论不变。
+
+**发到 ghcr.io/weironz/crater/yq**,三个版本(4.40.5 / 4.44.3 / 4.45.1)。
+索引 `packages/index.yaml` 提交进仓库,走 `raw.githubusercontent.com` 托管 ——
+与 `scripts/install.sh` 同一条路,不需要任何额外基础设施。
+
+**顺手补了一个安全缺口:`crater registry login` 没有 `--password-stdin`。**
+
+要给 ghcr 存凭据时才发现它只接受 `--password <明文>`。那意味着令牌会进
+`argv`(同机器上谁 `ps` 一下都看得见)和 shell 历史。helm / docker / oras
+都有 stdin 那个口子,正是为了这个。**我没有把用户的令牌放进命令行**,而是
+先把这个口子补上:
+
+- `--password-stdin` 从标准输入读第一行,与 `--password` 互斥
+- 什么都不给时报错并给出该敲什么,不吊在那里等一个不会来的输入
+- **没有加交互式不回显提问** —— 那要引 `rpassword`,而真正的需求只是"令牌
+  别进 argv",stdin 已经满足。为一个便利多背一个依赖,在这个要静态链接、
+  进气隙现场的二进制上不划算
+
+`--password` 保留(存量脚本在用),但文档里明说它是三条里最差的一条。
+
+**同一个排版坑我又踩了一次,记下来**:多行提示用 `\` 续行,rustfmt 折成一行
+之后行首缩进空格留在字符串里,打印出来错位。D-156 刚在 `store::timeout_hint`
+修过,写 `read_password` 时立刻又犯 —— 说明"知道这件事"不足以避开它。两处
+都改成了整行字面量,并在两处注释里互相点名。
+
+**还差一步才算真能用,而那一步不在我这**:ghcr 新包**默认私有**。实测匿名
+访问 403(裸 HTTP 与 `crater pkg tags` 都是)。要在
+`https://github.com/users/weironz/packages/container/crater%2Fyq/settings`
+把可见性改成 public,`crater apply yq` 才对外人成立。
+
+四道闸门全绿,16 套 614 个用例。

@@ -974,13 +974,34 @@ enum RepoCmd {
 #[derive(Subcommand)]
 enum RegistryCmd {
     /// Store credentials for a registry (used by pull/push).
+    /// 存一份 registry 凭据
+    ///
+    /// crater 也读 `~/.docker/config.json`(D-129)—— 已经 `docker login` 过
+    /// 就不必再来一遍。这条是给"装了凭据助手、docker config 里没有明文"的
+    /// 情况兜底的。
+    #[command(
+        verbatim_doc_comment,
+        after_help = "\
+用法示例:
+  # 从标准输入读口令 —— 令牌不进命令行、不进 shell 历史
+  gh auth token | crater registry login ghcr.io -u <用户名> --password-stdin
+
+  # 已经 docker login 过的话,这一步根本不用做 —— crater 直接读
+  #   ~/.docker/config.json 里的明文凭据(D-129)
+"
+    )]
     Login {
-        /// Registry host, e.g. docker.io or registry.example.com:5000
+        /// Registry 主机,如 ghcr.io 或 registry.example.com:5000
         registry: String,
         #[arg(short, long)]
         username: String,
+        /// 口令/令牌。**不建议** —— 它会留在 `ps` 的输出和 shell 历史里。
+        /// 用 `--password-stdin`,或者什么都不给让它交互式问
         #[arg(short, long)]
-        password: String,
+        password: Option<String>,
+        /// 从标准输入读口令(第一行)。CI 与管道用这个
+        #[arg(long, conflicts_with = "password")]
+        password_stdin: bool,
     },
 }
 
@@ -1317,7 +1338,9 @@ async fn main() -> Result<()> {
                 registry,
                 username,
                 password,
+                password_stdin,
             } => {
+                let password = read_password(password, password_stdin)?;
                 crater_core::store::save_login(&registry, &username, &password)?;
                 info!("saved credentials for {registry}");
                 Ok(())
@@ -1585,6 +1608,36 @@ fn local_only(cmd: &str, source: &Option<String>) -> String {
         if cmd == "verify" { "对账" } else { "退役" }
     ));
     m
+}
+
+/// 口令从哪来:标准输入 → 命令行 → 交互式提问。
+///
+/// **命令行那条是最差的一条**,但删不掉(存量脚本在用),所以把它降级成
+/// 三选一里最不推荐的:令牌写在 argv 里,同机器上任何人 `ps` 一下就看得见,
+/// 而且它会留在 shell 历史里 —— 令牌被抄写的次数,就是它泄漏的机会次数
+/// (与 D-129 里"crater 只读 docker 凭据、不让人再写一遍"同一条理由)。
+/// 多行提示里**不要用 `\` 续行**:rustfmt 会把续行折成一行,而行首的缩进
+/// 空格会留在字符串里,打印出来是错位的。这个坑在 `store::timeout_hint`
+/// 踩过一次,写这个函数时又踩了一次 —— 所以两处都改成了整行字面量。
+fn read_password(from_arg: Option<String>, from_stdin: bool) -> Result<String> {
+    if from_stdin {
+        let mut buf = String::new();
+        std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut buf)?;
+        let p = buf.trim_end_matches(['\n', '\r']).to_string();
+        if p.is_empty() {
+            bail!("`--password-stdin` 从标准输入读到的是空的");
+        }
+        return Ok(p);
+    }
+    if let Some(p) = from_arg {
+        return Ok(p);
+    }
+    // 没有交互式提问。不回显的输入要引一个新依赖(rpassword),而真正的需求
+    // 只是"令牌别进 argv" —— `--password-stdin` 已经满足了。为一个便利多背
+    // 一个依赖不划算,尤其在这个二进制要静态链接、进气隙现场的场景下。
+    bail!(
+        "没给口令。用管道从标准输入给,令牌就不会留在 `ps` 和 shell 历史里:\n  echo <令牌> | crater registry login <registry> -u <用户名> --password-stdin"
+    )
 }
 
 fn legacy_note(cmd: &str) -> String {
