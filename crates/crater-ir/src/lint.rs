@@ -51,6 +51,16 @@ const ROOT_SCOPES: &[&str] = &["params", "env", "substrate", "item", "facts", "o
 
 /// 只读探针函数白名单(裁定 A)。CEL 本身不允许用户定义函数;这里再把**宿主提供**的
 /// 函数集也钉成封闭集合 —— 否则"非图灵完备"会被一个万能的 `exec()` 悄悄破坏。
+/// CEL 里可调的函数 —— **封闭集合**(D-117/A)。
+///
+/// ⚠️ 前四个是**只 lint 放行、求值上下文从未注册**的探针(D-133 实测:
+/// 运行期报 `Undeclared reference to 'port_owner'`)。它们不是笔误 ——
+/// rustfs 试金石(裁定 A)正用着 `port_owner`,那是一条设计决定。
+/// 缺的是求值侧:`cel::Context::add_function` 要求 `'static + Send + Sync`,
+/// 借不进 `&dyn Ctx`,所以实现它是一次架构改动。见 issue #14。
+///
+/// 在那之前,preflight 里用到它们会**在求值处明确失败**(而不是被当成"断言
+/// 为假")—— 措辞上分得开,是因为"写错的断言"与"环境不满足"修法完全不同。
 const PROBE_FUNCS: &[&str] = &[
     "port_owner",   // 谁在监听这个端口(空串 = 没人)
     "path_exists",

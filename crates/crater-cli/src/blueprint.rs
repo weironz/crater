@@ -445,6 +445,10 @@ async fn run_on_targets(
     // `_closure_dir` 必须活到本函数结束 —— blob 就在那个临时目录里。
     let (_closure_dir, blobs, images) = open_closure(target)?;
 
+    // 准入断言:在**碰任何机器之前**。plan 也跑它 —— preflight 是只读的,
+    // 而 plan 正是闸门:等到 apply 才发现不满足,那道闸门就白设了。
+    run_preflight(&bp, &hosts, &fleet, &overrides, path, target, &blobs, &images).await?;
+
     let mut failures = 0usize;
     // 自定义类型(L2)的弥合是机群级的舞:逐台 converge 只记下"需要跳哪支",
     // 收齐去重后在机群层跑**一次** —— 在循环里跑会把同一支舞跳 N 遍。
@@ -1425,6 +1429,72 @@ fn open_closure(
     let imgs = if images.is_empty() { String::new() } else { format!(",{} 个镜像", images.len()) };
     say!("离线闭包 {} —— {} 份物料{imgs}已备好\n", path.display(), map.len());
     Ok((Some(dir), map, images))
+}
+
+/// 跑 `preflight:` 准入断言 —— 在**碰任何机器之前**。
+///
+/// 这一步此前压根不存在:断言被解析进 IR、被 lint 检查、写在 JSON schema 里
+/// (「任一失败则整个部署不开始」),**唯独没有求值的地方**(D-133)。整条链
+/// 上只缺最后一环,所以每一处单看都是对的 —— 而实际表现是一条恒假的断言
+/// 拦不住任何东西。
+///
+/// 三条纪律:
+/// - **零成本**:蓝图没声明 preflight 就一次连接都不发起;
+/// - **任一失败即整个停**,不是"跳过那一台" —— 准入的语义就是全体准入;
+/// - **只读**:断言只能走 `probe`,与 plan 的零写入承诺同源。
+async fn run_preflight(
+    bp: &Blueprint,
+    hosts: &[crater_core::spec::Host],
+    fleet: &Fleet,
+    overrides: &[(String, Yaml)],
+    path: &Path,
+    target: &TargetOpts,
+    blobs: &BlobMap,
+    images: &crate::material_ctx::ImageMap,
+) -> Result<()> {
+    if bp.preflight.is_empty() {
+        return Ok(());
+    }
+    let targets =
+        connect_fleet(bp, hosts, fleet, overrides, &base_dir(path), target.parallel, blobs, images)
+            .await?;
+    let mut bad: Vec<String> = Vec::new();
+    for m in &targets.fleet.members {
+        let scope = &targets.scope(&m.name)?;
+        for (i, a) in bp.preflight.iter().enumerate() {
+            // `on:` 让断言只针对一部分机器 —— "etcd 盘必须是 SSD" 只问 etcd 节点。
+            let hit = targets
+                .fleet
+                .matches(&a.on, &m.name, scope)
+                .map_err(|e| anyhow::anyhow!("preflight[{i}] 的 `on: {}`:{e}", a.on))?;
+            if !hit {
+                continue;
+            }
+            match scope.eval_bool(&a.expr) {
+                Ok(true) => {}
+                Ok(false) => bad.push(format!(
+                    "{}:{}",
+                    m.name,
+                    a.msg.clone().unwrap_or_else(|| format!("`{}` 不成立", a.expr.src()))
+                )),
+                // 求值本身出错(引用了不存在的变量、探针函数没实现)**不等于**
+                // 断言为假 —— 混为一谈会让"写错的断言"看起来像"环境不满足",
+                // 而这两者的修法完全不同。
+                Err(e) => bad.push(format!("{}:断言 `{}` 求值失败 —— {e}", m.name, a.expr.src())),
+            }
+        }
+    }
+    if !bad.is_empty() {
+        for b in &bad {
+            oops!("  ✗ {b}");
+        }
+        bail!(
+            "preflight 未通过({} 项)—— 整个部署不开始,一台机器都没碰。",
+            bad.len()
+        );
+    }
+    say!("preflight ✓ {} 条断言,{} 台机器全部满足\n", bp.preflight.len(), targets.fleet.members.len());
+    Ok(())
 }
 
 /// 机群契约在**一切之前**校验:没连机器、没跑 preflight、更没改任何东西。
