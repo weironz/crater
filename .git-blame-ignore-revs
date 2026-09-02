@@ -1,0 +1,9 @@
+# 只含排版的提交 —— `git blame` 应当跳过它们,否则每一行的"最后改动者"
+# 都会变成一次全仓格式化,而那句话对任何人都没有用。
+#
+# 本地启用一次即可:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub 的 blame 视图会自动读这个文件。
+
+# style: 全仓跑一次 cargo fmt(默认配置)
+1e4792c975deddad91cad9c77586d22bf9b3a1bb
