@@ -1,0 +1,67 @@
+# Rust 构建前置:toolchain + 缓存 + RUSTFLAGS 覆盖。
+#
+# 这个 action 存在的理由是最后那一条(D-126)。仓库 `.cargo/config.toml` 为
+# 本地提速给 gnu target 指定了 `-fuse-ld=mold`(D-079),而 runner 上没装
+# mold —— 不覆盖 RUSTFLAGS 就直接链接失败。
+#
+# 这是一条**必须记住才能正确**的约定,而它已经被忘过一次:新建
+# pkg-compat.yml 时漏抄了 `RUSTFLAGS: ""`,CI 当场红。抽到这里之后,
+# 忘掉它的唯一方式变成"不用这个 action",而那是看得见的。
+#
+# 用法(本地 action,必须先 checkout):
+#   - uses: actions/checkout@v4
+#   - uses: ./.github/actions/setup-rust
+#
+# 不要在 workflow / job / step 的 `env:` 里再写一份 RUSTFLAGS —— 那是第二处
+# 事实来源,两处不一致时谁赢取决于 runner 的合并顺序。要改就改 rustflags 输入。
+name: setup-rust
+description: 装 Rust toolchain、开 cargo 缓存,并覆盖 .cargo/config.toml 里的 mold 链接器设置
+
+inputs:
+  targets:
+    description: "额外要装的 target triple(逗号分隔),如 x86_64-unknown-linux-musl"
+    required: false
+    default: ""
+  cache-key:
+    description: "rust-cache 的附加 key —— 矩阵构建按 target 分开缓存,别互相污染"
+    required: false
+    default: ""
+  rustflags:
+    description: >
+      RUSTFLAGS 的值。默认空串:空串**也算设置过**,足以让 cargo 忽略
+      config.toml 里的 target.*.rustflags,这正是覆盖 mold 所需要的全部。
+      要顺带上零警告门禁就传 "-D warnings"。
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ inputs.targets }}
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.cache-key }}
+
+    - name: 覆盖 RUSTFLAGS(盖掉 .cargo/config.toml 的 -fuse-ld=mold)
+      shell: bash
+      # 走 env 而不是把 inputs 直接插进 shell:输入里的引号或 $(...) 不该有
+      # 机会变成命令。
+      env:
+        RUSTFLAGS_IN: ${{ inputs.rustflags }}
+      run: echo "RUSTFLAGS=${RUSTFLAGS_IN}" >> "$GITHUB_ENV"
+
+    - name: 自检:RUSTFLAGS 确实落到了后续步骤上
+      shell: bash
+      # 写 $GITHUB_ENV 对**写它的那一步自己**不生效,所以只能另起一步来验。
+      # 这一步的意义是把静默失效换成报错(见 docs/agent-workflow.md 第三条):
+      # 万一这条覆盖没生效,当场红在这里,而不是十几分钟后现形成一句
+      # 看不出所以然的 `cannot find -fuse-ld=mold`。
+      run: |
+        if [ -z "${RUSTFLAGS+set}" ]; then
+          echo "::error::RUSTFLAGS 没设上 —— .cargo/config.toml 的 -fuse-ld=mold 会生效,而 runner 上没有 mold,构建必然以链接失败告终"
+          exit 1
+        fi
+        echo "RUSTFLAGS=[${RUSTFLAGS}]"

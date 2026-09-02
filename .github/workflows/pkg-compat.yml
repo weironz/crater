@@ -24,19 +24,16 @@ on:
         description: "tag"
         default: probe
 
-env:
-  # 覆盖仓库 .cargo/config.toml 的 -fuse-ld=mold(D-079 本地提速)——
-  # runner 上没有 mold,不覆盖直接链接失败(release.yml 同此)。
-  # RUSTFLAGS 环境变量的优先级高于 config.toml 的 target.*.rustflags。
-  RUSTFLAGS: ""
-
 jobs:
   compat:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+
+      # toolchain / 缓存 / 覆盖 .cargo/config.toml 的 mold,都在这个 action 里。
+      # 这个 workflow 就是那次教训本身:新建时漏抄了 `RUSTFLAGS: ""`,
+      # CI 直接链接失败(D-126)。抽走之后不再有"漏抄"这回事。
+      - uses: ./.github/actions/setup-rust
 
       - name: 构建 crater
         run: cargo build --release -p crater-cli
