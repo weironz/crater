@@ -2427,3 +2427,40 @@ application/vnd.crater.blueprint.config.v1+json
   本次合并前我按这条复验了 #5(断言 `--force` 在 `--help` 里)。
 - 更好的解法是给每个 agent 独立 target 目录 + 预热(例如从主仓 `cp -al` 硬
   链接一份),但那要先验证 cargo 对硬链接缓存的行为,留待需要时再做。
+
+### D-143:多架构包 `save` 出来是个 6 KB 的空壳 —— 而每一步都退出 0(issue #3)
+
+- **症状**:U 盘离线搬运这条路**端到端是断的,且每一步都成功**。
+  `crater save` 一个多架构包(yq,amd64+arm64,18.8 M 物料)产出 **6144 字节**、
+  只含顶层 index 一个 blob,日志写着 `saved`、退出 0;`load` 收下(退出 0、
+  报 "loaded");`pkg ls` 说"本地还没有蓝图包";`pkg index --store` 说"一个包
+  都没收进来";`install` 死在断网机上。
+- **根因是一个假设写了四遍**:「制品 = `config` + `layers`」。而**多架构包的
+  顶层是 image index:它既没有 `config` 也没有 `layers`,只有 `manifests`**。
+  于是每一处照这个形状写的遍历都得到**空集合而不是错误** ——
+  `export_oci_archive`、`import_entry`、`has_all_layers`(对一个空 store 回答
+  `true`)、`artifact_sizes`。`gc` 是唯一走对了 `manifests` 的地方,这也是那
+  18.8 M 字节一直安稳躺在 store 里的原因:**从来没有东西把它们带出去过**。
+- **这是 D-127 我自己引入的**:多架构 index 只补了 push/pull 两侧,没有清扫
+  消费方。比"两处各写一遍漏一处"更糟 —— 这里是**改了数据形状却没扫消费者**。
+- **`crater pkg save` / `pkg load` 当时根本不存在**。issue 的验收命令抄自设计
+  文档 §6 的命令面,我写 issue 时当它们已经实现了。设计写过 ≠ 代码有。
+- **另外三个洞**:`pull_thin`/`pull` 即便闭包已在本地也仍去 registry(断网机
+  上表现为一次长超时);`import` 把引用 tag 到 index,而在线 `pull` tag 到平台
+  子清单 —— 同一个 store,在线能装、离线报 `manifest 没有 config`。
+- **`Entry.urls` 从"定义了从不读"变成真的读**:`pkg index` 扫输出目录里的
+  `*.pkg.tar`,**只在归档自报的引用与条目相符时**才记(绝不按文件名 —— 同名
+  不同版会指向错的包,而你要装到断网机上之后才发现)。`repo::resolve` 在字节
+  不在本地时点名那个文件,或者说"U 盘只拷了索引、漏了包?"。这把 U 盘场景最
+  常见的失误从"install 够不着 registry"(会让人去查防火墙和证书)变成了真正
+  的诊断。
+- **验收(agent 真跑 + 我独立对拍)**:同一个包、同一个 store,**修复前 6144
+  字节 2 个 blob,修复后 19.7 MB 8 个 blob**;断网容器(`--network none`)里
+  `load` → `repo add file://` → `search` → 到 plan 闸门;registry `docker rm -f`
+  之后 `install` 把 yq 4.44.3 真装到 multipass w1 上,并打印"闭包已在本地 ——
+  不联系 registry";**反证**:删掉 tar 只留索引,**0 秒**报"字节不在本地",
+  不是长超时。
+- **agent 如实报了两条它没验成的**:`--network none` 的容器到不了 w1(它压根
+  没有网),所以"从未联网的机器"与"真装到真机"是两次跑分别证的;以及无
+  `ca-certificates` 的机器上 `reqwest::Client::new()` 会 **panic** 而不是报错
+  —— 真实的 air-gap 隐患,不在本 issue 范围内,值得单开。
