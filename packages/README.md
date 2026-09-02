@@ -1,5 +1,9 @@
 # 官方包索引
 
+> 这份索引只管 crater **自己发的**那几个包。
+> 想发你自己的包?看 [发布你自己的 crater 包](../docs/publishing.md) ——
+> 绝大多数情况下**一条 `crater pkg push` 就够,不需要索引、不需要 CI**。
+
 `packages/index.yaml` 是 crater 的官方包索引。订阅它:
 
 ```bash

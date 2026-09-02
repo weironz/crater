@@ -12,7 +12,7 @@
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg?logo=rust)](https://www.rust-lang.org)
 [![Platform](https://img.shields.io/badge/platform-linux%20x86__64%20%7C%20aarch64-lightgrey.svg)](https://github.com/weironz/crater/releases)
 
-[安装](#-安装) · [快速开始](#-快速开始) · [离线交付](#-离线交付整套环境一个文件) · [功能文档](docs/features/README.md) · [模块参考](docs/modules/README.md) · [设计决策](docs/decisions.md)
+[安装](#-安装) · [快速开始](#-快速开始) · [发布你的包](docs/publishing.md) · [离线交付](#-离线交付整套环境一个文件) · [功能文档](docs/features/README.md) · [模块参考](docs/modules/README.md) · [设计决策](docs/decisions.md)
 
 </div>
 
