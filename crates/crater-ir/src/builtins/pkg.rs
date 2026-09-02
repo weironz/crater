@@ -54,6 +54,22 @@ impl ResourceType for Package {
         if pkgs.is_empty() {
             anyhow::bail!("package:没有适配本机 family 的包名");
         }
+        // 有 `material:` → 包文件就在闭包里,推过去用本地文件装(D-132)。
+        // 断网现场的唯一装法;有网时它同样成立,而且**更确定** —— 装的是烤
+        // 闭包时那一刻的版本,不是执行时上游恰好给出的版本。
+        if let Some(name) = arg_str_opt(args, "material") {
+            let dir = "/tmp/crater-ospkg";
+            ctx.place_material(name, dir)?;
+            let cmd = local_pkg_cmd(dir);
+            let (code, out) = ctx.run(&cmd)?;
+            // 无论成败都清掉:几十兆的包文件留在 /tmp 里,几次部署就把磁盘吃光,
+            // 而那时的表现是**别的**东西失败。
+            let _ = ctx.run(&format!("rm -rf {}", sh(dir)));
+            if code != 0 {
+                anyhow::bail!("从闭包装包失败(exit {code}):{}", out.trim());
+            }
+            return Ok(Outcome::Changed);
+        }
         // 索引比仓库旧时,apt 会去抓已被归档取代的 .deb 版本,得到 404 而不是
         // "包不存在"。这类失败**刷新索引就能好**,而且极其常见(任何开机久了
         // 或从旧快照恢复的机器都会碰上)。
@@ -113,6 +129,23 @@ fn refresh_cmd() -> &'static str {
      else yum makecache -q || true; fi"
 }
 
+/// 从一个目录里的本地包文件安装,依赖也在同一个目录里。
+///
+/// apt 认 `./*.deb` 这种路径写法并会在**同目录内**解依赖 —— 这正是把本体与
+/// 依赖一起烤进闭包的意义。缺了哪一个它会明说,而不是装一半就算成功。
+fn local_pkg_cmd(dir: &str) -> String {
+    let d = sh(dir);
+    format!(
+        "set -e; cd {d}; \
+         if command -v apt-get >/dev/null 2>&1; then \
+           DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 \
+             -o Debug::pkgProblemResolver=true install -y --no-download --fix-broken ./*.deb \
+           || DEBIAN_FRONTEND=noninteractive dpkg -i ./*.deb; \
+         elif command -v dnf >/dev/null 2>&1; then dnf install -y ./*.rpm; \
+         else yum install -y ./*.rpm; fi"
+    )
+}
+
 fn pkg_cmd(install: bool, pkgs: &[String]) -> String {
     let list = pkgs.iter().map(|p| sh(p)).collect::<Vec<_>>().join(" ");
     let (apt_op, rpm_op) = if install {
@@ -134,15 +167,33 @@ fn pkg_cmd(install: bool, pkgs: &[String]) -> String {
 }
 
 /// 按目标 family 取包名列表。`packages: {debian: [...], rhel: [...]}`。
+/// 目标机属于哪个包管理家族。
+///
+/// 按**有哪个命令**判定,不按 `/etc/os-release` 的发行版名 —— 派生发行版
+/// (Kylin、UOS、Anolis)的名字五花八门,而"有没有 apt-get"是稳定事实。
+///
+/// 公开是因为物料层要用同一句:`os_package` 物料按家族分包名表,两处各写
+/// 一遍判定迟早会漂,而漂了之后的表现是"装了另一族的包名"。
+pub const FAMILY_PROBE: &str =
+    "if command -v apt-get >/dev/null 2>&1; then echo debian; \
+     elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then echo rhel; \
+     else echo unknown; fi";
+
 fn packages_for(ctx: &dyn Ctx, args: &ResolvedArgs) -> Result<Vec<String>> {
+    // `material:` 写法:包名表在**物料**里,由执行层按本机家族挑好后交回来
+    // (D-132)。判定用名字、安装用字节,两者出自同一份声明,不会各说各话。
+    if let Some(name) = arg_str_opt(args, "material") {
+        return Ok(match ctx.material_source(name)? {
+            Some(list) if !list.is_empty() => {
+                list.split(',').map(str::to_string).collect()
+            }
+            _ => Vec::new(),
+        });
+    }
     let Some(Yaml::Mapping(by_family)) = args.get("packages") else {
         return Ok(Vec::new());
     };
-    let (_, family) = ctx.probe(
-        "if command -v apt-get >/dev/null 2>&1; then echo debian; \
-         elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then echo rhel; \
-         else echo unknown; fi",
-    )?;
+    let (_, family) = ctx.probe(FAMILY_PROBE)?;
     let key = Yaml::String(family.trim().to_string());
     Ok(match by_family.get(&key) {
         Some(Yaml::Sequence(items)) => items.iter().map(crate::eval::scalar_to_string).collect(),

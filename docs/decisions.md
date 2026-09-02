@@ -2127,3 +2127,35 @@ application/vnd.crater.blueprint.config.v1+json
     断网现场装不上"并失败,不是静默跳过
 - **`crater pkg` 的物料层暂不收镜像**:那需要镜像树对应的层形态,不在
   issue #1 范围内。收不了时如实跳过并报出来,不假装收了。
+
+### D-132:系统包进闭包(issue #2)
+
+- **补的是什么**:`package` 的 `material:` 字段在 26 类型登记表里声明了,而
+  `packages_for` 从来没读过它 —— 声明与实现对不上。后果是 air-gap 下
+  `package:` 这类最常见的声明直接不可用(内网连 apt 源都没有是常态)。
+- **依赖解析交给发行版自己**,在**同族容器**里跑一次
+  `apt-get install --download-only` / `dnf --downloadonly --resolve`。
+  自己解析等于重写 apt 的求解器,而且解析结果与"在什么系统上解"强相关。
+  实测:nginx 一个包带出 9 个依赖,共 1.9 MiB。
+- **这给控制端加了一个依赖(docker 或 podman),目标机仍然零依赖**,且只在
+  真要烤系统包时才需要。缺了就明说缺什么、怎么补,**不静默降级**成"只下一个
+  包不带依赖" —— 那种闭包拿到现场才会发现装不上。
+- **必须指定 `--for os_image=`**:依赖集与解它的系统强相关,拿 debian 的镜像
+  解 rhel 的包名毫无意义。不给就报错并说明该加什么,与 `${substrate.arch}`
+  那条错误提示同一个套路。
+- **判定用名字、安装用字节,两者出自同一份声明**:`material_source` 对
+  `os_package` 返回**本机家族**那一列包名(现场探家族,不在构建期定死 ——
+  同一个闭包可能装到 debian 与 rhel 两种机器上)。observe 因此照常工作,
+  不需要作者把包名写两遍。
+- **家族探测抽成 `FAMILY_PROBE` 一处定义**:资源层与物料层各写一遍迟早会漂,
+  而漂了之后的表现是"装了另一族的包名"。按**有哪个命令**判定而不是按
+  `/etc/os-release` 的名字 —— 派生发行版(Kylin、UOS、Anolis)名字五花八门,
+  "有没有 apt-get"是稳定事实。
+- **有网时也用闭包更确定**:装的是烤闭包那一刻的版本,不是执行时上游恰好
+  给出的版本。
+- **验收(multipass 真虚机 w1,Ubuntu 24.04)**:
+  - `apt-get install nginx` 确认失败(`Network is unreachable`)
+  - `crater apply --closure` 装成,`nginx -v` 报 1.24.0,dpkg 里 2 个 nginx 包
+  - 重跑"跳过执行(无变更)" —— 幂等
+  - **反证**:卸掉后不带 `--closure`,报"系统包不在闭包里 —— 断网现场装不上"
+    并失败,机器上确认没装

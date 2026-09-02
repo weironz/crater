@@ -245,6 +245,29 @@ impl Ctx for MaterialCtx<'_> {
     /// 求值发生在**这一侧**,因为同名物料按 `when:` 分变体、各有各的 ref ——
     /// 资源类型拿不到作用域,自己解析不出来。
     fn material_source(&self, name: &str) -> Result<Option<String>> {
+        // 系统包:返回**本机家族**那一列包名(逗号分隔)。
+        //
+        // 家族要现场探,不能在构建期定死:同一个闭包可能装到 debian 与 rhel
+        // 两种机器上,而包名两边不同。探测复用与 `packages:` 完全相同的那句,
+        // 免得两处判定漂开。
+        if let Some(m) = self.bp.materials.iter().find(|m| m.name == name) {
+            if m.kind == MaterialKind::OsPackage {
+                let (_, fam) = self.probe(crater_ir::builtins::pkg::FAMILY_PROBE)?;
+                let key = fam.trim();
+                let crater_ir::ir::Value::Map(table) = &m.source else { return Ok(None) };
+                let Some(crater_ir::ir::Value::List(xs)) = table.get(key) else {
+                    return Ok(None); // 没为本机家族声明包名 —— 如实说不清
+                };
+                let names: Vec<String> = xs
+                    .iter()
+                    .filter_map(|v| match v {
+                        crater_ir::ir::Value::Lit(y) => Some(crater_ir::eval::scalar_to_string(y)),
+                        _ => None,
+                    })
+                    .collect();
+                return Ok(Some(names.join(",")));
+            }
+        }
         Ok(materials::resolve(self.bp, name, &self.scope).ok().map(|p| p.source))
     }
 
@@ -332,6 +355,26 @@ impl Ctx for MaterialCtx<'_> {
             let tar = oci_archive(img, &plan.source)
                 .with_context(|| format!("为镜像 `{name}` 合成 archive"))?;
             return self.inner.write_bytes(dest, &tar);
+        }
+        // 系统包:一个物料对应**一批**包文件(本体 + 依赖),`dest` 是目录。
+        if plan.kind == MaterialKind::OsPackage {
+            let prefix = format!("{}{name}/", crate::closure::OS_PKG_SCHEME);
+            let files: Vec<(&String, &PathBuf)> =
+                self.blobs.iter().filter(|(k, _)| k.starts_with(&prefix)).collect();
+            if files.is_empty() {
+                bail!(
+                    "系统包 `{name}` 不在闭包里 —— 断网现场装不上。\n\
+                     用 `crater build -f <蓝图> -o <闭包> --for os_image=<同族镜像>` 烤进去。"
+                );
+            }
+            self.inner.run(&format!("mkdir -p {}", sh(dest)))?;
+            for (key, path) in files {
+                let file = key.rsplit('/').next().unwrap_or("pkg");
+                let bytes = std::fs::read(path)
+                    .with_context(|| format!("读闭包里的 {file}"))?;
+                self.inner.write_bytes(&format!("{dest}/{file}"), &bytes)?;
+            }
+            return Ok(());
         }
         if plan.kind != MaterialKind::File {
             bail!(

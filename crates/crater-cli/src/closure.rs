@@ -64,8 +64,12 @@ impl Baker {
         let taken = baked.len() + images.len();
         self.images.extend(images);
         for b in baked {
+            // `store_blob` 内容寻址、幂等:系统包那一路已经存过一次,这里
+            // 再存只是把 BlobEntry 收进清单,不会写第二份字节。
             let entry = self.stage.store_blob(&b.source, &b.bytes)?;
-            println!("  ✓ {:<28} {:>9}  {}", b.name, human(entry.size), &entry.sha256[..12]);
+            if !b.source.starts_with(OS_PKG_SCHEME) {
+                println!("  ✓ {:<28} {:>9}  {}", b.name, human(entry.size), &entry.sha256[..12]);
+            }
             self.blobs.push(entry);
         }
         Ok(taken)
@@ -270,7 +274,25 @@ pub(crate) async fn bake_bytes(
             images.push(img);
             continue;
         }
-        // 系统包还在 apt/yum 那边,不是一份可寻址的字节(见 issue #2)。
+        // 系统包:在**同族容器**里跑一次下载,连依赖一起烤进闭包(D-132)。
+        if plan.kind == MaterialKind::OsPackage {
+            let Some(stage) = stage else {
+                skipped.push(format!("{}(系统包:此出口尚不支持)", item.label()));
+                continue;
+            };
+            let debs = bake_os_package(&bp, &item.name, profile).await?;
+            for (file, bytes) in debs {
+                // 键里带物料名:部署时按前缀一次取全这个物料的所有包文件。
+                let key = format!("{OS_PKG_SCHEME}{}/{file}", item.name);
+                if seen.insert(key.clone(), ()).is_some() {
+                    continue;
+                }
+                let entry = stage.store_blob(&key, &bytes)?;
+                println!("  ✓ {:<28} {:>9}  {}", file, human(entry.size), &entry.sha256[..12]);
+                out.push(Baked { name: item.name.clone(), source: key, bytes });
+            }
+            continue;
+        }
         if plan.kind != MaterialKind::File {
             skipped.push(format!("{} ({:?} 类型)", item.label(), plan.kind));
             continue;
@@ -309,6 +331,125 @@ pub(crate) async fn bake_bytes(
     }
     Ok((out, images, skipped))
 }
+
+/// 系统包 blob 的键前缀。部署时按 `os-pkg://<物料名>/` 一次取全。
+pub(crate) const OS_PKG_SCHEME: &str = "os-pkg://";
+
+/// 在**同族容器**里把一个 `os_package` 物料连依赖一起下载下来。
+///
+/// 为什么必须用容器:依赖解析是发行版包管理器的活,自己实现等于重写 apt 的
+/// 求解器。而解析结果与"在什么样的系统上解"强相关 —— 只有跑在同族同版本的
+/// 环境里,拿到的依赖集才对得上目标机。
+///
+/// 这给**控制端**加了一个依赖(docker 或 podman)。目标机仍然零依赖,而且
+/// 只有真的要烤系统包时才需要 —— 这是"离线装 nginx"与"根本装不了"之间的
+/// 交换。缺了就明说缺什么、怎么补,不静默降级成"只下一个包不带依赖"。
+async fn bake_os_package(
+    bp: &Blueprint,
+    name: &str,
+    profile: &[String],
+) -> Result<Vec<(String, Vec<u8>)>> {
+    let image = profile
+        .iter()
+        .find_map(|kv| kv.strip_prefix("os_image="))
+        .ok_or_else(|| anyhow::anyhow!(
+            "物料 `{name}` 是系统包 —— 需要知道**在什么系统上解依赖**才能烤。\n\
+             加一句 `--for os_image=ubuntu:24.04`(或 rockylinux:9 等),\n\
+             用与目标机同族同版本的镜像,否则依赖集对不上。"
+        ))?
+        .to_string();
+
+    let runner = ["docker", "podman"]
+        .into_iter()
+        .find(|c| std::process::Command::new(c)
+            .arg("--version").stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false))
+        .ok_or_else(|| anyhow::anyhow!(
+            "烤系统包需要控制端有 docker 或 podman —— 依赖解析只能交给发行版\n\
+             自己的包管理器,在同族容器里跑一次。\n\
+             (目标机不需要它们;这只是构建期的事。)"
+        ))?;
+
+    // 家族按镜像里有什么命令判定,不按镜像名猜 —— `ubuntu`/`debian`/`ghcr.io/...`
+    // 各种写法都有,猜名字必然漏。
+    let m = bp
+        .materials
+        .iter()
+        .find(|m| m.name == name)
+        .ok_or_else(|| anyhow::anyhow!("物料 `{name}` 不见了"))?;
+    // `os_package:` 的来源是按 family 的包名表 —— 它是**字面量**,不插值:
+    // 包名依赖目标机的家族,而家族在构建期还不知道,所以两边都写清楚才对。
+    let table = match &m.source {
+        crater_ir::ir::Value::Map(t) => t,
+        _ => bail!("物料 `{name}`:`os_package:` 应是按 family 的包名表,如 `{{debian: [nginx]}}`"),
+    };
+
+    let tmp = tempfile::tempdir()?;
+    let out = tmp.path().to_path_buf();
+    let mut got: Vec<(String, Vec<u8>)> = Vec::new();
+
+    for (family, key, script) in [
+        ("debian", "debian", DEB_SCRIPT),
+        ("rhel", "rhel", RPM_SCRIPT),
+    ] {
+        let Some(list) = table.get(key) else { continue };
+        let pkgs: Vec<String> = match list {
+            crater_ir::ir::Value::List(xs) => xs
+                .iter()
+                .filter_map(|v| match v {
+                    crater_ir::ir::Value::Lit(y) => Some(crater_ir::eval::scalar_to_string(y)),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        if pkgs.is_empty() {
+            continue;
+        }
+        println!("  · {name}({family}):在 {image} 里解 {} 个包的依赖", pkgs.len());
+        let status = std::process::Command::new(runner)
+            .args(["run", "--rm", "-v"])
+            .arg(format!("{}:/out", out.display()))
+            .arg(&image)
+            .args(["sh", "-c", &script.replace("__PKGS__", &pkgs.join(" "))])
+            .status()?;
+        if !status.success() {
+            bail!(
+                "在 {image} 里下载 {name} 的包失败 —— 检查包名与镜像是否同族。\n\
+                 (镜像里的家族由它自己有哪个包管理器决定,与镜像名无关)"
+            );
+        }
+    }
+
+    for e in std::fs::read_dir(&out)?.flatten() {
+        let p = e.path();
+        if !p.is_file() {
+            continue;
+        }
+        let fname = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if !(fname.ends_with(".deb") || fname.ends_with(".rpm")) {
+            continue;
+        }
+        got.push((fname, std::fs::read(&p)?));
+    }
+    got.sort_by(|a, b| a.0.cmp(&b.0)); // 可复现
+    if got.is_empty() {
+        bail!("物料 `{name}`:一个包文件都没下到 —— 检查包名与 `--for os_image=`");
+    }
+    Ok(got)
+}
+
+/// 只下载不安装,连依赖一起。`-o Dir::Cache::archives` 把 .deb 直接落到挂载目录。
+const DEB_SCRIPT: &str = "set -e; export DEBIAN_FRONTEND=noninteractive; \
+  apt-get update -qq; \
+  apt-get install -y --download-only --reinstall -o Dir::Cache::archives=/out __PKGS__; \
+  chmod -R a+r /out";
+
+/// dnf/yum 的等价物。`--resolve` 才会把依赖一起拉下来。
+const RPM_SCRIPT: &str = "set -e; \
+  (command -v dnf >/dev/null && dnf install -y --downloadonly --downloaddir=/out --resolve __PKGS__) \
+  || (yum install -y --downloadonly --downloaddir=/out --resolve __PKGS__); \
+  chmod -R a+r /out";
 
 /// 构建期的求值作用域:参数默认值 ⊕ `--for` 给出的目标画像。
 fn bake_scope(bp: &Blueprint, profile: &[String]) -> Result<Scope> {
