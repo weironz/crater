@@ -17,6 +17,7 @@
 
 mod agent;
 mod apply;
+mod blob_source;
 mod blueprint;
 mod build;
 mod closure;

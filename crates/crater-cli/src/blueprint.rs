@@ -20,6 +20,7 @@ use crater_ir::state::{self, DeploymentRecord, DriftVerdict, FileStore, Store};
 use crater_ir::verbs::{Change, Ctx};
 use crater_ir::{lint, parse, Blueprint};
 
+use crate::blob_source::BlobSource;
 use crate::material_ctx::{BlobMap, MaterialCtx};
 use crate::target::{connect_executor, TargetOpts};
 
@@ -163,7 +164,7 @@ pub(crate) async fn destroy_lensed(
     let fleet = build_fleet(&all_hosts, target.declared_groups()).remap(&lens.groups);
     // 退役**不**校验机群契约:契约问的是"够不够装",而拆东西不需要够 ——
     // 一个只剩一台 master 的残破集群,恰恰是最需要拆掉的那种。
-    let (_closure_dir, blobs, images) = open_closure(target)?;
+    let (_blob_src, blobs, images) = open_closure(target)?;
 
     let mut failures = 0usize;
     let mut removed_any = false;
@@ -442,8 +443,8 @@ async fn run_on_targets(
     let fleet = build_fleet(&all_hosts, target.declared_groups()).remap(&lens.groups);
     enforce_contract(&bp, &fleet)?;
     // 闭包在**连机器之前**装载并校验:字节坏了要在这里知道,不是推到一半。
-    // `_closure_dir` 必须活到本函数结束 —— blob 就在那个临时目录里。
-    let (_closure_dir, blobs, images) = open_closure(target)?;
+    // `_blob_src` 必须活到本函数结束 —— tar 闭包的解包目录归它管。
+    let (_blob_src, blobs, images) = open_closure(target)?;
 
     // 准入断言:在**碰任何机器之前**。plan 也跑它 —— preflight 是只读的,
     // 而 plan 正是闸门:等到 apply 才发现不满足,那道闸门就白设了。
@@ -1368,7 +1369,7 @@ pub async fn run_procedure(
     let hosts = target.hosts()?;
     let fleet = build_fleet(&hosts, target.declared_groups());
     enforce_contract(&bp, &fleet)?;
-    let (_closure_dir, blobs, images) = open_closure(target)?;
+    let (_blob_src, blobs, images) = open_closure(target)?;
     let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs, &images).await?;
 
     say!("procedure {proc_name} —— {} 台目标\n", targets.fleet.members.len());
@@ -1437,25 +1438,30 @@ fn base_dir(path: &Path) -> PathBuf {
 /// **顺序即 inventory 声明序**,所以 `first()` 每次跑都选中同一台。
 /// 装载 `--closure`(没给就是空表 → 目标机自己联网取)。
 ///
-/// 返回的 `TempDir` 必须被调用方**持有到部署结束** —— blob 就在里面,
-/// 提前 drop 会让所有物料在推送时凭空消失。
+/// 来源**不再在这里分叉**:`tar` / `oci://` / 空表都是 [`BlobSource`] 的实现,
+/// 这里只管构造一个、摊平成表、把这一行报出来(D-119)。加第四个后端不必改
+/// 这个函数。
+///
+/// 返回的 `Box<dyn BlobSource>` 必须被调用方**持有到部署结束** —— tar 闭包的
+/// 解包目录归它管,提前 drop 会让所有物料在推送时凭空消失。
 fn open_closure(
     target: &TargetOpts,
-) -> Result<(Option<tempfile::TempDir>, BlobMap, crate::material_ctx::ImageMap)> {
-    let Some(path) = &target.closure else {
-        return Ok((None, BlobMap::new(), Default::default()));
-    };
-    // `oci://<ref>`:物料就是包里的层,已在本地 store 里按 sha256 躺着。
-    // 不解包、不复制,直接把路径交出去 —— 于是没有临时目录要守着。
-    if let Some(r) = path.to_string_lossy().strip_prefix("oci://") {
-        let map = crate::pkg::blobs_of(r)?;
-        say!("离线闭包 {r}(包内物料)—— {} 份物料已备好\n", map.len());
-        return Ok((None, map, Default::default()));
+) -> Result<(Box<dyn BlobSource>, BlobMap, crate::material_ctx::ImageMap)> {
+    let (src, images) = crate::blob_source::open(target.closure.as_deref())?;
+    let blobs = crate::blob_source::blob_map(src.as_ref())?;
+    // 没给 `--closure` 就一个字不印:那不是"空闭包",是压根没有闭包。
+    if target.closure.is_some() {
+        let imgs =
+            if images.is_empty() { String::new() } else { format!(",{} 个镜像", images.len()) };
+        let origin = src.origin();
+        // `——` 前那个空格:路径后面要,`(包内物料)` 后面不要 —— 右括号本身
+        // 已经把两边隔开了,再补一个空格就成了双倍间距。这不是洁癖:这一行是
+        // 现场核对"字节到底从哪来"的唯一凭据,重构承诺的是**逐字**不变,
+        // 一个空格也算数。
+        let gap = if origin.ends_with(')') { "" } else { " " };
+        say!("离线闭包 {origin}{gap}—— {} 份物料{imgs}已备好\n", blobs.len());
     }
-    let (dir, map, images) = crate::closure::load(path)?;
-    let imgs = if images.is_empty() { String::new() } else { format!(",{} 个镜像", images.len()) };
-    say!("离线闭包 {} —— {} 份物料{imgs}已备好\n", path.display(), map.len());
-    Ok((Some(dir), map, images))
+    Ok((src, blobs, images))
 }
 
 /// 跑 `preflight:` 准入断言 —— 在**碰任何机器之前**。

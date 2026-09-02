@@ -383,40 +383,9 @@ pub async fn push(path: &Path, reference: &str, archs: &[String], fors: &[String
     Ok(())
 }
 
-/// 一个已拉全的包里的物料字节 → 部署侧的 `BlobMap`(源 URL → 本地路径)。
-///
-/// 不解包、不复制:store 的 blob 本来就是内容寻址的文件,直接把路径交出去。
-/// 这是 D-119 说的"第二个 blob 后端",而它没让 `BlobSource` 多一个方法。
-pub fn blobs_of(reference: &str) -> Result<crate::material_ctx::BlobMap> {
-    let store = ImageStore::open()?;
-    let m = store.resolve_manifest(reference)?;
-    let mut map = crate::material_ctx::BlobMap::new();
-    let mut missing = Vec::new();
-    for l in m["layers"].as_array().into_iter().flatten() {
-        if l["mediaType"].as_str() != Some(MT_MATERIAL) {
-            continue;
-        }
-        let Some(src) = l["annotations"][ANN_MATERIAL_SOURCE].as_str() else { continue };
-        let d = l["digest"].as_str().unwrap_or_default().trim_start_matches("sha256:");
-        let p = store.blob_path(d);
-        // 瘦拉过的包物料层不在本地。报出来而不是静默少一条 —— 少一条的表现
-        // 是"部署时目标机自己去联网下载",在断网现场就是装不上。
-        if p.exists() {
-            map.insert(src.to_string(), p);
-        } else {
-            missing.push(src.to_string());
-        }
-    }
-    if !missing.is_empty() {
-        bail!(
-            "{reference} 的 {} 份物料不在本地(瘦拉的包只有蓝图层)。\n\
-             先 `crater pkg pull {reference} --full`。缺:{}",
-            missing.len(),
-            missing.join(", ")
-        );
-    }
-    Ok(map)
-}
+// 「一个已拉全的包里的物料字节 → 部署侧的 `BlobMap`」搬去了
+// `blob_source::oci::OciSource` —— 它是 D-119 说的第二个 blob 后端,现在与 tar
+// 闭包同在一个 `BlobSource` 后面,而四个方法仍然是四个方法。
 
 /// `crater pkg pull <ref> [--into DIR] [--full]` —— 拉下来并摊回文件。
 ///
