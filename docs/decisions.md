@@ -2464,3 +2464,29 @@ application/vnd.crater.blueprint.config.v1+json
   没有网),所以"从未联网的机器"与"真装到真机"是两次跑分别证的;以及无
   `ca-certificates` 的机器上 `reqwest::Client::new()` 会 **panic** 而不是报错
   —— 真实的 air-gap 隐患,不在本 issue 范围内,值得单开。
+
+### D-144:clippy 清零并进闸门(issue #11)
+
+- **真实条数是 45 不是 51**:issue 里那个数字是几天前的,期间合并了七个 issue。
+  agent 以自己跑出来的为准并给出分布(17 条 `doc_lazy_continuation` 居首)。
+- **零新增 `#[allow]`** —— 全部在源头改掉。糊一条就少一条真信号。
+- **两个顺带发现**:一处文档注释**跨文件漂了** —— `known_systemd_units` 从
+  `apply.rs` 挪到 `main.rs` 时注释留在了原地,于是 `apply.rs` 里两行孤儿挂在
+  不相干的 `print_plan` 上,`main.rs` 只剩半句 `/// data, never hardcoded.`;
+  另有三处 **rustdoc 输出本来就是坏的**(以 `+` 开头的行被当成 markdown 列表,
+  后续行被吞进去),**用重排而不是缩进修** —— 缩进能让 lint 闭嘴,但渲染还是错的。
+- **`too_many_arguments` 当真信号处理**:`run_linear` / `connect_fleet` /
+  `run_preflight` 共用一个 `RunCtx`,五个调用点各自抄的那对参数收进函数里。
+- **agent 拒绝给一个假的零**:树里还有 **12 处既有的
+  `#[allow(clippy::too_many_arguments)]`,一处都没有说明理由**。它们早于本
+  issue,拆开是另一场重构,所以留着并如实报出。**"零"指的是未被抑制的 lint,
+  不是那 12 个函数没问题。**
+- **反证是它自己做的,我又独立复现了一遍**:追加一个 `&Vec<String>` 参数的
+  金丝雀函数,**旧闸门(`cargo build -D warnings`)退出 0,新闸门
+  (`clippy -D warnings`)退出 101**。这证明了 issue 的前提 —— clippy 那一半
+  确实是旧闸门看不见的。
+- **`components: clippy` 显式传**:runner 预装的 stable **恰好**带 clippy,
+  但那是运行环境的巧合而不是约定。这句话写进了 action 的注释里。
+- 验收:16 个测试套 626 个测试全绿;dev 与 release 两个 profile 下 clippy 均
+  退出 0(唯一剩下的一条是依赖 `proc-macro-error2` 的 future-incompat 提示,
+  不受 `-D warnings` 管)。
