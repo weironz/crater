@@ -2246,3 +2246,35 @@ application/vnd.crater.blueprint.config.v1+json
   - 补上 `sha256:` → 恢复正常判定
   - **反证**:裸 shell(没 `check:`/`creates:`)仍然照跑,`/tmp` 里的标记文件
     确实被创建 —— 逃生舱没被误伤
+
+### D-136:`facts:` 派生事实块 + `iface_in` 探针(issue #8)
+
+- **问题**:`interface: "${iface_in(params.vip_cidr)}"` 会被 **E310**(D-117/A4)
+  拒掉 —— 值位置只许名词。但"按网段找网卡"这类计算确实要做。
+- **裁定(用户拍板)**:**换个位置做**。新增顶层 `facts:` 块,声明处允许完整
+  CEL(与 `when:` 同一门语言、同一个封闭函数白名单),资源里写
+  `${facts.vip_iface}` 保持名词。**E310 一字未改** —— 那扇门仍然关着。
+  这与 `cast:` 对 selector 做过的事同构:一次声明、多处引用。
+- **不需要新词汇**:D-134 刚把 CEL 探针函数做出来,派生事实直接写成一段
+  CEL 即可,不必发明 `{ iface_in: ... }` 这样的"探针种类"语法。
+- **`iface_in(cidr)` 的网段计算放在控制端**。目标机上只跑一句
+  `ip -o -4 addr show`;在目标机上算需要 python3 或 ipcalc,而**目标零依赖
+  是硬约束** —— 为一个网卡名去要求目标装 python,这笔交易不成立。
+  纯函数因此可测:/29 与 /30 的边界、/32 精确匹配、`<< 32` 是溢出不是 0
+  (/0 单独处理),这些不该靠真机试。
+- **匹配不到返回空串,不编一个网卡名**:编出来的话 keepalived 会起来但不
+  工作 —— 一切进程都在跑,只是 VIP 不漂,那是最难查的一类故障。
+- **三条 lint 护栏**:作用域照常校验;**派生事实不能引用 `facts.*`**
+  (那要求一个可见的求值顺序,而顺序一旦可见就会被依赖);与探测事实撞名
+  出 warn(`facts.arch` 与 `substrate.arch` 是两个东西)。
+- **踩到的坑值得记**:`scope` 在**两处**构造 —— 逐台 plan 一处、
+  `connect_fleet` 一处。第一版只补了后者,于是 plan 期直接报
+  `No such key: vip_iface`。抽成 `equip_scope()` 一处实现 ——
+  同一件事在两个地方各写一遍,漏一处是迟早的(这一轮里第三次撞上这个模式:
+  D-132 的 `FAMILY_PROBE`、D-135 的判据、这次)。
+- **验收(multipass 真虚机 w1,现加一块 `vrrp0` 网卡做出专用 VRRP 网段)**:
+  - `facts: { vip_iface: "iface_in(params.vip_cidr)" }` → 渲染出 **`vrrp0`**,
+    而 `substrate.iface` 给的是 `ens3` —— **这正是这个功能存在的理由**
+  - E310 仍然拦住值位置的函数调用(`${iface_in(...)}` 报 error)
+  - `facts.b: "facts.a"` 报 error
+  - `facts.arch` 与 `substrate.arch` 撞名报 warn

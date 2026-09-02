@@ -28,6 +28,48 @@ fn run(p: &Option<Prober>, cmd: &str) -> Result<String, cel::ExecutionError> {
     }
 }
 
+
+/// `ip -o -4 addr show` 的输出里,哪块网卡持有落在 `cidr` 内的地址。
+///
+/// 匹配不到返回**空串**,不编一个网卡名出来:编出来的话 keepalived 会起来
+/// 但不工作,而那是最难查的一类故障 —— 一切进程都在跑,只是 VIP 不漂。
+///
+/// 纯函数,所以可测:网段算术的边界(/31、/32、跨字节前缀)不该靠真机试。
+fn iface_in_cidr(out: &str, cidr: &str) -> String {
+    let Some(net) = parse_cidr(cidr) else { return String::new() };
+    for line in out.lines() {
+        // `2: ens33    inet 10.219.111.111/24 brd ... scope global ens33`
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let (Some(name), Some(addr)) = (f.get(1), f.iter().position(|x| *x == "inet").and_then(|i| f.get(i + 1)))
+        else {
+            continue;
+        };
+        let Some((ip, _)) = addr.split_once('/') else { continue };
+        let Ok(ip) = ip.parse::<std::net::Ipv4Addr>() else { continue };
+        if in_net(u32::from(ip), net) {
+            return (*name).to_string();
+        }
+    }
+    String::new()
+}
+
+/// `10.0.0.0/24` → (网络地址, 掩码)。写不出来就返回 None,由调用方报空。
+fn parse_cidr(s: &str) -> Option<(u32, u32)> {
+    let (a, p) = s.trim().split_once('/')?;
+    let base = u32::from(a.parse::<std::net::Ipv4Addr>().ok()?);
+    let bits: u32 = p.parse().ok()?;
+    if bits > 32 {
+        return None;
+    }
+    // `<< 32` 在 Rust 里是溢出而不是 0 —— /0 要单独处理。
+    let mask = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
+    Some((base & mask, mask))
+}
+
+fn in_net(ip: u32, (net, mask): (u32, u32)) -> bool {
+    ip & mask == net
+}
+
 /// shell 单引号转义 —— 探针参数来自蓝图,不能直接拼进命令行。
 fn shq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -155,6 +197,21 @@ impl Scope {
             // 退出码而不是输出:`cmd_ok` 问的是"成不成",不是"说了什么"。
             let out = run(&p, &format!("if {cmd} >/dev/null 2>&1; then echo yes; else echo no; fi"))?;
             Ok(V::Bool(out.trim() == "yes"))
+        });
+
+        // 持有该网段地址的网卡名(D-136)。
+        //
+        // `substrate.iface` 给的是**默认路由**那块网卡,绝大多数 HA 部署够用
+        // (VRRP 是 L2 协议,VIP 与主地址同网段本就是前提)。这个函数补的是
+        // 专用 VRRP 网段的情形 —— 那时默认路由网卡是错的答案。
+        //
+        // 网段计算放在**控制端**:目标机上只跑一句 `ip -o -4 addr show`。
+        // 在目标机上算需要 python3 或 ipcalc,而"目标零依赖"是硬约束 ——
+        // 为一个网卡名去要求目标装 python,这笔交易不成立。
+        let p = probe.clone();
+        ctx.add_function("iface_in", move |cidr: Arc<String>| -> Result<V, cel::ExecutionError> {
+            let out = run(&p, "ip -o -4 addr show 2>/dev/null")?;
+            Ok(V::String(iface_in_cidr(&out, &cidr).into()))
         });
 
         let p = probe;
@@ -418,5 +475,46 @@ mod tests {
         // Ansible 会把未定义变量渲染成空串,错误一路沉默地流下去。
         let err = scope().resolve(&v("\"${params.nope}\"")).unwrap_err();
         assert!(err.contains("params.nope"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod cidr_tests {
+    use super::iface_in_cidr;
+
+    const OUT: &str = "\
+1: lo    inet 127.0.0.1/8 scope host lo
+2: ens33    inet 10.219.111.111/24 brd 10.219.111.255 scope global dynamic ens33
+3: ens34    inet 192.168.50.7/28 brd 192.168.50.15 scope global ens34
+4: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0";
+
+    #[test]
+    fn picks_the_interface_holding_an_address_in_that_subnet() {
+        assert_eq!(iface_in_cidr(OUT, "10.219.111.0/24"), "ens33");
+        // 专用 VRRP 网段:默认路由网卡(ens33)是**错的**答案,这正是
+        // 这个函数存在的理由(D-136)。
+        assert_eq!(iface_in_cidr(OUT, "192.168.50.0/28"), "ens34");
+        assert_eq!(iface_in_cidr(OUT, "172.17.0.0/16"), "docker0");
+    }
+
+    #[test]
+    fn no_match_yields_empty_not_a_guess() {
+        // 编一个网卡名出来的话,keepalived 会起来但不工作 —— 一切进程都在跑,
+        // 只是 VIP 不漂,那是最难查的一类故障。
+        assert_eq!(iface_in_cidr(OUT, "10.9.9.0/24"), "");
+        assert_eq!(iface_in_cidr(OUT, "不是网段"), "");
+        assert_eq!(iface_in_cidr(OUT, "10.0.0.0/99"), "");
+    }
+
+    #[test]
+    fn prefix_arithmetic_holds_at_the_edges() {
+        // 前缀边界:.7 在 /29(覆盖 .0-.7)里,不在 /30(.0-.3)里。
+        assert_eq!(iface_in_cidr(OUT, "192.168.50.0/29"), "ens34");
+        assert_eq!(iface_in_cidr(OUT, "192.168.50.0/30"), "");
+        // /32 精确匹配单个地址。
+        assert_eq!(iface_in_cidr(OUT, "10.219.111.111/32"), "ens33");
+        assert_eq!(iface_in_cidr(OUT, "10.219.111.112/32"), "");
+        // /0 匹配一切 —— 第一条(lo)胜出;`<< 32` 是溢出不是 0,单独处理过。
+        assert_eq!(iface_in_cidr(OUT, "0.0.0.0/0"), "lo");
     }
 }

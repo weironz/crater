@@ -30,6 +30,18 @@ fn list() {
     say!("  substrate.name        inventory 里的机器名 —— 部署记录按它归档");
     say!("  substrate.roles       该机器所属的组(含嵌套传播)");
     say!();
+    say!("蓝图还可以用 `facts:` 声明**派生事实** —— 声明处做计算,值位置保持名词:");
+    say!("  facts:");
+    say!("    vip_iface: \"iface_in(params.vip_cidr)\"   # 持有该网段地址的网卡");
+    say!("  然后在资源里写 ${{facts.vip_iface}}。");
+    say!();
+    say!("可在 `when:` / `facts:` / `preflight:` 里调用的探针(封闭集合):");
+    say!("  port_owner(端口)      谁在监听 —— 空串 = 没人");
+    say!("  path_exists(路径)     路径在不在");
+    say!("  cmd_ok(命令)          只读命令退出码为 0");
+    say!("  service_state(名字)   systemd 单元状态");
+    say!("  iface_in(网段)        持有该网段地址的网卡名 —— 匹配不到是空串");
+    say!();
     say!("用法:`when: \"substrate.family == 'debian'\"`,或物料 URL 里 ${{substrate.arch}}。");
     say!("白名单之外不探 —— `substrate.` 不是一个能夹带任意命令的口子。");
     say!("构建期没有目标机可探,所以 `crater build` 要用 `--for arch=amd64` 补上。");

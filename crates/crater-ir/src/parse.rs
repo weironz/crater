@@ -181,7 +181,7 @@ fn parse_structure(text: &str) -> Result<Blueprint> {
         &[
             "name", "version", "description", "params", "requires", "materials",
             "preflight", "types", "resources", "procedures", "health", "parts",
-            "fleet", "cast",
+            "fleet", "cast", "facts",
         ],
         "blueprint",
     )?;
@@ -200,6 +200,7 @@ fn parse_structure(text: &str) -> Result<Blueprint> {
         requires: parse_requires(m.get(Y::from("requires")))?,
         materials: parse_materials(m.get(Y::from("materials")))?,
         preflight: parse_preflight(m.get(Y::from("preflight")), &cast)?,
+        facts: parse_derived_facts(m.get(Y::from("facts")))?,
         types: parse_types(m.get(Y::from("types")))?,
         resources: parse_resources(m.get(Y::from("resources")), &cast)?,
         procedures: parse_procedures(m.get(Y::from("procedures")), &cast)?,
@@ -669,6 +670,36 @@ fn parse_params(v: Option<&Y>) -> Result<Params> {
                 desc: get_str(b, "desc").or_else(|| get_str(b, "description")),
             },
         );
+    }
+    Ok(out)
+}
+
+/// `facts:` —— 派生事实(D-136)。
+///
+/// 形状是 `名字: <CEL 表达式>`,与 `when:` 同一门语言。这里**允许完整 CEL**
+/// (含探针函数),因为这是声明位置;资源参数那边仍然只许名词(E310)。
+/// 一次计算、多处引用,正是 `cast:` 对 selector 做过的事。
+fn parse_derived_facts(v: Option<&Y>) -> Result<BTreeMap<String, CelExpr>> {
+    let Some(v) = v else { return Ok(BTreeMap::new()) };
+    let m = v.as_mapping().ok_or_else(|| Error::parse("`facts:` 应是 map(名字: 表达式)"))?;
+    let mut out = BTreeMap::new();
+    for (k, val) in m {
+        let name = k
+            .as_str()
+            .ok_or_else(|| Error::parse("`facts:` 的键应是字符串"))?
+            .to_string();
+        // 值可以写成 `${...}` 或裸表达式 —— 前者与蓝图别处一致,后者更短。
+        // 两种都收,剥掉 `${}` 之后按同一条路编译。
+        let raw = scalar_to_string(val);
+        let src = raw
+            .trim()
+            .strip_prefix("${")
+            .and_then(|r| r.strip_suffix('}'))
+            .unwrap_or(raw.trim())
+            .to_string();
+        let expr = CelExpr::compile(&src)
+            .map_err(|e| Error::parse(format!("facts.{name}:{e}")))?;
+        out.insert(name, expr);
     }
     Ok(out)
 }

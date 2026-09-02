@@ -51,21 +51,14 @@ const ROOT_SCOPES: &[&str] = &["params", "env", "substrate", "item", "facts", "o
 
 /// 只读探针函数白名单(裁定 A)。CEL 本身不允许用户定义函数;这里再把**宿主提供**的
 /// 函数集也钉成封闭集合 —— 否则"非图灵完备"会被一个万能的 `exec()` 悄悄破坏。
-/// CEL 里可调的函数 —— **封闭集合**(D-117/A)。
-///
-/// ⚠️ 前四个是**只 lint 放行、求值上下文从未注册**的探针(D-133 实测:
-/// 运行期报 `Undeclared reference to 'port_owner'`)。它们不是笔误 ——
-/// rustfs 试金石(裁定 A)正用着 `port_owner`,那是一条设计决定。
-/// 缺的是求值侧:`cel::Context::add_function` 要求 `'static + Send + Sync`,
-/// 借不进 `&dyn Ctx`,所以实现它是一次架构改动。见 issue #14。
-///
-/// 在那之前,preflight 里用到它们会**在求值处明确失败**(而不是被当成"断言
-/// 为假")—— 措辞上分得开,是因为"写错的断言"与"环境不满足"修法完全不同。
+/// CEL 里可调的函数 —— **封闭集合**(D-117/A),全部只读,实现见
+/// `eval.rs::add_probes`。
 const PROBE_FUNCS: &[&str] = &[
     "port_owner",   // 谁在监听这个端口(空串 = 没人)
     "path_exists",
     "cmd_ok",       // 只读命令退出码为 0
     "service_state",
+    "iface_in",     // 持有该网段地址的网卡名(D-136)
     "has",          // CEL 标准宏
     "size",
 ];
@@ -292,6 +285,37 @@ pub fn lint(bp: &Blueprint) -> Vec<Diagnostic> {
                 format!("materials.{}", m.name),
                 m.line,
                 "同名物料重复且没有 `when:` 区分 —— 变体必须可判定".into(),
+            );
+        }
+    }
+
+    // ---- 派生事实(D-136)----
+    for (name, e) in &bp.facts {
+        // 作用域:可以引用 params / substrate / env,**不能引用 facts 自己**。
+        // 允许 facts 互相引用就要定义求值顺序,而顺序一旦可见,作者迟早会
+        // 依赖它 —— 那是一条不该开的口子。要串联就写成一个表达式。
+        check_scope(e, &format!("facts.{name}"), None, &param_names, false, &mut push);
+        if e.roots().contains("facts") {
+            push(
+                Severity::Error,
+                format!("facts.{name}"),
+                None,
+                "派生事实不能引用 `facts.*` —— 那要求一个可见的求值顺序,\n\
+                 而顺序一旦可见就会被依赖。要串联就写成一个表达式。"
+                    .into(),
+            );
+        }
+        // 与探测事实撞名:`${facts.arch}` 与 `${substrate.arch}` 会长得很像,
+        // 而它们是两个东西。不禁止,但要说出来。
+        if crate::facts::Facts::names().contains(&name.as_str()) {
+            push(
+                Severity::Warn,
+                format!("facts.{name}"),
+                None,
+                format!(
+                    "`facts.{name}` 与探测事实 `substrate.{name}` 同名 —— \
+                     两者是不同的东西,读的人容易搞混。换个名字更清楚。"
+                ),
             );
         }
     }

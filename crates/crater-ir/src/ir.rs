@@ -229,6 +229,15 @@ pub struct Blueprint {
     /// 选角表:给 selector 起名字,单点定义、全篇引用。
     /// 解析期已展开进各处 selector,这里保留原表供 `inspect` 与报错使用。
     pub cast: BTreeMap<String, Selector>,
+    /// **派生事实**:声明处做计算,值位置保持名词(D-136)。
+    ///
+    /// 为什么需要它:`interface: "${iface_in(params.vip_cidr)}"` 会被 E310
+    /// 拒掉 —— 值位置只许名词,这是 D-117/A4 刻意关上的门。但"按网段找网卡"
+    /// 这类计算确实要做,答案是**换个位置做**:在这里算一次,资源里写
+    /// `${facts.vip_iface}`。
+    ///
+    /// 每台机器各算各的(网卡名本就因机而异),在事实探全之后求值一次。
+    pub facts: BTreeMap<String, CelExpr>,
     pub version: Option<String>,
     pub description: Option<String>,
     pub params: Params,

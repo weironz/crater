@@ -544,6 +544,7 @@ async fn run_on_targets(
         scope.substrate = facts;
         scope.fleet = Some(fleet.clone());
         scope.identify(&fleet_name(host), &host.roles);
+        equip_scope(&bp, host, &mut scope).await?;
 
         // 再包上物料解析能力 —— 传输层不该知道"物料"是什么。
         let ctx = MaterialCtx::new(transport, &bp, scope.clone(), blobs.clone(), base_dir(path))
@@ -845,6 +846,31 @@ async fn run_on_targets(
 /// 这种最误导人的差异。
 pub(crate) async fn probe_ctx(host: &Host) -> Result<Box<dyn Ctx>> {
     build_transport(host).await
+}
+
+/// 给这台机器的作用域装上探测能力与派生事实(D-134 / D-136)。
+///
+/// **两处都要调**:逐台 plan 一处、`connect_fleet` 一处。抽成函数是因为
+/// 第一版只补了后者,于是 plan 期 `${facts.*}` 直接报 `No such key` ——
+/// 同一件事在两个地方各写一遍,漏一处是迟早的。
+async fn equip_scope(
+    bp: &Blueprint,
+    host: &crater_core::spec::Host,
+    scope: &mut plan::Scope,
+) -> Result<()> {
+    // 派生事实多半要调探针函数,所以 prober 必须先就位。
+    let probe_ctx: std::sync::Arc<dyn Ctx> = build_transport(host).await?.into();
+    scope.prober = Some(std::sync::Arc::new(move |cmd: &str| {
+        probe_ctx.probe(cmd).map(|(_code, out)| out).map_err(|e| e.to_string())
+    }));
+    // 在事实探全之后求值一次,逐台各算各的 —— 网卡名本就因机而异。
+    for (name, expr) in &bp.facts {
+        let v = scope.eval(expr).map_err(|e| {
+            anyhow::anyhow!("{}:派生事实 `facts.{name}` 求值失败 —— {e}", host_label(host))
+        })?;
+        scope.facts.insert(name.clone(), v);
+    }
+    Ok(())
 }
 
 async fn build_transport(host: &Host) -> Result<Box<dyn Ctx>> {
@@ -1255,16 +1281,7 @@ async fn connect_fleet<'a>(
         scope.substrate = facts;
         scope.fleet = Some(fleet.clone());
         scope.identify(&name, &host.roles);
-        // CEL 探针函数(`port_owner(9000)` 之类)的落地能力(D-134)。
-        //
-        // 单独一条传输,**每台建一次、全程复用**:上面那条马上要被
-        // `MaterialCtx` 拿走所有权,而 `Scope` 是 `Clone` 且要活到整轮结束。
-        // 早先写成"每次调用现连"——一份蓝图几条断言就是几次 SSH 握手,
-        // 五台机器就是十几次,而它们探的是同一台机器。
-        let probe_ctx: std::sync::Arc<dyn Ctx> = build_transport(host).await?.into();
-        scope.prober = Some(std::sync::Arc::new(move |cmd: &str| {
-            probe_ctx.probe(cmd).map(|(_code, out)| out).map_err(|e| e.to_string())
-        }));
+        equip_scope(bp, host, &mut scope).await?;
         ctxs.insert(
             name.clone(),
             MaterialCtx::new(transport, bp, scope.clone(), blobs.clone(), base.to_path_buf())

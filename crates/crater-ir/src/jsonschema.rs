@@ -67,6 +67,7 @@ fn top_level_properties() -> Value {
                          "additionalProperties": param_def() },
         "materials":   { "type": "array",  "description": "离线闭包物料", "items": material_def() },
         "preflight":   { "type": "array",  "description": "只读准入断言:任一失败则整个部署不开始" },
+        "facts":       { "type": "object", "description": "派生事实:名字 → CEL 表达式(可调探针函数)。声明处做计算,资源里写 ${facts.名字} 保持名词" },
         "types":       { "type": "array",  "description": "自定义资源类型(L2):探针 + procedure 补齐五动词" },
         "resources":   { "type": "array",  "description": "期望态资源,按声明序收敛",
                          "items": { "$ref": "#/$defs/resource" } },
