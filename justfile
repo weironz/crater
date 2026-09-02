@@ -41,6 +41,9 @@ test:
 #
 # 跟着 build/test 一起用 --release:同一份依赖产物,不为 lint 再编一遍 dev。
 check:
+    # fmt 最先:它最快,而且排版一乱后面两道门的输出就难读了。
+    # `--check` 只报不改 —— 闸门不该偷偷改你的代码然后说自己通过了。
+    cargo fmt --all --check
     RUSTFLAGS="" cargo clippy --workspace --all-targets --release -- -D warnings
     RUSTFLAGS="-D warnings" cargo build --release --all-targets
     RUSTFLAGS="-D warnings" cargo test --release

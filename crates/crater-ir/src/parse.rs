@@ -754,9 +754,11 @@ fn parse_params(v: Option<&Y>) -> Result<Params> {
         let stage = match b.get(Y::from("stage")).and_then(|v| v.as_str()) {
             Some("build") => Stage::Build,
             Some("deploy") | None => Stage::Deploy,
-            Some("apply") => return Err(Error::parse(format!(
+            Some("apply") => {
+                return Err(Error::parse(format!(
                 "param `{name}`:`stage: apply` 已废止 —— apply 是动词,参数分期请写 `stage: deploy`"
-            ))),
+            )))
+            }
             Some(other) => {
                 return Err(Error::parse(format!("param `{name}`:未知 stage `{other}`")))
             }

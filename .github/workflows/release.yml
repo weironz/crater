@@ -32,7 +32,7 @@ jobs:
       # 覆盖 mold 那一半在 action 里,不用也不该在这里重复。
       - uses: ./.github/actions/setup-rust
         with:
-          components: clippy
+          components: clippy,rustfmt
           rustflags: "-D warnings"
 
       # clippy 是上面那道门禁看不见的另一半:RUSTFLAGS 的 `-D warnings` 只管
@@ -42,6 +42,10 @@ jobs:
       # 值不在洁癖,在于**下一条警告能被看见**:几十条噪音里混进一句
       # "这个 unwrap 会 panic",没人会注意到(D-144)。
       # 跟 test 一样用 --release,复用同一份依赖产物。
+      # fmt 放在最前面:它最快,而且排版一乱,后面两道门的输出就难读了。
+      # 判据是 `--check`(只报不改)—— CI 不该偷偷改代码然后说自己通过了。
+      - run: cargo fmt --all --check
+
       - run: cargo clippy --workspace --all-targets --release --locked -- -D warnings
 
       - run: cargo test --release --locked
