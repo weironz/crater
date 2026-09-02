@@ -138,8 +138,42 @@ fn entry_of(reference: &str, cfg: &serde_json::Value, platforms: Vec<String>, di
 /// `--store`(本地 store 里的全部蓝图包)。**没有"扫一个 registry"这一种**
 /// —— 那正是 OCI 问不出来的东西,假装能问只会在别人的 registry 上失败。
 pub async fn index(sources: &[String], from_store: bool, out: &std::path::Path, merge: bool) -> Result<()> {
-    let mut idx = if merge && out.exists() {
-        load_index_file(out)?
+    let mut idx = if merge {
+        if out.exists() {
+            // 读不动就**报错**,绝不退回空索引 —— `--merge` 的输入正是 `out`
+            // 自己,把"读坏了"当成"没有历史"会把整份历史一次性写没。
+            let existing = load_index_file(out)?;
+            // 解析得动 ≠ 没坏。截断在 `entries:` 那一行之后的索引是**合法
+            // YAML**(`entries` 成了 null,serde 收成空 map),于是 merge 从
+            // 零开始、退出 0、把整份历史换成这一版 —— 一点症状都没有。真机
+            // 上复现过。
+            //
+            // 拦得住是因为**空索引根本不该存在**:下面那道 `n == 0` 的闸决定
+            // 了 `pkg index` 自己永远写不出一份零个包的索引。所以磁盘上出现
+            // 一份,只可能是写坏了或放错了文件。
+            //
+            // 这条只管 merge 这一处,不下沉进 load_index_file —— 别人发布的
+            // 空索引拉回来缓存着是合法的,`repo list` 不该因此报未同步。
+            if existing.entries.is_empty() {
+                bail!(
+                    "{} 是一份零个包的索引 —— `pkg index` 写不出这种东西,\
+                     多半是写了一半被打断或放错了文件。并进去会把历史清空,不干了",
+                    out.display()
+                );
+            }
+            say!("并入 {}({} 个包)", out.display(), existing.entries.len());
+            existing
+        } else {
+            // `--merge` 指着一个不存在的文件只有两种可能:第一次发布(正常),
+            // 或者 CI 里 `-o` 写错了 / 取上一版索引的那步没成(事故)。这里
+            // 分不出是哪种,但后者的后果与索引损坏完全一样 —— 整份历史被这
+            // 一版顶掉,而输出看起来和一次成功的 merge 一模一样。
+            //
+            // 所以不能一声不吭。仍然不报错:第一次发布必须能跑,否则每条
+            // 流水线都要为"第一次"多写一个分支。
+            crate::oops!("  · --merge 的 {} 不存在 —— 当作首次发布,从空索引开始", out.display());
+            Index::default()
+        }
     } else {
         Index::default()
     };
@@ -199,9 +233,17 @@ pub async fn index(sources: &[String], from_store: bool, out: &std::path::Path, 
         bail!("一个包都没收进来 —— 索引不写了(免得把已有的覆盖成空)");
     }
     idx.generated = now_rfc3339();
-    std::fs::write(out, serde_yaml::to_string(&idx)?)?;
+    write_atomically(out, serde_yaml::to_string(&idx)?.as_bytes())?;
     say!();
-    say!("索引 → {}({} 个包,{} 个版本)", out.display(), idx.entries.len(), n);
+    // 报**索引里**的版本数,不是本次收到的 n。merge 时两者差得很远,而"这一
+    // 版并进去之后历史还在不在"恰恰只能从总数看出来 —— 之前只印 n,一次成功
+    // 的增量发布和一次把历史写没的全量重写在终端上长得一模一样。
+    let total: usize = idx.entries.values().map(|v| v.len()).sum();
+    if merge {
+        say!("索引 → {}({} 个包,{total} 个版本;本次 {n} 个)", out.display(), idx.entries.len());
+    } else {
+        say!("索引 → {}({} 个包,{total} 个版本)", out.display(), idx.entries.len());
+    }
     say!("托管到任意静态 HTTP,对方 `crater repo add <名> <地址>` 就能搜。");
     Ok(())
 }
@@ -237,6 +279,23 @@ fn save_repos(r: &Repos) -> Result<()> {
         std::fs::create_dir_all(d)?;
     }
     std::fs::write(p, serde_yaml::to_string(r)?)?;
+    Ok(())
+}
+
+/// 先写同目录的临时文件再 rename —— **索引不能有"写了一半"这个状态**。
+///
+/// `fs::write` 是先截断再写:进程在中间被打断(Ctrl-C、CI 超时、磁盘满),
+/// 留下的就是一份截断的索引。而增量发布的下一次 `--merge` 读的正是这个文件,
+/// 于是一次中断吃掉整份历史。同目录 + rename 才是原子的(跨文件系统的
+/// rename 会失败,所以临时文件必须是兄弟而不是 /tmp 里的)。
+fn write_atomically(out: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let name = out
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "index.yaml".into());
+    let tmp = out.with_file_name(format!(".{name}.tmp"));
+    std::fs::write(&tmp, bytes).with_context(|| format!("写索引 {}", tmp.display()))?;
+    std::fs::rename(&tmp, out).with_context(|| format!("落位索引 {}", out.display()))?;
     Ok(())
 }
 
@@ -511,6 +570,115 @@ mod tests {
         assert_eq!(n, "x");
         assert_eq!(ent.version, "4.44.3");
         assert_eq!(ent.blueprint_version, "1");
+    }
+
+    /// 增量发布的正向判据:并进新版本后**老版本还在**,且 semver 降序。
+    ///
+    /// 与 `upsert_is_idempotent_*` 的区别是这条走了一趟盘 —— merge 的输入
+    /// 不是内存里的 Index,而是上一次写出去的那个文件。
+    #[test]
+    fn merge_from_disk_keeps_the_old_versions() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("index.yaml");
+
+        let mut first = Index::default();
+        first.upsert("yq", e("4.40.5"));
+        std::fs::write(&p, serde_yaml::to_string(&first).unwrap()).unwrap();
+
+        // 下一次发布只知道自己这一版,历史全从文件里来。
+        let mut merged = load_index_file(&p).unwrap();
+        merged.upsert("yq", e("4.44.3"));
+        merged.upsert("rustfs", e("1.0.0"));
+
+        let vs: Vec<&str> = merged.entries["yq"].iter().map(|x| x.version.as_str()).collect();
+        assert_eq!(vs, vec!["4.44.3", "4.40.5"], "老版本必须留着,且新的排前面");
+        assert!(merged.entries.contains_key("rustfs"), "另一个包也要在");
+    }
+
+    /// **反证**:`--merge` 读到一份坏索引必须报错,不能退回空索引。
+    ///
+    /// 退回空索引不会有任何症状 —— 命令成功、文件写出、只是历史没了,
+    /// 要等到有人装旧版本时才发现。这四种坏法都是真会发生的:写了一半被
+    /// 打断(空 / 截断)、放错文件(不是索引)、旧版 crater 写的(apiVersion)。
+    #[test]
+    fn a_broken_index_is_an_error_never_an_empty_start() {
+        let d = tempfile::tempdir().unwrap();
+        let good = serde_yaml::to_string(&{
+            let mut i = Index::default();
+            i.upsert("yq", e("4.40.5"));
+            i
+        })
+        .unwrap();
+
+        let cases: [(&str, String); 4] = [
+            ("empty", String::new()),
+            ("garbage", "这不是索引\n".to_string()),
+            // 截在半个 token 上(写盘被打断的常见样子)。
+            ("truncated", "apiVersion: crater.pkg/v1\ngenerated: x\nentries:\n  yq:\n  - vers".into()),
+            ("wrong_api", good.replace(API_VERSION, "crater.pkg/v99")),
+        ];
+        for (name, body) in cases {
+            let p = d.path().join(format!("{name}.yaml"));
+            std::fs::write(&p, body).unwrap();
+            assert!(load_index_file(&p).is_err(), "{name}:坏索引却读成功了 —— merge 会把历史写没");
+        }
+
+        // 对照组:好索引照常读得出来,免得上面四条是因为读函数整个坏了才过。
+        let p = d.path().join("good.yaml");
+        std::fs::write(&p, &good).unwrap();
+        assert_eq!(load_index_file(&p).unwrap().entries.len(), 1);
+    }
+
+    /// 截断**恰好落在 `entries:` 之后**的索引是合法 YAML —— 这里钉住的就是
+    /// "解析得动"这个事实本身,好让人知道防线为什么不在 load_index_file 里。
+    ///
+    /// `entries` 变成 null、serde 收成空 map,于是 merge 从零开始、退出 0、
+    /// 把整份历史换成这一版。真机上复现过。挡它的闸在 `index()`(空索引不是
+    /// 合法的 merge 底本),端到端用例在 tests/pkg_index_cli.rs。
+    #[test]
+    fn a_truncation_at_the_entries_line_still_parses() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("cut.yaml");
+        std::fs::write(&p, "apiVersion: crater.pkg/v1\ngenerated: 2026-09-02T00:00:00Z\nentries:\n").unwrap();
+
+        let idx = load_index_file(&p).expect("截断在 entries: 之后仍是合法 YAML");
+        assert!(idx.entries.is_empty(), "它看起来就是一份'没有任何包'的好索引 —— 危险正在这里");
+    }
+
+    /// 索引落盘不留"写了一半"的中间态,也不留临时文件。
+    ///
+    /// 临时文件必须是**同目录的兄弟** —— 放 /tmp 的话跨文件系统 rename 会
+    /// 直接失败,而这条路径在 CI 容器里天天走。
+    #[test]
+    fn writing_an_index_is_atomic_and_leaves_no_litter() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("index.yaml");
+
+        write_atomically(&p, b"first").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"first");
+
+        // 覆盖一份已有的,同样不留残渣。
+        write_atomically(&p, b"second").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"second");
+
+        let leftovers: Vec<_> = std::fs::read_dir(d.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "index.yaml")
+            .collect();
+        assert!(leftovers.is_empty(), "留下了临时文件:{leftovers:?}");
+    }
+
+    /// 目标目录不存在时要说清是**哪个路径**写不了。
+    ///
+    /// 之前 `fs::write` 的错误裸奔成 "No such file or directory (os error 2)",
+    /// 在 CI 日志里根本看不出是 `-o` 指错了地方。
+    #[test]
+    fn a_write_into_a_missing_directory_names_the_path() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("nope").join("index.yaml");
+        let e = write_atomically(&p, b"x").unwrap_err();
+        assert!(format!("{e:#}").contains("nope"), "错误没指出路径:{e:#}");
     }
 
     #[test]
