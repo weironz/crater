@@ -22,6 +22,7 @@ use crater_ir::ir::MaterialKind;
 use crater_ir::materials;
 use crater_ir::Blueprint;
 
+#[cfg(test)]
 use crate::material_ctx::BlobMap;
 
 /// 一次烘焙的累积状态 —— 栈级 bake 靠它把多份蓝图的闭包并成一个。
@@ -148,42 +149,23 @@ pub async fn build_stack(stack_path: &Path, out: &Path, profile: &[String], sets
     baker.seal(&st.name, out)
 }
 
-/// 装载一个闭包 → (解包目录, 按**源 URL** 索引的 blob 表)。
-///
-/// 键是源 URL 而不是物料名:同名物料按 `when:` 分成多个变体,各有各的 URL。
-/// 按名字索引会让"多架构"这个最常见的场景取到错误的字节 —— 而且是**静默**取错。
-///
-/// 返回的 `TempDir` 必须活到部署结束:blob 就在里面。
-pub fn load(path: &Path) -> Result<(tempfile::TempDir, BlobMap, crate::material_ctx::ImageMap)> {
-    let tmp = tempfile::tempdir()?;
-    let stage = bundle::unpack(path, tmp.path())
-        .with_context(|| format!("解包闭包 {}", path.display()))?;
-    let manifest = stage
-        .read_manifest()
-        .with_context(|| format!("{} 不像是 crater 闭包(读不到 manifest)", path.display()))?;
-    // 校验一次全部 blob。慢几秒,换的是"部署到一半才发现字节坏了"永远不会发生。
-    stage.verify(&manifest).context("闭包完整性校验")?;
+// 装载一侧(把 closure.tar 解开、校验、摊成 blob 表)搬去了
+// `blob_source::tar::TarClosure` —— 那里与 `oci://` 包共用同一个 `BlobSource`,
+// 于是 `open_closure()` 不再需要按来源分叉(D-119)。这个文件只剩**烘焙**。
 
-    let map: BlobMap = manifest
-        .blobs
-        .iter()
-        .map(|b| (b.source_url.clone(), stage.blob_path(&b.sha256)))
-        .collect();
-    // 镜像按 **ref** 索引(不是物料名):同名物料按 `when:` 分变体,各有各的 ref。
-    let images: crate::material_ctx::ImageMap = manifest
-        .images
-        .iter()
-        .map(|i| {
-            (
-                i.reference.clone(),
-                crate::material_ctx::ClosureImage {
-                    manifest_digest: i.manifest_digest.clone(),
-                    blobs_dir: stage.blobs_dir(),
-                },
-            )
-        })
-        .collect();
-    Ok((tmp, map, images))
+/// 装载一个刚烤好的闭包 —— 只给本文件的测试用。
+///
+/// 装载一侧已经搬走,但**烤 → 装**这条往返仍然要整条走完:这些用例问的正是
+/// "写进去的字节能不能原样取回来",只测其中一半等于没测。
+///
+/// 返回的 `BlobSource` 必须被调用方持有 —— blob 在它管的临时目录里。
+#[cfg(test)]
+fn load(
+    path: &Path,
+) -> Result<(Box<dyn crate::blob_source::BlobSource>, BlobMap, crate::material_ctx::ImageMap)> {
+    let (src, images) = crate::blob_source::open(Some(path))?;
+    let map = crate::blob_source::blob_map(src.as_ref())?;
+    Ok((src, map, images))
 }
 
 /// `--set k=v` → 参数覆盖。
@@ -584,7 +566,9 @@ mod tests {
         // 重打包的目标必须**在 stage 之外** —— 否则 tar 会把自己卷进去。
         let repacked = scratch.path().join("bad.tar");
         bundle::pack(stage.root.as_path(), &repacked).unwrap();
-        let err = load(&repacked).unwrap_err().to_string();
+        // `BlobSource` 是 trait object,没有 `Debug` —— 用 `err()` 取错误本身,
+        // 而不是 `unwrap_err()`(它要求成功值可打印)。
+        let err = load(&repacked).err().expect("坏闭包必须被拒").to_string();
         assert!(err.contains("完整性") || err.contains("checksum"), "{err}");
     }
 
