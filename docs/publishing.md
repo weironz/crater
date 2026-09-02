@@ -13,8 +13,8 @@ crater 没有中心仓库,也不打算有。包就是 OCI 制品,推到**你自�
 什么都不用建。
 
 ```bash
-# 知道引用就直接装
-crater apply oci://ghcr.io/someone/pkgs/redis:7.2 -i inventory.yaml
+# 知道引用就直接装(`oci://` 前缀可省)
+crater apply ghcr.io/someone/pkgs/redis:7.2 -i inventory.yaml
 
 # 或者订阅别人的索引,之后用名字
 crater repo add theirs https://example.com/index.yaml
@@ -36,14 +36,17 @@ crater pkg push ./my-redis ghcr.io/<你>/pkgs/redis:7.2
 对方装它:
 
 ```bash
-crater apply oci://ghcr.io/<你>/pkgs/redis:7.2 -i inventory.yaml
+crater apply ghcr.io/<你>/pkgs/redis:7.2 -i inventory.yaml
 ```
+
+`oci://` 前缀可省。写了也认 —— helm 3.8+ 是那个写法,从 helm 过来的人照着
+敲不会撞墙。
 
 版本发现也不需要索引 —— OCI 自带 `tags/list`:
 
 ```bash
-crater pkg tags ghcr.io/<你>/pkgs/redis           # 有哪些版本
-crater apply 'oci://ghcr.io/<你>/pkgs/redis:7.*'   # 范围解析
+crater pkg tags ghcr.io/<你>/pkgs/redis      # 有哪些版本
+crater apply 'ghcr.io/<你>/pkgs/redis:7.*'    # 范围解析
 ```
 
 **这一档覆盖了绝大多数情况。** 内部团队之间、给客户交付、开源一个包 ——

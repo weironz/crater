@@ -92,8 +92,11 @@ crater search yq                                  # 有什么
 crater apply yq -i inventory.yaml                 # 拉下来 → 印计划 → 收敛
 
 # 二、直连引用 —— 不需要配任何仓库
-crater apply oci://ghcr.io/weironz/crater/yq:4.44.3 -i inventory.yaml
+crater apply ghcr.io/weironz/crater/yq:4.44.3 -i inventory.yaml
 ```
+
+`oci://` 前缀**可省**(写了也认 —— helm 3.8+ 是那么写的,照着敲不会撞墙)。
+判据是带不带 `/`:带的是引用,直连 registry;不带的是包名,走索引。
 
 索引只为回答"**有哪些包**":OCI 规范里没有搜索端点,所以那件事必须靠一个
 索引文件 —— 好处是它能随闭包一起进 U 盘。而**版本发现**不需要索引,
@@ -108,7 +111,7 @@ crater pkg index oci://ghcr.io/weironz/crater/yq -o index.yaml  # 做成可搜�
 不需要索引:
 
 ```bash
-crater apply 'oci://ghcr.io/weironz/crater/yq:4.*'   # 4 这条线上的最新
+crater apply 'ghcr.io/weironz/crater/yq:4.*'   # 4 这条线上的最新
 crater apply 'yq:^4.44'                    # >=4.44,不跨主版本
 crater apply 'yq:~4.44.1'                  # 只放行补丁号
 crater apply 'yq:>=4.10, <4.44'            # 逗号/空格分隔 = 全部满足
@@ -162,46 +165,54 @@ health:
 
 ## 📦 离线交付:整套环境一个文件
 
+**栈**把多份蓝图按序组合起来 —— 顺序就是语义,`apply` 自上而下,`destroy` 逆序:
+
 ```yaml
-# demo-stack.yaml —— project:有序编排多个 task
-name: demo-stack
-plays:
-  - { name: 装 yq,       source: yq,     hosts: all }
-  - { name: 部署 rustfs, source: rustfs, hosts: all }
+# platform.stack.yaml
+crater: 1
+stack: platform
+uses:
+  - { blueprint: os-baseline, groups: { all: nodes } }      # 基线先行
+  - { blueprint: postgres-ha, groups: { db: pg_nodes } }    # 存储在反代之前
+  - { blueprint: nginx-lb,    groups: { lb: edge } }
 ```
 
 ```bash
-# 构建机(在线)
-crater build -f demo-stack.yaml            # 逐 play 构建,play source 锁定为制品 ref
-crater save crater/demo-stack:latest -o demo-stack.oci   # 项目 + 全部 task 闭包 → 一个文件
+# 构建机(在线):把全部物料烤进一个闭包文件
+crater build -f platform.stack.yaml -o platform.closure.tar
 
-# 离线现场(零联网)
-crater apply demo-stack.oci -i inventory.yaml            # 按 play 顺序 recipe-replay
-crater delete demo-stack.oci -i inventory.yaml           # 逆序卸载
+# 离线现场(零联网):U 盘拷过去,物料从闭包里推,目标机不下载任何东西
+crater apply -f platform.stack.yaml --closure platform.closure.tar -i inventory.yaml
+crater destroy -f platform.stack.yaml -i inventory.yaml --yes    # 逆序退场
+```
 
-# 或者走私有 registry(zot / Harbor)
-crater tag crater/demo-stack:latest reg:5000/demo-stack:1
-crater push reg:5000/demo-stack:1          # 闭包 push:task 制品一起走
-crater pull reg:5000/demo-stack:1          # 另一台控制机:闭包 pull
-crater apply reg:5000/demo-stack:1 --offline -i inventory.yaml
+包也能整个搬走 —— `pkg save` 连物料导成一个 tar,对面 `pkg load` 收进来:
+
+```bash
+crater pkg save ghcr.io/<你>/pkgs/redis:7.2 -o /media/usb/redis.pkg.tar
+crater pkg index --store -o /media/usb/index.yaml     # 索引一起带,对面照样能搜
 ```
 
 ## 🧰 命令总览
 
 | 类别 | 命令 |
 |---|---|
-| 部署 | `apply` `plan` `delete`(source:task 文件 / 裸名 / project / `.oci` / 镜像 ref) |
-| 离线打包 | `build`(`--set k=v` 覆盖、源指纹缓存、`--no-cache`)· `save` · `load` |
-| 制品库 | `images` `pull` `push` `tag` `rmi` `gc` `inspect` `registry login` |
-| 状态 | `task list/show/history`(`--verify` 漂移检测)· `ui`(看板,`--token` 鉴权) |
-| 工具 | `run`(临时命令)· `cp`(推文件)· `doctor`(离线诊断)· `ai` · `create inventory` |
+| 写蓝图 | `create` `types` `facts` `schema` `lint` `fmt` `inspect` |
+| 部署 | `apply` `plan` `verify` `destroy` `procedure`(source:蓝图/栈文件 · `<名字>` · OCI 引用) |
+| 包与分发 | `pkg`(push/pull/tags/index/save/load/inspect)· `install` · `repo` · `search` · `build` |
+| 本地存储 | `images` `pull` `push` `tag` `rmi` `gc` `save` `load` `registry login` |
+| 运维排查 | `ui`(看板,`--token` 鉴权)· `run`(临时命令)· `cp`(推文件)· `doctor`(离线诊断) |
+| crater 自己 | `update`(自更新,与安装脚本同一套规矩) |
+
+`crater --help` 是这张表的权威版本 —— 它由代码生成,有测试钉着不许漂。
 
 ## 🏗️ 工程结构
 
 ```
 crater/
 ├── crates/
-│   ├── crater-core/   # 引擎:task / engine(模块 lowering)/ executor(SSH)/ bundle / store
+│   ├── crater-core/   # 引擎:executor(SSH)/ bundle / store(OCI)/ state / dag / diagnose
+│   ├── crater-ir/     # 蓝图 IR:五个动词、资源注册表、CEL、plan/apply 管线
 │   └── crater-cli/    # `crater` 二进制(同一个二进制也是目标机上的 agent)
 ├── library/           # 交付库:每个子目录一个自闭环交付(yq/ docker/ rustfs/ zot/ k8s/ …)
 ├── docs/

@@ -22,7 +22,7 @@ crater apply yq -i inventory.yaml
 
 ```bash
 crater pkg tags ghcr.io/weironz/crater/yq       # 不需要索引
-crater apply 'oci://ghcr.io/weironz/crater/yq:4.*'   # 范围解析也不需要
+crater apply 'ghcr.io/weironz/crater/yq:4.*'         # 范围解析也不需要
 ```
 
 ## 怎么更新
