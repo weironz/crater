@@ -890,6 +890,85 @@ pub fn registry_of(reference: &str) -> String {
     }
 }
 
+/// `~/.docker/config.json` 里这个 registry 的凭据。
+///
+/// 只认明文的 `auth` 字段(base64 的 `user:password`)。凭据助手
+/// (`credsStore` / `credHelpers`)不认:那要 exec 一个外部程序,而 crater
+/// 的气质是静态单二进制、不依赖宿主上装了什么 —— 装了助手的人用
+/// `crater registry login` 一句话就能补上。
+fn docker_login(registry: &str) -> Option<(String, String)> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::Path::new(&home).join(".docker").join("config.json");
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    docker_login_in(&v, registry)
+}
+
+/// 上面那条的纯函数内核 —— 与文件系统无关,于是可测。
+fn docker_login_in(v: &serde_json::Value, registry: &str) -> Option<(String, String)> {
+    use base64::Engine as _;
+    let auths = v.get("auths")?.as_object()?;
+    // docker.io 在那个文件里的键是历史遗留的 v1 端点,不是主机名。
+    let keys: Vec<String> = if registry == "docker.io" {
+        ["https://index.docker.io/v1/", "index.docker.io", "docker.io"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        vec![registry.to_string(), format!("https://{registry}")]
+    };
+    let entry = keys.iter().find_map(|k| auths.get(k))?;
+    let raw = entry.get("auth")?.as_str()?;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(raw).ok()?;
+    let text = String::from_utf8(decoded).ok()?;
+    let (u, p) = text.split_once(':')?;
+    Some((u.to_string(), p.to_string()))
+}
+
+#[cfg(test)]
+mod docker_auth_tests {
+    use super::docker_login_in;
+    use serde_json::json;
+
+    /// `dXNlcjpwYXNz` = base64("user:pass")。
+    fn cfg() -> serde_json::Value {
+        json!({"auths": {
+            "https://index.docker.io/v1/": {"auth": "dXNlcjpwYXNz"},
+            "registry.cn-shenzhen.aliyuncs.com": {"auth": "dXNlcjpwYXNz"}
+        }})
+    }
+
+    #[test]
+    fn docker_io_is_found_under_its_legacy_v1_key() {
+        // docker.io 在那个文件里的键是历史遗留的 v1 端点,不是主机名 ——
+        // 按主机名直查会**静默**退成匿名,表现为莫名其妙的 401。
+        assert_eq!(
+            docker_login_in(&cfg(), "docker.io"),
+            Some(("user".into(), "pass".into()))
+        );
+    }
+
+    #[test]
+    fn a_plain_host_is_found_as_is() {
+        assert_eq!(
+            docker_login_in(&cfg(), "registry.cn-shenzhen.aliyuncs.com"),
+            Some(("user".into(), "pass".into()))
+        );
+    }
+
+    #[test]
+    fn an_unknown_registry_yields_nothing_not_a_wrong_credential() {
+        assert_eq!(docker_login_in(&cfg(), "ghcr.io"), None);
+    }
+
+    #[test]
+    fn a_creds_helper_entry_is_not_mistaken_for_a_password() {
+        // credsStore 的条目没有 `auth` 字段 —— 认不出来就该退成匿名,
+        // 而不是拿一个空口令去撞认证。
+        let v = json!({"auths": {"x.io": {}}, "credsStore": "pass"});
+        assert_eq!(docker_login_in(&v, "x.io"), None);
+    }
+}
+
 /// Persist credentials for a registry (`crater registry login`).
 pub fn save_login(registry: &str, username: &str, password: &str) -> crate::Result<()> {
     let path = auth_path();
@@ -908,7 +987,13 @@ pub fn save_login(registry: &str, username: &str, password: &str) -> crate::Resu
     Ok(())
 }
 
-/// Resolve registry auth for a reference: stored creds → Basic, else Anonymous.
+/// Resolve registry auth: crater 自己的 `auth.json` → `~/.docker/config.json`
+/// → 匿名。
+///
+/// 认 docker 的登录不是图省事,是因为**别的 OCI 工具都认**(helm、oras、
+/// skopeo、buildah)。让已经 `docker login` 过的人再跑一遍 `crater registry
+/// login`,等于要他把口令在第二个地方再写一遍 —— 而口令被抄写的次数,
+/// 就是它泄漏的机会次数。crater 只读不写那个文件。
 fn auth_for(reference: &str) -> oci_client::secrets::RegistryAuth {
     use oci_client::secrets::RegistryAuth;
     let reg = registry_of(reference);
@@ -916,8 +1001,12 @@ fn auth_for(reference: &str) -> oci_client::secrets::RegistryAuth {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok());
     if let Some(c) = f.and_then(|f| f.registries.get(&reg).cloned()) {
-        RegistryAuth::Basic(c.username, c.password)
-    } else {
+        return RegistryAuth::Basic(c.username, c.password);
+    }
+    if let Some((u, p)) = docker_login(&reg) {
+        return RegistryAuth::Basic(u, p);
+    }
+    {
         RegistryAuth::Anonymous
     }
 }

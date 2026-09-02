@@ -2049,3 +2049,34 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   (既有测试 `a_remote_material_without_a_digest_admits_it_cannot_tell`),
   换版本时目标机保留旧字节并报"无变更"。带 `--full` 或声明 `sha256:` 即正常
   ——实测 `--full` 降级 4.44.3 → 4.40.5 成功。
+
+### D-129:ACR 个人版实测拒收;crater 认 docker 的登录
+
+**ACR 实测**(推最小蓝图包到 `registry.cn-shenzhen.aliyuncs.com/willspace`):
+
+```
+403 DENIED — unknown manifest class for
+application/vnd.crater.blueprint.config.v1+json
+```
+
+- **卡在 manifest,不是 blob**:config 与蓝图层都已上传成功,报错来自
+  `/v2/<repo>/manifests/<tag>`。ACR 拦的是 manifest class 白名单。
+- **不是换个写法能绕过的**:我们用的已经是最保守的 OCI 1.0 写法。唯一出路
+  是把 config 伪装成 `vnd.oci.image.config.v1+json`、改用注解识别包 ——
+  那会砸掉"制品身份靠 `config.mediaType`"这条与其它五家 registry 共同的
+  约定,为一家最保守的 registry 让所有人降级。**不做。**
+- **同一个 ACR 收普通镜像没问题**(release workflow 一直在推),所以问题
+  精确地是"自定义制品",与凭据、网络、区域无关。
+- **更正 D-123**:"以 ACR 为兼容地板设计"这句站不住 —— 它不在地板上,在
+  地板**之下**。兼容地板是 Docker Hub(已实测通过)。
+
+**crater 认 `~/.docker/config.json`**:
+
+- 别的 OCI 工具都认(helm / oras / skopeo / buildah)。让已经 `docker login`
+  过的人再跑一遍 `crater registry login`,等于要他把口令在第二个地方再写
+  一遍 —— 而**口令被抄写的次数,就是它泄漏的机会次数**。crater 只读不写。
+- 优先级:crater 自己的 `auth.json` → docker config → 匿名。
+- 只认明文 `auth` 字段;凭据助手(`credsStore` / `credHelpers`)不认 ——
+  那要 exec 一个外部程序,与静态单二进制的气质冲突;装了助手的人用
+  `crater registry login` 一句话补上。**认不出就退匿名,不拿空口令去撞认证。**
+- 实测:Docker Hub 与 ACR 两家都是靠它连上的(ACR 那个 403 正说明认证过了)。

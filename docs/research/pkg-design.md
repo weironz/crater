@@ -28,15 +28,18 @@
    列举、`_catalog` 不在规范里且 Docker Hub 禁用。Helm 的答案是静态 `index.yaml`,
    crater 也该走这条:**registry 管存储与不可变 digest,索引文件管列举与搜索**,
    而且索引文件能随闭包进 U 盘。
-5. **兼容性地板是 OCI 1.0 风格**:自定义 `config.mediaType` + 真实 config blob +
+5. **兼容性地板是 OCI 1.0 风格**(实测基线:Docker Hub 与 zot 均通过):自定义 `config.mediaType` + 真实 config blob +
    自定义层 mediaType。**不要**依赖 OCI 1.1 的 `artifactType` + 空描述符(ACR 拒收,
    与本仓库 buildx 那次撞的是同一堵墙)、**不要**依赖 referrers API(GHCR / Docker
    Hub 没有)、**不要**依赖 `_catalog`。版本发现只用 `tags/list`(dist-spec 1.0 必选)。
 6. **一键安装不绕过 plan 闸门。** `crater install` = 拉蓝图包 → 读契约 → 对账机群
    → 生成 app 文件 → plan → 停在闸门前;`--yes` 才 apply。"一键"省的是找包、填参、
    对账那几步,不是省"先看 diff 再动手"。
-7. **注意你自己的 ACR**:阿里云 ACR 的自定义 OCI 制品是**企业版专属**,个人版
-   能不能收 crater 包,要先实测;Docker Hub(2022-10 起)与 zot 是稳妥的验证场。
+7. **阿里云 ACR 个人版收不了 crater 包 —— 已实测**:`403 DENIED — unknown
+   manifest class`,卡在 manifest 白名单(blob 都传上去了)。这不是换个写法能
+   绕过的,唯一出路是为它一家把制品身份从 `config.mediaType` 降级成注解 ——
+   不做。公网用 Docker Hub / GHCR,自建用 zot / Harbor,要 ACR 得是企业版。
+   详见 §3.5。
 
 ## 二、起点:crater 已经走完一半
 
@@ -127,7 +130,11 @@ registry 内解决**,全部外包给 ArtifactHub、registry UI 或 Git。
 **跨 registry 的公分母**:(a) 制品身份放 `config.mediaType`,config 用真实 blob;
 (b) 层用自定义 mediaType;(c) 制品关联不依赖 referrers,要关联就用 tag fallback;
 (d) 仓库枚举不依赖 `_catalog`,用 `tags/list`;(e) zot 搜索只当增强。
-**以 ACR 为兼容性地板设计,referrers / 搜索做成运行时探测 + 降级。**
+
+> **更正(2026-09-02,实测之后)**:初稿写的是"以 ACR 为兼容性地板设计"。
+> 实测表明这句话站不住 —— **阿里云 ACR 个人版根本收不了任何自定义制品**,
+> 它不在地板上,而在地板**之下**。兼容地板应当是 **Docker Hub**(已实测通过)。
+> 详见 §3.5。
 
 ## 四、两个可分发物:设计答案
 
@@ -305,7 +312,7 @@ entries:
 | --- | --- | --- | --- | --- |
 | **zot**(本地) | ✓ 原样 | ✓ 原样 | 未设 ✓ | 过 |
 | **Docker Hub** | ✓ 原样 | ✓ 原样 | 未设 ✓ | **过** |
-| **阿里云 ACR** | — | — | — | 未测(见下) |
+| **阿里云 ACR**(个人版) | ✗ **拒收** | — | — | **不可用**,见 §3.5 |
 
 Docker Hub 上 `config` 535 B、蓝图层 572 B —— `pkg inspect` 的全部下载量就是
 前者,这是"零层下载读契约"的实测数字。判据本身也验了反向:把一个普通 docker
@@ -316,9 +323,8 @@ Docker Hub 上 `config` 535 B、蓝图层 572 B —— `pkg inspect` 的全部�
 (2022-10-31 之后才具备这个能力),前提是继续用 `pull_manifest_raw` + `pull_blob`
 低层 API,不走高层 `pull`。
 
-**关于你自己的 ACR**:自定义 OCI 制品是**企业版专属**能力,个人版的行为文档未提及。
-落地第一步必须实测 `registry.cn-shenzhen.aliyuncs.com/willspace` 收不收 crater 包;
-不收就用 Docker Hub 或自建 zot(library 里已有蓝图)。**不要在设计上假设 ACR 可用。**
+**关于你自己的 ACR:已实测,不可用。** 见 §3.5 —— 设计里不假设它可用这一条,
+从"谨慎"变成了"必须"。
 
 ## 九、与已有设计的关系
 
@@ -363,6 +369,34 @@ ACR 个人版收不收自定义制品仍是**第二阶段开工前必须实测**
 **真机没用上实验室**:192.168.73.x 的路由被本机的 Meta 代理截住(TCP 连得上、
 SSH 握手即断),隧道也没起。改用一个 sshd 容器当目标 —— 对 crater 而言它就是
 一台开着 22 端口、要口令登录的机器,验的东西一样。
+
+### 3.5 阿里云 ACR 个人版:实测拒收(2026-09-02)
+
+推一个最小蓝图包(config 535 B + 蓝图层 572 B)到
+`registry.cn-shenzhen.aliyuncs.com/willspace`,结果:
+
+```
+403 DENIED
+unknown manifest class for application/vnd.crater.blueprint.config.v1+json
+```
+
+三点值得记下:
+
+1. **卡在 manifest,不是 blob。** 报错来自 `/v2/<repo>/manifests/<tag>`,
+   config 与蓝图层两个 blob 都已上传成功。ACR 拦的是 **manifest class 白名单**
+   —— 它只认自己列举过的那几种 config 类型。
+2. **这不是"换个写法"能绕过的。** 我们已经用的是最保守的 OCI 1.0 写法
+   (真实 config blob、不设 `artifactType`);研究表明 1.1 写法(空描述符 +
+   `artifactType`)ACR 拒得更早。剩下的唯一出路是把 config 伪装成
+   `vnd.oci.image.config.v1+json` 并改用注解识别包 —— 那会砸掉"制品身份靠
+   `config.mediaType`"这条与其它五家 registry 共同的约定,为一家最保守的
+   registry 让所有人降级。**不做。**
+3. **同一个 ACR 收普通镜像没问题**(本仓库的 release workflow 一直在推),
+   所以问题精确地是"自定义制品",与凭据、网络、区域无关。
+
+**结论**:crater 包要放公网,用 Docker Hub 或 GHCR;要自建,用 zot 或 Harbor;
+要用 ACR,得是**企业版**。文档里"以 ACR 为兼容地板"那句已更正 —— 它不在
+地板上,在地板之下。
 
 ### 第四阶段验收记录(2026-09-02)
 
