@@ -1,0 +1,24 @@
+name: 缺陷
+description: 与预期不符的行为
+labels: ["bug"]
+body:
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 命令、环境、目标机形态。能在容器里复现的最好。
+    validations: { required: true }
+  - type: textarea
+    id: expect
+    attributes:
+      label: 期望 vs 实得
+    validations: { required: true }
+  - type: dropdown
+    id: silent
+    attributes:
+      label: 是不是静默失效
+      description: |
+        **静默失效优先修** —— 报错的 bug 人能看见,静默的 bug 要到出事才发现。
+        本仓库栽过好几次(D-113 的 `on:`、D-115 的 `env:`、D-128 的版本覆盖)。
+      options: ["是:没有报错,结果却是错的", "否:有明确报错"]
+    validations: { required: true }

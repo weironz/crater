@@ -1,0 +1,45 @@
+name: 任务(给人或 Agent)
+description: 一件可以独立做完、可以独立验收的事
+labels: ["task"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **一个 issue = 一次可提交的改动。** 做不完就拆,拆不动就先开一个
+        `kind:spike` 去调研 —— 一个说不清验收标准的 issue,交给谁做都会跑偏。
+  - type: textarea
+    id: what
+    attributes:
+      label: 要做什么
+      description: 一两句说清。不写实现方案,写要达到的状态。
+    validations: { required: true }
+  - type: textarea
+    id: why
+    attributes:
+      label: 为什么现在做
+      description: |
+        它挡住了什么?不做会怎样?这一栏是排期的依据 ——
+        写不出来的,多半现在不该做。
+    validations: { required: true }
+  - type: textarea
+    id: accept
+    attributes:
+      label: 验收判据
+      description: |
+        **可执行的判据**,不是"跑起来没问题"。命令 + 期望输出最好,
+        真机/真 registry 上跑得出来的更好。反证(什么情况下它该失败)加分。
+      placeholder: |
+        - `crater pkg save yq:1 -o /tmp/x.tar && crater pkg load /tmp/x.tar` 后
+          `crater pkg ls` 能看见 yq:1
+        - 反证:损坏 tar 后 load 报错且不写入 store
+    validations: { required: true }
+  - type: textarea
+    id: context
+    attributes:
+      label: 上下文
+      description: 相关文件、决策编号(D-xxx)、已知的坑。Agent 靠这一栏省掉一轮摸索。
+  - type: input
+    id: blocked
+    attributes:
+      label: 依赖
+      description: 要先做完哪个 issue?填 `#12` 这样的编号,没有就留空。
