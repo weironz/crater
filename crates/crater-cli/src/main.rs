@@ -483,6 +483,13 @@ enum Cmd {
         /// 连物料层一起拉 —— 离线现场才需要。
         #[arg(long)]
         full: bool,
+        /// 换版本时,上一版目录里的本地改动"判不出"或"已漂移"也照旧升级。
+        ///
+        /// 旧目录一个字节都不删,只是那些改动**不会**跟到新版本。
+        /// `--yes` 跨不过这道闸门:那句话的意思是"计划我看过了",
+        /// 不是"我的改动随便丢"。
+        #[arg(long)]
+        force: bool,
         #[command(flatten)]
         target: TargetOpts,
     },
@@ -827,8 +834,9 @@ async fn main() -> Result<()> {
             chmod,
         } => push_file(&host, &user, password, port, &src, &dst, chmod).await,
         Cmd::Images => images::list_images().await,
-        Cmd::Install { source, name, repo, set, yes, full, target } => {
-            pkg::install(&source, &target, &set, name.as_deref(), repo.as_deref(), yes, full).await
+        Cmd::Install { source, name, repo, set, yes, full, force, target } => {
+            pkg::install(&source, &target, &set, name.as_deref(), repo.as_deref(), yes, full, force)
+                .await
         }
         Cmd::Pkg { cmd } => match cmd {
             PkgCmd::Push { path, reference, arch, fors } => {

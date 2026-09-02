@@ -703,9 +703,304 @@ mod tests {
         v.sort_by(|a, b| semver_key(b).cmp(&semver_key(a)));
         assert_eq!(v, vec!["1.10.0", "1.2.0", "1.2", "1.2.0-rc1", "0.9.9"]);
     }
+
+    // ─── 升级路径(D-141) ───
+
+    #[test]
+    fn a_registry_port_is_not_a_version() {
+        // `zot:5031/lib/yq` 的 `5031` 是端口。认错了的话,两个版本会摊进
+        // 同一个 `yq-5031/`,D-128 那次事故原样复活。
+        assert_eq!(tag_of("yq:4.40.5"), "4.40.5");
+        assert_eq!(tag_of("zot:5031/lib/yq:4.40.5"), "4.40.5");
+        assert_eq!(tag_of("zot:5031/lib/yq"), "latest");
+        assert_eq!(tag_of("yq"), "latest");
+        assert_eq!(
+            tag_of("zot:5031/lib/yq@sha256:0123456789abcdef0123"),
+            "sha256-0123456789ab"
+        );
+    }
+
+    #[test]
+    fn two_versions_never_share_a_directory() {
+        // 这条就是本 issue 的全部理由:目录名带上版本,"装错版本"从
+        // "被拦下来"变成"发生不了"。
+        assert_eq!(pkg_dir_name("yq", "zot:5031/lib/yq:4.44.3"), "yq-4.44.3");
+        assert_eq!(pkg_dir_name("yq", "zot:5031/lib/yq:4.40.5"), "yq-4.40.5");
+        assert_ne!(
+            pkg_dir_name("yq", "yq:4.44.3"),
+            pkg_dir_name("yq", "yq:4.40.5")
+        );
+        // 手敲出来的怪引用不能把包摊到别的目录去:结果永远是**一段**路径。
+        for r in ["yq:../../etc", "yq:4.0 rc", "yq:/etc/passwd", "yq:."] {
+            let d = pkg_dir_name("yq", r);
+            assert_eq!(
+                Path::new(&d).components().count(),
+                1,
+                "{r} 摊成了 {d} —— 不是单段路径"
+            );
+            assert!(!d.contains('/'), "{r} 摊成了 {d}");
+        }
+        assert_eq!(pkg_dir_name("yq", "yq:4.0 rc"), "yq-4.0-rc");
+    }
+
+    #[test]
+    fn repointing_an_app_file_touches_exactly_one_line() {
+        // 反证:params / 注释 / 键序被顺手重排,等于升级悄悄改了人的文件。
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("yq.app.yaml");
+        let before = "# yq —— 把这份蓝图钉在这群机器上。\n\
+                      app:\n  \
+                      name: yq\n  \
+                      blueprint: yq-4.44.3/yq.blueprint.yaml\n  \
+                      inventory: inv.yaml\n  \
+                      params:\n    \
+                      version: 4.44.3\n";
+        std::fs::write(&f, before).unwrap();
+        assert!(repoint_app(&f, Path::new("yq-4.40.5/yq.blueprint.yaml")).unwrap());
+        let after = std::fs::read_to_string(&f).unwrap();
+        assert!(after.contains("  blueprint: yq-4.40.5/yq.blueprint.yaml\n"));
+        assert!(!after.contains("4.44.3/yq.blueprint.yaml"));
+        // 除了那一行,逐行相同。
+        let a: Vec<&str> = before.lines().collect();
+        let b: Vec<&str> = after.lines().collect();
+        assert_eq!(a.len(), b.len());
+        assert_eq!(
+            a.iter().zip(&b).filter(|(x, y)| x != y).count(),
+            1,
+            "只该动 blueprint 那一行"
+        );
+    }
+
+    #[test]
+    fn an_app_file_without_a_blueprint_line_is_left_alone() {
+        // 没有那一行就报出来让人自己指 —— 不要凭猜往里塞一行。
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("x.app.yaml");
+        std::fs::write(&f, "app:\n  name: x\n").unwrap();
+        assert!(!repoint_app(&f, Path::new("x-2/x.blueprint.yaml")).unwrap());
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "app:\n  name: x\n");
+    }
+
+    #[test]
+    fn a_package_dir_with_no_package_in_the_store_admits_it_cannot_tell() {
+        // 与 D-135 同一条纪律:比不了要说"判不出",不能报"没改动" ——
+        // 后者会让升级闸门在最该拦的时候放行。
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.blueprint.yaml"), "name: a\n").unwrap();
+        match compare_to_package(dir.path(), "no-such-registry.invalid/nope:1") {
+            Drift::Unknown(_) => {}
+            other => panic!("该是判不出,却得到 {other:?}"),
+        }
+    }
 }
 
 // ───────────────────────────── install ─────────────────────────────
+
+// ─── 升级路径:目录布局与本地改动闸门(D-141) ───
+
+/// 引用里的版本段 —— 摊包目录名的后半截。
+///
+/// 取的是**引用的 tag**,不是契约里的 `version:`。后者是蓝图自己的版本,
+/// 与被装的东西的版本不是一回事:`library/yq` 的 `version: "1"` 在
+/// `yq:4.44.3` 与 `yq:4.40.5` 两个包里是同一个值 —— 拿它做目录名等于
+/// 把 D-128 那次事故原样复制一遍。tag 才是使用者敲进去、也真正区分这
+/// 两次安装的那一段。
+fn tag_of(reference: &str) -> String {
+    // digest 引用没有 tag,拿短 digest 顶上 —— 它同样是"不同就是不同"。
+    if let Some((_, d)) = reference.split_once('@') {
+        let hex = d.rsplit(':').next().unwrap_or(d);
+        return format!("sha256-{}", &hex[..hex.len().min(12)]);
+    }
+    // `zot:5031/lib/yq` 里的 `:5031` 是端口不是 tag —— 只认最后一段路径里的冒号。
+    let last = reference.rfind('/').map(|i| i + 1).unwrap_or(0);
+    match reference[last..].rsplit_once(':') {
+        Some((_, tag)) if !tag.is_empty() => tag.to_string(),
+        _ => "latest".to_string(),
+    }
+}
+
+/// 摊包目录名:`<包名>-<版本>`。
+///
+/// OCI tag 的字符集(`[A-Za-z0-9_.-]`)本就是文件名安全的;这里仍然过一道,
+/// 因为引用可以是人手敲的,而一个带 `/` 的"tag"会把包摊到别处去。
+fn pkg_dir_name(name: &str, reference: &str) -> String {
+    let tag: String = tag_of(reference)
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+') { c } else { '-' })
+        .collect();
+    format!("{name}-{tag}")
+}
+
+/// 一次目录对账的结论。**三态**,与 D-135 同一套诚实:判不出要说判不出,
+/// 不能拿"没比出差别"冒充"没有差别"。
+#[derive(Debug, PartialEq)]
+enum Drift {
+    Same,
+    Changed(Vec<String>),
+    Unknown(String),
+}
+
+/// `reference` 的蓝图层字节(本地 store 里那份)。
+fn pkg_layer_bytes(store: &ImageStore, reference: &str) -> Option<Vec<u8>> {
+    let m = store.resolve_manifest(reference).ok()?;
+    let layer = m["layers"]
+        .as_array()?
+        .iter()
+        .find(|l| l["mediaType"].as_str() == Some(MT_PKG_LAYER))?;
+    let d = layer["digest"].as_str()?;
+    std::fs::read(store.blob_path(d.trim_start_matches("sha256:"))).ok()
+}
+
+/// 摊开的包目录 vs 它当初那个包 —— 有没有人动过。
+///
+/// 比的口径就是 [`collect`] 那一套(打包时用的同一份):凭据、`*.app.yaml`、
+/// 闭包、点开头的文件本来就不在包里,把它们当"改动"报出来只会天天误报,
+/// 报多了人就不看了。
+///
+/// 只比字节不比 mode:两边都是同一条 `untar_gz_into` 摊出来的,mode 差异
+/// 在实践中来自 umask 而不是人的意图,而一条会误报的警告等于没有警告。
+fn compare_to_package(dir: &Path, reference: &str) -> Drift {
+    let store = match ImageStore::open() {
+        Ok(s) => s,
+        Err(e) => return Drift::Unknown(format!("打不开本地 store:{e}")),
+    };
+    let Some(bytes) = pkg_layer_bytes(&store, reference) else {
+        return Drift::Unknown(format!("`{reference}` 的蓝图层不在本地 store"));
+    };
+    let tmp = match tempfile::tempdir() {
+        Ok(t) => t,
+        Err(e) => return Drift::Unknown(format!("建不出临时目录:{e}")),
+    };
+    if let Err(e) = crater_core::bundle::untar_gz_into(tmp.path(), &bytes, 0) {
+        return Drift::Unknown(format!("`{reference}` 的蓝图层摊不开:{e}"));
+    }
+    let (want, _) = match collect(tmp.path()) {
+        Ok(x) => x,
+        Err(e) => return Drift::Unknown(format!("读原样字节:{e}")),
+    };
+    let (have, _) = match collect(dir) {
+        Ok(x) => x,
+        Err(e) => return Drift::Unknown(format!("读 {}:{e}", dir.display())),
+    };
+    let want: std::collections::BTreeMap<&str, &[u8]> =
+        want.iter().map(|(p, d, _)| (p.as_str(), d.as_slice())).collect();
+    let have: std::collections::BTreeMap<&str, &[u8]> =
+        have.iter().map(|(p, d, _)| (p.as_str(), d.as_slice())).collect();
+    let mut out = Vec::new();
+    for (p, d) in &want {
+        match have.get(p) {
+            None => out.push(format!("删 {p}")),
+            Some(h) if h != d => out.push(format!("改 {p}")),
+            Some(_) => {}
+        }
+    }
+    for p in have.keys() {
+        if !want.contains_key(p) {
+            out.push(format!("增 {p}"));
+        }
+    }
+    out.sort();
+    if out.is_empty() { Drift::Same } else { Drift::Changed(out) }
+}
+
+/// `<名>.app.yaml` 现在指着哪一份蓝图(文件, 它所在的目录)。
+///
+/// app 文件是"这次安装的正身",所以"上一版装在哪"以它为准,而不是去
+/// 目录树里猜 —— UI 读的也正是这一行(`ui_app::parse_app`)。
+fn app_points_at(app_name: &str) -> Option<(PathBuf, PathBuf)> {
+    let f = PathBuf::from(format!("{app_name}.app.yaml"));
+    let text = std::fs::read_to_string(&f).ok()?;
+    let def = crate::ui_app::parse_app(&f, &text).ok()?;
+    let bp = PathBuf::from(&def.blueprint);
+    let dir = bp.parent().filter(|p| !p.as_os_str().is_empty())?.to_path_buf();
+    Some((f, dir))
+}
+
+/// 换版本之前先问一句:上一版的目录里有没有人动过的东西。
+///
+/// 为什么这道闸门不能省:`<包名>-<版本>` 布局下新版摊进**新目录**,旧目录
+/// 一个字节都不会被覆盖 —— 听起来很安全,但那正是问题:有人在旧目录里改过
+/// 的模板、加过的文件,升级之后**一声不响地不在了**。目标机上跑的是新版本,
+/// 而他以为自己的改动还在。这是本仓库最忌讳的那类静默失效。
+///
+/// `--yes` **不能**跨过这道闸门:`--yes` 的意思是"计划我看过了,执行吧",
+/// 不是"我的改动随便丢"。要丢得单独说一次。
+fn upgrade_gate(prev_dir: &Path, prev_ref: &str, source: &str, force: bool) -> Result<()> {
+    say!();
+    say!("换版本:{prev_ref} → {source}");
+    match compare_to_package(prev_dir, prev_ref) {
+        Drift::Same => {
+            say!("  {} 与包一致 —— 没有会被落下的本地改动", prev_dir.display());
+            Ok(())
+        }
+        Drift::Changed(items) => {
+            crate::oops!(
+                "{} 里有 {} 处本地改动,它们不会跟到新版本:",
+                prev_dir.display(),
+                items.len()
+            );
+            for i in &items {
+                say!("    {i}");
+            }
+            if force {
+                say!("  --force:照旧升级。旧目录原样留着,改动没丢,只是没跟过去。");
+                return Ok(());
+            }
+            bail!(
+                "先决定这些改动怎么办 —— 一台机器都没碰:\n  \
+                 要带过去:装完后把它们套到新目录再 `crater apply`\n  \
+                 不带过去:加 `--force` 重跑(旧目录不删,随时能回去看)\n  \
+                 要看差别:diff {} 与 `crater pkg pull {prev_ref} --into <临时目录>`",
+                prev_dir.display()
+            )
+        }
+        Drift::Unknown(why) => {
+            crate::oops!("? 判不出 {} 有没有本地改动:{why}", prev_dir.display());
+            if force {
+                say!("  --force:照旧升级。");
+                return Ok(());
+            }
+            bail!(
+                "判不出就不猜 —— 一台机器都没碰。二选一:\n  \
+                 把原样字节取回来再判:`crater pkg pull {prev_ref} --into <临时目录>`\n  \
+                 不在乎旧目录里有什么:加 `--force` 重跑"
+            )
+        }
+    }
+}
+
+/// 换版本时,这次计划判不判得出目标机上那份是旧的?
+///
+/// D-135 之后,物料没声明 `sha256:` 又没有闭包时 crater 报 `?` 并**不动** ——
+/// 于是"升级"会变成一次什么都没改的 apply,而日志从头到尾都是对的。
+/// 这一句就是把那个结局**提前**说出来:计划印出来之前先讲清楚它会是 `?`,
+/// 而不是让人对着一份"无变更"的计划自己去悟。
+///
+/// 只提醒不拦:拦住也变不出摘要,而 D-135 的 `?` 本身已经保证了不会误改。
+fn warn_if_undecidable(bp: &Blueprint, source: &str, have_bytes: bool) {
+    if have_bytes {
+        return;
+    }
+    let blind: Vec<&str> = bp
+        .materials
+        .iter()
+        .filter(|m| m.kind == crater_ir::ir::MaterialKind::File && m.sha256.is_none())
+        .map(|m| m.name.as_str())
+        .collect();
+    if blind.is_empty() {
+        return;
+    }
+    crate::oops!(
+        "{} 个物料没声明 `sha256:`,这次又没有闭包 —— 目标机上那份是不是旧版本,crater 判不出(D-135):{}",
+        blind.len(),
+        blind.join(", ")
+    );
+    say!("  计划里它们会是 `?`,不是 `~ 将修改`,apply 也不会动它们。");
+    say!("  要真换上去,二选一:");
+    say!("    crater install {source} --full …                  # 字节拉到本地,能算摘要");
+    say!("    crater install {source} --closure <closure.tar> … # 离线现场同理");
+    say!("  或让包作者在蓝图物料上写 `sha256:`。");
+}
 
 /// `crater install <引用|目录> -i <机群> [--set k=v]… [--yes]`
 ///
@@ -725,6 +1020,7 @@ pub async fn install(
     repo: Option<&str>,
     yes: bool,
     full: bool,
+    force: bool,
 ) -> Result<()> {
     // ① 取到蓝图 —— 本地路径就地用,否则当成 registry 引用拉下来。
     let local = Path::new(source);
@@ -739,6 +1035,8 @@ pub async fn install(
     } else {
         source
     };
+    // 这次是不是换版本 —— 后面 D-135 那句提醒要用。
+    let mut upgrading = false;
     let bp_file = if local.exists() {
         locate(local)?.0
     } else {
@@ -748,7 +1046,38 @@ pub async fn install(
         let cfg = read_config(&store, &m)?;
         warn_if_newer(&cfg);
         let pkg_name = cfg["name"].as_str().unwrap_or("pkg").to_string();
-        let dir = PathBuf::from(&pkg_name);
+
+        // ── 目录布局:`<包名>-<版本>`(D-141)。
+        //
+        // D-128 的封条挡住了"静默装错版本",但代价是换版本只能人工搬目录。
+        // 换成版本化目录,那次事故就**发生不了**而不是被拦下来:两个版本
+        // 天生不共用一个目录。另外两条同样重要:
+        //
+        // - app 文件的 `blueprint:` 会跟着变,于是一次升级在 `git diff` 里
+        //   是看得见的一行;`<包名>/` 布局下升级在版本库里毫无痕迹。
+        // - 旧版本原样留着 —— 回退不用连网,离线现场也能回。
+        //
+        // 老布局摊出来的 `<包名>/` 若正是这一版,就原地用,不强行搬家。
+        let legacy = PathBuf::from(&pkg_name);
+        let dir = if legacy.is_dir() && stamped(&legacy).as_deref() == Some(source) {
+            legacy.clone()
+        } else {
+            PathBuf::from(pkg_dir_name(&pkg_name, source))
+        };
+
+        // ── 升级闸门:在摊开任何字节**之前**,先问上一版有没有被人动过。
+        let app_name = name.unwrap_or(&pkg_name).to_string();
+        let prev_dir = app_points_at(&app_name)
+            .map(|(_, d)| d)
+            .filter(|d| d.is_dir() && d != &dir)
+            .or_else(|| (legacy.is_dir() && legacy != dir).then(|| legacy.clone()));
+        if let Some(prev) = prev_dir {
+            if let Some(prev_ref) = stamped(&prev).filter(|p| p != source) {
+                upgrading = true;
+                upgrade_gate(&prev, &prev_ref, source, force)?;
+            }
+        }
+
         if !dir.exists() {
             let layer = m["layers"]
                 .as_array()
@@ -762,19 +1091,28 @@ pub async fn install(
         } else {
             // 目录已在:默认用本地那份(它可能有本地改动,重装不该冲掉)。
             //
-            // 但**必须先确认它就是这次要装的那个版本**:包目录按包名命名,
-            // `install yq:4.40.5` 会撞上上次 `install yq` 摊下的 4.44.3,
-            // 然后**静默**装成 4.44.3 —— 引用解析对了、日志也对,装上去的
-            // 却是另一版。这一条是那次事故的封条。
+            // 印记检查留着当兜底 —— 版本化目录之后它只剩一种触发方式:
+            // 两个 registry 上同名同 tag 的包。那仍然是"装的不是你以为的
+            // 那个",仍然该拦。
             match stamped(&dir) {
                 Some(prev) if prev != source => bail!(
-                    "{} 里是 `{prev}`,这次要装的是 `{source}` —— 版本对不上。\n\
+                    "{} 里是 `{prev}`,这次要装的是 `{source}` —— 同名同版本、来源不同。\n\
                      换个位置:`crater pkg pull {source} --into <目录>`,\n\
                      或先把 {} 移开。",
                     dir.display(),
                     dir.display()
                 ),
-                _ => say!("{} 已存在 —— 用本地这份(包已在 store)", dir.display()),
+                _ => {
+                    say!("{} 已存在 —— 用本地这份(包已在 store)", dir.display());
+                    // 重装同一版不覆盖任何字节,所以这里只报不拦:人要知道
+                    // 自己跑的是"包 + 我改过的那几处",不是原样的包。
+                    if let Drift::Changed(items) = compare_to_package(&dir, source) {
+                        crate::oops!("{} 有 {} 处本地改动,这次装的是改过的那份:", dir.display(), items.len());
+                        for i in &items {
+                            say!("    {i}");
+                        }
+                    }
+                }
             }
         }
         locate(&dir)?.0
@@ -859,6 +1197,10 @@ pub async fn install(
         target.closure = Some(PathBuf::from(format!("oci://{source}")));
     }
     let target = &target;
+    // 换版本时,先把"这次判不判得出"讲清楚,再印计划(D-135)。
+    if upgrading {
+        warn_if_undecidable(&bp, source, full || target.closure.is_some());
+    }
     say!();
     crate::blueprint::plan_blueprint(&bp_file, target, sets).await?;
     if !yes {
@@ -888,6 +1230,32 @@ fn looks_secret(name: &str) -> bool {
         .any(|k| n.contains(k))
 }
 
+/// 把 app 文件里的 `blueprint:` 指到新版本;文件里没有这一行返回 `false`。
+///
+/// 逐行改而不是 `serde_yaml` 读回再写出:后者会把注释、空行、键序全抹平,
+/// 而这个文件的开头两行注释("改它 = 改任务")正是它自我说明的那部分。
+/// 升级不该顺手把人的文件重排一遍。
+fn repoint_app(app_file: &Path, new_bp: &Path) -> Result<bool> {
+    let text = std::fs::read_to_string(app_file)?;
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut done = false;
+    for line in text.lines() {
+        let t = line.trim_start();
+        if !done && t.starts_with("blueprint:") {
+            out.push_str(&line[..line.len() - t.len()]);
+            out.push_str(&format!("blueprint: {}\n", new_bp.display()));
+            done = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if done {
+        std::fs::write(app_file, out)?;
+    }
+    Ok(done)
+}
+
 /// 写 `<名>.app.yaml`:这次安装绑定了哪份蓝图、哪个机群、改了哪些参数。
 ///
 /// **敏感参数不落盘。** 它们的值来自 `--set`,写进一个可 git 的文件就等于
@@ -901,7 +1269,33 @@ fn write_app(
 ) -> Result<()> {
     let out = PathBuf::from(format!("{name}.app.yaml"));
     if out.exists() {
-        say!("{} 已存在 —— 保留不动(改它就是改这次安装)", out.display());
+        // 升级时**只改 `blueprint:` 这一行**,别的一个字不动。
+        //
+        // 不动的理由:params / inventory / verify 是操作者自己填的,整份重写
+        // 等于把他的改动抹掉,而这个文件正是"这次安装的正身"。
+        // 要动这一行的理由:UI 与后续 apply 都按它找蓝图(`ui_app::parse_app`),
+        // 不改它就是"目标机装了新版、app 文件还指着旧版" —— 下一次从 UI 点
+        // 一下 apply 就悄悄退回旧版本了。
+        let prev = std::fs::read_to_string(&out)
+            .ok()
+            .and_then(|t| crate::ui_app::parse_app(&out, &t).ok())
+            .map(|d| d.blueprint);
+        let now = bp_file.display().to_string();
+        if prev.as_deref() == Some(now.as_str()) {
+            say!("{} 已存在 —— 保留不动(改它就是改这次安装)", out.display());
+        } else if repoint_app(&out, bp_file)? {
+            say!(
+                "任务 {} 换版本:blueprint {} → {now}",
+                out.display(),
+                prev.as_deref().unwrap_or("?")
+            );
+            say!("  (params / inventory / verify 原样不动 —— 那是你填的)");
+        } else {
+            crate::oops!(
+                "{} 里没有 `blueprint:` 一行 —— 没动它。请手工指到 {now},否则它还跑旧版本。",
+                out.display()
+            );
+        }
         return Ok(());
     }
     let is_secret = |k: &str| bp.params.get(k).map(|p| p.secret).unwrap_or(false) || looks_secret(k);
