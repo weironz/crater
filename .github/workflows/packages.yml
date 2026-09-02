@@ -1,0 +1,119 @@
+name: packages
+
+# 把 library/ 下的蓝图推成 OCI 包,然后**从 registry 重新生成索引**。
+#
+# 为什么索引必须由机器生成:它是 registry 状态的**投影**,不是一份独立的
+# 事实。手工维护的后果亲身踩过 —— 为了验版本范围,同一份内容被推成了
+# 4.40.5 / 4.44.3 / 4.45.1 三个 tag,索引照单全收发了出去,于是它开始声称
+# 存在两个根本不存在的版本(D-159)。
+#
+# 这个 workflow 的判据只有一条:**索引里有什么,以 registry 上有什么为准**。
+# 它不接受任何"应该有什么"的输入 —— 那正是漂移的入口。
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: "推哪些(library/ 下的目录名,逗号分隔;留空=只重建索引不推包)"
+        required: false
+        default: ""
+      dry_run:
+        description: "只看会做什么,不推也不提交"
+        type: boolean
+        default: false
+
+# GITHUB_TOKEN 就够推 ghcr —— 不需要额外的 PAT。
+permissions:
+  contents: write # 提交回索引
+  packages: write # 推包
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io/${{ github.repository_owner }}/crater
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # RUSTFLAGS 的覆盖在这个 action 里(D-126 忘过一次)。不要在这里再写一份。
+      - uses: ./.github/actions/setup-rust
+
+      - name: 编 crater
+        run: cargo build --release --locked -p crater-cli
+
+      - name: 登录 ghcr
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            ./target/release/crater registry login ghcr.io \
+              -u "${{ github.actor }}" --password-stdin
+
+      - name: 推包
+        if: inputs.packages != ''
+        run: |
+          set -eu
+          for name in $(echo "${{ inputs.packages }}" | tr ',' ' '); do
+            dir="library/$name"
+            bp="$dir/$name.blueprint.yaml"
+            [ -d "$dir" ] || { echo "::error::没有 $dir"; exit 1; }
+            # 说清是"没有单文件蓝图",不是"版本号取不到" —— library/k8s、
+            # library/middleware 这类是多蓝图目录,还不能当单个包发。
+            [ -f "$bp" ] || { echo "::error::$dir 里没有 $name.blueprint.yaml(多蓝图目录暂不支持整目录发包)"; exit 1; }
+
+            # tag 由蓝图**自己**决定,不从输入来:让人手填版本号就是让"填错"
+            # 成为可能,而填错的表现是索引里出现一个装下去货不对板的版本
+            # (D-159 就是这么来的)。规则与理由都在 scripts/pkg-tag.py 里。
+            ver=$(python3 scripts/pkg-tag.py "$bp")
+            [ -n "$ver" ] || { echo "::error::$bp 取不到版本"; exit 1; }
+
+            echo "::group::$name:$ver"
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo "(dry-run)会推 $REGISTRY/$name:$ver"
+            else
+              ./target/release/crater pkg push "$dir" "$REGISTRY/$name:$ver"
+            fi
+            echo "::endgroup::"
+          done
+
+      # 索引**从 registry 重建**,不从 library/ 目录推断。
+      # 差别很实在:目录里有的未必推上去了,推上去的也未必还在(有人删过 tag)。
+      # 索引要回答的是"现在拉得到什么"。
+      - name: 从 registry 重建索引
+        run: |
+          set -eu
+          srcs=""
+          for dir in library/*/; do
+            name=$(basename "$dir")
+            case "$name" in _*) continue ;; esac
+            # 远端没有这个包就跳过 —— 不是错误,只是还没发过
+            if ./target/release/crater pkg tags "$REGISTRY/$name" >/dev/null 2>&1; then
+              srcs="$srcs oci://$REGISTRY/$name"
+            fi
+          done
+          [ -n "$srcs" ] || { echo "::error::registry 上一个包都没有"; exit 1; }
+          echo "来源:$srcs"
+          ./target/release/crater pkg index $srcs -o packages/index.yaml
+
+      - name: 提交索引(有变化才提交)
+        if: inputs.dry_run != true
+        run: |
+          set -eu
+          # `generated:` 每次都变,所以不能拿整份文件比。只看 entries 变没变 ——
+          # 否则每跑一次都多一个"只改了时间戳"的空提交。
+          if git diff --quiet -I '^generated:' -- packages/index.yaml; then
+            echo "索引没变,不提交"
+            git restore packages/index.yaml
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add packages/index.yaml
+          git commit -m "chore(packages): 从 registry 重建索引"
+          git push
+
+      - name: 报一下现状
+        run: |
+          echo "### 索引现状" >> "$GITHUB_STEP_SUMMARY"
+          echo '```yaml' >> "$GITHUB_STEP_SUMMARY"
+          cat packages/index.yaml >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
