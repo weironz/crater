@@ -2605,3 +2605,32 @@ application/vnd.crater.blueprint.config.v1+json
   **0 命中**,险些得出"反证失败"。`touch` 源文件强制重跑才拿到真结果。
   这与 D-142(共用 target 目录测到别人的二进制)是同一类:**构建缓存会让
   验证悄悄失效**,而失效的表现是"看起来通过了"。
+
+### D-150:清残骸(issue #19)—— 顺带捡回两样"删掉就没了"的东西
+
+- **`apply.rs` 的孤儿 banner 已删。** 判断依据三条独立证据:`grep "ai::"` 在
+  `apply.rs` 里零命中;`git log -S` 追到它的来历(`5bbe6e4` 拆 main.rs 时,
+  banner 底下原本跟着 `known_systemd_units` 与 `ai_generate` 两个函数,
+  banner 跟着前者走了,而 D-144 又把前者挪回 main.rs);main.rs 里
+  `ai_generate` 上方现在没有 banner,所以也不存在"该挪回去"的空位。
+- **顺带发现同类的第二、三例**(→ #21):`apply.rs:1152` 有六行文档描述的是
+  `target.rs::target_hosts()`,`target.rs:117` 有一行描述的是 `hosts()` ——
+  两个被描述的函数**都没有文档**,而两段文档都粘在了下一个函数头上。
+  **文档注释比代码更容易在搬家时掉队,因为编译器不检查它**;掉队之后它比
+  没有更糟 —— 读的人会拿它当真。
+- **`~/crater` 工作区清点出两样值得进库的东西**,都是"删掉就没了":
+  - 工作区的 `yq.blueprint.yaml` **比库里新**,多出的全是解释性注释:
+    `stage: build` 为什么在烤闭包时就定死、`${substrate.arch}` 为什么要
+    `--for` 才渲染得出来。这两段是踩过坑之后写下的。**已捡回库里。**
+  - `library/selftest` 的 README 要求"≥3 台 controlplane + ≥2 台 worker",
+    却**没有配套 inventory 示例**(`_template`/`k8s`/`rustfs`/`middleware`
+    都有)。**已补上**,并写清为什么少于这个数判据就区分不出来。口令用
+    `${env:LAB_PASS}` 而非照抄真机配置 —— 这个文件要进版本库,而 git 历史
+    删不掉。
+- **另外查出一处过期副本**:`~/crater/rustfs/` 的蓝图丢了 `secret: true`
+  (D-125 补上的那个标志)。库里那份是权威且更新。
+- **`.crater-trash/` 不是垃圾**,是 UI 的回收站(`ui_edit.rs` 的设计安全网)。
+- **agent 抓到了自己的一次测量错误**:第一遍数测试数时管道带了 `| tail -60`,
+  只留了尾部,数出"5 套 40 个"的假数;它重跑并捕获完整输出才拿到 16/627。
+  **这是第三次栽在"验证被工具悄悄截断/缓存"上**(D-142 共用 target、
+  D-149 clippy 缓存、这次管道截断)。
