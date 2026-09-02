@@ -8,7 +8,7 @@
 //! 那里才知道有没有 OCI 闭包。
 
 use crate::eval::{Scope, Yaml};
-use crate::ir::{Blueprint, Material, MaterialKind};
+use crate::ir::{Blueprint, Material, MaterialKind, Value};
 
 /// 一份物料在**当前这台目标**上的取用计划。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,9 +105,27 @@ pub fn resolve(bp: &Blueprint, name: &str, scope: &Scope) -> Result<MaterialPlan
             .resolve(&chosen.source)
             .map(|v| crate::eval::scalar_to_string(&v))
             .map_err(ResolveError::Eval)?,
-        sha256: chosen.sha256.clone(),
+        sha256: render_sha(scope, &chosen.sha256)?,
         unzip: chosen.unzip.clone(),
     })
+}
+
+/// 摘要与 URL 走**同一条**渲染路径。
+///
+/// 不这么做的后果很具体:URL 里能写 `${params.version}`,摘要里不能 —— 于是
+/// 换版本时 URL 变了而摘要没变,落地必然摘要不符。两者本就是一对(某个版本
+/// 的字节 + 那份字节的摘要),只让其中一个可参数化,等于让它们**必然**走散。
+///
+/// 这也是 `crater pkg push --set version=…` 能真正发出别的版本的前提
+/// (issue #25):版本与摘要一起 `--set`,包才是自洽的。
+fn render_sha(scope: &Scope, raw: &Option<Value>) -> Result<Option<String>, ResolveError> {
+    match raw {
+        None => Ok(None),
+        Some(v) => scope
+            .resolve(v)
+            .map(|y| Some(crate::eval::scalar_to_string(&y)))
+            .map_err(ResolveError::Eval),
+    }
 }
 
 /// 报错时告诉作者"这台机器长什么样",否则 `NoVariant` 无从下手。
@@ -175,14 +193,16 @@ pub fn bake(bp: &Blueprint, scope: &Scope, filter_by_when: bool) -> Vec<BakeItem
             let plan = scope
                 .resolve(&m.source)
                 .map(|v| crate::eval::scalar_to_string(&v))
-                .map(|source| MaterialPlan {
-                    name: m.name.clone(),
-                    kind: m.kind,
-                    source,
-                    sha256: m.sha256.clone(),
-                    unzip: m.unzip.clone(),
-                })
-                .map_err(ResolveError::Eval);
+                .map_err(ResolveError::Eval)
+                .and_then(|source| {
+                    Ok(MaterialPlan {
+                        name: m.name.clone(),
+                        kind: m.kind,
+                        source,
+                        sha256: render_sha(scope, &m.sha256)?,
+                        unzip: m.unzip.clone(),
+                    })
+                });
             out.push(BakeItem {
                 name: m.name.clone(),
                 plan,
@@ -300,6 +320,56 @@ resources:
   - copy: { material: bin, dest: /usr/local/bin/tool }
   - copy: { material: cfg, dest: /etc/app.conf }
 "#;
+
+    /// 摘要必须和 URL 走**同一条**渲染 —— 否则换版本时 URL 变了、摘要没变,
+    /// 落地必然摘要不符。这条是 `pkg push --set version=…` 能真正发出别的
+    /// 版本的前提(issue #25)。
+    ///
+    /// 回归价值很具体:漏渲染时的表现不是崩,是把字面量 `${params.sha}` 当成
+    /// 期望摘要拿去比对 —— 报错里会赫然写着 `期望 ${params.sha_amd64}`。
+    /// 实测撞见过。
+    #[test]
+    fn a_templated_sha256_is_rendered_like_the_url() {
+        const T: &str = r#"
+name: t
+params:
+  version: { default: "9.9.9" }
+  sha: { default: "deadbeef" }
+materials:
+  - name: bin
+    file: "https://ex.com/v${params.version}/tool"
+    sha256: "${params.sha}"
+resources:
+  - copy: { material: bin, dest: /usr/local/bin/tool }
+"#;
+        let bp = blueprint_from_str(T).unwrap();
+        let mut params = BTreeMap::new();
+        params.insert("version".to_string(), Yaml::from("9.9.9"));
+        params.insert("sha".to_string(), Yaml::from("cafebabe"));
+        let mut substrate = BTreeMap::new();
+        substrate.insert("arch".to_string(), Yaml::from("amd64"));
+        let scope = Scope {
+            params,
+            substrate,
+            ..Default::default()
+        };
+        let plan = resolve(&bp, "bin", &scope).unwrap();
+        assert_eq!(plan.sha256.as_deref(), Some("cafebabe"), "摘要没被渲染");
+        assert!(
+            plan.source.contains("v9.9.9"),
+            "URL 没被渲染:{}",
+            plan.source
+        );
+    }
+
+    /// 没写摘要仍然是 `None`,不能变成空串 —— 空串会被当成"声明了摘要",
+    /// 于是每次落地都判成不符。
+    #[test]
+    fn an_absent_sha256_stays_none() {
+        let bp = blueprint_from_str(BP).unwrap();
+        let plan = resolve(&bp, "bin", &scope_with_arch("arm64")).unwrap();
+        assert_eq!(plan.sha256, None);
+    }
 
     fn scope_with_arch(arch: &str) -> Scope {
         let mut params = BTreeMap::new();

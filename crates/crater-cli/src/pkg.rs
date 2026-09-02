@@ -238,14 +238,75 @@ async fn assemble(
     reference: &str,
     archs: &[String],
     fors: &[String],
+    sets: &[String],
 ) -> Result<String> {
-    let (bp_file, root) = locate(path)?;
-    let bp = crate::blueprint::load(&bp_file)?;
-    let (files, skipped) = collect(&root)?;
+    let (bp_file0, root0) = locate(path)?;
+    let (mut files, skipped) = collect(&root0)?;
     if files.is_empty() {
-        bail!("{} 里没有可打包的文件", root.display());
+        bail!("{} 里没有可打包的文件", root0.display());
     }
+
+    // `--set` 把覆盖值**烤进包里的那份蓝图文本**,然后后续一切都以它为准 ——
+    // 包的字节、契约、以及烤物料时渲染的 URL 必须来自同一份文本。任何一处
+    // 用回原文,包就会"写着一套装的是另一套"(D-159 那类)。
+    //
+    // 摊到临时目录再从那里 load,而不是就地改源文件:源文件是用户的,打包
+    // 不该动它;而只改内存里的字节又不够 —— `closure::bake_bytes` 要按路径
+    // 读蓝图,而蓝图可能被 `fmt --split` 拆成了同目录的多个文件。
+    let _staging;
+    let (bp_file, root) = if sets.is_empty() {
+        (bp_file0, root0)
+    } else {
+        let bp0 = crate::blueprint::load(&bp_file0)?;
+        let declared: Vec<String> = bp0.params.keys().cloned().collect();
+        let kv: std::collections::BTreeMap<String, String> = sets
+            .iter()
+            .map(|s| {
+                s.split_once('=')
+                    .map(|(k, v)| (k.trim().to_string(), v.to_string()))
+                    .ok_or_else(|| anyhow::anyhow!("`--set {s}` 应是 KEY=VALUE"))
+            })
+            .collect::<Result<_>>()?;
+
+        let rel = bp_file0
+            .strip_prefix(&root0)
+            .unwrap_or(&bp_file0)
+            .display()
+            .to_string();
+        let f = files
+            .iter_mut()
+            .find(|f| f.0 == rel)
+            .ok_or_else(|| anyhow::anyhow!("{rel} 不在打包清单里"))?;
+        let text =
+            String::from_utf8(f.1.clone()).map_err(|_| anyhow::anyhow!("{rel} 不是 UTF-8 文本"))?;
+        f.1 = crate::pkg_params::bake_defaults(&text, &kv, &declared)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .into_bytes();
+        for (k, v) in &kv {
+            say!("  · --set {k}={v} 已烤进包里的蓝图");
+        }
+
+        let dir = tempfile::tempdir()?;
+        for (rel, data, mode) in &files {
+            let p = dir.path().join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&p, data)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(*mode))?;
+            }
+        }
+        let r = dir.path().to_path_buf();
+        _staging = dir;
+        (r.join(&rel), r)
+    };
+
+    let bp = crate::blueprint::load(&bp_file)?;
     refuse_literal_secrets(&files)?;
+    let _ = &root;
 
     let store = ImageStore::open()?;
     let cfg = serde_json::to_vec_pretty(&contract(&bp))?;
@@ -384,15 +445,27 @@ async fn assemble(
 // ───────────────────────────── 命令 ─────────────────────────────
 
 /// `crater pkg build <路径> -t <ref>` —— 只组装,不推。
-pub async fn build(path: &Path, reference: &str, archs: &[String], fors: &[String]) -> Result<()> {
-    let digest = assemble(path, reference, archs, fors).await?;
+pub async fn build(
+    path: &Path,
+    reference: &str,
+    archs: &[String],
+    fors: &[String],
+    sets: &[String],
+) -> Result<()> {
+    let digest = assemble(path, reference, archs, fors, sets).await?;
     say!("已入本地 store(sha256:{digest})—— `crater pkg push {reference}` 推上去");
     Ok(())
 }
 
 /// `crater pkg push <路径> <ref>` —— 组装并推。
-pub async fn push(path: &Path, reference: &str, archs: &[String], fors: &[String]) -> Result<()> {
-    let digest = assemble(path, reference, archs, fors).await?;
+pub async fn push(
+    path: &Path,
+    reference: &str,
+    archs: &[String],
+    fors: &[String],
+    sets: &[String],
+) -> Result<()> {
+    let digest = assemble(path, reference, archs, fors, sets).await?;
     let store = ImageStore::open()?;
     store.push(reference).await?;
     say!("推送完成 → {reference}");

@@ -871,7 +871,7 @@ fn parse_materials(v: Option<&Y>) -> Result<Vec<Material>> {
             name,
             kind,
             source: value_from_yaml(m.get(Y::from(src_key)).expect("key present"))?,
-            sha256: get_str(m, "sha256"),
+            sha256: m.get(Y::from("sha256")).map(value_from_yaml).transpose()?,
             unzip: get_str(m, "unzip"),
             when: match m.get(Y::from("when")) {
                 Some(w) => Some(

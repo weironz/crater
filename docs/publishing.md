@@ -52,15 +52,43 @@ crater apply 'ghcr.io/<你>/pkgs/redis:7.*'    # 范围解析
 **这一档覆盖了绝大多数情况。** 内部团队之间、给客户交付、开源一个包 ——
 都到这里为止。
 
-### 一个现在的限制
+### 一份蓝图发多个版本
 
-一份蓝图目前**只能发出一个版本**:`crater pkg push` 还不支持 `--set`,
-所以包的内容就是蓝图 `params.version.default` 那个版本。
+`--set` 就是变量渲染,和 helm 一个意思 —— 只是 crater 的参数分**两个阶段**:
+
+| 什么时候给 | 命令 | 覆盖的是 |
+| --- | --- | --- |
+| 打包时 | `crater pkg push … --set k=v` | `stage: build` 的参数(定死在包里) |
+| 部署时 | `crater apply … --set k=v` | `stage: apply` 的参数(每次部署可不同) |
+
+分两段的理由很实在:`version` 决定**下载哪个 URL**,而物料要在打包时就抓下来
+烤进闭包 —— 部署时才问就太晚了。
+
+```bash
+# 同一份蓝图,发两个版本;源文件一个字不改
+crater pkg push ./my-redis reg/ns/redis:7.2 --set version=7.2 --set sha_amd64=…
+crater pkg push ./my-redis reg/ns/redis:7.4 --set version=7.4 --set sha_amd64=…
+```
+
+覆盖值**烤进包里的那份蓝图**,不是另存一处 —— 解包出来的蓝图自己就说自己是
+7.2,不会"写着一套装的是另一套"。注释、空行、键序都保留。
+
+**摘要要和版本一起给。** 物料上钉的 `sha256:` 和 URL 是一对(某个版本的字节 +
+那份字节的摘要),只换版本不换摘要,落地时会摘要不符 —— 那是**对的**,内容
+寻址就该在这里拦住。把摘要也写成参数即可:
+
+```yaml
+params:
+  version:   { default: "7.2", stage: build }
+  sha_amd64: { default: "c5f0…", stage: build }
+materials:
+  - name: bin
+    file: "https://…/v${params.version}/redis-amd64"
+    sha256: "${params.sha_amd64}"
+```
 
 **不要**给同一份内容打不同的版本 tag —— 那样索引会声称存在一个装下去货不
-对板的版本(我们自己踩过,见 D-159)。要发别的版本,先改蓝图的默认值。
-
-进展见 [issue #25](https://github.com/weironz/crater/issues/25)。
+对板的版本(我们自己踩过,见 D-159)。
 
 ## 第三档:让人能"按名字"搜你的一批包
 

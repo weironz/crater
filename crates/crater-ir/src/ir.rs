@@ -155,7 +155,10 @@ pub struct Material {
     pub kind: MaterialKind,
     /// `file`: URL(可含插值);`image`: 镜像 ref;`os_package`: 包名表。
     pub source: Value,
-    pub sha256: Option<String>,
+    /// 内容摘要。**和 `source` 一样可插值** —— URL 里能写
+    /// `${params.version}`,摘要里就必须也能写,否则换版本时两者必然走散
+    /// (见 `materials::render_sha`)。
+    pub sha256: Option<Value>,
     /// 下载物是 zip 时,取其中这个成员作为物料本体(控制端解包)。
     pub unzip: Option<String>,
     /// 条件纳入:决定该物料属于哪个 flavor 子闭包。

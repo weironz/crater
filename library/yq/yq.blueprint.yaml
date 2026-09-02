@@ -7,6 +7,13 @@ params:
   # stage: build —— 这个参数在**烤闭包**时就要定死(它决定下载哪个 URL),
   # 不是部署时才问。UI 的参数表单会据此标注。
   version: { default: "4.53.6", stage: build, desc: "上游 release tag" }
+  # 摘要也是参数,和 version 成对 —— 这样一份蓝图能发出任意版本的包:
+  #   crater pkg push library/yq <ref>:4.44.3 \
+  #     --set version=4.44.3 --set sha_amd64=… --set sha_arm64=…
+  # 只 --set 版本而不换摘要,落地时会摘要不符 —— 那是**对的**,内容寻址
+  # 就该在这里拦住(实测过)。
+  sha_amd64: { default: "c5f056448f973ae7d39b5401949648a78f2dc1947d6a8eb65be60d5c504b9385", stage: build, desc: "yq_linux_amd64 的 sha256" }
+  sha_arm64: { default: "88a1016bc1d657375a35864e4f44b6f333df8ff97b559f51bba0adcb2169df09", stage: build, desc: "yq_linux_arm64 的 sha256" }
 
 materials:
   # 同名两条,靠 `when:` 分成变体 —— 每个架构有**自己的**摘要。
@@ -24,11 +31,11 @@ materials:
   - name: yq-bin
     when: "substrate.arch == 'amd64'"
     file: "https://github.com/mikefarah/yq/releases/download/v${params.version}/yq_linux_amd64"
-    sha256: "c5f056448f973ae7d39b5401949648a78f2dc1947d6a8eb65be60d5c504b9385"
+    sha256: "${params.sha_amd64}"
   - name: yq-bin
     when: "substrate.arch == 'arm64'"
     file: "https://github.com/mikefarah/yq/releases/download/v${params.version}/yq_linux_arm64"
-    sha256: "88a1016bc1d657375a35864e4f44b6f333df8ff97b559f51bba0adcb2169df09"
+    sha256: "${params.sha_arm64}"
 
 resources:
   - copy: { material: yq-bin, dest: /usr/local/bin/yq, mode: "0755" }

@@ -42,6 +42,7 @@ mod material_ctx;
 mod named;
 mod out;
 mod pkg;
+mod pkg_params;
 mod repo;
 mod schema_cmd;
 mod stack_cmd;
@@ -892,6 +893,16 @@ enum PkgCmd {
         /// 烘焙用的其它目标事实,`k=v`,与每个 `--arch` 合并。
         #[arg(long = "for", value_name = "K=V")]
         fors: Vec<String>,
+        /// 覆盖一个参数的默认值,如 `--set version=4.44.3`。可重复。
+        ///
+        /// 覆盖值**烤进包里的那份蓝图**,不是另存一处 —— 解包出来的蓝图
+        /// 自己就说自己是这一版,不会"写着一套装的是另一套"。
+        ///
+        /// 注意物料上钉的 `sha256:` 不会跟着变:换了版本而摘要没换,落地时
+        /// 会摘要不符(那正是内容寻址该有的样子)。要发别的版本,把对应的
+        /// 摘要也一起 `--set`,或者让作者把摘要也做成参数。
+        #[arg(long = "set", value_name = "KEY=VAL")]
+        set: Vec<String>,
     },
     /// 只组装进本地 store,不推 —— 想先看看包成什么样时用。
     Build {
@@ -902,6 +913,16 @@ enum PkgCmd {
         arch: Vec<String>,
         #[arg(long = "for", value_name = "K=V")]
         fors: Vec<String>,
+        /// 覆盖一个参数的默认值,如 `--set version=4.44.3`。可重复。
+        ///
+        /// 覆盖值**烤进包里的那份蓝图**,不是另存一处 —— 解包出来的蓝图
+        /// 自己就说自己是这一版,不会"写着一套装的是另一套"。
+        ///
+        /// 注意物料上钉的 `sha256:` 不会跟着变:换了版本而摘要没换,落地时
+        /// 会摘要不符(那正是内容寻址该有的样子)。要发别的版本,把对应的
+        /// 摘要也一起 `--set`,或者让作者把摘要也做成参数。
+        #[arg(long = "set", value_name = "KEY=VAL")]
+        set: Vec<String>,
     },
     /// 拉下来并摊回文件。默认瘦拉(物料层留在 registry,在线部署用不到)。
     Pull {
@@ -1284,13 +1305,15 @@ async fn main() -> Result<()> {
                 reference,
                 arch,
                 fors,
-            } => pkg::push(&path, &reference, &arch, &fors).await,
+                set,
+            } => pkg::push(&path, &reference, &arch, &fors, &set).await,
             PkgCmd::Build {
                 path,
                 reference,
                 arch,
                 fors,
-            } => pkg::build(&path, &reference, &arch, &fors).await,
+                set,
+            } => pkg::build(&path, &reference, &arch, &fors, &set).await,
             PkgCmd::Pull {
                 reference,
                 into,
