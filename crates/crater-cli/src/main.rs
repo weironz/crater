@@ -1085,6 +1085,8 @@ async fn component_shortcut(args: Vec<String>) -> Result<()> {
 
 
 
+/// systemd unit names mentioned by tasks under `tasks/` (their `service` /
+/// `systemd_unit` actions). `doctor` derives per-unit journal probes from this
 /// data, never hardcoded.
 fn known_systemd_units(tasks_dir: &Path) -> Vec<String> {
     use crater_core::component::Action;
@@ -1097,9 +1099,8 @@ fn known_systemd_units(tasks_dir: &Path) -> Vec<String> {
             }
             if let Ok(t) = crater_core::task::TaskFile::from_yaml_file(&p) {
                 for step in &t.actions {
-                    match &step.action {
-                        Action::Service { name, .. } => out.push(name.clone()),
-                        _ => {}
+                    if let Action::Service { name, .. } = &step.action {
+                        out.push(name.clone());
                     }
                 }
             }

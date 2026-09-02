@@ -481,7 +481,7 @@ pub(crate) async fn apply_task(
             }
             let coord = engine::HostCoord::new(seed, group.len());
             let (rc_ref, hostvars_ref, coord_ref) = (&rc, &hostvars, &coord);
-            let results: Vec<Result<(String, Vec<(String, String)>)>> = futures::stream::iter(
+            let results: Vec<HostRunResult> = futures::stream::iter(
                 group.iter().map(|h| async move {
                     // Signal the coordinator on finish so peers awaiting this host's
                     // facts fail fast on error / never-produced rather than blocking
@@ -526,6 +526,9 @@ pub(crate) async fn apply_task(
 }
 
 
+/// 一台机跑完的结果:(主机名, 这台机 `register` 出来的事实 kv)。
+pub(crate) type HostRunResult = Result<(String, Vec<(String, String)>)>;
+
 /// Plan + execute one task on one host. The run-wide fixed inputs live in
 /// `rc` (CLI 重构 2/3); only the genuinely per-call ones remain parameters:
 /// the host, the between-groups `hostvars` snapshot, the per-group coordinator.
@@ -534,7 +537,7 @@ pub(crate) async fn run_task_on_host(
     host: &crater_core::spec::Host,
     hostvars: &BTreeMap<String, BTreeMap<String, String>>,
     coord: Option<&engine::HostCoord>,
-) -> Result<(String, Vec<(String, String)>)> {
+) -> HostRunResult {
     let RunContext { task, spec_dir, role_addrs, role_members, target_hosts, deployment, opts } = rc;
     let RunOpts { offline_blobmap, offline, do_apply, do_shell, teardown, source, set_overrides: _, plan_check } = opts;
     let (offline, do_apply, do_shell, teardown) = (*offline, *do_apply, *do_shell, *teardown);
@@ -1006,9 +1009,6 @@ pub(crate) fn find_yaml_under(dir: &Path, name: &str) -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 // M4: AI copilot — natural language -> validated crater.yaml
 // ---------------------------------------------------------------------------
-
-/// systemd unit names mentioned by tasks under `tasks/` (their `service` /
-/// `systemd_unit` actions). `doctor` derives per-unit journal probes from this
 
 pub(crate) fn print_plan(plan: &[Op]) {
     for (i, op) in plan.iter().enumerate() {

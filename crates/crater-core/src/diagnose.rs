@@ -120,14 +120,13 @@ pub fn diagnose(text: &str) -> Vec<Finding> {
     let hay = text.to_lowercase();
     let mut out: Vec<Finding> = Vec::new();
     for rule in rules() {
-        if rule.needles.iter().any(|n| hay.contains(&n.to_lowercase())) {
-            if !out
+        if rule.needles.iter().any(|n| hay.contains(&n.to_lowercase()))
+            && !out
                 .iter()
                 .any(|f| f.category == rule.finding.category && f.cause == rule.finding.cause)
             {
                 out.push(rule.finding.clone());
             }
-        }
     }
     out
 }

@@ -625,7 +625,7 @@ pub fn plan_from_task(
         let id = s.id.clone().unwrap_or_else(|| format!("action{i}"));
         let os_ok = s.when_os.is_empty()
             || os.match_keys().iter().any(|k| s.when_os.iter().any(|w| w == k));
-        let off_ok = s.when_offline.map_or(true, |w| w == offline);
+        let off_ok = s.when_offline.is_none_or(|w| w == offline);
         // when_role (D-071): run only on hosts holding one of these roles.
         let role_match = |roles: &[String]| {
             s.when_role.is_empty() || s.when_role.iter().any(|r| roles.iter().any(|h| h == r))
@@ -1696,6 +1696,7 @@ pub async fn execute(ops: &[Op], exec: &dyn Executor) -> crate::Result<()> {
 ///   ~ would-change  probe failed / import-type step (always runs)
 ///   ? unknown       step has no probe (apply would just run it)
 ///   - skip          preflight/verify shell (checks, not state; plan runs nothing)
+///
 /// Returns (ok, would_change, unknown, skipped).
 pub async fn plan_check_task(
     steps: &[TaskStep],

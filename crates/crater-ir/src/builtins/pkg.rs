@@ -202,7 +202,7 @@ fn packages_for(ctx: &dyn Ctx, args: &ResolvedArgs) -> Result<Vec<String>> {
 }
 
 /// `runtime` 与 `namespace` 两个参数的默认值,一处定义。
-fn runtime_of<'a>(args: &'a ResolvedArgs) -> (&'a str, Option<&'a str>) {
+fn runtime_of(args: &ResolvedArgs) -> (&str, Option<&str>) {
     (arg_str_opt(args, "runtime").unwrap_or("docker"), arg_str_opt(args, "namespace"))
 }
 

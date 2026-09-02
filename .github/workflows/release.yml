@@ -32,7 +32,17 @@ jobs:
       # 覆盖 mold 那一半在 action 里,不用也不该在这里重复。
       - uses: ./.github/actions/setup-rust
         with:
+          components: clippy
           rustflags: "-D warnings"
+
+      # clippy 是上面那道门禁看不见的另一半:RUSTFLAGS 的 `-D warnings` 只管
+      # rustc 的 lint,clippy 自己那些(type_complexity / unnecessary_unwrap /
+      # doc_lazy_continuation …)一条都不在其中 —— 所以要在 `--` 后面再写一份。
+      #
+      # 值不在洁癖,在于**下一条警告能被看见**:几十条噪音里混进一句
+      # "这个 unwrap 会 panic",没人会注意到(D-144)。
+      # 跟 test 一样用 --release,复用同一份依赖产物。
+      - run: cargo clippy --workspace --all-targets --release --locked -- -D warnings
 
       - run: cargo test --release --locked
 

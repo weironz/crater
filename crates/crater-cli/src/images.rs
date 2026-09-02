@@ -42,6 +42,7 @@ fn human(bytes: u64) -> String {
 ///   3. `--cache`: the whole download cache (file/ospkg, D-096);
 ///   4. `--host`/`-i`: each TARGET's staged-blob cache (`/var/lib/crater/blobs`,
 ///      D-095) — safe, next apply re-stages.
+///
 /// `--dry-run` reports without deleting. All four are caches/orphans: nothing
 /// a deployment or a later build can't recreate.
 pub(crate) async fn gc(cache: bool, dry_run: bool, target: crate::target::TargetOpts) -> Result<()> {

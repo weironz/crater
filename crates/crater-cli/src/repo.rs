@@ -93,7 +93,7 @@ impl Index {
         v.retain(|x| x.version != e.version);
         v.push(e);
         // semver 降序:读的人先看见最新的那个。
-        v.sort_by(|a, b| crate::pkg::semver_key(&b.version).cmp(&crate::pkg::semver_key(&a.version)));
+        v.sort_by_key(|x| std::cmp::Reverse(crate::pkg::semver_key(&x.version)));
     }
 }
 
@@ -485,8 +485,10 @@ pub async fn update(only: Option<&str>) -> Result<()> {
             }
         }
     }
-    if bad > 0 && only.is_some() {
-        bail!("{} 同步失败", only.unwrap());
+    if bad > 0 {
+        if let Some(n) = only {
+            bail!("{n} 同步失败");
+        }
     }
     Ok(())
 }
@@ -663,6 +665,37 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+// ───────────────────── UI 用的数据接口(不打印,只返回) ─────────────────────
+
+/// 已配的仓库及其缓存状态:(名, 地址, 缓存里有几个包)。
+pub fn repo_status() -> Vec<(String, String, Option<usize>)> {
+    load_repos()
+        .repos
+        .into_iter()
+        .map(|(n, u)| {
+            let c = load_index_file(&cache_of(&n)).ok().map(|i| i.entries.len());
+            (n, u, c)
+        })
+        .collect()
+}
+
+/// 全部缓存索引里的**最新版**条目:(仓库名, 包名, 条目)。
+///
+/// 只给最新版:目录是"能装什么"的墙,不是版本历史。要装旧版的人知道
+/// 自己在做什么,走 `crater install <名>:<版本>`。
+pub fn latest_entries() -> Vec<(String, String, Entry)> {
+    let mut out = Vec::new();
+    for (rn, idx) in cached() {
+        for (name, versions) in idx.entries {
+            if let Some(e) = versions.into_iter().next() {
+                out.push((rn.clone(), name, e));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out
 }
 
 #[cfg(test)]
@@ -894,35 +927,4 @@ mod tests {
         assert_eq!(civil_from_days(20698), (2026, 9, 2));
         assert_eq!(civil_from_days(19723), (2024, 1, 1)); // 闰年边界
     }
-}
-
-// ───────────────────── UI 用的数据接口(不打印,只返回) ─────────────────────
-
-/// 已配的仓库及其缓存状态:(名, 地址, 缓存里有几个包)。
-pub fn repo_status() -> Vec<(String, String, Option<usize>)> {
-    load_repos()
-        .repos
-        .into_iter()
-        .map(|(n, u)| {
-            let c = load_index_file(&cache_of(&n)).ok().map(|i| i.entries.len());
-            (n, u, c)
-        })
-        .collect()
-}
-
-/// 全部缓存索引里的**最新版**条目:(仓库名, 包名, 条目)。
-///
-/// 只给最新版:目录是"能装什么"的墙,不是版本历史。要装旧版的人知道
-/// 自己在做什么,走 `crater install <名>:<版本>`。
-pub fn latest_entries() -> Vec<(String, String, Entry)> {
-    let mut out = Vec::new();
-    for (rn, idx) in cached() {
-        for (name, versions) in idx.entries {
-            if let Some(e) = versions.into_iter().next() {
-                out.push((rn.clone(), name, e));
-            }
-        }
-    }
-    out.sort_by(|a, b| a.1.cmp(&b.1));
-    out
 }

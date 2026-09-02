@@ -112,8 +112,13 @@ fn packable(rel: &Path) -> Option<&'static str> {
     None
 }
 
-/// 走一遍目录,收出要进包的文件(相对路径, 字节, mode)与被排除的清单。
-fn collect(root: &Path) -> Result<(Vec<(String, Vec<u8>, u32)>, Vec<(String, &'static str)>)> {
+/// 要进包的一个文件:(包内相对路径, 内容, unix mode)。
+type PackedFile = (String, Vec<u8>, u32);
+/// 被挡在包外的一项:(包内相对路径, 被排除的原因)。
+type SkippedFile = (String, &'static str);
+
+/// 走一遍目录,收出要进包的文件与被排除的清单。
+fn collect(root: &Path) -> Result<(Vec<PackedFile>, Vec<SkippedFile>)> {
     use std::os::unix::fs::PermissionsExt;
     let mut files = Vec::new();
     let mut skipped = Vec::new();
@@ -456,7 +461,7 @@ pub async fn tags(reference: &str) -> Result<()> {
         return Ok(());
     }
     // semver 降序:人问"有哪些版本"时想先看见最新的那个。
-    tags.sort_by(|a, b| semver_key(b).cmp(&semver_key(a)));
+    tags.sort_by_key(|t| std::cmp::Reverse(semver_key(t)));
     for t in &tags {
         // OCI tag 里不能有 `+`,推的时候换成了 `_`,读回来换回去。
         say!("  {}", t.replace('_', "+"));
@@ -842,7 +847,7 @@ mod tests {
     #[test]
     fn semver_sorts_newest_first_and_prerelease_below_release() {
         let mut v = vec!["1.2.0", "1.10.0", "1.2.0-rc1", "0.9.9", "1.2"];
-        v.sort_by(|a, b| semver_key(b).cmp(&semver_key(a)));
+        v.sort_by_key(|e| std::cmp::Reverse(semver_key(e)));
         assert_eq!(v, vec!["1.10.0", "1.2.0", "1.2", "1.2.0-rc1", "0.9.9"]);
     }
 
@@ -1452,7 +1457,7 @@ fn write_app(
         y.push_str(&format!("  inventory: {}\n", i.display()));
     }
     if let Some(l) = &target.limit {
-        let items: Vec<String> = l.split(',').map(|s| format!("{}", s.trim())).collect();
+        let items: Vec<String> = l.split(',').map(|s| s.trim().to_string()).collect();
         y.push_str(&format!("  limit: [{}]\n", items.join(", ")));
     }
     let plain: Vec<(&String, &serde_yaml::Value)> =

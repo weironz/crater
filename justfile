@@ -33,7 +33,15 @@ test:
 #
 # `-D warnings` 只管得住本仓库(cargo 对 registry 依赖自动 --cap-lints allow),
 # 所以不会被上游警告误伤。CI 用的是同一条口径。
+#
+# clippy 是 `cargo build` 看不见的那一半 lint(D-144)。两处 `-D warnings`
+# 不是重复:RUSTFLAGS 那份只到 rustc,而 clippy 自己的 lint
+# (type_complexity / unnecessary_unwrap / doc_lazy_continuation …)只认 `--`
+# 后面这份 —— 少写后面那份,闸门就只剩个名字。
+#
+# 跟着 build/test 一起用 --release:同一份依赖产物,不为 lint 再编一遍 dev。
 check:
+    RUSTFLAGS="" cargo clippy --workspace --all-targets --release -- -D warnings
     RUSTFLAGS="-D warnings" cargo build --release --all-targets
     RUSTFLAGS="-D warnings" cargo test --release
 

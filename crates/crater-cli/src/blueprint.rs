@@ -173,9 +173,8 @@ pub(crate) async fn destroy_lensed(
     // apply 时资源要先就位(kubeadm 得先有 containerd);退役时若先卸掉
     // containerd/kubelet,etcd 里那个成员就成了永远清不掉的孤儿。
     if yes {
-        let targets =
-            connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs, &images)
-                .await?;
+        let rc = RunCtx { bp: &bp, fleet: &fleet, overrides: &overrides, path, target, blobs: &blobs, images: &images };
+        let targets = connect_fleet(&rc, &hosts).await?;
         let dances = {
             let first = fleet.members.first().map(|m| m.name.clone());
             match first {
@@ -448,7 +447,8 @@ async fn run_on_targets(
 
     // 准入断言:在**碰任何机器之前**。plan 也跑它 —— preflight 是只读的,
     // 而 plan 正是闸门:等到 apply 才发现不满足,那道闸门就白设了。
-    run_preflight(&bp, &hosts, &fleet, &overrides, path, target, &blobs, &images).await?;
+    let rc = RunCtx { bp: &bp, fleet: &fleet, overrides: &overrides, path, target, blobs: &blobs, images: &images };
+    run_preflight(&rc, &hosts).await?;
 
     let mut failures = 0usize;
     // 自定义类型(L2)的弥合是机群级的舞:逐台 converge 只记下"需要跳哪支",
@@ -456,7 +456,7 @@ async fn run_on_targets(
     let mut dances: std::collections::BTreeSet<String> = Default::default();
     // linear 策略走另一条执行路径:资源在外层、机器在内层。
     if target.strategy == crate::target::Strategy::Linear && mode == Mode::Apply {
-        return run_linear(&bp, &hosts, &fleet, &overrides, path, target, &blobs, &images, &store).await;
+        return run_linear(&rc, &hosts, &store).await;
     }
 
     // 前缀列宽按本轮全体主机定,各行正文才对得齐。
@@ -806,7 +806,7 @@ async fn run_on_targets(
     }
     // 逐台收敛之后再跳机群级的舞(顺序不能反:舞往往依赖资源已就位)。
     if converge && !dances.is_empty() && failures == 0 {
-        let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs, &images).await?;
+        let targets = connect_fleet(&rc, &hosts).await?;
         for name in &dances {
             say!("── procedure {name} ──");
             crate::events::emit(serde_json::json!({ "e": "proc_start", "name": name }));
@@ -928,17 +928,8 @@ fn report_closure(bp: &Blueprint, scope: &plan::Scope) {
 /// 为什么值得单独一条路径:滚动升级问的是"这一步在所有机器上都成了吗"。
 /// 逐台执行要等最后一台跑完,才会发现第三步早在第二台上就炸了 —— 而那时
 /// 第一台已经被改完了。
-async fn run_linear(
-    bp: &Blueprint,
-    hosts: &[Host],
-    fleet: &Fleet,
-    overrides: &[(String, Yaml)],
-    path: &Path,
-    target: &TargetOpts,
-    blobs: &BlobMap,
-    images: &crate::material_ctx::ImageMap,
-    store: &FileStore,
-) -> Result<()> {
+async fn run_linear(rc: &RunCtx<'_>, hosts: &[Host], store: &FileStore) -> Result<()> {
+    let RunCtx { bp, path, target, .. } = *rc;
     use crater_ir::verbs::Outcome as O;
 
     crate::out::fleet(&hosts.iter().map(|h| h.name.clone()).collect::<Vec<_>>());
@@ -969,8 +960,7 @@ async fn run_linear(
     }
     let batch_fail_before = failures;
     // 只连**这一批** —— 滚动的前提是没轮到的机器一根手指都不碰。
-    let targets =
-        connect_fleet(bp, hosts, fleet, overrides, &base_dir(path), target.parallel, blobs, images).await?;
+    let targets = connect_fleet(rc, hosts).await?;
 
     // 每台各求各的计划:资源集合可以不同(选择器 / when / each)。
     let mut plans: BTreeMap<String, plan::Plan> = BTreeMap::new();
@@ -1256,17 +1246,30 @@ impl Targets for FleetTargets<'_> {
     }
 }
 
-/// 把整个机群连起来 —— 舞开始之后才发现某台连不上,是最糟的失败时机。
-async fn connect_fleet<'a>(
+/// 一次蓝图执行里从头传到尾的那几样:蓝图、机群、参数覆盖、蓝图路径、
+/// 目标选项、闭包物料。
+///
+/// 抽成一个结构不是为了少打字 —— 它们在 `run_preflight` / `run_linear` /
+/// `connect_fleet` 之间原样转手,而其中三个都是 `&[…]`/`&Path`:顺序传错
+/// 时编译器未必拦得住(`path` 与 `base` 曾经就是同类型的两个位置参数)。
+struct RunCtx<'a> {
     bp: &'a Blueprint,
-    hosts: &'a [Host],
-    fleet: &Fleet,
-    overrides: &[(String, Yaml)],
-    base: &Path,
-    parallel: usize,
-    blobs: &BlobMap,
-    images: &crate::material_ctx::ImageMap,
-) -> Result<FleetTargets<'a>> {
+    fleet: &'a Fleet,
+    overrides: &'a [(String, Yaml)],
+    /// 蓝图文件本身的路径;物料的相对路径以它所在目录为基准(见 `base_dir`)。
+    path: &'a Path,
+    target: &'a TargetOpts,
+    blobs: &'a BlobMap,
+    images: &'a crate::material_ctx::ImageMap,
+}
+
+/// 把整个机群连起来 —— 舞开始之后才发现某台连不上,是最糟的失败时机。
+async fn connect_fleet<'a>(rc: &RunCtx<'a>, hosts: &'a [Host]) -> Result<FleetTargets<'a>> {
+    let RunCtx { bp, fleet, overrides, path, target, blobs, images } = *rc;
+    // 五处调用点原本都传 `&base_dir(path)` 与 `target.parallel`,一字不差 ——
+    // 与其让每处各抄一遍,不如就在这里算。
+    let base = base_dir(path);
+    let parallel = target.parallel;
     let mut transports = Vec::new();
     for host in hosts {
         transports.push((host, build_transport(host).await?));
@@ -1370,11 +1373,12 @@ pub async fn run_procedure(
     let fleet = build_fleet(&hosts, target.declared_groups());
     enforce_contract(&bp, &fleet)?;
     let (_blob_src, blobs, images) = open_closure(target)?;
-    let targets = connect_fleet(&bp, &hosts, &fleet, &overrides, &base_dir(path), target.parallel, &blobs, &images).await?;
+    let rc = RunCtx { bp: &bp, fleet: &fleet, overrides: &overrides, path, target, blobs: &blobs, images: &images };
+    let targets = connect_fleet(&rc, &hosts).await?;
 
     say!("procedure {proc_name} —— {} 台目标\n", targets.fleet.members.len());
     // `--set` 既是 deploy 期参数覆盖,也是过程参数(`--set to=1.37.0`)。
-    let args: BTreeMap<String, Yaml> = overrides.into_iter().collect();
+    let args: BTreeMap<String, Yaml> = overrides.iter().cloned().collect();
     let report = procedure::run(&bp, proc_name, &targets, &args)?;
     print_proc_report(&report);
     Ok(())
@@ -1474,22 +1478,12 @@ fn open_closure(
 /// - **零成本**:蓝图没声明 preflight 就一次连接都不发起;
 /// - **任一失败即整个停**,不是"跳过那一台" —— 准入的语义就是全体准入;
 /// - **只读**:断言只能走 `probe`,与 plan 的零写入承诺同源。
-async fn run_preflight(
-    bp: &Blueprint,
-    hosts: &[crater_core::spec::Host],
-    fleet: &Fleet,
-    overrides: &[(String, Yaml)],
-    path: &Path,
-    target: &TargetOpts,
-    blobs: &BlobMap,
-    images: &crate::material_ctx::ImageMap,
-) -> Result<()> {
+async fn run_preflight(rc: &RunCtx<'_>, hosts: &[crater_core::spec::Host]) -> Result<()> {
+    let bp = rc.bp;
     if bp.preflight.is_empty() {
         return Ok(());
     }
-    let targets =
-        connect_fleet(bp, hosts, fleet, overrides, &base_dir(path), target.parallel, blobs, images)
-            .await?;
+    let targets = connect_fleet(rc, hosts).await?;
     let mut bad: Vec<String> = Vec::new();
     for m in &targets.fleet.members {
         let scope = &targets.scope(&m.name)?;

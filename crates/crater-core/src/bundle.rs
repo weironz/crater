@@ -266,10 +266,10 @@ impl BundleStage {
     }
 
     /// Build a **B 类 OCI artifact** for a crater task (D-032): a recipe
-    /// layer + one material layer per material (annotated by material name)
-    /// + a small config, under an `artifactType` manifest. NOT a runnable
-    /// image. Loaded by recipe-replay (materials feed the recipe's `place`
-    /// actions offline), not by extracting a rootfs.
+    /// layer + one material layer per material (annotated by material name) +
+    /// a small config, under an `artifactType` manifest. NOT a runnable image.
+    /// Loaded by recipe-replay (materials feed the recipe's `place` actions
+    /// offline), not by extracting a rootfs.
     pub fn store_component_artifact(
         &self,
         reference: &str,
