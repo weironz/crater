@@ -5,7 +5,7 @@
 //! `first()` / `rest()` 更是无从谈起 —— 它们需要跨主机的**稳定序**。
 //!
 //! 这里只放**静态成员信息**(名字 + 组),它从 inventory 就能得到,不必连机器。
-//! 与之相对,`substrate.*` 是连上之后才知道的单机事实,住在 [`Scope`](crate::eval::Scope) 里。
+//! 与之相对,`substrate.*` 是连上之后才知道的单机事实,住在 [`crate::eval::Scope`] 里。
 
 use std::collections::{BTreeMap, BTreeSet};
 

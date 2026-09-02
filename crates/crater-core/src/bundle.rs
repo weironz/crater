@@ -257,7 +257,7 @@ impl BundleStage {
         self.image_from_layer(reference, &layer)
     }
 
-    /// Like [`store_rootfs_layer`] but the layer is a tar of a real directory
+    /// Like `store_rootfs_layer` but the layer is a tar of a real directory
     /// tree (preserving file modes) — used when `crater build --image` has
     /// materialized a component's file actions into a staging rootfs.
     pub fn store_rootfs_layer_dir(&self, reference: &str, dir: &Path) -> crate::Result<ImageRef> {

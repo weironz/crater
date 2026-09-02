@@ -114,7 +114,6 @@ impl TargetOpts {
         apply_limit(&self.hosts()?, self.limit.as_deref())
     }
 
-    /// Resolve to a concrete host list: inventory > `--host` > localhost.
     /// inventory **显式声明**的组名(含空组)。
     ///
     /// 空组是合法拓扑(单节点的 `worker: { hosts: [] }`),必须与"拼错的组名"
@@ -128,6 +127,12 @@ impl TargetOpts {
             .unwrap_or_default()
     }
 
+    /// 解析出具体的主机清单,三层优先级:
+    /// `-i inventory.yaml` > `--host a,b,c` > 本机。
+    ///
+    /// 这段说明原先粘在 `declared_groups` 头上 —— 它描述的函数搬走之后,
+    /// 注释留在了原地(D-152)。**文档注释比代码更容易在搬家时掉队,因为
+    /// 编译器不检查它**;掉队之后它比没有更糟:读的人会拿它当真。
     pub(crate) fn hosts(&self) -> Result<Vec<crater_core::spec::Host>> {
         target_hosts(
             self.inventory.as_deref(),
@@ -387,6 +392,14 @@ fn warn_literal_passwords(hosts: &[crater_core::spec::Host], path: &Path) {
     eprintln!("      改用 `key:`、`password_file:` 或 `password: \"${{env:VAR}}\"`。");
 }
 
+/// 三层目标解析的实现:
+///
+/// - `-i inventory.yaml` —— 机群,**每台各自的凭据**(来自文件);
+/// - `--host a,b,c` —— 小机群,**共用一份凭据**(user + password|key);
+/// - 两者都没有 —— 单台**本机**(在控制端跑)。
+///
+/// 异物凭据(每台不同)**刻意不能**用 `--host` 表达 —— 它只有一份凭据。
+/// 要那个就写 inventory 文件。
 pub(crate) fn target_hosts(
     inv: Option<&Path>,
     host: Option<String>,

@@ -1,19 +1,33 @@
-//! `crater` CLI — a declarative remote-execution engine (task model).
+//! `crater` CLI —— 声明式的 agentless 部署引擎。
 //!
-//! Forms (executes by default; pass --dry-run to only print the plan):
-//!   crater apply <task>.yaml [--host a,b | -i inv.yaml] [--key K] [--dry-run|--shell]
-//!   crater apply <name>                       # named task → tasks/<name>.yaml
-//!   crater <name> [flags]                      # shorthand for `crater apply <name>`
-//!   crater apply <image-ref|x.oci> --host H    # deploy an image / offline artifact
-//!   crater delete <source> [--host|-i]         # uninstall via the task's teardown: (D-049)
-//!   crater task list|show <name>|history       # deployment state; --verify = drift check (D-051/055)
-//!   crater ui [--bind H --port N]               # read-only web dashboard (Axum + htmx, D-054)
-//!   crater build -f task.yaml [-t ref]         # → B 类 OCI artifact in the local store
-//!   crater save <ref> -o x.oci                 # export a stored artifact to a file
-//!   crater ai "<request>" [-o task.yaml]       # NL → validated task
-//!   crater doctor --file log.txt | --host H    # offline rule-based diagnosis
-//!   crater run --host H --password P -- <cmd>  # ad-hoc (ansible -m shell style)
-//!   crater agent --task-plan <file>            # internal (runs on the target node)
+//! 一条主线:**蓝图**声明期望态,五动词(observe / diff / apply / destroy /
+//! upgrade)把它对到机群上。默认停在计划上,`--yes` 才动手。
+//!
+//! ```text
+//! 写与看
+//!   crater lint <蓝图>                 静态检查,不连机器
+//!   crater plan -f <蓝图> -i <机群>    零写入预演
+//!   crater inspect <蓝图>              输入契约:要给什么参数、要什么样的机群
+//!   crater types / facts               26 类资源类型 / substrate.* 事实白名单
+//!
+//! 装与拆
+//!   crater apply   -f <蓝图> -i <机群>  过闸执行(--closure 走离线闭包)
+//!   crater install <包名|引用> -i <机群> 拉包 → 契约 → 对账 → plan 闸门
+//!   crater verify / destroy             只读核对 / 退役
+//!   crater procedure <名> -f <蓝图>     跑一支声明好的"舞"
+//!
+//! 打包与分发
+//!   crater build -f <蓝图> -o <闭包>    烤离线闭包(--for arch= 选变体)
+//!   crater pkg push/pull/ls/inspect     蓝图打成 OCI 制品
+//!   crater repo add/update, crater search  索引文件:有哪些包
+//!
+//! 其它
+//!   crater ui [--workspace D]           本地 Web 控制台
+//!   crater doctor --host H              离线规则诊断
+//!   crater run / cp                     临时命令 / 传文件
+//! ```
+//!
+//! 旧 task 管线(顶层 `actions:`)已在 D-151 整块删除。
 
 mod blob_source;
 mod blueprint;

@@ -1644,8 +1644,6 @@ fn base_dir(path: &Path) -> PathBuf {
     path.parent().unwrap_or(Path::new(".")).to_path_buf()
 }
 
-/// 机群视角:`on:` / `first()` / `rest()` 的判定依据。
-/// **顺序即 inventory 声明序**,所以 `first()` 每次跑都选中同一台。
 /// 装载 `--closure`(没给就是空表 → 目标机自己联网取)。
 ///
 /// 来源**不再在这里分叉**:`tar` / `oci://` / 空表都是 [`BlobSource`] 的实现,
@@ -1764,6 +1762,13 @@ fn enforce_contract(bp: &crater_ir::ir::Blueprint, fleet: &Fleet) -> Result<()> 
     Ok(())
 }
 
+/// 机群视角:`on:` / `first()` / `rest()` 的判定依据。
+///
+/// **顺序即 inventory 声明序**,所以 `first()` 每次跑都选中同一台 ——
+/// 换个顺序就换一台"种子节点",而那会让已部署的集群多出一个 seed。
+///
+/// 这两行原先粘在 `open_closure` 头上(D-152):被描述的函数搬走了,注释
+/// 留在原地,于是"装载闭包"那段的开头讲的是机群顺序。
 fn build_fleet(hosts: &[Host], declared: impl IntoIterator<Item = String>) -> Fleet {
     Fleet::new(
         hosts

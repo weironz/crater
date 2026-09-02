@@ -2664,3 +2664,26 @@ application/vnd.crater.blueprint.config.v1+json
   测试失败了 —— 而那两次失败恰恰是有价值的信号。**这是本轮第四次栽在"验证被
   工具截断或缓存"上**(D-142 共用 target、D-149 clippy 缓存、D-150 管道 tail、
   这次 cargo test 中止)。
+
+### D-152:孤儿文档归位,`cargo doc` 清零(issue #21)
+
+- **#21 的一半已被 D-151 解决**:`apply.rs` 那六行随文件一起删了。删掉一整条
+  管线,顺带清掉的债比预期多。
+- **`target.rs` 那处已归位**:`Resolve to a concrete host list: inventory >
+  --host > localhost` 原先粘在 `declared_groups` 头上,搬到它真正描述的
+  `hosts()` 上;三层细则补给了 `target_hosts()`(它此前一行文档都没有)。
+  **搬之前核对过规则仍然成立**,不是无脑搬位置。
+- **扫出了第四处**,而且是靠换判据换出来的:第一版启发式(找"文档中间突然
+  换主题")报了 **97 处**,绝大多数是正常分段 —— 噪音太大等于没扫。换成
+  「**文档点名了一个本文件里不存在的函数**」之后只剩 9 处,逐个核实,其中
+  `blueprint.rs` 的 `open_closure` 头上那两行「顺序即 inventory 声明序,
+  `first()` 每次选中同一台」根本不是在讲闭包 —— 它属于 `build_fleet`
+  (那个函数同样一行文档都没有)。已搬。
+- **顺带发现两个 crate 的头部说明整段过期**:`crater-core/src/lib.rs` 的模块
+  清单里还列着 `component` / `engine` / `ai`(D-151 已删),`crater-cli/src/main.rs`
+  的命令面还在写 `crater task` / `crater ai` / `crater agent`。**这类"总览
+  文档"最容易烂掉**:改代码时没人会想起它,而它恰恰是新人第一眼看的东西。
+  两段都按现状重写了。
+- **`cargo doc --no-deps` 从 21 条警告降到 0**(唯一剩的是依赖
+  `proc-macro-error2` 的 future-incompat 提示)。
+- 验收:四道闸门全绿,16 套 581 个测试不变。

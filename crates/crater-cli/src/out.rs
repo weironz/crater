@@ -22,7 +22,7 @@ struct Sink {
     /// 主机名列宽:各行的正文要对齐,否则加了前缀反而更难扫。
     width: usize,
     /// 上色。只在真终端上开 —— 重定向到文件或管道时,转义序列是垃圾。
-    /// 同时尊重 NO_COLOR(https://no-color.org)。
+    /// 同时尊重 `NO_COLOR`(<https://no-color.org>)。
     color: bool,
 }
 
