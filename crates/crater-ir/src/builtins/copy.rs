@@ -71,6 +71,7 @@ impl ResourceType for Copy {
         }
 
         let mut fields = Vec::new();
+        let mut unverifiable = false;
         match desired_sha {
             Some(want) => {
                 if obs.get("sha256") != Some(want.as_str()) {
@@ -100,6 +101,15 @@ impl ResourceType for Copy {
                             "(上游已变)",
                             source_label(input.args),
                         ));
+                    } else {
+                        // 拿不到期望摘要(远端 URL、没声明 sha256、也没有闭包)
+                        // —— **判不出**目标上这份是不是我们要的那份。
+                        //
+                        // 早先这里什么都不做,于是落到下面的 `Change::Ok`:
+                        // 与"确认一致"长得一模一样。换版本时的表现是 plan 报
+                        // "无变更"、目标机上还是旧字节,而一切看起来都成功了
+                        // (D-135)。判不出是事实,如实说出来就行。
+                        unverifiable = true;
                     }
                 }
             },
@@ -116,11 +126,15 @@ impl ResourceType for Copy {
                 fields.push(FieldDiff::change("mode", have, want));
             }
         }
-        if fields.is_empty() {
-            Change::Ok
-        } else {
-            Change::Update(fields)
+        if !fields.is_empty() {
+            // 别的字段(mode/owner)确实要改 —— 那就照改,而 copy 的 apply
+            // 会顺带重推内容,判不出的那一半自然被解决。
+            return Change::Update(fields);
         }
+        if unverifiable {
+            return Change::Unknown(unverifiable_note(input.args));
+        }
+        Change::Ok
     }
 
     fn apply(&self, ctx: &dyn Ctx, args: &ResolvedArgs, _change: &Change) -> Result<Outcome> {
@@ -159,6 +173,18 @@ fn source_label(args: &ResolvedArgs) -> String {
     arg_str_opt(args, "content")
         .map(|c| format!("{} 字节内联", c.len()))
         .unwrap_or_else(|| "(无来源)".into())
+}
+
+/// "判不出"的说法 —— 连同**怎么才能判得出**一起给。
+///
+/// 只说"判不出"会让人卡住:这条信息的价值全在后半句。
+pub fn unverifiable_note(args: &ResolvedArgs) -> String {
+    let m = arg_str_opt(args, "material").unwrap_or("?");
+    format!(
+        "物料 `{m}` 没声明 sha256 且不在闭包里 —— 判不出目标上这份是不是它。\n\
+         在 materials 里补一行 `sha256:`,或用 `--closure` / `install --full` \
+         把字节带上,就能判了。"
+    )
 }
 
 fn short(sha: &str) -> String {
@@ -234,6 +260,51 @@ pub fn sha256_hex(data: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// 判不出 ≠ 一致。远端物料没声明 sha256、也没有闭包时,`copy` 曾经报
+    /// `Change::Ok` —— 与"确认一致"长得一模一样。换版本时的表现是 plan 说
+    /// "无变更"、目标机上还是旧字节,而一切看起来都成功了(D-135)。
+    #[test]
+    fn an_unverifiable_material_is_not_reported_as_in_sync() {
+        let args: ResolvedArgs = [
+            ("dest".to_string(), Yaml::from("/usr/local/bin/yq")),
+            ("material".to_string(), Yaml::from("yq-bin")),
+        ]
+        .into_iter()
+        .collect();
+        // 目标上有文件、摘要读到了,但**期望摘要**拿不到(没有 want_sha256)。
+        let observed = Observed::present([
+            ("sha256", "aa".repeat(32)),
+            ("mode", "755".into()),
+        ]);
+        let change = Copy.diff(&DiffInput { args: &args, observed: &observed, upstream_changed: false });
+        match change {
+            Change::Unknown(why) => {
+                assert!(why.contains("yq-bin"), "要说清是哪份物料: {why}");
+                assert!(why.contains("sha256"), "要说清怎么才能判得出: {why}");
+            }
+            other => panic!("判不出应报 Unknown,得到 {other:?}"),
+        }
+    }
+
+    /// 反面:期望摘要拿得到且一致时,照常报 `Ok` —— 别把所有物料都变成 `?`。
+    #[test]
+    fn a_verifiable_material_still_reports_ok() {
+        let args: ResolvedArgs = [
+            ("dest".to_string(), Yaml::from("/usr/local/bin/yq")),
+            ("material".to_string(), Yaml::from("yq-bin")),
+        ]
+        .into_iter()
+        .collect();
+        let observed = Observed::present([
+            ("sha256", "bb".repeat(32)),
+            ("want_sha256", "bb".repeat(32)),
+        ]);
+        assert!(matches!(
+            Copy.diff(&DiffInput { args: &args, observed: &observed, upstream_changed: false }),
+            Change::Ok
+        ));
+    }
     use super::*;
     use crate::ctx::FakeCtx;
     use crate::eval::Yaml;
@@ -291,11 +362,22 @@ mod tests {
 
     #[test]
     fn material_backed_copy_is_stable_until_upstream_moves() {
-        // 物料内容在控制端,plan 期不重读;上游没变就不该谎报变更。
+        // 上游没变就**不该谎报变更** —— 这条本意不变。
+        //
+        // 变的是另一半:此前它断言 `Change::Ok`,而那是**谎报一致**
+        // (期望摘要根本拿不到,凭什么说一致?)。现在报 `Unknown`:
+        // 不谎报变更,也不谎报一致(D-135)。
         let a = args(&[("dest", "/usr/local/bin/rustfs"), ("material", "rustfs-bin")]);
         let obs = Observed::present([("sha256", "deadbeef".into())]);
-        assert_eq!(diff_of(&a, &obs, false), Change::Ok);
+        assert!(matches!(diff_of(&a, &obs, false), Change::Unknown(_)));
         assert!(matches!(diff_of(&a, &obs, true), Change::Update(_)));
+
+        // 期望摘要拿得到时,`Ok` 才是有依据的结论。
+        let obs2 = Observed::present([
+            ("sha256", "deadbeef".into()),
+            ("want_sha256", "deadbeef".into()),
+        ]);
+        assert_eq!(diff_of(&a, &obs2, false), Change::Ok);
     }
 
     #[test]

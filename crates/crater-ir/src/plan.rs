@@ -340,6 +340,20 @@ pub fn converge_item(
             match again {
                 Change::Ok => Ok((Outcome::Ok, true)),
                 Change::Unknown(_) => {
+                    // 「说不清」有两种,处置**相反**(D-135):
+                    //
+                    // - **什么都观察不到**(裸 shell 没写 `check:`)→ 照跑。
+                    //   跑它就是它的全部语义,不跑等于这一步永远不执行。
+                    // - **观察得到、只是比不了**(物料没声明 sha256,判不出
+                    //   目标上那份是不是它)→ **不动**。动了就是猜,而这里
+                    //   猜的代价是每次 apply 都重推一遍几百 MB 的物料。
+                    //
+                    // 判据用"这次观察到了什么"而不是类型名:前者是事实,
+                    // 后者要维护一张会漏的名单。
+                    let blind = !fresh.present && fresh.fields.is_empty();
+                    if !blind {
+                        return Ok((Outcome::Warn, false));
+                    }
                     rt.apply(ctx, &item.args, &again)
                         .map_err(|e| anyhow::anyhow!("{}: {e}", item.id))?;
                     Ok((Outcome::Warn, true))

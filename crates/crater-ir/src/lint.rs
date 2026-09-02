@@ -107,6 +107,20 @@ fn check_pure_ref(
     );
 }
 
+/// 物料来源是不是远端 URL(而不是随蓝图走的本地文件)。
+///
+/// 只看字面量:带 `${}` 的模板要到部署期才知道渲染成什么,构建期判不了 ——
+/// 那时宁可不报,也不要报一条可能是错的 warning。
+fn remote_source(v: &Value) -> bool {
+    match v {
+        Value::Lit(y) => y
+            .as_str()
+            .map(|s| ["http://", "https://", "ftp://"].iter().any(|p| s.starts_with(p)))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
 fn check_funcs(
     e: &CelExpr,
     at: &str,
@@ -240,6 +254,32 @@ pub fn lint(bp: &Blueprint) -> Vec<Diagnostic> {
                 format!("materials.{}", m.name),
                 m.line,
                 "`unzip:` 只对 `file:` 物料有意义".into(),
+            );
+        }
+    }
+    for m in &bp.materials {
+        // 远端 file 物料没声明摘要 → crater **判不出**目标机上那份是不是它
+        // (D-135)。不是 error:上游不发布 checksum 是常有的事,而且第一次
+        // 安装完全正常 —— 只有换版本时才会撞上"判不出"。
+        //
+        // **只对字面量 URL 报。** URL 里插值了 `${params.version}` 时,写死一个
+        // sha256 反而是错的:换个版本参数,校验必然失败。那种物料的答案是
+        // `--closure`(烘焙期按当时的参数取字节并记摘要),不是"补一行"。
+        // 对它们报警等于给出会把人带沟里的建议,而且库里几乎每份蓝图都会中 ——
+        // 一条几乎总在响的警告,很快就没人看了。
+        let literal_url = matches!(&m.source, Value::Lit(_));
+        if m.kind == MaterialKind::File
+            && m.sha256.is_none()
+            && literal_url
+            && remote_source(&m.source)
+        {
+            push(
+                Severity::Warn,
+                format!("materials.{}", m.name),
+                m.line,
+                "远端物料没声明 `sha256:` —— crater 判不出目标上那份是不是它,\n\
+                 plan 会显示 `?` 而不是 `~`。这条 URL 是字面量,补一行 `sha256:` 即可。"
+                    .into(),
             );
         }
     }
