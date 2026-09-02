@@ -1453,13 +1453,12 @@ fn open_closure(
     if target.closure.is_some() {
         let imgs =
             if images.is_empty() { String::new() } else { format!(",{} 个镜像", images.len()) };
-        let origin = src.origin();
-        // `——` 前那个空格:路径后面要,`(包内物料)` 后面不要 —— 右括号本身
-        // 已经把两边隔开了,再补一个空格就成了双倍间距。这不是洁癖:这一行是
-        // 现场核对"字节到底从哪来"的唯一凭据,重构承诺的是**逐字**不变,
-        // 一个空格也算数。
-        let gap = if origin.ends_with(')') { "" } else { " " };
-        say!("离线闭包 {origin}{gap}—— {} 份物料{imgs}已备好\n", blobs.len());
+        // 两条来源统一成同一个排版。重构前它们差一个空格(路径后有、
+        // `(包内物料)` 后没有),而重构版本一度用 `origin.ends_with(')')`
+        // 去还原那点差异 —— 那是拿"以右括号结尾"当代理判据,一个叫
+        // `k8s(1).tar` 的闭包会**静默少一个空格**。为保住一处纯装饰性的
+        // 不一致背一颗地雷,不划算:这里接受 oci 那行多一个空格。
+        say!("离线闭包 {} —— {} 份物料{imgs}已备好\n", src.origin(), blobs.len());
     }
     Ok((src, blobs, images))
 }
