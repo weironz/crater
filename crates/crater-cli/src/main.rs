@@ -1104,7 +1104,6 @@ async fn run_adhoc(
     std::process::exit(if out.ok() { 0 } else { out.code });
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn push_file(
     host: &str,
     user: &str,

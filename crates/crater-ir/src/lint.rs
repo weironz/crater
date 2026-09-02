@@ -408,7 +408,6 @@ pub fn lint(bp: &Blueprint) -> Vec<Diagnostic> {
 }
 
 /// 类型名是否已知 + 参数拼写/必填/互斥。
-#[allow(clippy::too_many_arguments)]
 fn lint_type_and_args(
     ty: &str,
     args: &Args,
@@ -515,7 +514,6 @@ fn lint_type_and_args(
 }
 
 /// CEL 作用域检查:根变量必须在白名单内;`item` 只在 `each:` 下合法。
-#[allow(clippy::too_many_arguments)]
 fn lint_scope_of(
     args: &Args,
     when: Option<&CelExpr>,

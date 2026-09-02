@@ -2539,6 +2539,26 @@ application/vnd.crater.blueprint.config.v1+json
   态",目标机上二进制正确;**反证** —— 真的失败(往 `/proc` 里建目录)仍然
   照常报失败并以非零退出。
 
+### D-148:D-126 的反证补上了 —— 去掉覆盖,CI 确实变红(issue #18)
+
+- **欠的是什么**:D-126 把构建前置抽成 composite action,正向验过(CI 绿)。
+  但**反证一直没验**:去掉那条 `RUSTFLAGS` 覆盖之后,CI 是不是真会红?
+  不验它,就说不清"绿"是因为覆盖在起作用,还是**别处碰巧也把 mold 关掉了**。
+- **结果**:临时分支 `probe/no-rustflags`,run `33615376098`,**14 秒变红**,
+  停在 composite action 自己那步自检上:
+  > `RUSTFLAGS 没设上 —— .cargo/config.toml 的 -fuse-ld=mold 会生效,而
+  > runner 上没有 mold,构建必然以链接失败告终`
+  后续步骤全部 skipped。属于两种预期红里的第一种 —— **自检有效**。
+- **一条额外证据,正好回答了"是不是别处碰巧"**:自检步的 env dump 完整,
+  只有 `CARGO_HOME` / `CARGO_INCREMENTAL` / `CARGO_TERM_COLOR` /
+  `CACHE_ON_FAILURE` 四条,**`RUSTFLAGS` 一个字都没有**。去掉覆盖之后
+  runner 上再没有第二处设它 —— 绿是那条覆盖挣来的,不是巧合。
+- **第二种红(走到 cargo 那步以 `cannot find -fuse-ld=mold` 失败)没验**,
+  因为自检先拦下了 —— 这是保留自检的必然结果,不是遗漏。要看那句原文得再
+  推一条把自检也去掉的分支,代价是一次真冷编译。**不值**:env dump 已经
+  排除了第二来源,而链接失败是 D-126 当初实际撞到过的既有事实。
+- 临时分支已删,`main` 未被动过。**做反证不该在主干上留下痕迹。**
+
 ### D-147:rustfmt 一次跑齐并进闸门(issue #16)
 
 - **为什么是"悬着比做掉更糟"**:这个仓库从没跑过 rustfmt,积了 82 个文件的

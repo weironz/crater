@@ -257,7 +257,6 @@ async fn ensure_pulled(store: &ImageStore, local: &str, remote: &str, offline: b
 /// Materialize ONE crater task artifact from the store and run it through the
 /// task pipeline. `graceful_no_teardown`: project plays skip teardown-less
 /// tasks (D-098 semantics); a direct single-ref delete stays a hard error.
-#[allow(clippy::too_many_arguments)]
 async fn apply_task_artifact(
     store: &ImageStore,
     reference: &str,
@@ -332,7 +331,6 @@ async fn apply_task_artifact(
 /// (materials feed the recipe offline). A project artifact → registry/store-
 /// direct play orchestration (D-101). A plain container image → extract its
 /// rootfs layers to `/` on each host (parallel). crater-native, no runtime.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_image_ref(
     reference: &str,
     hosts: Vec<crater_core::spec::Host>,

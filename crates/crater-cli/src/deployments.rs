@@ -163,7 +163,6 @@ pub(crate) fn status_label(s: Option<bool>) -> &'static str {
 
 /// `crater task list` (D-051/052/053): **deployment-centric** — one row per
 /// deployment, hosts aggregated as a count. `--verify` adds a drift STATUS.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn task_list(target: TargetOpts, verify: bool) -> Result<()> {
     let from_targets = target.inventory.is_some() || target.host.is_some();
     if verify && !from_targets {
@@ -258,7 +257,6 @@ pub(crate) async fn task_list(target: TargetOpts, verify: bool) -> Result<()> {
 
 /// `crater task show <name>` (D-051): one deployment's per-host instances;
 /// `--verify` adds per-host drift status.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn task_show(name: &str, target: TargetOpts, verify: bool) -> Result<()> {
     if verify && target.inventory.is_none() && target.host.is_none() {
         anyhow::bail!("--verify needs --host or -i (it re-runs the verify phase on the targets)");

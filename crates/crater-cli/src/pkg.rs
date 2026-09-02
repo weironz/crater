@@ -1285,7 +1285,6 @@ fn warn_if_undecidable(bp: &Blueprint, source: &str, have_bytes: bool) {
 /// 顺序是刻意的:**契约与机群都在本地对完账,才连第一台机器**。参数少给一个、
 /// 组名写错一个,在 SSH 之前就该说清楚 —— 那时候纠正的代价是改一行命令,
 /// 连上之后再发现就已经在改机器了。
-#[allow(clippy::too_many_arguments)]
 pub async fn install(
     source: &str,
     target: &crate::target::TargetOpts,

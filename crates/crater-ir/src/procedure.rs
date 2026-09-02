@@ -231,7 +231,6 @@ struct MemberBag {
 }
 
 /// 一步在**一台**机器上的执行。无共享可变状态 —— 这是它能并发的全部理由。
-#[allow(clippy::too_many_arguments)]
 fn run_member(
     proc: &Procedure,
     step: &Step,

@@ -23,7 +23,6 @@ use crate::{agent, deployments, images};
 /// Auto-detect the source kind and route; the execution engine (idempotency,
 /// tracing, agent/shell) is shared — online vs offline differ only in where
 /// artifacts come from.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_source(
     name: Option<String>,
     source: Option<String>,
@@ -173,7 +172,6 @@ pub(crate) async fn apply_source(
 /// A barrier between plays (each `apply_task` completes first), so ordering like
 /// host-init → k8s → cni holds. All plays share one deployment label (the project
 /// name, or `--name`), so `task list` groups them.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_project(
     path: &Path,
     name: Option<&str>,
@@ -977,7 +975,6 @@ pub(crate) fn forks_limit() -> usize {
 /// inventory from CLI), set `Artifacts::Offline`, and run `run_pipeline`. So
 /// offline gets the same host grouping / parallelism / register / idempotency —
 /// the only difference is where artifacts come from (the bundle, on control).
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_oci_bundle(
     bundle_file: &Path,
     hosts: Vec<crater_core::spec::Host>,
