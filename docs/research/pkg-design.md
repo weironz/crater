@@ -337,7 +337,7 @@ Docker Hub 上 `config` 535 B、蓝图层 572 B —— `pkg inspect` 的全部�
 | 阶段 | 内容 | 验收(全部真机) |
 | --- | --- | --- |
 | **1. 制品格式 + push/pull** ✅ 已落地 | 蓝图目录 → manifest(config + 蓝图层);`pkg push/build/pull/ls/inspect/tags`;瘦拉;复用 `store.rs` | 见下方"第一阶段验收记录"。**ACR 个人版仍未实测**(本地无凭据) |
-| **2. 闭包层 + 多架构** | `--with-closure --for arch=`,物料层 `fetch=embedded/dependency`;image index 按 platform;`pull --full` | 同一 tag 推 amd64+arm64;蓝图层 digest 相同(registry 只存一份);瘦拉字节数 ≈ 旧管线 16K 量级,`--full` 拉到闭包;离线机上 `apply --closure` 走通 |
+| **2. 闭包层 + 多架构** ✅ 已落地 | `pkg push --arch amd64 --arch arm64`,物料层 `fetch=dependency`;image index 按 platform;`pull --full`;`--closure oci://<ref>` | 见下方"第二阶段验收记录" |
 | **3. install** ✅ 已落地(UI 远端源除外) | `crater install` 串起 pull → 契约 → fit → app → plan 闸门 | 见下方"第三阶段验收记录"。**UI 远端源未做** |
 | **4. 索引与搜索** | `pkg index` 生成 `index.yaml`;`repo add/update`;`search` | 索引托管在 rustfs(S3 静态)上;U 盘场景:tar + index 离线搬运后 `search` 能查、`install` 能装 |
 
@@ -363,6 +363,34 @@ ACR 个人版收不收自定义制品仍是**第二阶段开工前必须实测**
 **真机没用上实验室**:192.168.73.x 的路由被本机的 Meta 代理截住(TCP 连得上、
 SSH 握手即断),隧道也没起。改用一个 sshd 容器当目标 —— 对 crater 而言它就是
 一台开着 22 端口、要口令登录的机器,验的东西一样。
+
+### 第二阶段验收记录(2026-09-02)
+
+`crater pkg push <目录> <ref> --arch amd64 --arch arm64` —— 物料随包,一个 tag
+装下两个架构。全部在 zot 与一台**真断网**的目标机上验:
+
+| 判据 | 结果 |
+| --- | --- |
+| 多架构 index | 顶层 `application/vnd.oci.image.index.v1+json`,两条 `platform` 条目 |
+| **蓝图层跨架构共享 digest** | config 1 个 digest、蓝图层 1 个 digest、物料层 2 个 —— 设计里那句话是真的,registry 只存一份 |
+| 物料层类型与注解 | `vnd.crater.material.v1` + `fetch=dependency` + `source=<渲染后的 URL>` |
+| 瘦拉 vs 全量 | **20K vs 9.6M**。且全量只拉本机架构那一份(9.5M),不是两架构的 18.8M |
+| 断网安装 | 目标机 `iptables -A OUTPUT --ctstate NEW -j REJECT`,`install --full --yes` 装成,`yq --version` 报 v4.44.3 |
+| **反证** | 同一台断网机不带 `--full` → `curl: (6) Could not resolve host`,装不上。断网是真的,不是摆设 |
+
+**`--for` 表达不了多架构,这是个真缺口。** `bake_scope` 把多次 `--for` 合并成
+**一个**画像,所以 `--for arch=amd64 --for arch=arm64` 是后者覆盖前者 ——
+错误提示里那句"(可给多次)"指的是可以给多个不同的 key,不是同一个 key 给多个
+值。新的 `--arch` 单开一个维度,正好对上 OCI `platform` 字段;其余维度仍走
+`--for`,与每个 `--arch` 合并。
+
+**索引解析改成"本机架构优先"**(原来硬编码 amd64,D-061)。原来的行为在
+arm64 机器上会**静默**装错架构的字节 —— 静默,是因为摘要对得上(那是 amd64
+那份的摘要),直到目标机上 exec 才报 `Exec format error`。
+
+**`--closure` 接受 `oci://<ref>`**:包里的物料层已经在本地 store 里按 sha256
+躺着,不解包、不复制,直接把路径交给 `BlobMap`。这印证了 D-119 那两个接口
+够窄 —— 加第二个 blob 后端没让 `BlobSource` 多一个方法。
 
 ### 第三阶段验收记录(2026-09-02)
 

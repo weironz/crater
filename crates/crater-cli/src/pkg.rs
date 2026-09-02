@@ -20,13 +20,17 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
-use crater_core::store::{ImageStore, MT_PKG_CONFIG, MT_PKG_LAYER};
+use crater_core::store::{
+    ImageStore, ANN_MATERIAL_FETCH, ANN_MATERIAL_NAME, ANN_MATERIAL_SOURCE, MT_MATERIAL,
+    MT_PKG_CONFIG, MT_PKG_LAYER,
+};
 use crater_ir::ir::Blueprint;
 use serde_json::json;
 
 use crate::say;
 
 const MT_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
+const MT_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 
 // ───────────────────────── 契约(config blob 的内容) ─────────────────────────
 
@@ -203,11 +207,20 @@ fn locate(path: &Path) -> Result<(PathBuf, PathBuf)> {
     }
 }
 
-/// 组装制品并落进本地 store,返回引用。
+/// 组装制品并落进本地 store。
 ///
 /// 落本地再推,而不是边算边推:于是"推上去的"和"本地留着的"是同一份字节,
 /// `pkg ls` 看见的就是对方会拉到的。
-fn assemble(path: &Path, reference: &str) -> Result<(String, u64, u64)> {
+///
+/// `archs` 非空即带闭包:每个架构烤一遍物料,做成各自的层。**蓝图层与
+/// config 跨架构是同一个 digest** —— registry 按内容寻址,只存一份,
+/// 多一个架构只多它自己的物料字节。给了两个及以上架构就产出 image index。
+async fn assemble(
+    path: &Path,
+    reference: &str,
+    archs: &[String],
+    fors: &[String],
+) -> Result<()> {
     let (bp_file, root) = locate(path)?;
     let bp = crate::blueprint::load(&bp_file)?;
     let (files, skipped) = collect(&root)?;
@@ -216,60 +229,176 @@ fn assemble(path: &Path, reference: &str) -> Result<(String, u64, u64)> {
     }
     refuse_literal_secrets(&files)?;
 
+    let store = ImageStore::open()?;
     let cfg = serde_json::to_vec_pretty(&contract(&bp))?;
     let layer = crater_core::bundle::tar_gz_files(&files)?;
-    let store = ImageStore::open()?;
     let (cfg_d, cfg_s) = store.put_blob(&cfg)?;
     let (lay_d, lay_s) = store.put_blob(&layer)?;
+
+    say!("包 {reference} —— {} 个文件,{}", files.len(), human(lay_s));
+    for (rel, why) in &skipped {
+        say!("  · 排除 {rel}({why})");
+    }
 
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let manifest = json!({
-        "schemaVersion": 2,
-        "mediaType": MT_MANIFEST,
-        "config": { "mediaType": MT_PKG_CONFIG, "digest": format!("sha256:{cfg_d}"), "size": cfg_s },
-        "layers": [{
-            "mediaType": MT_PKG_LAYER,
-            "digest": format!("sha256:{lay_d}"),
-            "size": lay_s,
-            // ORAS 惯例:带上文件名,`oras pull` 也能当逃生通道把包取出来。
-            "annotations": { "org.opencontainers.image.title": format!("{}.tar.gz", bp.name) }
-        }],
-        "annotations": {
-            "org.opencontainers.image.title": bp.name,
-            "org.opencontainers.image.version": bp.version.clone().unwrap_or_default(),
-            "org.opencontainers.image.description": bp.description.clone().unwrap_or_default(),
-            "org.opencontainers.image.created": created.to_string(),
-        }
+    let ann = json!({
+        "org.opencontainers.image.title": bp.name,
+        "org.opencontainers.image.version": bp.version.clone().unwrap_or_default(),
+        "org.opencontainers.image.description": bp.description.clone().unwrap_or_default(),
+        "org.opencontainers.image.created": created.to_string(),
     });
-    let mbytes = serde_json::to_vec(&manifest)?;
-    store.put_manifest(reference, &mbytes)?;
+    let cfg_desc = json!({
+        "mediaType": MT_PKG_CONFIG, "digest": format!("sha256:{cfg_d}"), "size": cfg_s
+    });
+    let bp_layer = json!({
+        "mediaType": MT_PKG_LAYER,
+        "digest": format!("sha256:{lay_d}"),
+        "size": lay_s,
+        // ORAS 惯例:带上文件名,`oras pull` 也能当逃生通道把包取出来。
+        "annotations": { "org.opencontainers.image.title": format!("{}.tar.gz", bp.name) }
+    });
 
-    say!("包 {} —— {} 个文件,{}", reference, files.len(), human(lay_s));
-    for (rel, why) in &skipped {
-        say!("  · 排除 {rel}({why})");
+    // 不带闭包:一份 manifest,与 Helm 的布局同形。
+    if archs.is_empty() {
+        let m = json!({
+            "schemaVersion": 2, "mediaType": MT_MANIFEST,
+            "config": cfg_desc, "layers": [bp_layer], "annotations": ann
+        });
+        store.put_manifest(reference, &serde_json::to_vec(&m)?)?;
+        return Ok(());
     }
-    Ok((bp.name.clone(), cfg_s, lay_s))
+
+    // 带闭包:逐架构烤。`seen` 跨架构复用 —— 两个架构共用的物料(证书、
+    // 配置模板)只下载一次,两份 manifest 引用同一个 digest。
+    let mut seen = std::collections::BTreeMap::new();
+    let mut per_arch: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut total_mat = 0u64;
+    for a in archs {
+        let mut profile: Vec<String> = fors.to_vec();
+        profile.push(format!("arch={a}"));
+        say!();
+        say!("── {a} ──");
+        let (baked, skip) =
+            crate::closure::bake_bytes(&bp_file, &profile, &Default::default(), &mut seen).await?;
+        for s in &skip {
+            say!("  · 跳过 {s}");
+        }
+        let mut layers = vec![bp_layer.clone()];
+        for b in &baked {
+            let sha = crater_core::bundle::sha256_hex(&b.bytes);
+            let (d, sz) = store.put_blob(&b.bytes)?;
+            total_mat += sz;
+            say!("  ✓ {:<28} {:>9}  {}", b.name, human(sz), &sha[..12]);
+            layers.push(json!({
+                "mediaType": MT_MATERIAL,
+                "digest": format!("sha256:{d}"),
+                "size": sz,
+                "annotations": {
+                    // 物料是**外部字节**,不随瘦拉走:在线部署时目标机自己按
+                    // URL 取,几百兆的层留在 registry 里(D-087 的老约定)。
+                    ANN_MATERIAL_FETCH: "dependency",
+                    ANN_MATERIAL_NAME: b.name,
+                    // 部署侧的 BlobMap 按**渲染后的 URL** 索引,不按物料名 ——
+                    // 同名物料按 `when:` 分成多个变体,各有各的 URL。
+                    ANN_MATERIAL_SOURCE: b.source,
+                    "org.opencontainers.image.title": b.name,
+                }
+            }));
+        }
+        // 这个架构一个物料都没烤出来(全被上一个架构的 seen 挡掉了),说明
+        // 该蓝图的物料与架构无关 —— 那就没有必要为它单开一份 manifest。
+        let m = json!({
+            "schemaVersion": 2, "mediaType": MT_MANIFEST,
+            "config": cfg_desc, "layers": layers, "annotations": ann
+        });
+        per_arch.push((a.clone(), m));
+    }
+
+    if per_arch.len() == 1 {
+        let (_, m) = per_arch.remove(0);
+        store.put_manifest(reference, &serde_json::to_vec(&m)?)?;
+        say!();
+        say!("闭包 {} —— 一份 manifest", human(total_mat));
+        return Ok(());
+    }
+
+    // 多架构 → image index。`platform` 是 OCI 定义的变体选择字段,
+    // 所有 registry 与运行时都懂它;用注解自造一套只有 crater 认得。
+    let mut entries = Vec::new();
+    for (a, m) in &per_arch {
+        let bytes = serde_json::to_vec(m)?;
+        let (d, sz) = store.put_blob(&bytes)?;
+        entries.push(json!({
+            "mediaType": MT_MANIFEST,
+            "digest": format!("sha256:{d}"),
+            "size": sz,
+            "platform": { "architecture": a, "os": "linux" }
+        }));
+    }
+    let index = json!({
+        "schemaVersion": 2, "mediaType": MT_INDEX,
+        "manifests": entries, "annotations": ann
+    });
+    store.put_manifest(reference, &serde_json::to_vec(&index)?)?;
+    say!();
+    say!("闭包 {} —— {} 个架构,index 一个 tag 装下", human(total_mat), per_arch.len());
+    Ok(())
 }
 
 // ───────────────────────────── 命令 ─────────────────────────────
 
 /// `crater pkg build <路径> -t <ref>` —— 只组装,不推。
-pub fn build(path: &Path, reference: &str) -> Result<()> {
-    assemble(path, reference)?;
+pub async fn build(path: &Path, reference: &str, archs: &[String], fors: &[String]) -> Result<()> {
+    assemble(path, reference, archs, fors).await?;
     say!("已入本地 store —— `crater pkg push {reference}` 推上去");
     Ok(())
 }
 
 /// `crater pkg push <路径> <ref>` —— 组装并推。
-pub async fn push(path: &Path, reference: &str) -> Result<()> {
-    assemble(path, reference)?;
+pub async fn push(path: &Path, reference: &str, archs: &[String], fors: &[String]) -> Result<()> {
+    assemble(path, reference, archs, fors).await?;
     let store = ImageStore::open()?;
     store.push(reference).await?;
     say!("推送完成 → {reference}");
     Ok(())
+}
+
+/// 一个已拉全的包里的物料字节 → 部署侧的 `BlobMap`(源 URL → 本地路径)。
+///
+/// 不解包、不复制:store 的 blob 本来就是内容寻址的文件,直接把路径交出去。
+/// 这是 D-119 说的"第二个 blob 后端",而它没让 `BlobSource` 多一个方法。
+pub fn blobs_of(reference: &str) -> Result<crate::material_ctx::BlobMap> {
+    let store = ImageStore::open()?;
+    let m = store.resolve_manifest(reference)?;
+    let mut map = crate::material_ctx::BlobMap::new();
+    let mut missing = Vec::new();
+    for l in m["layers"].as_array().into_iter().flatten() {
+        if l["mediaType"].as_str() != Some(MT_MATERIAL) {
+            continue;
+        }
+        let Some(src) = l["annotations"][ANN_MATERIAL_SOURCE].as_str() else { continue };
+        let d = l["digest"].as_str().unwrap_or_default().trim_start_matches("sha256:");
+        let p = store.blob_path(d);
+        // 瘦拉过的包物料层不在本地。报出来而不是静默少一条 —— 少一条的表现
+        // 是"部署时目标机自己去联网下载",在断网现场就是装不上。
+        if p.exists() {
+            map.insert(src.to_string(), p);
+        } else {
+            missing.push(src.to_string());
+        }
+    }
+    if !missing.is_empty() {
+        bail!(
+            "{reference} 的 {} 份物料不在本地(瘦拉的包只有蓝图层)。\n\
+             先 `crater pkg pull {reference} --full`。缺:{}",
+            missing.len(),
+            missing.join(", ")
+        );
+    }
+    Ok(map)
 }
 
 /// `crater pkg pull <ref> [--into DIR] [--full]` —— 拉下来并摊回文件。
@@ -301,6 +430,14 @@ pub async fn pull(reference: &str, into: Option<&Path>, full: bool) -> Result<()
     crater_core::bundle::untar_gz_into(&dir, &bytes, 0)?;
     let n = std::fs::read_dir(&dir).map(|r| r.flatten().count()).unwrap_or(0);
     say!("{reference} → {}({n} 项)", dir.display());
+    let mats = m["layers"]
+        .as_array()
+        .map(|ls| ls.iter().filter(|l| l["mediaType"].as_str() == Some(MT_MATERIAL)).count())
+        .unwrap_or(0);
+    if full && mats > 0 {
+        say!("闭包 {mats} 份物料随包带下 —— 断网部署:");
+        say!("  crater apply -f {}/... -i <机群> --closure oci://{reference}", dir.display());
+    }
     print_contract(&cfg);
     Ok(())
 }
@@ -346,19 +483,23 @@ pub async fn tags(reference: &str) -> Result<()> {
 pub fn ls() -> Result<()> {
     let store = ImageStore::open()?;
     let all = store.list()?;
-    let mut rows: Vec<(String, String, String, u64, bool)> = Vec::new();
+    let mut rows: Vec<(String, String, String, u64, usize)> = Vec::new();
     for img in &all {
         let Ok(m) = store.resolve_manifest(&img.reference) else { continue };
         if m["config"]["mediaType"].as_str() != Some(MT_PKG_CONFIG) {
             continue; // 不是蓝图包(旧 task 制品、普通镜像)—— `crater images` 管那些
         }
         let cfg = read_config(&store, &m).unwrap_or(json!({}));
+        let mats = m["layers"]
+            .as_array()
+            .map(|ls| ls.iter().filter(|l| l["mediaType"].as_str() == Some(MT_MATERIAL)).count())
+            .unwrap_or(0);
         rows.push((
             img.reference.clone(),
             cfg["name"].as_str().unwrap_or("").to_string(),
             cfg["description"].as_str().unwrap_or("").to_string(),
             img.content_size,
-            store.has_all_layers(&img.reference),
+            if store.has_all_layers(&img.reference) { mats } else { usize::MAX },
         ));
     }
     if rows.is_empty() {
@@ -368,9 +509,14 @@ pub fn ls() -> Result<()> {
     }
     rows.sort();
     let w = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0);
-    for (r, _n, desc, size, complete) in &rows {
-        // 瘦拉的包是完整可用的(蓝图层全在),标注只是说"物料层还在 registry"。
-        let mark = if *complete { "" } else { "  (瘦)" };
+    for (r, _n, desc, size, mats) in &rows {
+        // 瘦拉的包照样能在线部署(蓝图层全在),标注只是说"物料层还在
+        // registry" —— 断网现场要的是另一种。
+        let mark = match *mats {
+            usize::MAX => "  (瘦)".to_string(),
+            0 => String::new(),
+            n => format!("  (闭包 {n} 份)"),
+        };
         say!("  {:<w$}  {:>9}{}  {}", r, human(*size), mark, desc, w = w);
     }
     Ok(())
@@ -665,6 +811,14 @@ pub async fn install(
     write_app(&app_name, &bp_file, target, &bp, &given)?;
 
     // ⑤ 闸门。
+    //
+    // `--full` 拉来的包自带物料层,那就是这次安装的闭包 —— 断网现场
+    // 不必再单独准备一个 closure.tar。用户显式给了 `--closure` 则尊重他的。
+    let mut target = target.clone();
+    if full && target.closure.is_none() && !local.exists() {
+        target.closure = Some(PathBuf::from(format!("oci://{source}")));
+    }
+    let target = &target;
     say!();
     crate::blueprint::plan_blueprint(&bp_file, target, sets).await?;
     if !yes {

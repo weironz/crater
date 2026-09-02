@@ -2000,3 +2000,27 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
 - **踩到的坑**:新 workflow 漏抄了 release.yml 早就写明的 `RUSTFLAGS: ""`
   ——仓库 `.cargo/config.toml` 为本地提速指定了 `-fuse-ld=mold`,runner
   上没装。同一个坑在本地会话里也撞过一次。
+
+### D-127:物料层 + 多架构 image index(D-123 第二阶段)
+
+- **`--arch` 而不是 `--for arch=`**:`bake_scope` 把多次 `--for` 合并成**一个**
+  画像,同一个 key 给两次是后者覆盖前者 —— 多架构今天根本表达不了。新开
+  `--arch` 一个维度,正好对上 OCI `platform` 字段(那是规范定义的变体选择
+  机制,所有 registry 与运行时都懂);其余维度仍走 `--for`,与每个 `--arch`
+  合并。
+- **物料层一律 `fetch=dependency`**:新蓝图管线里 `templates/` 与 `files/` 已经
+  在蓝图层里了,`materials:` 全是外部字节。于是瘦拉 = 蓝图包,全量 = 加闭包,
+  正好是设计里的两个可分发物。
+- **蓝图层与 config 跨架构同 digest**(实测:config 1 个、蓝图层 1 个、物料层
+  2 个)。registry 内容寻址,多一个架构只多它自己的物料字节。
+- **索引解析改成本机架构优先**(原来硬编码 amd64,D-061)。原来的行为在
+  arm64 机器上**静默**装错架构:摘要对得上(那是 amd64 那份的摘要),直到
+  目标机 exec 才报 `Exec format error`。
+- **`--closure` 接受 `oci://<ref>`**:包里的物料层已在本地 store 按 sha256
+  躺着,不解包不复制,直接交路径给 `BlobMap`。`install --full` 自动接上。
+  这印证了 D-119 的接口够窄 —— 加第二个 blob 后端没让 `BlobSource` 多方法。
+- **`push` 学会推 image index**:子 manifest 按 digest 先推,再推 index。
+  index 走原始 PUT,不经 `OciImageManifest`(它会把 `manifests` 丢掉)。
+- **验收**:瘦拉 20K vs 全量 9.6M(且只拉本机架构那份,不是两架构的 18.8M);
+  真断网目标机(`iptables OUTPUT --ctstate NEW -j REJECT`)上 `install --full`
+  装成;**反证**同一台机不带 `--full` 报 `Could not resolve host`,装不上。

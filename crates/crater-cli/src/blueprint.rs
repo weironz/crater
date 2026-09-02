@@ -1407,6 +1407,13 @@ fn open_closure(target: &TargetOpts) -> Result<(Option<tempfile::TempDir>, BlobM
     let Some(path) = &target.closure else {
         return Ok((None, BlobMap::new()));
     };
+    // `oci://<ref>`:物料就是包里的层,已在本地 store 里按 sha256 躺着。
+    // 不解包、不复制,直接把路径交出去 —— 于是没有临时目录要守着。
+    if let Some(r) = path.to_string_lossy().strip_prefix("oci://") {
+        let map = crate::pkg::blobs_of(r)?;
+        say!("离线闭包 {r}(包内物料)—— {} 份物料已备好\n", map.len());
+        return Ok((None, map));
+    }
     let (dir, map) = crate::closure::load(path)?;
     say!("离线闭包 {} —— {} 份物料已备好\n", path.display(), map.len());
     Ok((Some(dir), map))

@@ -521,12 +521,23 @@ enum PkgCmd {
         path: PathBuf,
         /// 目标引用,如 registry.example.com/ns/rustfs:1.0
         reference: String,
+        /// 把物料字节也烤进包(离线现场需要)。可给多次 = 多架构,
+        /// 产出一个 image index,一个 tag 装下所有架构。
+        #[arg(long, value_name = "ARCH")]
+        arch: Vec<String>,
+        /// 烘焙用的其它目标事实,`k=v`,与每个 `--arch` 合并。
+        #[arg(long = "for", value_name = "K=V")]
+        fors: Vec<String>,
     },
     /// 只组装进本地 store,不推 —— 想先看看包成什么样时用。
     Build {
         path: PathBuf,
         #[arg(short = 't', long = "tag")]
         reference: String,
+        #[arg(long, value_name = "ARCH")]
+        arch: Vec<String>,
+        #[arg(long = "for", value_name = "K=V")]
+        fors: Vec<String>,
     },
     /// 拉下来并摊回文件。默认瘦拉(物料层留在 registry,在线部署用不到)。
     Pull {
@@ -773,8 +784,12 @@ async fn main() -> Result<()> {
             pkg::install(&source, &target, &set, name.as_deref(), yes, full).await
         }
         Cmd::Pkg { cmd } => match cmd {
-            PkgCmd::Push { path, reference } => pkg::push(&path, &reference).await,
-            PkgCmd::Build { path, reference } => pkg::build(&path, &reference),
+            PkgCmd::Push { path, reference, arch, fors } => {
+                pkg::push(&path, &reference, &arch, &fors).await
+            }
+            PkgCmd::Build { path, reference, arch, fors } => {
+                pkg::build(&path, &reference, &arch, &fors).await
+            }
             PkgCmd::Pull { reference, into, full } => {
                 pkg::pull(&reference, into.as_deref(), full).await
             }

@@ -18,8 +18,12 @@ const MT_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 const ANN_REF: &str = "org.opencontainers.image.ref.name";
 // B 类 artifact layer typing (D-087) — kept in sync with bundle.rs, used to
 // skip `dependency` material layers on a thin pull.
-const MT_MATERIAL: &str = "application/vnd.crater.material.v1";
-const ANN_MATERIAL_FETCH: &str = "org.crater.material.fetch";
+pub const MT_MATERIAL: &str = "application/vnd.crater.material.v1";
+pub const ANN_MATERIAL_FETCH: &str = "org.crater.material.fetch";
+/// 物料层的来源 URL —— 部署侧的 `BlobMap` 按它索引(不是按物料名:
+/// 同名物料按 `when:` 分成多个变体,各有各的 URL)。
+pub const ANN_MATERIAL_SOURCE: &str = "org.crater.material.source";
+pub const ANN_MATERIAL_NAME: &str = "org.crater.material.name";
 // Project artifact typing (D-098) — kept in sync with bundle.rs.
 const AT_PROJECT: &str = "application/vnd.crater.project.v1";
 const MT_RECIPE: &str = "application/vnd.crater.recipe.v1+yaml";
@@ -300,14 +304,24 @@ impl ImageStore {
         // manifests (no `manifests:` array) → used as-is, unchanged.
         let manifest_raw = if top.get("manifests").and_then(|v| v.as_array()).is_some() {
             let entries = top["manifests"].as_array().unwrap();
-            let sub = entries
-                .iter()
-                .find(|e| {
-                    e["platform"]["os"].as_str() == Some("linux")
-                        && e["platform"]["architecture"].as_str() == Some("amd64")
+            // 架构优先级:本机 → amd64 → 任意一条(D-127)。
+            //
+            // 原来只认 amd64(D-061),在 arm64 机器上会静默装错架构的字节 ——
+            // 而"静默"正是这里最贵的部分:摘要对得上(那是 amd64 那份的摘要),
+            // 直到目标机上 exec 才报 Exec format error。
+            let want = crate::arch::detect_local().as_str();
+            let pick = |a: &str| {
+                entries.iter().find(|e| {
+                    e["platform"]["architecture"].as_str() == Some(a)
+                        && e["platform"]["os"].as_str().unwrap_or("linux") == "linux"
                 })
+            };
+            let sub = pick(want)
+                .or_else(|| pick("amd64"))
                 .or_else(|| entries.iter().find(|e| e["platform"]["architecture"].is_string()))
-                .ok_or_else(|| anyhow::anyhow!("manifest list '{reference}' has no linux/amd64 entry"))?;
+                .ok_or_else(|| anyhow::anyhow!(
+                    "'{reference}' 的 index 里没有 linux/{want},也没有任何带架构的条目"
+                ))?;
             let sub_dig = sub["digest"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("manifest list entry missing digest"))?
@@ -376,12 +390,25 @@ impl ImageStore {
     /// Push a stored image/artifact to a registry (oci-client). Re-serializes the
     /// stored manifest through `OciImageManifest` so `artifactType` (B 类 marker)
     /// + custom layer mediaTypes are preserved on the wire (D-033).
+    ///
+    /// An image **index** (multi-arch, D-127) is pushed sub-manifests first:
+    /// a registry rejects an index whose children it has never seen, and each
+    /// child must be reachable by digest before the index names it.
     pub async fn push(&self, reference: &str) -> crate::Result<()> {
+        let manifest_blob = self.manifest_blob(reference)?;
+        let top: serde_json::Value = serde_json::from_slice(&manifest_blob)?;
+        if top.get("manifests").and_then(|v| v.as_array()).is_some() {
+            return self.push_index(reference, &top, &manifest_blob).await;
+        }
+        self.push_manifest_blob(reference, &manifest_blob).await
+    }
+
+    /// Push one image manifest and every blob it names.
+    async fn push_manifest_blob(&self, reference: &str, manifest_blob: &[u8]) -> crate::Result<()> {
         use oci_client::manifest::{OciImageManifest, OciManifest};
         use oci_client::{Reference, RegistryOperation};
 
-        let manifest_blob = self.manifest_blob(reference)?;
-        let im: OciImageManifest = serde_json::from_slice(&manifest_blob)?;
+        let im: OciImageManifest = serde_json::from_slice(manifest_blob)?;
         let r: Reference = reference
             .parse()
             .map_err(|e| anyhow::anyhow!("bad image ref '{reference}': {e}"))?;
@@ -489,6 +516,46 @@ impl ImageStore {
             .await
             .map_err(|e| anyhow::anyhow!("list tags '{reference}': {e}"))?;
         Ok(resp.tags)
+    }
+
+    /// Push an image index: every child manifest (by digest) first, then the
+    /// index under the tag.
+    async fn push_index(
+        &self,
+        reference: &str,
+        index: &serde_json::Value,
+        index_blob: &[u8],
+    ) -> crate::Result<()> {
+        use oci_client::Reference;
+        let r: Reference = reference
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad image ref '{reference}': {e}"))?;
+        for child in index["manifests"].as_array().into_iter().flatten() {
+            let d = child["digest"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("index entry missing digest"))?;
+            let blob = std::fs::read(self.blob_path(strip(d)))?;
+            // 子 manifest 按 digest 推(不占 tag)—— tag 留给 index 本身。
+            let by_digest = format!("{}/{}@{}", r.registry(), r.repository(), d);
+            self.push_manifest_blob(&by_digest, &blob).await?;
+        }
+        // index 本身没有 blob,只有一份 JSON —— 走原始 PUT,不经
+        // `OciImageManifest`(它会把 `manifests` 丢掉,索引就成了空壳)。
+        let client = registry_client();
+        let auth = auth_for(reference);
+        use oci_client::manifest::OciImageIndex;
+        use oci_client::manifest::OciManifest;
+        use oci_client::RegistryOperation;
+        client
+            .auth(&r, &auth, RegistryOperation::Push)
+            .await
+            .map_err(|e| anyhow::anyhow!("auth '{reference}': {e}"))?;
+        let idx: OciImageIndex = serde_json::from_slice(index_blob)?;
+        client
+            .push_manifest(&r, &OciManifest::ImageIndex(idx))
+            .await
+            .map_err(|e| anyhow::anyhow!("push index '{reference}': {e}"))?;
+        Ok(())
     }
 
     fn manifest_blob(&self, reference: &str) -> crate::Result<Vec<u8>> {

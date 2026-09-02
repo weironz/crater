@@ -56,72 +56,13 @@ impl Baker {
         profile: &[String],
         extra_params: &BTreeMap<String, serde_yaml::Value>,
     ) -> Result<usize> {
-        let bp = crater_ir::parse::blueprint_from_path(bp_path)?;
-        let base = bp_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let mut scope = bake_scope(&bp, profile)?;
-        for (k, v) in extra_params {
-            scope.params.insert(k.clone(), v.clone());
-        }
-        let items = materials::bake(&bp, &scope, !profile.is_empty());
-        println!("烘焙 `{}` —— {} 个物料变体", bp.name, items.len());
-
-        let mut taken = 0usize;
-        for item in &items {
-            let plan = match &item.plan {
-                Ok(p) => p,
-                // URL 本身依赖目标事实(`.../${substrate.arch}/tool`)时,不给画像
-                // 就渲染不出来。这不是内部错误,是**作者需要补一句 `--for`**。
-                Err(e) => bail!(
-                    "物料 {} 无法在构建期定型:{e}\n\
-                     提示:它的 URL 引用了目标事实,请用 `--for arch=amd64` 之类给出\
-                     要烘焙的目标画像(可给多次)",
-                    item.label()
-                ),
-            };
-            // 镜像与系统包不是"一份字节":前者要整棵 OCI 树,后者根本在 apt/yum 那边。
-            if plan.kind != MaterialKind::File {
-                self.skipped.push(format!("{} ({:?} 类型)", item.label(), plan.kind));
-                continue;
-            }
-            // 同一个 URL 只取一次 —— 跨蓝图共享物料是栈里的常态。
-            if self.seen.insert(plan.source.clone(), ()).is_some() {
-                println!("  ↩ {:<28} (已在闭包中)", item.name);
-                continue;
-            }
-
-            let bytes = fetch_bytes(&plan.source, &base)
-                .await
-                .with_context(|| format!("烘焙物料 {}", item.label()))?;
-            // 声明了摘要就当场核对:烤进闭包的字节错了,现场是查不出来的。
-            // 注意核对发生在解包**之前** —— 上游发布的 checksum 是对下载物
-            // (zip)的,不是对里面那个成员的。
-            if let Some(want) = &plan.sha256 {
-                let got = bundle::sha256_hex(&bytes);
-                if &got != want {
-                    bail!(
-                        "物料 {} 摘要不符 —— 声明 {want},实得 {got}\n源:{}",
-                        item.label(),
-                        plan.source
-                    );
-                }
-            }
-            // `unzip:` 在**这里**兑现(D-103:目标机零依赖,解包只能在控制端)。
-            // 闭包里存的是解出来的成员,不是 zip —— 否则推到目标机的就是个
-            // 没人解得开的压缩包,闭包等于白建。
-            let bytes = match &plan.unzip {
-                Some(member) => crater_core::zip::extract_member(&bytes, member)
-                    .with_context(|| format!("物料 {}:从 zip 抽取 `{member}`", item.label()))?,
-                None => bytes,
-            };
-            let entry = self.stage.store_blob(&plan.source, &bytes)?;
-            println!(
-                "  ✓ {:<28} {:>9}  {}",
-                item.name,
-                human(entry.size),
-                &entry.sha256[..12]
-            );
+        let (baked, skipped) = bake_bytes(bp_path, profile, extra_params, &mut self.seen).await?;
+        self.skipped.extend(skipped);
+        let taken = baked.len();
+        for b in baked {
+            let entry = self.stage.store_blob(&b.source, &b.bytes)?;
+            println!("  ✓ {:<28} {:>9}  {}", b.name, human(entry.size), &entry.sha256[..12]);
             self.blobs.push(entry);
-            taken += 1;
         }
         Ok(taken)
     }
@@ -239,6 +180,89 @@ fn parse_params(sets: &[String]) -> Result<BTreeMap<String, serde_yaml::Value>> 
         out.insert(k.to_string(), val);
     }
     Ok(out)
+}
+
+/// 烤好的一份物料 —— 字节还在手里,放哪由调用方决定。
+///
+/// 闭包把它落进 `BundleStage`,`crater pkg` 把它做成一个 OCI 层。两条出口
+/// 共用这一次下载与这一次校验:摘要核对写两遍,迟早会有一遍写松。
+pub(crate) struct Baked {
+    pub name: String,
+    pub source: String,
+    pub bytes: Vec<u8>,
+}
+
+/// 烤一份蓝图在某个画像下引用到的全部物料字节。
+///
+/// `seen` 由调用方持有并跨调用复用 —— 栈里多份蓝图共用 containerd 是常态,
+/// 多架构打包时两个画像也常有共用物料。同一个 URL 只下载一次。
+pub(crate) async fn bake_bytes(
+    bp_path: &Path,
+    profile: &[String],
+    extra_params: &BTreeMap<String, serde_yaml::Value>,
+    seen: &mut BTreeMap<String, ()>,
+) -> Result<(Vec<Baked>, Vec<String>)> {
+    let bp = crater_ir::parse::blueprint_from_path(bp_path)?;
+    let base = bp_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let mut scope = bake_scope(&bp, profile)?;
+    for (k, v) in extra_params {
+        scope.params.insert(k.clone(), v.clone());
+    }
+    let items = materials::bake(&bp, &scope, !profile.is_empty());
+    println!("烘焙 `{}` —— {} 个物料变体", bp.name, items.len());
+
+    let mut out = Vec::new();
+    let mut skipped = Vec::new();
+    for item in &items {
+        let plan = match &item.plan {
+            Ok(p) => p,
+            // URL 本身依赖目标事实(`.../${substrate.arch}/tool`)时,不给画像
+            // 就渲染不出来。这不是内部错误,是**作者需要补一句 `--for`**。
+            Err(e) => bail!(
+                "物料 {} 无法在构建期定型:{e}\n\
+                 提示:它的 URL 引用了目标事实,请用 `--for arch=amd64` 之类给出\
+                 要烘焙的目标画像(可给多次)",
+                item.label()
+            ),
+        };
+        // 镜像与系统包不是"一份字节":前者要整棵 OCI 树,后者根本在 apt/yum 那边。
+        if plan.kind != MaterialKind::File {
+            skipped.push(format!("{} ({:?} 类型)", item.label(), plan.kind));
+            continue;
+        }
+        // 同一个 URL 只取一次 —— 跨蓝图、跨架构共享物料都是常态。
+        if seen.insert(plan.source.clone(), ()).is_some() {
+            println!("  ↩ {:<28} (已在闭包中)", item.name);
+            continue;
+        }
+
+        let bytes = fetch_bytes(&plan.source, &base)
+            .await
+            .with_context(|| format!("烘焙物料 {}", item.label()))?;
+        // 声明了摘要就当场核对:烤进闭包的字节错了,现场是查不出来的。
+        // 注意核对发生在解包**之前** —— 上游发布的 checksum 是对下载物
+        // (zip)的,不是对里面那个成员的。
+        if let Some(want) = &plan.sha256 {
+            let got = bundle::sha256_hex(&bytes);
+            if &got != want {
+                bail!(
+                    "物料 {} 摘要不符 —— 声明 {want},实得 {got}\n源:{}",
+                    item.label(),
+                    plan.source
+                );
+            }
+        }
+        // `unzip:` 在**这里**兑现(D-103:目标机零依赖,解包只能在控制端)。
+        // 闭包里存的是解出来的成员,不是 zip —— 否则推到目标机的就是个
+        // 没人解得开的压缩包,闭包等于白建。
+        let bytes = match &plan.unzip {
+            Some(member) => crater_core::zip::extract_member(&bytes, member)
+                .with_context(|| format!("物料 {}:从 zip 抽取 `{member}`", item.label()))?,
+            None => bytes,
+        };
+        out.push(Baked { name: item.name.clone(), source: plan.source.clone(), bytes });
+    }
+    Ok((out, skipped))
 }
 
 /// 构建期的求值作用域:参数默认值 ⊕ `--for` 给出的目标画像。
