@@ -11,16 +11,11 @@ on:
         required: true
 
 env:
-  # 两件事一起做:
-  # 1. 覆盖仓库 .cargo/config.toml 的 -fuse-ld=mold(D-079 本地提速)——
-  #    runner 上没有 mold,不覆盖直接链接失败。
-  #    RUSTFLAGS 环境变量的优先级高于 config.toml 的 target.*.rustflags。
-  # 2. **零警告门禁**。cargo 对 registry 依赖自动 --cap-lints allow,
-  #    所以这条只管得住本仓库的 crate,不会被上游的警告误伤。
-  #    在此之前"零警告"全靠人肉 grep 声称,而 grep 写窄了就会漏
-  #    (`does not need to be mutable` 就这么溜过去过)。
-  RUSTFLAGS: "-D warnings"
   CARGO_TERM_COLOR: always
+
+# RUSTFLAGS 不在这里写。构建前置(toolchain / 缓存 / 覆盖 .cargo/config.toml
+# 的 mold)统一由 ./.github/actions/setup-rust 提供 —— 那条覆盖是"必须记住
+# 才能正确"的约定,而它被忘过一次(D-126)。这里再写一份就是第二处事实来源。
 
 jobs:
   # ── 发版前先跑测试 ──
@@ -29,8 +24,16 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+
+      # rustflags 传 "-D warnings" 是**零警告门禁**:cargo 对 registry 依赖自动
+      # --cap-lints allow,所以这条只管得住本仓库的 crate,不会被上游的警告误伤。
+      # 在此之前"零警告"全靠人肉 grep 声称,而 grep 写窄了就会漏
+      # (`does not need to be mutable` 就这么溜过去过)。
+      # 覆盖 mold 那一半在 action 里,不用也不该在这里重复。
+      - uses: ./.github/actions/setup-rust
+        with:
+          rustflags: "-D warnings"
+
       - run: cargo test --release --locked
 
   # ── 各架构原生构建,目标是 musl 静态 ──
@@ -58,12 +61,12 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
+          # 各 target 各一份缓存,别互相污染。
+          cache-key: ${{ matrix.target }}
+          rustflags: "-D warnings"   # 零警告门禁,同 test job
 
       - name: 装 musl 工具链
         run: sudo apt-get update && sudo apt-get install -y musl-tools
