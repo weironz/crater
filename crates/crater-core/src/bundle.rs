@@ -193,7 +193,7 @@ impl BundleStage {
         // 与 `crater pull` 走同一套客户端与凭据:私有 registry 的镜像、
         // 本地 HTTP registry(`$CRATER_INSECURE_REGISTRIES`)都要能烤进闭包。
         // 早先这里写死匿名 + 默认配置,等于宣布"闭包只支持公开镜像"。
-        let client = crate::store::registry_client();
+        let client = crate::store::registry_client()?;
         let auth = crate::store::auth_for(reference);
         let accepted = vec![
             mt::IMAGE_MANIFEST_MEDIA_TYPE,

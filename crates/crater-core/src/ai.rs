@@ -51,11 +51,14 @@ pub struct OpenAiCompatProvider {
 }
 
 impl OpenAiCompatProvider {
-    pub fn new(settings: AiSettings) -> Self {
-        Self {
-            settings,
-            client: reqwest::Client::new(),
-        }
+    /// 返回 `Result`:`reqwest::Client::new()` 在 TLS 后端起不来时**panic**
+    /// (没装 `ca-certificates` 的机器上就是如此),而 `builder().build()`
+    /// 把同一件事变成一个能带上下文的错误(D-145)。
+    pub fn new(settings: AiSettings) -> crate::Result<Self> {
+        let client = reqwest::Client::builder()
+            .build()
+            .map_err(|e| anyhow::anyhow!("建不出 HTTP 客户端:{e}"))?;
+        Ok(Self { settings, client })
     }
 }
 

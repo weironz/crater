@@ -1123,7 +1123,7 @@ async fn ai_generate(request: &str, output: Option<PathBuf>) -> Result<()> {
     })?;
     println!("AI: model={} endpoint={}", settings.model, settings.endpoint);
 
-    let provider = OpenAiCompatProvider::new(settings);
+    let provider = OpenAiCompatProvider::new(settings)?;
     let (yaml, task) = ai::nl_to_task(&provider, request).await?;
 
     println!("\n# ---- generated & validated task ----");
@@ -1205,7 +1205,15 @@ async fn doctor(
             Some(settings) => {
                 use crater_core::ai::{AiProvider, OpenAiCompatProvider};
                 println!("--- AI deeper analysis ({}) ---", settings.model);
-                let provider = OpenAiCompatProvider::new(settings);
+                // 建不出客户端就跳过 AI 那一段 —— 诊断本身已经有结论了,
+                // 不该因为一个可选的增强而整条命令失败。
+                let provider = match OpenAiCompatProvider::new(settings) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        println!("(AI analysis unavailable: {e})");
+                        return Ok(());
+                    }
+                };
                 let sys = "You are an SRE assistant. Given logs, identify the root cause \
                            and give concrete shell commands to fix it. Be concise.";
                 // Cap the log size we send.

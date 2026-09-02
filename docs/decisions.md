@@ -2490,3 +2490,29 @@ application/vnd.crater.blueprint.config.v1+json
 - 验收:16 个测试套 626 个测试全绿;dev 与 release 两个 profile 下 clippy 均
   退出 0(唯一剩下的一条是依赖 `proc-macro-error2` 的 future-incompat 提示,
   不受 `-D warnings` 管)。
+
+### D-145:没有 CA 证书时 panic 而不是报错(issue #15)
+
+- **agent 的报告方向对、归因不准,复验时纠正了**:它说的是
+  `reqwest::Client::new()` panic。逐条查下来:`source.rs::client()` 用的是
+  `builder().build()?`,**不 panic**;真正的链是
+  `oci_client::Client::new(cfg)` → `try_from` 失败 → `unwrap_or_else` 退回
+  `Default` → `reqwest::Client::new()` → **panic**。`ai.rs` 那处则是直接
+  `Client::new()`(不在部署路径上,但同病)。
+- **实测比 issue 写的更容易撞上**:`ubuntu:24.04` 基础镜像**本身就不带
+  `ca-certificates`**,所以在它里面跑 `crater pkg inspect` 直接是一句
+  Rust 堆栈 + 退出码 101。内网机器裁掉这个包更是常态 —— 正是 crater 的主场景。
+- **修法**:`registry_client()` 改为返回 `Result`,用 `Client::try_from`。
+  `oci_client::Client::new` 的"失败就退回默认客户端"是一种**静默降级**,而
+  那个默认客户端的构造本身会 panic —— 两层加起来,一个可诊断的配置问题
+  变成了不可诊断的崩溃。
+- **真因在 source 链里**:reqwest 顶层 `Display` 只说 `builder error`,
+  "No CA certificates were loaded from the system" 在下一层。初版只报顶层,
+  等于什么都没说 —— 人会去查网络和代理。改成走完整条 source 链再拼提示。
+- **提示要给出路,不只给诊断**:装 `ca-certificates`,**或者本来就该走离线**
+  (`pkg pull --full` 备好包 → `pkg load` → `--closure` 部署)。后半句才是
+  air-gap 场景下真正该做的事。
+- **验收(`ubuntu:24.04` 容器,两个方向)**:无证书 → 报错并给出两条出路,
+  不再是 Rust 堆栈;**反证** —— `apt-get install ca-certificates` 之后同一条
+  命令正常读到契约。回归测试钉的是**类型**(改回 `Client::new()` 连编译都
+  过不去),因为在有证书的开发机上跑不出那个失败。

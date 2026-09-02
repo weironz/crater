@@ -352,7 +352,7 @@ impl ImageStore {
         let r: Reference = reference
             .parse()
             .map_err(|e| anyhow::anyhow!("bad image ref '{reference}': {e}"))?;
-        let client = registry_client();
+        let client = registry_client()?;
         let auth = auth_for(reference);
         let accepted = accepted_media_types();
         let (raw, _digest) = client
@@ -475,7 +475,7 @@ impl ImageStore {
         let r: Reference = reference
             .parse()
             .map_err(|e| anyhow::anyhow!("bad image ref '{reference}': {e}"))?;
-        let client = registry_client();
+        let client = registry_client()?;
         let auth = auth_for(reference);
         client
             .auth(&r, &auth, RegistryOperation::Push)
@@ -529,7 +529,7 @@ impl ImageStore {
         let r: Reference = reference
             .parse()
             .map_err(|e| anyhow::anyhow!("bad ref '{reference}': {e}"))?;
-        let client = registry_client();
+        let client = registry_client()?;
         let auth = auth_for(reference);
         let (raw, _) = client
             .pull_manifest_raw(&r, &auth, &accepted_media_types())
@@ -577,7 +577,7 @@ impl ImageStore {
         let r: Reference = reference
             .parse()
             .map_err(|e| anyhow::anyhow!("bad ref '{reference}': {e}"))?;
-        let client = registry_client();
+        let client = registry_client()?;
         let auth = auth_for(reference);
         let resp = client
             .list_tags(&r, &auth, None, None)
@@ -609,7 +609,7 @@ impl ImageStore {
         }
         // index 本身没有 blob,只有一份 JSON —— 走原始 PUT,不经
         // `OciImageManifest`(它会把 `manifests` 丢掉,索引就成了空壳)。
-        let client = registry_client();
+        let client = registry_client()?;
         let auth = auth_for(reference);
         use oci_client::manifest::OciImageIndex;
         use oci_client::manifest::OciManifest;
@@ -1053,7 +1053,16 @@ fn accepted_media_types() -> Vec<&'static str> {
 
 /// An oci-client honoring `$CRATER_INSECURE_REGISTRIES` (comma-separated hosts
 /// served over plain HTTP, e.g. a temp zot at `192.168.73.5:5000`).
-pub(crate) fn registry_client() -> oci_client::Client {
+///
+/// **返回 `Result`,不用 `oci_client::Client::new`**(D-145)。那个构造器在
+/// 建不出客户端时 `unwrap_or_else` 退回一个 `Default` 客户端,而
+/// `Default` 走的是 `reqwest::Client::new()` —— 后者在 TLS 后端起不来时
+/// **panic**。于是一台没装 `ca-certificates` 的机器上,`crater pull` 报的是
+/// 一句 Rust 堆栈,而不是"这台机器没有 CA 证书"。
+///
+/// 这不是边角情形:`ubuntu:24.04` 这类基础镜像**本身就不带 ca-certificates**,
+/// 而内网机器裁掉它更是常态 —— 正是 crater 的主场景。
+pub(crate) fn registry_client() -> crate::Result<oci_client::Client> {
     use oci_client::client::{ClientConfig, ClientProtocol};
     let mut cfg = ClientConfig::default();
     if let Ok(list) = std::env::var("CRATER_INSECURE_REGISTRIES") {
@@ -1066,7 +1075,23 @@ pub(crate) fn registry_client() -> oci_client::Client {
             cfg.protocol = ClientProtocol::HttpsExcept(regs);
         }
     }
-    oci_client::Client::new(cfg)
+    oci_client::Client::try_from(cfg).map_err(|e| {
+        // 真因在 source 链里:reqwest 的顶层 Display 只说 "builder error",
+        // 而"没有 CA 证书"那句在下一层。只报顶层等于什么都没说 —— 人会去
+        // 查网络和代理,而真正要做的是装一个包,或者根本不该联网。
+        let mut chain = e.to_string();
+        let mut cur: Option<&dyn std::error::Error> = std::error::Error::source(&e);
+        while let Some(c) = cur {
+            chain.push_str(&format!(":{c}"));
+            cur = c.source();
+        }
+        let hint = if chain.contains("CA certificate") {
+"\n这台机器上没有 CA 证书。装 `ca-certificates`,\n或者本来就该走离线:`crater pkg pull --full` 在有网的机器上备好包,\n搬过去 `crater pkg load`,再 `--closure` 部署。"
+        } else {
+            ""
+        };
+        anyhow::anyhow!("建不出 registry 客户端:{chain}{hint}")
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1133,6 +1158,23 @@ fn docker_login_in(v: &serde_json::Value, registry: &str) -> Option<(String, Str
     let text = String::from_utf8(decoded).ok()?;
     let (u, p) = text.split_once(':')?;
     Some((u.to_string(), p.to_string()))
+}
+
+#[cfg(test)]
+mod client_tests {
+    /// `registry_client()` 必须返回 `Result` 而不是在建不出客户端时 panic。
+    ///
+    /// 钉住的是**类型**,不是某一次运行的结果:在有证书的开发机上这条永远
+    /// 成功,真正的判据在一台没有 `ca-certificates` 的机器上(D-145 用
+    /// `ubuntu:24.04` 容器验过 —— 那个基础镜像本身就不带)。而一旦有人把它
+    /// 改回 `oci_client::Client::new()`,这里连编译都过不去:那个构造器返回
+    /// 的是 `Client` 不是 `Result<Client>`。
+    #[test]
+    fn building_a_client_is_fallible_not_a_panic() {
+        let c: crate::Result<oci_client::Client> = super::registry_client();
+        // 开发机上有证书,应当成功;没有也不该 panic —— 两种都由 Result 表达。
+        assert!(c.is_ok() || c.is_err());
+    }
 }
 
 #[cfg(test)]
