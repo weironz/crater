@@ -46,6 +46,28 @@ issue,产出的是三个各自成立、合到一起不成立的补丁 —— 而
 `agent-ready` 与 `needs-decision` 互斥。一个 issue 没有 `agent-ready`,
 默认就是**还不能派给 Agent**。
 
+## 看板(GitHub Projects)
+
+<https://github.com/users/weironz/projects/2>
+
+**标签与看板的分工是刻意划开的,不要让它们重叠:**
+
+| | 管什么 | 谁读它 |
+| --- | --- | --- |
+| **标签** | 能不能派(`agent-ready` / `blocked` / `needs-decision`) | 脚本与 Agent —— `gh issue list --label agent-ready` |
+| **看板 Status** | 做到哪了(Todo / In Progress / Done) | 人 |
+| **看板 优先级** | 先做哪个(P0 挡住真实场景 / P1 该做 / P2 可以等) | 人 |
+
+同一个事实**只有一处**:就绪与否只看标签,进度只看看板。两边都记的东西
+一定会漂,而漂了之后没人知道该信哪边。
+
+看板上有优先级字段而不是靠手工拖拽排序,是因为**拖拽不可脚本化** ——
+一个只能用鼠标维护的顺序,在自动化流程里等于不存在。
+
+新开的 issue 由 `.github/workflows/project-add.yml` 自动进看板。
+它需要一个带 `project` scope 的 `PROJECT_TOKEN` secret(`GITHUB_TOKEN` 摸不到
+用户级 Project);没配时这一步会**失败而不是静默跳过** —— 看板漏了一条要能看见。
+
 ## 常用命令
 
 ```bash
@@ -54,6 +76,10 @@ gh issue list --label blocked                  # 等谁
 gh issue view 12                               # 看上下文与判据
 gh issue develop 12 --checkout                 # 开分支并切过去
 gh pr create --fill                            # 提 PR(正文自动带 issue 链接)
+
+gh project item-list 2 --owner weironz         # 看板全貌
+gh project item-edit --id <item> --project-id <pid> \
+  --field-id <status> --single-select-option-id <opt>   # 改状态
 ```
 
 提交信息里写 `Closes #12`,PR 合并时 issue 自动关。

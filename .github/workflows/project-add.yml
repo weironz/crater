@@ -1,0 +1,21 @@
+# 新 issue 自动进看板。
+#
+# 为什么要自动:看板的价值在于"看一眼就知道全部",而只要有一条要靠人记得
+# 手动加,迟早会漏 —— 漏掉的那条恰恰是最容易被忘记的那种活。
+name: project-add
+
+on:
+  issues:
+    types: [opened, reopened]
+
+jobs:
+  add:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/add-to-project@v1.0.2
+        with:
+          project-url: https://github.com/users/weironz/projects/2
+          # 需要一个带 project scope 的 PAT —— GITHUB_TOKEN 摸不到用户级 Project。
+          # 没配 secret 时这一步会失败,那是**该看见的失败**:看板漏了一条,
+          # 比悄悄漏掉强。
+          github-token: ${{ secrets.PROJECT_TOKEN }}
