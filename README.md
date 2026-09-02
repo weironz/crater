@@ -58,18 +58,20 @@ done: changed=0 ok=5 warn=0
 
 ## 📥 安装
 
-**从 Release 下载**(musl 静态,任何 Linux 直接跑):
+**一行装好**(musl 静态,任何 Linux 直接跑,默认装到 `~/.local/bin`,不要 sudo):
 
 ```bash
-curl -fLO https://github.com/weironz/crater/releases/latest/download/crater-linux-$(uname -m)
-chmod +x crater-linux-$(uname -m) && sudo mv crater-linux-$(uname -m) /usr/local/bin/crater
-crater --version
+curl -fsSL https://raw.githubusercontent.com/weironz/crater/main/scripts/install.sh | sh
 ```
+
+脚本会核对 `SHA256SUMS` 再装,**没有跳过校验的开关**。装完用 `crater update`
+升级。装到系统目录、钉版本、手动装、以及 Windows/macOS 现状,见
+**[安装文档](docs/install.md)**。
 
 | 资产 | 架构 | 说明 |
 |---|---|---|
-| `crater-linux-x86_64` | x86_64 | 真机久经验证 |
-| `crater-linux-aarch64` | ARM64(鲲鹏/飞腾/Graviton/树莓派) | qemu 冒烟通过,ARM 真机验证欢迎反馈 |
+| `crater-x86_64-unknown-linux-musl.tar.gz` | x86_64 | 真机久经验证 |
+| `crater-aarch64-unknown-linux-musl.tar.gz` | ARM64(鲲鹏/飞腾/Graviton/树莓派) | qemu 冒烟通过,ARM 真机验证欢迎反馈 |
 
 **从源码构建**:
 

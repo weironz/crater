@@ -722,6 +722,7 @@ dependencies = [
  "clap",
  "crater-core",
  "crater-ir",
+ "flate2",
  "futures",
  "libc",
  "serde",

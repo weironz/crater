@@ -55,6 +55,7 @@ mod ui_git;
 mod ui_inventory;
 mod ui_overview;
 mod ui_run;
+mod update;
 
 use std::path::{Path, PathBuf};
 
@@ -394,6 +395,20 @@ enum Cmd {
         /// chmod the remote file (e.g. 755) after upload.
         #[arg(long)]
         chmod: Option<String>,
+    },
+    /// 把 crater 自己换成最新版 —— 与 `scripts/install.sh` 同一套规矩
+    /// (取 musl 静态包、核对 SHA256SUMS、原子替换)。
+    ///
+    /// **装在哪就换哪**(按 `current_exe` 定位),不猜 PATH:同时装了
+    /// `~/.local/bin/crater` 与 `/usr/local/bin/crater` 时,换错一个的表现是
+    /// "更新成功了但版本没变"。
+    Update {
+        /// 换到指定版本(如 `v0.2.0`);默认取最新 release。
+        #[arg(long)]
+        version: Option<String>,
+        /// 只看有没有新版本,不替换。
+        #[arg(long)]
+        check: bool,
     },
     /// List images in the local store (~/.crater/store).
     Images,
@@ -813,6 +828,7 @@ async fn main() -> Result<()> {
             dst,
             chmod,
         } => push_file(&host, &user, password, port, &src, &dst, chmod).await,
+        Cmd::Update { version, check } => update::run(version, check).await,
         Cmd::Images => images::list_images().await,
         Cmd::Install {
             source,

@@ -23,6 +23,7 @@ futures = "0.3"
 axum = "0.8"             # crater ui: pure-Rust web (hyper/tower/tokio, no C)
 tempfile = "3"           # 离线闭包解包(不只是测试用)
 tar.workspace = true     # 镜像 archive 现合成(D-131)
+flate2.workspace = true  # crater update:解发布包
 libc = "0.2"             # job 取消:SIGTERM
 
 [dev-dependencies]
