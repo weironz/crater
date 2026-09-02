@@ -94,10 +94,33 @@ pub fn fetch_candidates_with(url: &str, github_mirrors: &[String]) -> Vec<String
     out
 }
 
+/// 连不上就别等了。10 秒握不上手的 registry/镜像站,再等也握不上。
+pub(crate) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// **空闲**超时,不是总时长。
+///
+/// 这个区分是这条改动的全部要点:crater 要拉几百 MB 的离线闭包,给总时长
+/// 设上限等于给"多大的包能拉"设上限 —— 一条 1MB/s 的内网线上,300MB 要
+/// 五分钟,而那是完全正常的一次拉取。
+///
+/// `read_timeout` 掐的是**卡住**:60 秒一个字节都没来才算。慢但在动的传输
+/// 不受影响。将来有人想"把超时调小一点"时,请先读完这段 —— 换成
+/// `.timeout()` 会让大包在慢网上必失败,而症状是"随机断在中途"。
+pub(crate) const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn client() -> crate::Result<reqwest::Client> {
+    client_with(CONNECT_TIMEOUT, READ_TIMEOUT)
+}
+
+fn client_with(
+    connect: std::time::Duration,
+    read: std::time::Duration,
+) -> crate::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
-        .user_agent("crater/0.1")
+        .user_agent(concat!("crater/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::limited(10))
+        .connect_timeout(connect)
+        .read_timeout(read)
         .build()?)
 }
 
@@ -122,6 +145,69 @@ pub async fn fetch_best(url: &str) -> crate::Result<(Vec<u8>, String)> {
         }
     }
     anyhow::bail!("all sources failed for {url}:\n{}", errors.join("\n"))
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// **接受连接、然后什么都不回**的服务器 —— 黑洞。
+    ///
+    /// 这正是不可达 registry 的真实形态里最难查的一种:TCP 握上了,所以
+    /// "连不上"的报错永远不会出现;而 HTTP 响应一个字节都不来。没有读超时
+    /// 的客户端会在这里**永远**等下去。
+    fn black_hole() -> (String, std::thread::JoinHandle<()>) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let h = std::thread::spawn(move || {
+            // 收下连接,握住不放,什么都不写。
+            if let Ok((sock, _)) = l.accept() {
+                std::thread::sleep(Duration::from_secs(30));
+                drop(sock);
+            }
+        });
+        (format!("http://{addr}/x"), h)
+    }
+
+    /// 没有这条,`crater pull` 撞上黑洞就是无声挂死。
+    #[tokio::test]
+    async fn a_black_hole_server_times_out_instead_of_hanging_forever() {
+        let (url, _h) = black_hole();
+        let c = client_with(Duration::from_millis(500), Duration::from_millis(500)).unwrap();
+
+        let began = std::time::Instant::now();
+        let r = c.get(&url).send().await;
+        let took = began.elapsed();
+
+        assert!(r.is_err(), "黑洞应该超时报错,却拿到了响应");
+        // 上限放宽到 5 秒:CI 上慢一点没关系,要卡住的是"永远"这种量级。
+        assert!(took < Duration::from_secs(5), "等了 {took:?} —— 超时没生效");
+    }
+
+    // 连接超时(`CONNECT_TIMEOUT`)**没有**对应的测试,这是有意的。
+    //
+    // 试过:连 TEST-NET-1(192.0.2.1,RFC 5737 保证不路由到真实主机)本该在
+    // 300ms 的 connect_timeout 上失败,实测却是 5.0 秒 —— 因为开发/CI 的
+    // 沙箱网络**拦截全部出站 TCP 并一律接受**,裸 socket 连 192.0.2.1:9 都
+    // 会"连上"。连接阶段根本不会卡住,于是这条超时永远不触发。
+    //
+    // 写一条在这种环境下测不到东西的测试,只会得到一个测别人的绿灯。上面
+    // 那条黑洞测试才是真实场景(握手成功、响应不来),而它测的正是不可达
+    // registry 让 crater 挂死的那条路径。
+
+    /// 默认值必须是**空闲**超时的量级,不是"总共只能跑这么久"。
+    ///
+    /// 有人把它改成 `.timeout()` 或者调到几秒时,这条会红并指向那段注释:
+    /// 拉几百 MB 的闭包是正常操作。
+    #[test]
+    fn the_default_read_timeout_is_generous_enough_for_a_big_closure() {
+        assert!(
+            READ_TIMEOUT >= Duration::from_secs(30),
+            "读超时是**空闲**超时,压到 {READ_TIMEOUT:?} 会误杀慢网上的大包"
+        );
+        assert!(CONNECT_TIMEOUT <= Duration::from_secs(30));
+    }
 }
 
 #[cfg(test)]

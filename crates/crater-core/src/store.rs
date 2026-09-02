@@ -481,7 +481,7 @@ impl ImageStore {
             client
                 .pull_blob(&r, d.as_str(), &mut buf)
                 .await
-                .map_err(|e| anyhow::anyhow!("pull blob {d} of '{reference}': {e}"))?;
+                .map_err(|e| net_err(format!("拉 {reference} 的 blob {d}"), e))?;
             self.store_raw(&buf)?;
         }
         let (md, ms) = self.store_raw(&manifest_raw)?;
@@ -519,25 +519,25 @@ impl ImageStore {
         client
             .auth(&r, &auth, RegistryOperation::Push)
             .await
-            .map_err(|e| anyhow::anyhow!("auth '{reference}': {e}"))?;
+            .map_err(|e| net_err(format!("向 {reference} 认证"), e))?;
 
         // push config + each layer blob, then the manifest itself.
         let cfg = std::fs::read(self.blob_path(strip(&im.config.digest)))?;
         client
             .push_blob(&r, cfg, &im.config.digest)
             .await
-            .map_err(|e| anyhow::anyhow!("push config '{reference}': {e}"))?;
+            .map_err(|e| net_err(format!("推送 {reference} 的 config"), e))?;
         for l in &im.layers {
             let data = std::fs::read(self.blob_path(strip(&l.digest)))?;
             client
                 .push_blob(&r, data, &l.digest)
                 .await
-                .map_err(|e| anyhow::anyhow!("push layer '{reference}': {e}"))?;
+                .map_err(|e| net_err(format!("推送 {reference} 的层"), e))?;
         }
         client
             .push_manifest(&r, &OciManifest::Image(im))
             .await
-            .map_err(|e| anyhow::anyhow!("push '{reference}': {e}"))?;
+            .map_err(|e| net_err(format!("推送 {reference}"), e))?;
         Ok(())
     }
 
@@ -573,7 +573,7 @@ impl ImageStore {
         let (raw, _) = client
             .pull_manifest_raw(&r, &auth, &accepted_media_types())
             .await
-            .map_err(|e| anyhow::anyhow!("pull manifest '{reference}': {e}"))?;
+            .map_err(|e| net_err(format!("拉 {reference} 的 manifest"), e))?;
         let top: serde_json::Value = serde_json::from_slice(&raw)?;
         let platforms = platforms_of(&top);
         let m: serde_json::Value = if top.get("manifests").and_then(|v| v.as_array()).is_some() {
@@ -621,7 +621,7 @@ impl ImageStore {
         let resp = client
             .list_tags(&r, &auth, None, None)
             .await
-            .map_err(|e| anyhow::anyhow!("list tags '{reference}': {e}"))?;
+            .map_err(|e| net_err(format!("列 {reference} 的版本"), e))?;
         Ok(resp.tags)
     }
 
@@ -656,7 +656,7 @@ impl ImageStore {
         client
             .auth(&r, &auth, RegistryOperation::Push)
             .await
-            .map_err(|e| anyhow::anyhow!("auth '{reference}': {e}"))?;
+            .map_err(|e| net_err(format!("向 {reference} 认证"), e))?;
         let idx: OciImageIndex = serde_json::from_slice(index_blob)?;
         client
             .push_manifest(&r, &OciManifest::ImageIndex(idx))
@@ -1119,9 +1119,106 @@ fn accepted_media_types() -> Vec<&'static str> {
 ///
 /// 这不是边角情形:`ubuntu:24.04` 这类基础镜像**本身就不带 ca-certificates**,
 /// 而内网机器裁掉它更是常态 —— 正是 crater 的主场景。
+/// registry 出错时,把**真因**一起报出来。
+///
+/// oci-client / reqwest 的顶层 `Display` 常常只有一句 "error sending request
+/// for url (…)",而"连接超时"、"没有 CA 证书"这类真正要看的话在 source 链的
+/// 下一层。只报顶层的后果很具体:人会去查凭据和权限,而实际该看的是网络。
+///
+/// 与 D-145 同一课 —— 那次是 CA 证书,这次是超时。
+fn net_err(what: String, e: impl std::error::Error) -> anyhow::Error {
+    let mut chain = e.to_string();
+    let mut cur = std::error::Error::source(&e);
+    while let Some(c) = cur {
+        chain.push_str(&format!(": {c}"));
+        cur = c.source();
+    }
+    anyhow::anyhow!("{what}: {chain}{}", timeout_hint(&chain))
+}
+
+/// 从错误链里认出超时,并给出**对得上**的建议。
+///
+/// 分两种,建议不一样 —— 说错了会把人引向错误的方向:
+///
+/// - 连接超时 = 根本握不上手(路由不通、端口没开、地址写错)
+/// - 读超时   = 握上了但对端不回话(静默丢包、反向代理卡死)
+///
+/// 第一版把两者混成一句"连得上但不回话",而实测那条恰恰是连接超时 ——
+/// 一条自己就在误导的提示,比不给提示更坏。所以有了下面那几个测试。
+fn timeout_hint(chain: &str) -> String {
+    let low = chain.to_ascii_lowercase();
+    if !(low.contains("timed out") || low.contains("timeout")) {
+        return String::new();
+    }
+    // 提示是多行的,**不要用 `\` 续行**:rustfmt 会把续行折成一行,行首的
+    // 缩进空格会留在字符串里,打印出来是一段错位的文字(踩过)。
+    let probe = "  先确认这台机器能不能到它:`curl -sv https://<registry>/v2/`";
+    if low.contains("connect") {
+        format!(
+            "\n  连接超时({} 秒内握不上手)—— 这台机器到不了那个 registry:\n  路由不通、端口没开,或者地址写错了。\n{probe}",
+            crate::source::CONNECT_TIMEOUT.as_secs()
+        )
+    } else {
+        format!(
+            "\n  读超时({} 秒内一个字节都没回来)—— 连上了但对端不回话:\n  防火墙静默丢包、反向代理卡死,或者对端在忙。\n{probe}",
+            crate::source::READ_TIMEOUT.as_secs()
+        )
+    }
+}
+
+#[cfg(test)]
+mod net_err_tests {
+    use super::timeout_hint;
+
+    /// 两种超时要给出**不同**的建议。混成一句就等于把人引向错误的方向。
+    #[test]
+    fn connect_and_read_timeouts_get_different_advice() {
+        let c = timeout_hint("error sending request: client error (Connect): operation timed out");
+        assert!(c.contains("连接超时"), "连接超时认成了别的:{c}");
+        assert!(!c.contains("读超时"));
+
+        let r = timeout_hint("error sending request: operation timed out");
+        assert!(r.contains("读超时"), "读超时认成了别的:{r}");
+        assert!(!r.contains("连接超时"));
+    }
+
+    /// 不是超时就别乱给建议 —— 401 的时候让人去查路由是纯噪音。
+    #[test]
+    fn a_non_timeout_error_gets_no_network_advice() {
+        assert_eq!(timeout_hint("unauthorized: authentication required"), "");
+        assert_eq!(timeout_hint("manifest unknown"), "");
+    }
+
+    /// 提示必须是干净的多行,不能带上源码里的缩进 —— 那正是用 `\` 续行
+    /// 会留下的伤,已经踩过一次。
+    #[test]
+    fn the_hint_has_no_stray_source_indentation() {
+        for h in [
+            timeout_hint("client error (Connect): operation timed out"),
+            timeout_hint("operation timed out"),
+        ] {
+            for line in h.lines().filter(|l| !l.is_empty()) {
+                let lead = line.len() - line.trim_start().len();
+                assert!(lead <= 2, "这一行缩了 {lead} 格,像是续行留下的:{line:?}");
+            }
+        }
+    }
+}
+
 pub(crate) fn registry_client() -> crate::Result<oci_client::Client> {
     use oci_client::client::{ClientConfig, ClientProtocol};
-    let mut cfg = ClientConfig::default();
+    // `ClientConfig::default()` 两个超时都是 `None` —— 也就是**永不超时**。
+    // 一个不可达的 registry(路由不通、被防火墙黑洞掉)会让 `crater pull`
+    // 无声地吊在那里,不报错、不退出。部署工具挂死比报错难查得多:报错至少
+    // 告诉你去看网络,挂死只让你以为它在干活。
+    //
+    // 用的是**空闲**超时而不是总时长,理由见 `source::READ_TIMEOUT` 那段:
+    // 拉几百 MB 的闭包是正常操作,给总时长设上限等于给包的大小设上限。
+    let mut cfg = ClientConfig {
+        connect_timeout: Some(crate::source::CONNECT_TIMEOUT),
+        read_timeout: Some(crate::source::READ_TIMEOUT),
+        ..Default::default()
+    };
     if let Ok(list) = std::env::var("CRATER_INSECURE_REGISTRIES") {
         let regs: Vec<String> = list
             .split(',')
