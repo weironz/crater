@@ -2353,3 +2353,32 @@ application/vnd.crater.blueprint.config.v1+json
   `crater <crater@localhost>`;非 git 工作区与 git 不在 PATH → UI 照常、横幅
   说明;**反证**:预置"已 add 进暂存区""未跟踪""手工改了一半"三种改动,
   UI 提交后 `git status --porcelain` 一个都没被带走,`.bak` 也没进库。
+
+### D-140:抽出 `BlobSource`(issue #9,纯重构)
+
+- **做了什么**:物料字节的来源抽成 `BlobSource` 四方法接口,`TarClosure` /
+  `OciSource` / `TargetFetches` 三个实现各自成文件。`open_closure()` 里不再有
+  判断来源类型的 `if`。
+- **四个方法各有调用方**(这是不加第五个的判据):`manifest()` + `fetch()` 给
+  `blob_map()`;`contains()` 是 `blob_map()` 那道闸("只有真取得到的才进表");
+  `origin()` 给报告行。**没有预先加 `list` / `delete` / `gc`。**
+- **`BlobSink` 没抽,是对的**:D-119 写的签名
+  `put(&self, source, bytes: &Path, sha256)` 与两个写侧都不合 —— 它们把字节
+  拿在 `Vec<u8>` 里,还要用返回的 `BlobEntry.size` 印进度行;`finish(manifest)`
+  对 `pkg` 更不成立(它根本没有 `bundle::Manifest`)。硬凑要么改签名要么把每份
+  烤好的 blob 落一次临时文件 —— **那就不是纯重构了**。当前只有一个可实现的
+  sink、没有第二个调用方,所以不抽。
+- **`material_ctx.rs` 没动**,也是对的:系统包要按 `os-pkg://` 前缀**枚举**
+  BlobMap,那正是 issue 明令不加的 `list` 形状的方法。于是 `BlobSource` 停在
+  "打开期"这一层,`MaterialCtx` 继续持有 `BlobMap`。
+- **我否掉了 agent 的一处保真手段**:它用 `origin.ends_with(')')` 还原重构前
+  两条报告行差的那个空格。那是拿"以右括号结尾"当代理判据,一个叫
+  `k8s(1).tar` 的闭包会**静默少一个空格**。为保住一处纯装饰性的不一致背一颗
+  地雷不划算 —— 改成两行统一,接受 oci 那行多一个空格。**"行为零变化"说的是
+  行为,不是排版。**
+- **验收**:15 个测试套 605 个测试全绿,与重构前逐项相同;两条报错文本用
+  **新旧两个二进制对拍**,逐字相同(不存在的 tar / 不存在的 oci 引用)。
+- **顺带一条环境事实**:`CLAUDE.md` 要求先用 code-review-graph / GitNexus 的
+  MCP 工具再 Grep/Read,但**这两个 MCP server 在 agent 会话里没有暴露**。
+  agent 如实报告了这一点并退回手工核对爆炸半径。这条约定要么让它在 agent
+  会话里也可用,要么在文档里说明何时不适用。
