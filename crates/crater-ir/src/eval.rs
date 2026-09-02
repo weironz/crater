@@ -9,16 +9,45 @@
 //! 旧模型全靠字符串替换,于是 `timeout: "{{n}}"` 这类值一路以字符串流到执行层。
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::expr::{CelExpr, Part, Template};
 use crate::ir::{Args, Value};
+
+/// 跑一条探针命令;没有 prober 就**明确报错**,不编造返回值。
+fn run(p: &Option<Prober>, cmd: &str) -> Result<String, cel::ExecutionError> {
+    match p {
+        Some(f) => f(cmd).map_err(|e| cel::ExecutionError::FunctionError {
+            function: "probe".into(),
+            message: e,
+        }),
+        None => Err(cel::ExecutionError::FunctionError {
+            function: "probe".into(),
+            message: "此上下文没有目标机可探(lint / 构建期):探针函数在这里用不了".into(),
+        }),
+    }
+}
+
+/// shell 单引号转义 —— 探针参数来自蓝图,不能直接拼进命令行。
+fn shq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// 在目标机上跑一条**只读**命令 → stdout。
+///
+/// CEL 的探针函数(`port_owner(9000)` 之类)靠它落地。做成 `Arc<dyn Fn>`
+/// 而不是把 `&dyn Ctx` 塞进 `Scope`,是被 `cel::Context::add_function` 的
+/// `'static + Send + Sync` 约束逼出来的 —— 借用引用进不去(D-134)。
+///
+/// 语义上也对:探测本来就是「这台机器」的能力,而 `Scope` 正是 per-host 的。
+pub type Prober = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
 
 pub type Yaml = serde_yaml::Value;
 /// 求值后的参数:类型已定,可直接喂给资源类型。
 pub type ResolvedArgs = BTreeMap<String, Yaml>;
 
 /// 一次求值可见的全部名字(与 lint 的 ROOT_SCOPES 一一对应)。
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Scope {
     pub params: BTreeMap<String, Yaml>,
     /// 目标侧探测事实:os/arch/hostname/网卡…(k8s 试金石裁定 C)。
@@ -33,6 +62,27 @@ pub struct Scope {
     pub fleet: Option<crate::fleet::Fleet>,
     /// 当前正在对哪一台求值。
     pub host: Option<String>,
+    /// 这台机器的只读探测能力 —— CEL 探针函数用(D-134)。
+    ///
+    /// `None` = 这个上下文探不了(lint、单测、构建期烘焙)。那时探针函数
+    /// 会**明确报错**而不是返回一个编出来的值:说不清就说不清。
+    pub prober: Option<Prober>,
+}
+
+impl std::fmt::Debug for Scope {
+    /// 手写 Debug:`prober` 是个闭包,没法 derive,而它对排障也没有意义 ——
+    /// 有没有探测能力用一个词就说清了。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scope")
+            .field("params", &self.params)
+            .field("substrate", &self.substrate)
+            .field("env", &self.env)
+            .field("facts", &self.facts)
+            .field("item", &self.item)
+            .field("host", &self.host)
+            .field("prober", &if self.prober.is_some() { "yes" } else { "no" })
+            .finish()
+    }
 }
 
 impl Scope {
@@ -66,7 +116,54 @@ impl Scope {
         if let Some(item) = &self.item {
             ctx.add_variable("item", item).map_err(|e| e.to_string())?;
         }
+        self.add_probes(&mut ctx);
         Ok(ctx)
+    }
+
+    /// 注册**封闭集合**里的探针函数(D-117/A、D-134)。
+    ///
+    /// 四个都只读,全部走同一个 [`Prober`]。没有 prober 时**照样注册** ——
+    /// 让它们返回一句"此上下文探不了",比留一个 `Undeclared reference` 好:
+    /// 后者看起来像"函数名写错了",而真相是"这里探不了"。
+    fn add_probes(&self, ctx: &mut cel::Context<'_>) {
+        use cel::Value as V;
+        let probe = self.prober.clone();
+
+        // 谁在监听这个端口 —— 空串 = 没人。
+        //
+        // 返回**服务名**而不是布尔,是 rustfs 裁定 A 定下的:语义是"没被
+        // 别人占",而不是"端口空闲" —— 后者在已部署机器上重跑必然失败,
+        // 与幂等承诺冲突。
+        let p = probe.clone();
+        ctx.add_function("port_owner", move |port: i64| -> Result<V, cel::ExecutionError> {
+            // `ss` 的 users:(("nginx",pid=…)) 里抠出服务名。用 sed 而不是
+            // grep -oE 链:后者要嵌套两层引号,在 Rust 字符串里几乎写不对。
+            let out = run(&p, &format!(
+                r#"ss -lntpH 'sport = :{port}' 2>/dev/null | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -1"#
+            ))?;
+            Ok(V::String(out.trim().to_string().into()))
+        });
+
+        let p = probe.clone();
+        ctx.add_function("path_exists", move |path: Arc<String>| -> Result<V, cel::ExecutionError> {
+            let out = run(&p, &format!("test -e {} && echo yes || echo no", shq(&path)))?;
+            Ok(V::Bool(out.trim() == "yes"))
+        });
+
+        let p = probe.clone();
+        ctx.add_function("cmd_ok", move |cmd: Arc<String>| -> Result<V, cel::ExecutionError> {
+            // 退出码而不是输出:`cmd_ok` 问的是"成不成",不是"说了什么"。
+            let out = run(&p, &format!("if {cmd} >/dev/null 2>&1; then echo yes; else echo no; fi"))?;
+            Ok(V::Bool(out.trim() == "yes"))
+        });
+
+        let p = probe;
+        ctx.add_function("service_state", move |name: Arc<String>| -> Result<V, cel::ExecutionError> {
+            let out = run(&p, &format!(
+                "systemctl is-active {} 2>/dev/null || echo unknown", shq(&name)
+            ))?;
+            Ok(V::String(out.trim().to_string().into()))
+        });
     }
 
     /// 求一段表达式,得到 YAML 值。

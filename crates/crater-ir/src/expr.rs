@@ -23,11 +23,16 @@ impl CelExpr {
         let program = cel::Program::compile(src).map_err(|e| e.to_string())?;
         let refs = program.references();
         let roots = refs.variables().into_iter().map(|s| s.to_string()).collect();
-        // CEL 把运算符也算函数(`_+_` / `_==_`),内建算子不参与白名单校验。
+        // CEL 把运算符也算函数:中缀是 `_+_` / `_==_`,**前缀是 `!_` / `-_`**。
+        // 早先只挡了 `_` 与 `@` 开头,于是 `!path_exists(x)` 里的逻辑非被报成
+        // 「未知探针函数 `!_()`」—— 任何在 `when:` 里写 `!` 的蓝图都过不了 lint。
+        //
+        // 改成**只保留合法标识符**:运算符的名字里必然带 `_` 占位或符号,
+        // 而真正的函数名一定是标识符。按形状判定,不用穷举算子表。
         let funcs = refs
             .functions()
             .into_iter()
-            .filter(|f| !f.starts_with('_') && !f.starts_with('@'))
+            .filter(|f| is_ident(f))
             .map(|s| s.to_string())
             .collect();
         Ok(CelExpr { src: src.to_string(), roots, funcs })
@@ -182,6 +187,15 @@ mod tests {
         assert!(e.funcs().contains("port_owner"), "funcs={:?}", e.funcs());
         let plain = CelExpr::compile("params.a + params.b").unwrap();
         assert!(plain.funcs().is_empty(), "运算符不该算探针函数: {:?}", plain.funcs());
+        // **前缀**运算符也是函数(`!_` / `-_`)—— 早先只挡了 `_`/`@` 开头,
+        // 于是任何写了 `!` 的蓝图都被报成「未知探针函数 `!_()`」(D-134)。
+        let neg = CelExpr::compile("!path_exists('/x') && -1 < 0").unwrap();
+        assert_eq!(
+            neg.funcs().iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["path_exists"],
+            "前缀运算符不该混进函数名: {:?}",
+            neg.funcs()
+        );
     }
 
     #[test]

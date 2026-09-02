@@ -1255,6 +1255,16 @@ async fn connect_fleet<'a>(
         scope.substrate = facts;
         scope.fleet = Some(fleet.clone());
         scope.identify(&name, &host.roles);
+        // CEL 探针函数(`port_owner(9000)` 之类)的落地能力(D-134)。
+        //
+        // 单独一条传输,**每台建一次、全程复用**:上面那条马上要被
+        // `MaterialCtx` 拿走所有权,而 `Scope` 是 `Clone` 且要活到整轮结束。
+        // 早先写成"每次调用现连"——一份蓝图几条断言就是几次 SSH 握手,
+        // 五台机器就是十几次,而它们探的是同一台机器。
+        let probe_ctx: std::sync::Arc<dyn Ctx> = build_transport(host).await?.into();
+        scope.prober = Some(std::sync::Arc::new(move |cmd: &str| {
+            probe_ctx.probe(cmd).map(|(_code, out)| out).map_err(|e| e.to_string())
+        }));
         ctxs.insert(
             name.clone(),
             MaterialCtx::new(transport, bp, scope.clone(), blobs.clone(), base.to_path_buf())

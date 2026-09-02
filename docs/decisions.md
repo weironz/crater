@@ -2185,3 +2185,33 @@ application/vnd.crater.blueprint.config.v1+json
   注册(`Undeclared reference to 'port_owner'`)。在 preflight 不求值的年代,
   "没实现"与"实现了"表现完全一样。**没有一并拿掉** —— rustfs 试金石正用着
   `port_owner`,那是裁定 A 的设计决定,该由人来定怎么补,不该我单方面抹掉。
+
+### D-134:四个 CEL 探针函数落地(issue #14)
+
+- **背景**:`port_owner` / `path_exists` / `cmd_ok` / `service_state` 在
+  `PROBE_FUNCS` 白名单里,求值上下文却从未注册 —— lint 放行,运行期报
+  `Undeclared reference`。在 preflight 不求值的年代(D-133 之前),
+  "没实现"与"实现了"表现完全一样,所以这个洞一直看不见。
+- **不能一拿了之**:rustfs 试金石(裁定 A)正用着 `port_owner`,试探性移出
+  白名单会让 fixture 的 lint 立刻变红。试金石就是为拦住这种改动而存在的。
+- **做法:共享句柄**。`Scope` 多一个
+  `prober: Option<Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>>`。
+  `cel::Context::add_function` 要求 `'static + Send + Sync`,借用引用进不去,
+  `Arc` 正好满足。语义上也对:探测是「这台机器」的能力,而 `Scope` 是 per-host 的。
+- **每台一条探测连接,全程复用**。初版写成"每次调用现连" —— 一份蓝图几条
+  断言就是几次 SSH 握手,五台机器十几次,而它们探的是同一台机器。
+- **没有 prober 时照样注册函数**,让它们返回"此上下文探不了"。留一个
+  `Undeclared reference` 会看起来像"函数名写错了",而真相是"这里探不了"
+  (lint / 构建期烘焙)。
+- **顺带修掉一个既有 lint bug**:CEL 把**前缀**运算符也算函数(`!_` / `-_`),
+  而过滤只挡了 `_` 与 `@` 开头 —— 于是 `!path_exists(x)` 被报成
+  「未知探针函数 `!_()`」,**任何在 `when:` 里写 `!` 的蓝图都过不了 lint**。
+  改成只保留合法标识符:运算符名里必然带占位符或符号,按形状判定即可,
+  不用穷举算子表。加了回归测试。
+- **验收(multipass 真虚机 w1)**:
+  - 六条断言(四个探针 + 否定形式)全部在真机上求值通过
+  - `port_owner(9999)` 在 `nc` 占用时读到 `"nc"`,在 `python3` 占用时读到 `"python3"`
+  - **裁定 A 的语义完整成立**:端口空闲 → 通过;被"自己"占 → 通过;
+    被别人占 → 失败
+  - `service_state('ssh') == 'active'`、`path_exists('/etc/os-release')`、
+    `cmd_ok('true')` / `!cmd_ok('false')` 均正确
