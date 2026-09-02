@@ -1982,3 +1982,21 @@ provider 用 OpenAI 兼容协议(通吃 OpenAI/DeepSeek/Qwen/内网 endpoint,契
   "像 helm 那样一键安装"这个问题的正身。设计文档本就写明"阶段之间没有
   强依赖,1 是其余的前提"。
 - **没做**:UI 目录的远端源选项卡(数据已就位,与第四阶段索引一起做更顺)。
+
+### D-126:兼容地板在 Docker Hub 上实测通过
+
+- **为什么值一条记录**:D-123 把兼容地板定在 OCI 1.0 风格(自定义
+  `config.mediaType` + 真实 config blob + 自定义层 mediaType,**不设**
+  `artifactType`),依据是文档与先例。文档说的和 registry 真做的是两回事 ——
+  Docker Hub 是 2022-10-31 才开始收 OCI artifact 的。
+- **判据绕开自己的客户端**:读回 manifest 走 registry API + curl,不走
+  crater。拿自己的解析去证明自己的写入,证明不了任何事。
+- **两个方向都验**:蓝图包全绿;把一个普通 docker 镜像喂给同一套断言,
+  两条 mediaType 都报 ✗ 并非零退出 —— 否则这只是个只会绿的摆设。
+- **结果**:zot 与 Docker Hub 均原样过线。Docker Hub 上 config 535 B、
+  蓝图层 572 B,即"零层下载读契约"的实测数字。
+- **ACR 仍未测**:个人版收不收自定义制品没有答案,workflow 留了
+  `-f registry=acr` 的入口,但设计上不假设它可用。
+- **踩到的坑**:新 workflow 漏抄了 release.yml 早就写明的 `RUSTFLAGS: ""`
+  ——仓库 `.cargo/config.toml` 为本地提速指定了 `-fuse-ld=mold`,runner
+  上没装。同一个坑在本地会话里也撞过一次。

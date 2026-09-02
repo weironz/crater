@@ -296,6 +296,26 @@ entries:
 | 多架构 | image index + `platform` | 标准,所有 registry 与运行时都懂 |
 | 高层 `pull` API | **不用**,继续用 `pull_manifest_raw` + `pull_blob` | 高层 API 会把制品合成 image manifest,丢掉自定义类型(D-032/D-087 踩过) |
 
+### 实测结果(2026-09-02)
+
+`.github/workflows/pkg-compat.yml` 手动触发,读回 manifest 那一步**绕开 crater
+自己的客户端**走 registry API —— 拿自己的解析去证明自己的写入,证明不了任何事。
+
+| registry | config.mediaType | 层 mediaType | artifactType | 结论 |
+| --- | --- | --- | --- | --- |
+| **zot**(本地) | ✓ 原样 | ✓ 原样 | 未设 ✓ | 过 |
+| **Docker Hub** | ✓ 原样 | ✓ 原样 | 未设 ✓ | **过** |
+| **阿里云 ACR** | — | — | — | 未测(见下) |
+
+Docker Hub 上 `config` 535 B、蓝图层 572 B —— `pkg inspect` 的全部下载量就是
+前者,这是"零层下载读契约"的实测数字。判据本身也验了反向:把一个普通 docker
+镜像喂给同一套断言,两条 mediaType 都报 ✗ 并非零退出,所以这不是一个只会绿的
+摆设。
+
+**顺带确认了 D-033 仍然成立**:自定义层类型能穿过 Docker Hub 的白名单原样回来
+(2022-10-31 之后才具备这个能力),前提是继续用 `pull_manifest_raw` + `pull_blob`
+低层 API,不走高层 `pull`。
+
 **关于你自己的 ACR**:自定义 OCI 制品是**企业版专属**能力,个人版的行为文档未提及。
 落地第一步必须实测 `registry.cn-shenzhen.aliyuncs.com/willspace` 收不收 crater 包;
 不收就用 Docker Hub 或自建 zot(library 里已有蓝图)。**不要在设计上假设 ACR 可用。**
