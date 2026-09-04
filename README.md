@@ -199,7 +199,7 @@ crater index --store -o /media/usb/index.yaml     # 索引一起带,对面照样
 |---|---|
 | 写蓝图 | `create` `types` `facts` `schema` `lint` `fmt` `inspect` |
 | 部署 | `apply` `plan` `verify` `destroy` `procedure`(source:蓝图/栈文件 · `<名字>` · OCI 引用) |
-| 包与分发 | `pkg`(push/pull/tags/index/save/load/inspect)· `install` · `repo` · `search` · `build` |
+| 包与分发 | `build` · `push` · `pull` · `save` · `load` · `tags` · `inspect` · `images` · `tag` · `rmi` · `gc` · `index` · `install` · `repo` · `search` · `registry` |
 | 本地存储 | `images` `pull` `push` `tag` `rmi` `gc` `save` `load` `registry login` |
 | 运维排查 | `ui`(看板,`--token` 鉴权)· `run`(临时命令)· `cp`(推文件)· `doctor`(离线诊断) |
 | crater 自己 | `update`(自更新,与安装脚本同一套规矩) |
