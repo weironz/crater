@@ -345,9 +345,17 @@ impl Scope {
             let Value::Map(m) = item else {
                 return Err("`flags` 的每一条应是 map".into());
             };
-            if let Some(Value::Tmpl(_) | Value::Lit(_)) = m.get("when") {
-                // when 在解析期已编译成 CelExpr 并存进 Flag;走到这里说明是
-                // 未经 parse_flags 的原始形态(如测试直接构造),按字面处理。
+            if let Some(when) = m.get("when") {
+                // `flags` 仍以通用 Args 存在 IR 里，因此条目自己的条件在这里
+                // 编译并筛掉；绝不能仅仅移除 `when`，否则互斥 flag 会同时落进
+                // 命令行（后一条同名 flag 还能覆盖前一条的值）。
+                let Value::Lit(Yaml::String(src)) = when else {
+                    return Err("`flags[].when` 必须是 CEL 条件字符串".into());
+                };
+                let expr = CelExpr::compile(src).map_err(|e| format!("`flags[].when`: {e}"))?;
+                if !self.eval_bool(&expr)? {
+                    continue;
+                }
             }
             let mut out = serde_yaml::Mapping::new();
             for (k, val) in m {
@@ -509,6 +517,20 @@ mod tests {
             .eval_bool(&CelExpr::compile("params.vip").unwrap())
             .unwrap_err();
         assert!(err.contains("必须求值为布尔"), "{err}");
+    }
+
+    #[test]
+    fn conditional_flags_are_filtered_before_command_rendering() {
+        let flags = v(r#"[
+              {name: --nginx, value: local, when: "params.debug == false"},
+              {name: --vip, value: legacy, when: "params.debug"}
+            ]"#);
+        let args = BTreeMap::from([("flags".into(), flags)]);
+        let out = scope().resolve_args(&args).unwrap();
+        let flags = out["flags"].as_sequence().unwrap();
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags[0]["name"], Yaml::from("--nginx"));
+        assert_eq!(flags[0]["value"], Yaml::from("local"));
     }
 
     #[test]

@@ -1,15 +1,15 @@
-# 每台控制面上的本机 L4 入口。它不向局域网暴露端口，只让 kubeadm / kubeconfig
-# 通过 127.0.0.1:8443 访问；后端列表来自 inventory 的控制面成员。
+# 每台控制面上的内网 L4 入口。共享 DNS 名在所有节点解析到这三台入口；
+# 后端列表来自 inventory 的控制面成员。
 stream {
   upstream kube_apiserver {
     least_conn;
 {% for node in fleet.controlplane %}
-    server {{ node.name }} {{ node.address }}:{{ params.apiserver_port }} max_fails=1 fail_timeout=5s;
+    server {{ node.address }}:{{ params.apiserver_port }} max_fails=1 fail_timeout=5s;
 {% endfor %}
   }
 
   server {
-    listen 127.0.0.1:8443;
+    listen {{ substrate.ip }}:8443;
     proxy_connect_timeout 5s;
     proxy_timeout 1h;
     proxy_pass kube_apiserver;

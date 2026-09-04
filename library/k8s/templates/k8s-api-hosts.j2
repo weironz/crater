@@ -1,0 +1,5 @@
+# crater-k8s-api begin
+{% for node in fleet.controlplane %}
+{{ node.address }} {{ params.api_endpoint }}
+{% endfor %}
+# crater-k8s-api end

@@ -13,7 +13,7 @@
 # `cast.seed`(= first(role.controlplane))即 init 节点 —— 不再需要"全组跑 + check 守卫跳过首台"。
 name: k8s-ha
 # 包配方修订号；实际安装的 Kubernetes 版本由下方 params.version 决定，当前为 1.36.1。
-version: "1.36.2"
+version: "1.36.5"
 
 # 机群契约:不满足就根本不开跑,而不是跑到 rest(...) 那步才炸。
 # worker 写 min: 0 —— 单节点拓扑里 worker 组存在但为空,是合法拓扑不是打错字。
@@ -40,6 +40,7 @@ params:
   # 不需要 VIP、VRRP 或额外参数。
   ha:              { type: bool, default: false, desc: "多 master:启用控制面内部负载均衡" }
   ha_mode:         { type: { enum: [nginx-local, vip] }, default: nginx-local, desc: "HA LB: nginx-local(默认,无需 VIP)；vip(兼容旧 Keepalived+HAProxy)" }
+  api_endpoint:    { default: "k8s-api.crater.internal", desc: "内部 API LB 的稳定 DNS 名(默认由本包写入所有节点 /etc/hosts)" }
   # 预载镜像是**离线**才需要的:在线部署时 kubeadm 自己会拉。
   # 打开它要求 OCI 闭包就位(尚未接入新管线,见 D-115)。
   preload_images:  { type: bool, default: false, desc: "离线:把镜像预先导入目标运行时" }
@@ -133,6 +134,7 @@ materials:
   - { name: cfg-keepalived,  file: templates/keepalived.conf.j2 }
   - { name: cfg-haproxy,     file: templates/haproxy.cfg.j2 }
   - { name: cfg-nginx-api-lb,file: templates/nginx-k8s-api-lb.conf.j2 }
+  - { name: cfg-api-hosts,   file: templates/k8s-api-hosts.j2 }
 
   # —— 镜像(全节点导入到 k8s.io)——
   - { name: img-apiserver,   image: "${params.image_repo}/kube-apiserver:v${params.version}" }
@@ -216,9 +218,20 @@ resources:
     when: params.preload_images
 
   # ========== 控制面 LB ==========
-  # 默认方案:每台 master 的 Nginx 只监听自身 loopback,把 8443 转给所有真实
-  # apiserver。control-plane join 因而永远经本机 LB,不再依赖一个浮动 IP。
-  # worker 没有本机 Nginx,bootstrap 会改用 seed 的真实地址加入。
+  # 默认方案:每台 master 的 Nginx 监听自己的内网地址、把 8443 转给所有真实
+  # apiserver。所有节点将同一个稳定 DNS 名解析为三台 master；不需要 VIP 或
+  # 外部 DNS，kubeadm 仍能得到合法的 controlPlaneEndpoint。
+  - template: { material: cfg-api-hosts, dest: /etc/kubernetes/crater-api.hosts }
+    when: "params.ha && params.ha_mode == 'nginx-local'"
+  - shell:
+      cmd: >-
+        sed -i '/^# crater-k8s-api begin$/,/^# crater-k8s-api end$/d' /etc/hosts &&
+        cat /etc/kubernetes/crater-api.hosts >> /etc/hosts
+      check: >-
+        test -f /etc/kubernetes/crater-api.hosts &&
+        test "$(sed -n '/^# crater-k8s-api begin$/,/^# crater-k8s-api end$/p' /etc/hosts)" =
+        "$(cat /etc/kubernetes/crater-api.hosts)"
+    when: "params.ha && params.ha_mode == 'nginx-local'"
   - package:
       packages:
         debian: [nginx, libnginx-mod-stream]
@@ -277,30 +290,30 @@ procedures:
   # ---- 建集群:首台 init → 传 token/certkey → 其余逐台 join ----
   bootstrap:
     steps:
-      # 默认 Nginx 在每台控制面本机监听 8443；先确认本机代理在位,再让 kubeadm
-      # 把它写入 control-plane endpoint。单节点和兼容 VIP 路径都不需要此等待。
-      - wait: { port: 8443, host: "127.0.0.1", timeout: 30 }
+      # 默认 Nginx 在每台控制面内网地址监听 8443；先确认本机代理在位,再让 kubeadm
+      # 写入机群共享的稳定 DNS endpoint。单节点和兼容 VIP 路径都不需要此等待。
+      - wait: { port: 8443, host: "${substrate.ip}", timeout: 30 }
         target: masters
         when: "params.ha && params.ha_mode == 'nginx-local'"
 
       # 条件 flag 的正规写法(D-117 §3.4):条件是**条目的属性**,不是字符串里的三元。
-      # 单节点不传 --control-plane-endpoint。默认 HA 写 loopback:每台 master 都有
-      # 本机 Nginx；兼容 VIP 才使用操作者给出的 endpoint。
+      # 单节点不传 --control-plane-endpoint。默认 HA 写稳定内部 DNS:它在所有节点
+      # 都解析到三台 master 的 Nginx；兼容 VIP 才使用操作者给出的 endpoint。
       # flags[].name 禁插值 ⇒ lint 能静态枚举这条命令的全部 4 种展开形态。
       - cmd:
           argv: [kubeadm, init]
           creates: /etc/kubernetes/admin.conf
           flags:
             - name: --control-plane-endpoint
-              value: "127.0.0.1:8443"
+              value: "${params.api_endpoint}:8443"
               when: "params.ha && params.ha_mode == 'nginx-local'"
             - name: --control-plane-endpoint
               value: "${params.cp_endpoint}"
               when: "params.ha && params.ha_mode == 'vip' && params.cp_endpoint != ''"
-            # loopback endpoint 必须进 apiserver 证书 SAN,否则控制面通过本机 Nginx
-            # 访问 API 时 TLS 会拒绝 127.0.0.1。
+            # 共享 DNS endpoint 必须进 apiserver 证书 SAN,否则经 Nginx 访问 API
+            # 时 TLS 会拒绝该主机名。
             - name: --apiserver-cert-extra-sans
-              value: "127.0.0.1"
+              value: "${params.api_endpoint}"
               when: "params.ha && params.ha_mode == 'nginx-local'"
             - name: --upload-certs
               when: params.ha
@@ -315,12 +328,6 @@ procedures:
         target: seed
         exports:
           join:    "kubeadm token create --print-join-command"
-          # 控制面 join 使用上面的 endpoint(默认是本机 Nginx)；worker 没有 Nginx,
-          # 所以把回环 endpoint 改为 seed 的真实默认路由地址。VIP/单节点时不匹配,
-          # 原 join 命令保持原样。
-          worker_join: >-
-            kubeadm token create --print-join-command |
-            sed 's#127.0.0.1:8443#${substrate.ip}:6443#'
           certkey: "kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1"
 
       - shell:
@@ -351,7 +358,7 @@ procedures:
 
       # worker 可并行 join
       - shell:
-          cmd: "${facts.worker_join} --cri-socket=unix:///run/containerd/containerd.sock"
+          cmd: "${facts.join} --cri-socket=unix:///run/containerd/containerd.sock"
           check: "test -f /etc/kubernetes/kubelet.conf"
         target: workers
 
