@@ -12,7 +12,8 @@
 #   HA 多主多从 : M 台 controlplane + N 台 worker(默认每台 master 本机 Nginx 做 L4 转发)
 # `cast.seed`(= first(role.controlplane))即 init 节点 —— 不再需要"全组跑 + check 守卫跳过首台"。
 name: k8s-ha
-version: "1.36.1"
+# 包配方修订号；实际安装的 Kubernetes 版本由下方 params.version 决定，当前为 1.36.1。
+version: "1.36.2"
 
 # 机群契约:不满足就根本不开跑,而不是跑到 rest(...) 那步才炸。
 # worker 写 min: 0 —— 单节点拓扑里 worker 组存在但为空,是合法拓扑不是打错字。
