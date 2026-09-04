@@ -9,7 +9,7 @@
 # 拓扑由 inventory 的组决定,与旧版一致:
 #   单节点     : 1 台 controlplane
 #   1 主 N 从   : 1 台 controlplane + N 台 worker
-#   HA 多主多从 : M 台 controlplane + N 台 worker
+#   HA 多主多从 : M 台 controlplane + N 台 worker(默认每台 master 本机 Nginx 做 L4 转发)
 # `cast.seed`(= first(role.controlplane))即 init 节点 —— 不再需要"全组跑 + check 守卫跳过首台"。
 name: k8s-ha
 version: "1.36.1"
@@ -27,25 +27,25 @@ cast:
   followers: rest(role.controlplane)    # 其余控制面:join --control-plane
   masters:   role.controlplane
   workers:   role.worker
-description: "HA Kubernetes(单节点 / 1主N从 / 多主多从),二进制 + kubeadm"
+description: "Kubernetes(单节点 / 1主N从 / 多主多从),本机 Nginx HA + kubeadm"
 
 requires:
   os: [{ distro: ubuntu, versions: ["24.04"] }]
   arch: [amd64]
 
 params:
-  # 拓扑开关。单节点 / 1主N从 不需要 VIP 前置 —— keepalived+haproxy 只在多 master
-  # 时才有意义,单 master 上装一套反而多一层会坏的东西。
-  ha:              { type: bool, default: false, desc: "多 master:装 keepalived+haproxy 并经 VIP 接入" }
+  # 单节点 / 1主N从 不需要前置 LB。多 master 时,默认在每台控制面启动一个仅监听
+  # 127.0.0.1:8443 的 Nginx stream 代理 —— kubeadm 的控制面 join 走本机代理,
+  # 不需要 VIP、VRRP 或额外参数。
+  ha:              { type: bool, default: false, desc: "多 master:启用控制面内部负载均衡" }
+  ha_mode:         { type: { enum: [nginx-local, vip] }, default: nginx-local, desc: "HA LB: nginx-local(默认,无需 VIP)；vip(兼容旧 Keepalived+HAProxy)" }
   # 预载镜像是**离线**才需要的:在线部署时 kubeadm 自己会拉。
   # 打开它要求 OCI 闭包就位(尚未接入新管线,见 D-115)。
   preload_images:  { type: bool, default: false, desc: "离线:把镜像预先导入目标运行时" }
   version:         { type: version, default: "1.36.1", stage: build }
-  # 默认值刻意选在网段高位:低位常被真实主机占着,而 VIP 撞上一台在跑的
-  # 机器不会报错 —— 只会让两边都间歇性失联,是最难查的一类故障。
-  vip:             { type: ip,   default: "192.168.73.200", desc: "控制面 VIP(仅 ha=true 时使用)" }
-  # 留空 = 不传 --control-plane-endpoint(单节点的正确做法:kubeadm 用本机地址)。
-  cp_endpoint:     { default: "", desc: "kubeadm --control-plane-endpoint;ha=true 时应为 VIP:8443" }
+  # 下面三项只给 ha_mode=vip 的兼容路径使用；默认 nginx-local 无需填写。
+  vip:             { type: ip,   default: "192.168.73.200", desc: "控制面 VIP(仅 ha_mode=vip)" }
+  cp_endpoint:     { default: "", desc: "kubeadm --control-plane-endpoint(仅 ha_mode=vip，如 192.168.73.200:8443)" }
   subnet:          { type: cidr, default: "192.168.73.0/24", desc: "VIP 所在子网(keepalived 选网卡)" }
   pod_cidr:        { type: cidr, default: "10.244.0.0/16" }
   timezone:        { default: "Asia/Shanghai", desc: "机群统一时区(IANA 名)" }
@@ -131,6 +131,7 @@ materials:
   - { name: dropin-kubeadm,  file: files/10-kubeadm.conf }
   - { name: cfg-keepalived,  file: templates/keepalived.conf.j2 }
   - { name: cfg-haproxy,     file: templates/haproxy.cfg.j2 }
+  - { name: cfg-nginx-api-lb,file: templates/nginx-k8s-api-lb.conf.j2 }
 
   # —— 镜像(全节点导入到 k8s.io)——
   - { name: img-apiserver,   image: "${params.image_repo}/kube-apiserver:v${params.version}" }
@@ -213,26 +214,44 @@ resources:
       namespace: k8s.io
     when: params.preload_images
 
-  # ========== 控制面 LB(VIP 前置 apiserver)==========
+  # ========== 控制面 LB ==========
+  # 默认方案:每台 master 的 Nginx 只监听自身 loopback,把 8443 转给所有真实
+  # apiserver。control-plane join 因而永远经本机 LB,不再依赖一个浮动 IP。
+  # worker 没有本机 Nginx,bootstrap 会改用 seed 的真实地址加入。
+  - package:
+      packages:
+        debian: [nginx, libnginx-mod-stream]
+    target: masters
+    when: "params.ha && params.ha_mode == 'nginx-local'"
+  # Ubuntu 的 nginx.conf 在顶层 include modules-enabled/*.conf；50-mod-stream.conf
+  # 先加载 stream 模块,本文件再声明 stream 块。不能放 conf.d——那里在 http 块内。
+  - template: { material: cfg-nginx-api-lb, dest: /etc/nginx/modules-enabled/99-k8s-api-lb.conf }
+    target: masters
+    when: "params.ha && params.ha_mode == 'nginx-local'"
+  - service: { name: nginx, state: started, enabled: true }
+    target: masters
+    when: "params.ha && params.ha_mode == 'nginx-local'"
+
+  # 兼容旧方案:显式选择 ha_mode=vip 时才安装 Keepalived + HAProxy。
   - package:
       packages:
         debian: [keepalived, haproxy]
     target: masters
-    when: params.ha
+    when: "params.ha && params.ha_mode == 'vip'"
   - template: { material: cfg-haproxy, dest: /etc/haproxy/haproxy.cfg }
     target: masters
-    when: params.ha
+    when: "params.ha && params.ha_mode == 'vip'"
   - template: { material: cfg-keepalived, dest: /etc/keepalived/keepalived.conf }
     target: masters
-    when: params.ha
+    when: "params.ha && params.ha_mode == 'vip'"
   # 包安装时 haproxy 已带默认配置起来了,必须重启才加载我们写的 :8443 —— 上游
   # 配置变更会经指纹传播到这里,不必手写 notify。
   - service: { name: haproxy,    state: started, enabled: true }
     target: masters
-    when: params.ha
+    when: "params.ha && params.ha_mode == 'vip'"
   - service: { name: keepalived, state: started, enabled: true }
     target: masters
-    when: params.ha
+    when: "params.ha && params.ha_mode == 'vip'"
 
   # ========== 集群成员资格:状态在这里,舞在 procedure 里 ==========
   - cluster_member: { role: control-plane }
@@ -257,22 +276,31 @@ procedures:
   # ---- 建集群:首台 init → 传 token/certkey → 其余逐台 join ----
   bootstrap:
     steps:
-      # haproxy 恒监听 8443,所以 TCP 通 = VIP 在位 + haproxy 在跑。
-      # 这堵住了"init 撞上 VIP 尚未漂移"的窗口。单节点没有 VIP,自然也不必等。
-      - wait: { port: 8443, host: "${params.vip}", timeout: 30 }
+      # 默认 Nginx 在每台控制面本机监听 8443；先确认本机代理在位,再让 kubeadm
+      # 把它写入 control-plane endpoint。单节点和兼容 VIP 路径都不需要此等待。
+      - wait: { port: 8443, host: "127.0.0.1", timeout: 30 }
         target: masters
-        when: params.ha
+        when: "params.ha && params.ha_mode == 'nginx-local'"
 
       # 条件 flag 的正规写法(D-117 §3.4):条件是**条目的属性**,不是字符串里的三元。
-      # 单节点不传 --control-plane-endpoint;`--upload-certs` 只在多 master 时有意义。
+      # 单节点不传 --control-plane-endpoint。默认 HA 写 loopback:每台 master 都有
+      # 本机 Nginx；兼容 VIP 才使用操作者给出的 endpoint。
       # flags[].name 禁插值 ⇒ lint 能静态枚举这条命令的全部 4 种展开形态。
       - cmd:
           argv: [kubeadm, init]
           creates: /etc/kubernetes/admin.conf
           flags:
             - name: --control-plane-endpoint
+              value: "127.0.0.1:8443"
+              when: "params.ha && params.ha_mode == 'nginx-local'"
+            - name: --control-plane-endpoint
               value: "${params.cp_endpoint}"
-              when: "params.cp_endpoint != ''"
+              when: "params.ha && params.ha_mode == 'vip' && params.cp_endpoint != ''"
+            # loopback endpoint 必须进 apiserver 证书 SAN,否则控制面通过本机 Nginx
+            # 访问 API 时 TLS 会拒绝 127.0.0.1。
+            - name: --apiserver-cert-extra-sans
+              value: "127.0.0.1"
+              when: "params.ha && params.ha_mode == 'nginx-local'"
             - name: --upload-certs
               when: params.ha
             - name: --pod-network-cidr
@@ -286,6 +314,12 @@ procedures:
         target: seed
         exports:
           join:    "kubeadm token create --print-join-command"
+          # 控制面 join 使用上面的 endpoint(默认是本机 Nginx)；worker 没有 Nginx,
+          # 所以把回环 endpoint 改为 seed 的真实默认路由地址。VIP/单节点时不匹配,
+          # 原 join 命令保持原样。
+          worker_join: >-
+            kubeadm token create --print-join-command |
+            sed 's#127.0.0.1:8443#${substrate.ip}:6443#'
           certkey: "kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1"
 
       - shell:
@@ -316,7 +350,7 @@ procedures:
 
       # worker 可并行 join
       - shell:
-          cmd: "${facts.join} --cri-socket=unix:///run/containerd/containerd.sock"
+          cmd: "${facts.worker_join} --cri-socket=unix:///run/containerd/containerd.sock"
           check: "test -f /etc/kubernetes/kubelet.conf"
         target: workers
 

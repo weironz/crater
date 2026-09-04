@@ -1,9 +1,9 @@
 # k8s-ha 示范 inventory(占位密码)。复制改成你的机器,用 -i 传入:
-#   crater apply -f library/k8s/k8s-ha.yaml -i my-inventory.yaml
+#   crater apply docker.io/willdockerhub/k8s:<tag> -i my-inventory.yaml --set ha=true
 # 拓扑由 groups 决定:controlplane 组首台 = init 节点;worker 为工作节点。
 inventory:
-  # vars:                       # 三级 vars 可覆盖 task 的 params 默认(vip/网段…)
-  #   vip: "192.168.1.100"
+  # 默认 HA 不需要 vars：每台 controlplane 的本机 Nginx 自动互相负载均衡。
+  # 仅兼容旧 VIP 路径才需要：--set ha_mode=vip --set vip=192.168.1.100
   hosts:
     - { name: n1, address: 192.168.1.11, user: root, password: "changeme" }
     - { name: n2, address: 192.168.1.12, user: root, password: "changeme" }

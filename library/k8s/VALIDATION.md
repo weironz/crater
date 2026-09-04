@@ -1,4 +1,9 @@
-# k8s-ha 真机验证记录
+# k8s-ha 真机验证记录（历史 VIP 方案）
+
+> 本记录验证的是 `ha_mode=vip` 的 Keepalived + HAProxy 路径，保留它作为兼容
+> 证据。当前默认 HA 路径是 `ha_mode=nginx-local`：每台 controlplane 本机 Nginx
+> 监听 `127.0.0.1:8443`，不需要 VIP。新路径已完成 lint 与三控制面静态展开验证；
+> 在新的 3-VM 真实验证完成前，不应把下列 VIP 结果外推为 Nginx 路径的真机记录。
 
 ## 环境
 
