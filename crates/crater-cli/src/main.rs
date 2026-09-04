@@ -43,6 +43,7 @@ mod named;
 mod out;
 mod pkg;
 mod pkg_params;
+mod prepare;
 mod repo;
 mod schema_cmd;
 mod stack_cmd;
@@ -97,6 +98,7 @@ const COMMAND_GROUPS: &str = "\
 
   包(像 docker 那套动词)
     build        构建 —— 出一个 OCI 包(-t)或离线闭包文件(-o)
+    prepare      为目标机群生成带 OS 依赖与镜像的 Site Seed
     push         推上 registry(`push <目录> <引用>` 组装再推)
     pull         从 registry 拉下来(是包就摊回文件)
     save         连同物料导成一个文件 —— U 盘搬去断网机房
@@ -371,6 +373,25 @@ enum Cmd {
         /// 它盖掉参数的 `default`,所以一份源能烤出任意版本(D-089)
         #[arg(long = "set", value_name = "KEY=VAL")]
         set: Vec<String>,
+    },
+    /// 为一份实际机群准备离线 Site Seed。
+    ///
+    /// 它先只读探测每台目标的 arch、distro、version；一份 Seed 只允许一个
+    /// 画像，避免把不同发行版的 apt/dnf 依赖混在一起。随后按该画像烘焙文件、
+    /// OS 包依赖闭包和 OCI 镜像，并写出同名 `.lock.yaml`，其中记录断网 apply
+    /// 所需的参数。多 controlplane 会自动收集 Nginx HA 分支。
+    Prepare {
+        /// 蓝图文件
+        #[arg(short, long, value_name = "FILE")]
+        file: PathBuf,
+        /// Site Seed 闭包输出文件
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+        /// 额外的 build 参数(如 version=1.36.1)
+        #[arg(long = "set", value_name = "KEY=VAL")]
+        set: Vec<String>,
+        #[command(flatten)]
+        target: TargetOpts,
     },
     /// 把制品连同物料导成一个文件 —— U 盘搬去断网机房
     ///
@@ -1285,6 +1306,12 @@ async fn main() -> Result<()> {
             }
             bail!(legacy_note("build"))
         }
+        Cmd::Prepare {
+            file,
+            output,
+            set,
+            target,
+        } => prepare::run(&file, &output, &target, &set).await,
         Cmd::Inspect { source } => {
             let p = PathBuf::from(&source);
             if p.is_file() && (blueprint::is_blueprint_file(&p) || stack_cmd::is_stack_file(&p)) {

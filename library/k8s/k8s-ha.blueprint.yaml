@@ -13,7 +13,7 @@
 # `cast.seed`(= first(role.controlplane))即 init 节点 —— 不再需要"全组跑 + check 守卫跳过首台"。
 name: k8s-ha
 # 包配方修订号；实际安装的 Kubernetes 版本由下方 params.version 决定，当前为 1.36.1。
-version: "1.36.5"
+version: "1.36.6"
 
 # 机群契约:不满足就根本不开跑,而不是跑到 rest(...) 那步才炸。
 # worker 写 min: 0 —— 单节点拓扑里 worker 组存在但为空,是合法拓扑不是打错字。
@@ -42,7 +42,7 @@ params:
   ha_mode:         { type: { enum: [nginx-local, vip] }, default: nginx-local, desc: "HA LB: nginx-local(默认,无需 VIP)；vip(兼容旧 Keepalived+HAProxy)" }
   api_endpoint:    { default: "k8s-api.crater.internal", desc: "内部 API LB 的稳定 DNS 名(默认由本包写入所有节点 /etc/hosts)" }
   # 预载镜像是**离线**才需要的:在线部署时 kubeadm 自己会拉。
-  # 打开它要求 OCI 闭包就位(尚未接入新管线,见 D-115)。
+  # `crater prepare` 会把它以及 OS 依赖一起烤入 Site Seed；在线默认仍关闭。
   preload_images:  { type: bool, default: false, desc: "离线:把镜像预先导入目标运行时" }
   version:         { type: version, default: "1.36.1", stage: build }
   # 下面三项只给 ha_mode=vip 的兼容路径使用；默认 nginx-local 无需填写。
@@ -136,6 +136,21 @@ materials:
   - { name: cfg-nginx-api-lb,file: templates/nginx-k8s-api-lb.conf.j2 }
   - { name: cfg-api-hosts,   file: templates/k8s-api-hosts.j2 }
 
+  # —— OS 依赖 ——
+  # `material:` 是在线/离线共用的同一份包名表：普通 apply 仍走 apt，
+  # Site Seed 则在同族容器中把本体及递归依赖全部下载进闭包。
+  - name: k8s-prereqs
+    os_package:
+      debian: [conntrack, socat, ipset, ethtool, ebtables]
+  - name: nginx-stream
+    os_package:
+      debian: [nginx, libnginx-mod-stream]
+    when: "params.ha && params.ha_mode == 'nginx-local'"
+  - name: vip-lb
+    os_package:
+      debian: [keepalived, haproxy]
+    when: "params.ha && params.ha_mode == 'vip'"
+
   # —— 镜像(全节点导入到 k8s.io)——
   - { name: img-apiserver,   image: "${params.image_repo}/kube-apiserver:v${params.version}" }
   - { name: img-cm,          image: "${params.image_repo}/kube-controller-manager:v${params.version}" }
@@ -173,8 +188,7 @@ resources:
         net.bridge.bridge-nf-call-ip6tables: 1
         net.ipv4.ip_forward: 1
   - package:
-      packages:
-        debian: [conntrack, socat, ipset, ethtool, ebtables]
+      material: k8s-prereqs
 
   # ========== containerd 运行时 ==========
   - unarchive: { material: containerd, to: /usr/local, creates: /usr/local/bin/containerd }
@@ -233,8 +247,7 @@ resources:
         "$(cat /etc/kubernetes/crater-api.hosts)"
     when: "params.ha && params.ha_mode == 'nginx-local'"
   - package:
-      packages:
-        debian: [nginx, libnginx-mod-stream]
+      material: nginx-stream
     target: masters
     when: "params.ha && params.ha_mode == 'nginx-local'"
   # Ubuntu 的 nginx.conf 在顶层 include modules-enabled/*.conf；50-mod-stream.conf
@@ -248,8 +261,7 @@ resources:
 
   # 兼容旧方案:显式选择 ha_mode=vip 时才安装 Keepalived + HAProxy。
   - package:
-      packages:
-        debian: [keepalived, haproxy]
+      material: vip-lb
     target: masters
     when: "params.ha && params.ha_mode == 'vip'"
   - template: { material: cfg-haproxy, dest: /etc/haproxy/haproxy.cfg }
