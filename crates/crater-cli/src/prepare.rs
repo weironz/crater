@@ -1,16 +1,15 @@
-//! Site Seed preparation: probe the real target profile, then bake the exact
-//! offline closure needed there.  The resulting `.lock.yaml` is deliberately
-//! small and reviewable: it binds the closure digest to the source, target
-//! profile, and apply-time switches required to consume the closure.
+//! Site Seed preparation: use the inventory's declared target profile to bake
+//! the exact offline closure needed there. The resulting `.lock.yaml` is
+//! deliberately small and reviewable: it binds the closure digest to the
+//! source, target profile, and apply-time switches required to consume it.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
 use serde::Serialize;
 
 use crate::closure;
-use crate::target::{self, TargetOpts};
+use crate::target::TargetOpts;
 
 #[derive(Serialize)]
 struct SiteLock {
@@ -43,9 +42,102 @@ struct ApplyLock {
     set: Vec<String>,
 }
 
-/// Probe every selected target, reject a heterogeneous fleet, and bake a
-/// closure for its exact OS image.  A single Site Seed has one apt/dnf solver
-/// context by definition; mixed fleets are separate Seeds, not a silent union.
+/// A fully resolved static profile plus the topology switches that affect its
+/// closure. It intentionally contains no connection data or target facts.
+#[derive(Clone)]
+pub(crate) struct SeedPlan {
+    pub platform: crater_core::spec::Platform,
+    pub hosts: Vec<String>,
+    pub ha: bool,
+    pub apply_sets: Vec<String>,
+}
+
+impl SeedPlan {
+    fn profile(&self) -> Vec<String> {
+        vec![
+            format!("arch={}", self.platform.arch),
+            format!("os_image={}", self.platform.os_image()),
+        ]
+    }
+
+    fn bake_sets(&self, sets: &[String]) -> Result<Vec<String>> {
+        let mut out = sets.to_vec();
+        require_set(&mut out, "preload_images=true")?;
+        if self.ha {
+            require_set(&mut out, "ha=true")?;
+        }
+        Ok(out)
+    }
+}
+
+fn seed_plan(platform: crater_core::spec::Platform, hosts: &[crater_core::spec::Host]) -> SeedPlan {
+    let ha = hosts
+        .iter()
+        .filter(|host| host.roles.iter().any(|r| r == "controlplane"))
+        .count()
+        > 1;
+    SeedPlan {
+        platform,
+        hosts: hosts.iter().map(|h| h.name.clone()).collect(),
+        ha,
+        apply_sets: if ha {
+            vec!["preload_images=true".into(), "ha=true".into()]
+        } else {
+            vec!["preload_images=true".into()]
+        },
+    }
+}
+
+/// Bake a Seed for a publisher-supplied inventory. This parses only static
+/// inventory data and never resolves credentials or connects to a host.
+pub(crate) async fn bake_for_inventory(
+    blueprint: &Path,
+    output: &Path,
+    inventory: &Path,
+    sets: &[String],
+) -> Result<SeedPlan> {
+    let plan = plan_for_inventory(inventory)?;
+    bake(blueprint, output, &plan, sets).await?;
+    Ok(plan)
+}
+
+/// Resolve an inventory into a Seed plan without baking bytes. Publishers use
+/// this to attach a previously verified closure to the matching profile.
+pub(crate) fn plan_for_inventory(inventory: &Path) -> Result<SeedPlan> {
+    let spec = crater_core::spec::CraterSpec::from_yaml_file(inventory)?;
+    let mut inv = spec.inventory;
+    let platform = inv.platform.take().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} 缺少 inventory.platform；不能为未声明画像的机群烤 Site Seed",
+            inventory.display()
+        )
+    })?;
+    platform.validate()?;
+    if inv.hosts.is_empty() {
+        bail!("inventory {} 没有 hosts", inventory.display());
+    }
+    inv.resolve();
+    Ok(seed_plan(platform, &inv.hosts))
+}
+
+async fn bake(blueprint: &Path, output: &Path, plan: &SeedPlan, sets: &[String]) -> Result<()> {
+    let platform = &plan.platform;
+    println!(
+        "Site Seed 画像: {}/{}/{}，{} 台目标{}",
+        platform.arch,
+        platform.os,
+        platform.version,
+        plan.hosts.len(),
+        if plan.ha { "，HA 分支已启用" } else { "" }
+    );
+    closure::build(blueprint, output, &plan.profile(), &plan.bake_sets(sets)?).await
+}
+
+/// Bake a closure for the statically declared inventory platform. A single
+/// Site Seed has one apt/dnf solver context by definition; mixed fleets are
+/// separate Seeds, not a silent union. No target connection is made here:
+/// preparing/downloading an offline Seed must work before the target network
+/// is reachable.
 pub(crate) async fn run(
     blueprint: &Path,
     output: &Path,
@@ -59,60 +151,11 @@ pub(crate) async fn run(
         );
     }
     let hosts = target_opts.exec_hosts()?;
-    let mut profiles = Vec::new();
-    let mut controlplanes = 0usize;
-    for host in &hosts {
-        if host.roles.iter().any(|r| r == "controlplane") {
-            controlplanes += 1;
-        }
-        let exec = target::connect_executor(host, true)
-            .await
-            .with_context(|| format!("连接目标 {}", host.name))?;
-        let os = crater_core::os::detect_info_via(exec.as_ref()).await;
-        let arch = detect_arch(exec.as_ref()).await?;
-        if os.distro.is_empty() || os.version.is_empty() {
-            bail!("{}:无法从 /etc/os-release 确认 distro/version", host.name);
-        }
-        profiles.push((host.name.clone(), arch, os.distro, os.version));
-    }
-    let unique: BTreeSet<_> = profiles
-        .iter()
-        .map(|(_, arch, distro, version)| (arch.clone(), distro.clone(), version.clone()))
-        .collect();
-    if unique.len() != 1 {
-        let got = profiles
-            .iter()
-            .map(|(host, arch, distro, version)| format!("{host}={arch}/{distro}/{version}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        bail!("一个 Site Seed 只能对应一个 arch+distro+version；检测到:{got}");
-    }
-    let (arch, distro, version) = unique.into_iter().next().expect("non-empty hosts");
-    let os_image = format!("{distro}:{version}");
-    let mut bake_sets = sets.to_vec();
-    require_set(&mut bake_sets, "preload_images=true")?;
-    // Multi-control-plane topology needs the local Nginx material branch.
-    if controlplanes > 1 {
-        require_set(&mut bake_sets, "ha=true")?;
-    }
-    let profile = vec![format!("arch={arch}"), format!("os_image={os_image}")];
-    println!(
-        "Site Seed 画像: {arch}/{distro}/{version}，{} 台目标{}",
-        hosts.len(),
-        if controlplanes > 1 {
-            "，HA 分支已启用"
-        } else {
-            ""
-        }
-    );
-    closure::build(blueprint, output, &profile, &bake_sets).await?;
+    let plan = seed_plan(target_opts.offline_platform()?, &hosts);
+    bake(blueprint, output, &plan, sets).await?;
 
     let bytes =
         std::fs::read(output).with_context(|| format!("读取刚生成的闭包 {}", output.display()))?;
-    let mut apply_sets = vec!["preload_images=true".to_string()];
-    if controlplanes > 1 {
-        apply_sets.push("ha=true".to_string());
-    }
     let lock = SiteLock {
         format_version: 1,
         source: blueprint.display().to_string(),
@@ -121,13 +164,15 @@ pub(crate) async fn run(
             sha256: crater_core::bundle::sha256_hex(&bytes),
         },
         profile: ProfileLock {
-            arch,
-            distro,
-            version,
-            os_image,
-            hosts: hosts.into_iter().map(|h| h.name).collect(),
+            arch: plan.platform.arch.clone(),
+            distro: plan.platform.os.clone(),
+            version: plan.platform.version.clone(),
+            os_image: plan.platform.os_image(),
+            hosts: plan.hosts.clone(),
         },
-        apply: ApplyLock { set: apply_sets },
+        apply: ApplyLock {
+            set: plan.apply_sets,
+        },
     };
     let lock_path = lock_path(output);
     let yaml = serde_yaml::to_string(&lock)?;
@@ -160,18 +205,6 @@ fn require_set(sets: &mut Vec<String>, required: &str) -> Result<()> {
     debug_assert!(!value.is_empty());
     sets.push(required.to_string());
     Ok(())
-}
-
-async fn detect_arch(exec: &dyn crater_core::executor::Executor) -> Result<String> {
-    let out = exec.run("uname -m").await?;
-    if !out.ok() {
-        bail!("读取目标架构失败(exit {}):{}", out.code, out.stderr.trim());
-    }
-    match out.stdout.trim() {
-        "x86_64" | "amd64" => Ok("amd64".into()),
-        "aarch64" | "arm64" => Ok("arm64".into()),
-        other => bail!("不支持的目标架构 `{other}`(当前支持 amd64、arm64)"),
-    }
 }
 
 fn lock_path(output: &Path) -> PathBuf {

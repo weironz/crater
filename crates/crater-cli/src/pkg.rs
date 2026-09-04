@@ -17,12 +17,13 @@
 //!   上给别人拉的。打包时全数排除并逐个报出来,余下的文件再扫一遍字面口令,
 //!   撞上就**拒绝打包** —— 推上去之后再删是删不掉的。
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
 use crater_core::store::{
-    ImageStore, ANN_MATERIAL_FETCH, ANN_MATERIAL_NAME, ANN_MATERIAL_SOURCE, MT_MATERIAL,
-    MT_PKG_CONFIG, MT_PKG_LAYER,
+    ImageStore, ANN_MATERIAL_FETCH, ANN_MATERIAL_NAME, ANN_MATERIAL_SOURCE, ANN_SEED_ARCH,
+    ANN_SEED_OS, ANN_SEED_VERSION, MT_MATERIAL, MT_PKG_CONFIG, MT_PKG_LAYER, MT_SITE_SEED,
 };
 use crater_ir::ir::Blueprint;
 use serde_json::json;
@@ -239,6 +240,8 @@ async fn assemble(
     archs: &[String],
     fors: &[String],
     sets: &[String],
+    seed_inventories: &[PathBuf],
+    seed_files: &[PathBuf],
 ) -> Result<String> {
     let (bp_file0, root0) = locate(path)?;
     let (mut files, skipped) = collect(&root0)?;
@@ -349,6 +352,69 @@ async fn assemble(
         "annotations": { "org.opencontainers.image.title": format!("{}.tar.gz", bp.name) }
     });
 
+    // Site Seeds are profile-addressed layers on the one public package tag.
+    // `pull --offline -i inventory.yaml` reads their annotations and downloads
+    // just its one closure blob; the remaining Seed layers stay remote.
+    if !seed_inventories.is_empty() {
+        if !archs.is_empty() || !fors.is_empty() {
+            bail!("`--seed-inventory` 与 `--arch`/`--for` 不能混用；Seed 的画像只来自 inventory.platform");
+        }
+        let seed_dir = tempfile::tempdir()?;
+        if !seed_files.is_empty() && seed_files.len() != seed_inventories.len() {
+            bail!("`--seed-file` 给了 {} 个，但 `--seed-inventory` 给了 {} 个；两者必须按顺序一一对应", seed_files.len(), seed_inventories.len());
+        }
+        let mut profiles = BTreeSet::new();
+        let mut layers = vec![bp_layer.clone()];
+        let mut total = 0u64;
+        for (i, inventory) in seed_inventories.iter().enumerate() {
+            let output = seed_dir.path().join(format!("seed-{i}.tar"));
+            let (plan, bytes) = if let Some(seed_file) = seed_files.get(i) {
+                let plan = crate::prepare::plan_for_inventory(inventory)?;
+                let bytes = std::fs::read(seed_file)
+                    .with_context(|| format!("读取预先验证的 Site Seed {}", seed_file.display()))?;
+                (plan, bytes)
+            } else {
+                let plan =
+                    crate::prepare::bake_for_inventory(&bp_file, &output, inventory, sets).await?;
+                let bytes = std::fs::read(&output)
+                    .with_context(|| format!("读取刚生成的 Site Seed {}", output.display()))?;
+                (plan, bytes)
+            };
+            let key = format!(
+                "{}/{}/{}",
+                plan.platform.arch, plan.platform.os, plan.platform.version
+            );
+            if !profiles.insert(key.clone()) {
+                bail!("重复的 Site Seed 画像 `{key}`；一个公开包内每个画像只能有一份");
+            }
+            let (d, size) = store.put_blob(&bytes)?;
+            total += size;
+            say!("  ✓ Site Seed {key:<28} {:>9}", human(size));
+            layers.push(json!({
+                "mediaType": MT_SITE_SEED,
+                "digest": format!("sha256:{d}"),
+                "size": size,
+                "annotations": {
+                    ANN_SEED_ARCH: plan.platform.arch,
+                    ANN_SEED_OS: plan.platform.os,
+                    ANN_SEED_VERSION: plan.platform.version,
+                    "org.opencontainers.image.title": format!("site-seed-{key}.tar"),
+                }
+            }));
+        }
+        let manifest = json!({
+            "schemaVersion": 2, "mediaType": MT_MANIFEST,
+            "config": cfg_desc, "layers": layers, "annotations": ann
+        });
+        let digest = store.put_manifest(reference, &serde_json::to_vec(&manifest)?)?;
+        say!(
+            "离线 Seed {} —— {} 个画像，一个公开 tag",
+            human(total),
+            profiles.len()
+        );
+        return Ok(digest);
+    }
+
     // 不带闭包:一份 manifest,与 Helm 的布局同形。
     if archs.is_empty() {
         let m = json!({
@@ -451,8 +517,19 @@ pub async fn build(
     archs: &[String],
     fors: &[String],
     sets: &[String],
+    seed_inventories: &[PathBuf],
+    seed_files: &[PathBuf],
 ) -> Result<()> {
-    let digest = assemble(path, reference, archs, fors, sets).await?;
+    let digest = assemble(
+        path,
+        reference,
+        archs,
+        fors,
+        sets,
+        seed_inventories,
+        seed_files,
+    )
+    .await?;
     say!("已入本地 store(sha256:{digest})—— `crater push {reference}` 推上去");
     Ok(())
 }
@@ -464,8 +541,19 @@ pub async fn push(
     archs: &[String],
     fors: &[String],
     sets: &[String],
+    seed_inventories: &[PathBuf],
+    seed_files: &[PathBuf],
 ) -> Result<()> {
-    let digest = assemble(path, reference, archs, fors, sets).await?;
+    let digest = assemble(
+        path,
+        reference,
+        archs,
+        fors,
+        sets,
+        seed_inventories,
+        seed_files,
+    )
+    .await?;
     let store = ImageStore::open()?;
     store.push(reference).await?;
     say!("推送完成 → {reference}");
@@ -483,9 +571,38 @@ pub async fn push(
 ///
 /// 默认**瘦拉**:manifest + config + 蓝图层。物料层(第二阶段)留在 registry,
 /// 部署时目标机自己按 URL 取 —— 在线部署根本用不到那几百兆。
-pub async fn pull(reference: &str, into: Option<&Path>, full: bool) -> Result<()> {
+pub async fn pull(
+    reference: &str,
+    into: Option<&Path>,
+    full: bool,
+    offline_platform: Option<&crater_core::spec::Platform>,
+    offline: bool,
+) -> Result<()> {
     let store = ImageStore::open()?;
-    if full {
+    if let Some(platform) = offline_platform {
+        match store.pull_site_seed(reference, platform).await? {
+            Some(_) => say!(
+                "已预取 {}/{}/{} 的完整 Site Seed",
+                platform.arch,
+                platform.os,
+                platform.version
+            ),
+            None => say!("该包未声明 Site Seed，已按兼容模式拉取完整包"),
+        }
+    } else if offline {
+        // Keep `crater pull yq:… --offline` ergonomic for ordinary packages.
+        // A Seed matrix, however, cannot be selected honestly without the
+        // static inventory key — do not silently fetch every distro/profile.
+        store.pull_thin(reference).await?;
+        if store.has_site_seeds(reference)? {
+            bail!(
+                "{reference} 有多份 Site Seed；`--offline` 需要 `-i inventory.yaml` 选择 os/version/arch，\n\
+                 例如:`crater pull {reference} --offline -i inventory.yaml`"
+            );
+        }
+        store.pull(reference).await?;
+        say!("该包未声明 Site Seed，已按兼容模式拉取完整包");
+    } else if full {
         store.pull(reference).await?;
     } else {
         store.pull_thin(reference).await?;
@@ -1366,7 +1483,8 @@ fn warn_if_undecidable(bp: &Blueprint, source: &str, have_bytes: bool) {
 /// 抽出来不是为了让 clippy 闭嘴,是因为它们**确实构成一个整体**:三个都在
 /// 回答"这次安装允许越过哪道闸",而且三道闸互不替代 ——
 /// `yes` 是"计划我看过了",`force` 是"上一版目录里的本地改动我不要了",
-/// `full` 是"连物料一起拉"。三个 `bool` 挨着传,调用点上是三个裸 `true`/
+/// `full` 是"连物料一起拉",`offline` 是"绝不联网、只吃本地完整包"。四个
+/// `bool` 挨着传,调用点上是裸 `true`/
 /// `false`,谁是谁全靠位置记 —— 而记错的后果分别是"没看计划就执行"和
 /// "手工改动被丢掉"。
 #[derive(Debug, Clone, Copy, Default)]
@@ -1375,6 +1493,8 @@ pub struct InstallOpts {
     pub yes: bool,
     /// 连物料层一起拉(离线现场)。
     pub full: bool,
+    /// 禁止访问 registry 或物料源；缺一个字节就立刻失败。
+    pub offline: bool,
     /// 上一版目录里有本地改动也照旧升级。**`yes` 跨不过它。**
     pub force: bool,
 }
@@ -1431,7 +1551,12 @@ pub async fn install(
     repo: Option<&str>,
     opts: InstallOpts,
 ) -> Result<()> {
-    let InstallOpts { yes, full, force } = opts;
+    let InstallOpts {
+        yes,
+        full,
+        offline,
+        force,
+    } = opts;
     // ① 取到蓝图 —— 本地路径就地用,否则当成 registry 引用拉下来。
     let local = Path::new(source);
     // `crater install mysql` 里的 `mysql` 不是引用,是包名 —— 去仓库索引里
@@ -1442,7 +1567,7 @@ pub async fn install(
         resolved = crate::repo::resolve(source, repo)?;
         say!("{source} → {resolved}");
         resolved.as_str()
-    } else if !local.exists() {
+    } else if !local.exists() && !offline {
         // 完整引用,但 tag 位可能是个**范围**(`reg/ns/yq:4.*`)。
         // 这正是 helm#11000 里那个原例(`helm pull oci://… --version '0.0.*'`)
         // —— 靠 `tags/list` 问出远端有哪些版本,再挑最高的合格者。
@@ -1454,11 +1579,40 @@ pub async fn install(
     };
     // 这次是不是换版本 —— 后面 D-135 那句提醒要用。
     let mut upgrading = false;
+    let mut selected_seed = None;
     let bp_file = if local.exists() {
         locate(local)?.0
     } else {
         let store = ImageStore::open()?;
-        if full {
+        if offline {
+            if !store.has(source) {
+                bail!(
+                    "{source} 不在本地 store —— `--offline` 不会访问 registry。\n\
+                     在有网处先执行:`crater pull {source} --offline`，\n\
+                     或用 `crater load <包>.pkg.tar` 把完整包搬进来。"
+                );
+            }
+            if store.has_site_seeds(source)? {
+                let platform = target.offline_platform()?;
+                selected_seed = store.local_site_seed(source, &platform)?;
+                if selected_seed.is_none() {
+                    bail!(
+                        "{source} 缺少 {}/{}/{} 的本地 Site Seed。\n\
+                         在有网处先执行:`crater pull {source} --offline -i <inventory>`，\n\
+                         再用 `crater save/load` 搬到断网环境。",
+                        platform.arch,
+                        platform.os,
+                        platform.version
+                    );
+                }
+            } else if !store.has_all_layers(source) {
+                bail!(
+                    "{source} 在本地但不是完整离线包。\n\
+                     在有网处先执行:`crater pull {source} --offline`，\n\
+                     再进入断网环境执行 apply。"
+                );
+            }
+        } else if full {
             store.pull(source).await?
         } else {
             store.pull_thin(source).await?
@@ -1622,7 +1776,8 @@ pub async fn install(
     // 不必再单独准备一个 closure.tar。用户显式给了 `--closure` 则尊重他的。
     let mut target = target.clone();
     if full && target.closure.is_none() && !local.exists() {
-        target.closure = Some(PathBuf::from(format!("oci://{source}")));
+        target.closure =
+            Some(selected_seed.unwrap_or_else(|| PathBuf::from(format!("oci://{source}"))));
     }
     let target = &target;
     // 换版本时,先把"这次判不判得出"讲清楚,再印计划(D-135)。

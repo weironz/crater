@@ -24,3 +24,37 @@ crater apply docker.io/willdockerhub/k8s:<tag> -i inventory.yaml \
   --set ha=true --set ha_mode=vip \
   --set vip=192.168.1.100 --set cp_endpoint=192.168.1.100:8443
 ```
+
+## 离线交付
+
+inventory 必须静态声明目标画像；这不是 SSH 探测结果，而是选择离线依赖闭包的
+键。示例见 `inventory.example.yaml`：
+
+```yaml
+inventory:
+  platform: { os: ubuntu, version: "24.04", arch: amd64 }
+```
+
+发布方仍只推一个公开 tag；每个支持画像的完整闭包作为该 OCI 制品内部的 Site
+Seed 层。构建多个画像时重复 `--seed-inventory`，不会产生面向用户的 tag 矩阵：
+
+```bash
+crater push library/k8s docker.io/willdockerhub/k8s:1.36.6 \
+  --seed-inventory ubuntu-24-amd64.inventory.yaml
+```
+
+联网的准备机只下载该 inventory 命中的一份 Seed：
+
+```bash
+crater pull docker.io/willdockerhub/k8s:1.36.6 --offline -i inventory.yaml
+crater save docker.io/willdockerhub/k8s:1.36.6 -o k8s-ubuntu24-amd64.pkg.tar
+```
+
+`save` 此时导出的就是这一份选择后的完整 OCI 包；拷到隔离环境后照常 `load`，
+再部署。`apply --offline` 不访问 registry 或物料源，只在连接目标后只读校验
+实际 `arch + distro + version` 是否与 inventory 平台声明一致：
+
+```bash
+crater load k8s-ubuntu24-amd64.pkg.tar
+crater apply docker.io/willdockerhub/k8s:1.36.6 --offline -i inventory.yaml
+```

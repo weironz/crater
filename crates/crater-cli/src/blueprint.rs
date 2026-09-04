@@ -462,6 +462,7 @@ async fn run_on_targets(
     // 闭包在**连机器之前**装载并校验:字节坏了要在这里知道,不是推到一半。
     // `_blob_src` 必须活到本函数结束 —— tar 闭包的解包目录归它管。
     let (_blob_src, blobs, images) = open_closure(target)?;
+    validate_offline_package_platform(target, &hosts).await?;
 
     // 准入断言:在**碰任何机器之前**。plan 也跑它 —— preflight 是只读的,
     // 而 plan 正是闸门:等到 apply 才发现不满足,那道闸门就白设了。
@@ -1678,6 +1679,74 @@ fn open_closure(
     Ok((src, blobs, images))
 }
 
+/// A package-backed closure is selected from the inventory's static platform
+/// profile. Before any procedure runs, prove that every real target still
+/// matches that declared contract. This is intentionally deployment-time only:
+/// package pull/Seed preparation must not need a route to the target hosts.
+async fn validate_offline_package_platform(
+    target: &TargetOpts,
+    hosts: &[crater_core::spec::Host],
+) -> Result<()> {
+    let Some(closure) = target.closure.as_deref() else {
+        return Ok(());
+    };
+    let package_backed = closure.to_string_lossy().starts_with("oci://");
+    let Some(inventory) = target.inventory.as_deref() else {
+        if package_backed {
+            bail!("包内离线闭包需要 `-i inventory.yaml` 的 platform 声明，才能校验目标画像");
+        }
+        return Ok(());
+    };
+    let spec = crater_core::spec::CraterSpec::from_yaml_file(inventory)?;
+    if spec.inventory.platform.is_none() {
+        if package_backed {
+            bail!(
+                "{} 缺少 inventory.platform；包内离线闭包不能在未声明画像的机群上执行",
+                inventory.display()
+            );
+        }
+        return Ok(());
+    }
+    let expected = target.offline_platform()?;
+    for host in hosts {
+        let exec = connect_executor(host, true)
+            .await
+            .with_context(|| format!("连接 {} 以校验离线画像", host_label(host)))?;
+        let arch = crater_core::arch::detect_via(exec.as_ref()).await;
+        let os = crater_core::os::detect_info_via(exec.as_ref()).await;
+        check_platform_match(&expected, arch, &os, &host.name)?;
+    }
+    Ok(())
+}
+
+fn check_platform_match(
+    expected: &crater_core::spec::Platform,
+    arch: crater_core::arch::Arch,
+    os: &crater_core::os::OsInfo,
+    host: &str,
+) -> Result<()> {
+    let actual_arch = arch.as_str();
+    if arch == crater_core::arch::Arch::Unknown || os.distro.is_empty() || os.version.is_empty() {
+        bail!(
+            "{host}:无法确认实际 arch/distro/version，拒绝消费离线包(期望 {}/{}/{})",
+            expected.arch,
+            expected.os,
+            expected.version
+        );
+    }
+    if actual_arch != expected.arch || os.distro != expected.os || os.version != expected.version {
+        bail!(
+            "{host}:实际画像 {actual_arch}/{}/{} 与离线包选择键 {}/{}/{} 不匹配，未执行部署",
+            os.distro,
+            os.version,
+            expected.arch,
+            expected.os,
+            expected.version
+        );
+    }
+    Ok(())
+}
+
 /// 跑 `preflight:` 准入断言 —— 在**碰任何机器之前**。
 ///
 /// 这一步此前压根不存在:断言被解析进 IR、被 lint 检查、写在 JSON schema 里
@@ -1907,6 +1976,37 @@ mod tests {
     #[test]
     fn set_without_equals_is_rejected() {
         assert!(parse_sets(&["justakey".into()]).is_err());
+    }
+
+    #[test]
+    fn offline_package_profile_requires_an_exact_target_match() {
+        let expected = crater_core::spec::Platform {
+            os: "ubuntu".into(),
+            version: "24.04".into(),
+            arch: "amd64".into(),
+        };
+        let matching = crater_core::os::OsInfo {
+            distro: "ubuntu".into(),
+            version: "24.04".into(),
+            ..Default::default()
+        };
+        assert!(
+            check_platform_match(&expected, crater_core::arch::Arch::Amd64, &matching, "n1")
+                .is_ok()
+        );
+        let wrong_release = crater_core::os::OsInfo {
+            version: "22.04".into(),
+            ..matching
+        };
+        let err = check_platform_match(
+            &expected,
+            crater_core::arch::Arch::Amd64,
+            &wrong_release,
+            "n1",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("不匹配"), "{err}");
     }
 }
 

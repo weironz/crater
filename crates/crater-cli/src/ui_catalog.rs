@@ -311,7 +311,7 @@ pub async fn repo_pull(Json(q): Json<RepoPullReq>) -> Response {
         .unwrap_or("pkg")
         .to_string();
     let dir = root.join(&name);
-    match crate::pkg::pull(&q.reference, Some(&dir), q.full).await {
+    match crate::pkg::pull(&q.reference, Some(&dir), q.full, None, false).await {
         Ok(()) => Json(json!({ "ok": true, "dir": name })).into_response(),
         Err(e) => (
             StatusCode::CONFLICT,

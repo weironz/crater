@@ -27,6 +27,12 @@ impl CraterSpec {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Inventory {
+    /// Static target platform used to select an offline Site Seed. This is an
+    /// operator declaration, not a fact inferred by probing a host: an offline
+    /// pull must select its dependency closure before it can reach the eventual
+    /// deployment machines.
+    #[serde(default)]
+    pub platform: Option<Platform>,
     /// Global vars (D-082): lowest-precedence environment values, applied to every
     /// host. Override task `params` defaults at apply time (vip/subnet/…).
     #[serde(default)]
@@ -39,6 +45,35 @@ pub struct Inventory {
     /// so the inventory never repeats role labels per host — see [`Inventory::resolve`].
     #[serde(default)]
     pub groups: BTreeMap<String, Group>,
+}
+
+/// The OS/architecture contract of an offline deployment fleet.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Platform {
+    pub os: String,
+    pub version: String,
+    pub arch: String,
+}
+
+impl Platform {
+    /// Validate the small, static profile vocabulary that Crater can bake and
+    /// select today. Distro/version stay open-ended because package resolvers
+    /// own that compatibility decision; architecture does not.
+    pub fn validate(&self) -> crate::Result<()> {
+        if self.os.trim().is_empty() || self.version.trim().is_empty() {
+            anyhow::bail!("inventory.platform 的 os 与 version 都不能为空");
+        }
+        match self.arch.as_str() {
+            "amd64" | "arm64" => Ok(()),
+            other => {
+                anyhow::bail!("inventory.platform.arch 目前只支持 amd64、arm64，收到了 `{other}`")
+            }
+        }
+    }
+
+    pub fn os_image(&self) -> String {
+        format!("{}:{}", self.os, self.version)
+    }
 }
 
 /// A named inventory group (D-077): member hosts and/or nested groups. Mirrors
@@ -284,5 +319,22 @@ inventory:
         let mut inv: CraterSpec = serde_yaml::from_str(yaml).unwrap();
         inv.inventory.derive_roles();
         assert_eq!(inv.inventory.hosts[0].roles, vec!["extra", "web"]);
+    }
+
+    #[test]
+    fn reads_static_offline_platform_without_touching_hosts() {
+        let yaml = r#"
+inventory:
+  platform:
+    os: ubuntu
+    version: "24.04"
+    arch: amd64
+  hosts:
+    - { name: n1, address: 192.0.2.1 }
+"#;
+        let spec: CraterSpec = serde_yaml::from_str(yaml).unwrap();
+        let platform = spec.inventory.platform.unwrap();
+        platform.validate().unwrap();
+        assert_eq!(platform.os_image(), "ubuntu:24.04");
     }
 }

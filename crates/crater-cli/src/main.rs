@@ -216,6 +216,9 @@ enum Cmd {
 
   # 覆盖 apply 阶段的参数(盖过 app 文件里记的)
   crater apply yq --set vip=10.0.0.9
+
+  # 断网现场:此前已用 `crater pull <引用> --offline` 预取完整包
+  crater apply oci://ghcr.io/acme/yq:4.53.6 --offline
 "
     )]
     Apply {
@@ -236,6 +239,10 @@ enum Cmd {
         /// `crater inspect` 会列出来。
         #[arg(long = "set", value_name = "KEY=VAL")]
         set: Vec<String>,
+        /// 只消费本地完整包,绝不访问 registry 或物料源。
+        /// 先在有网处执行 `crater pull <引用> --offline`。
+        #[arg(long)]
+        offline: bool,
     },
     /// 预演会变什么 —— 连机器跑只读探针,不执行
     ///
@@ -348,6 +355,9 @@ enum Cmd {
 
   # 组装成 OCI 包(像 docker build -t),之后 crater push 推上去
   crater build library/yq -t ghcr.io/acme/yq:4.53.6
+
+  # 同一公开 tag 附上 Ubuntu 24.04/amd64 的离线 Seed
+  crater build library/k8s -t ghcr.io/acme/k8s:1.36.6 --seed-inventory k8s.inventory.yaml
 "
     )]
     Build {
@@ -373,13 +383,26 @@ enum Cmd {
         /// 它盖掉参数的 `default`,所以一份源能烤出任意版本(D-089)
         #[arg(long = "set", value_name = "KEY=VAL")]
         set: Vec<String>,
+        /// 把此 inventory.platform 对应的完整 Site Seed 附到同一 OCI tag。
+        /// 可重复，为多个发行版/架构画像各附一份；不会生成公开 tag 矩阵。
+        #[arg(
+            long = "seed-inventory",
+            value_name = "FILE",
+            conflicts_with_all = ["arch", "profile"]
+        )]
+        seed_inventory: Vec<PathBuf>,
+        /// 复用已验证的 Site Seed 闭包；与每个 `--seed-inventory` 按顺序对应。
+        /// 不给则在构建机重新烘焙。
+        #[arg(long = "seed-file", value_name = "FILE", requires = "seed_inventory")]
+        seed_file: Vec<PathBuf>,
     },
     /// 为一份实际机群准备离线 Site Seed。
     ///
-    /// 它先只读探测每台目标的 arch、distro、version；一份 Seed 只允许一个
-    /// 画像，避免把不同发行版的 apt/dnf 依赖混在一起。随后按该画像烘焙文件、
-    /// OS 包依赖闭包和 OCI 镜像，并写出同名 `.lock.yaml`，其中记录断网 apply
-    /// 所需的参数。多 controlplane 会自动收集 Nginx HA 分支。
+    /// 画像来自 inventory 的静态 `platform:{os,version,arch}`，不 SSH 探测
+    /// 目标；一份 Seed 只允许一个画像，避免把不同发行版的 apt/dnf 依赖混在
+    /// 一起。随后按该画像烘焙文件、OS 包依赖闭包和 OCI 镜像，并写出同名
+    /// `.lock.yaml`，其中记录断网 apply 所需的参数。多 controlplane 会自动
+    /// 收集 Nginx HA 分支。
     Prepare {
         /// 蓝图文件
         #[arg(short, long, value_name = "FILE")]
@@ -804,14 +827,15 @@ enum Cmd {
     /// 收进本地存储(普通 OCI 制品,如闭包要用的容器镜像)。
     ///
     /// 默认瘦拉:物料层留在 registry —— 在线部署时目标机自己按 URL 取,
-    /// 控制机不必先扛几百兆。离线现场用 `--full`。
+    /// 控制机不必先扛几百兆。`--offline` 预取完整包供断网 apply；旧名
+    /// `--full` 保留兼容。
     #[command(
         verbatim_doc_comment,
         after_help = "\
 用法示例:
   crater pull ghcr.io/acme/yq:4.53.6              # 摊成 yq/
   crater pull ghcr.io/acme/yq:4.53.6 --into ./x   # 摊到指定目录
-  crater pull ghcr.io/acme/yq:4.53.6 --full       # 连物料一起(离线要)
+  crater pull ghcr.io/acme/yq:4.53.6 --offline    # 预取完整包(断网 apply)
 "
     )]
     Pull {
@@ -821,8 +845,14 @@ enum Cmd {
         #[arg(long)]
         into: Option<PathBuf>,
         /// 连物料层一起拉 —— 离线现场才需要
-        #[arg(long)]
+        #[arg(long, conflicts_with = "offline")]
         full: bool,
+        /// 预取完整包供 `crater apply <引用> --offline` 使用
+        #[arg(long, conflicts_with = "full")]
+        offline: bool,
+        /// `--offline` 选择 Site Seed 用的静态 inventory；pull 阶段不 SSH。
+        #[arg(short = 'i', long, value_name = "FILE", requires = "offline")]
+        inventory: Option<PathBuf>,
     },
     /// 推上 registry
     ///
@@ -871,6 +901,16 @@ enum Cmd {
         /// 摘要也一起 `--set`。
         #[arg(long = "set", value_name = "KEY=VAL")]
         set: Vec<String>,
+        /// 把此 inventory.platform 对应的完整 Site Seed 附到同一 OCI tag。
+        #[arg(
+            long = "seed-inventory",
+            value_name = "FILE",
+            conflicts_with_all = ["arch", "fors"]
+        )]
+        seed_inventory: Vec<PathBuf>,
+        /// 复用已验证的 Site Seed 闭包；与每个 `--seed-inventory` 按顺序对应。
+        #[arg(long = "seed-file", value_name = "FILE", requires = "seed_inventory")]
+        seed_file: Vec<PathBuf>,
     },
     /// 把 `crater save` 的文件收进本地存储 —— 断网机上的第一步
     ///
@@ -967,8 +1007,11 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
         /// 连物料层一起拉 —— 离线现场才需要。
-        #[arg(long)]
+        #[arg(long, conflicts_with = "offline")]
         full: bool,
+        /// 只消费本地完整包,不访问 registry 或物料源。
+        #[arg(long, conflicts_with = "full")]
+        offline: bool,
         /// 换版本时,上一版目录里的本地改动"判不出"或"已漂移"也照旧升级。
         ///
         /// 旧目录一个字节都不删,只是那些改动**不会**跟到新版本。
@@ -1181,7 +1224,13 @@ fn remote_name(file: &Option<PathBuf>, source: &Option<String>) -> Option<String
 /// `converge=false`(`plan`,或 `apply --dry-run`)停在计划;`true` 时计划
 /// 照印,然后执行 —— 拉下来的字节是别人做的,而下一步要改的是生产机,
 /// 那一眼不能省。
-async fn from_repo(name: &str, target: &TargetOpts, sets: &[String], converge: bool) -> Result<()> {
+async fn from_repo(
+    name: &str,
+    target: &TargetOpts,
+    sets: &[String],
+    converge: bool,
+    offline: bool,
+) -> Result<()> {
     // 引用是直连 registry,没有"本地找过了"这一步 —— 说了反而误导。
     if !name.contains('/') {
         say!("本地没有 {name}.app.yaml —— 去仓库找");
@@ -1194,7 +1243,8 @@ async fn from_repo(name: &str, target: &TargetOpts, sets: &[String], converge: b
         None,
         pkg::InstallOpts {
             yes: converge,
-            full: false,
+            full: offline,
+            offline,
             force: false,
         },
     )
@@ -1225,6 +1275,7 @@ async fn main() -> Result<()> {
             target,
             dry_run,
             set,
+            offline,
         } => {
             // 按文件形状分流:栈 → 逐蓝图;蓝图 → 五动词管线;都不是 → 说清楚。
             let probe = source.clone();
@@ -1243,7 +1294,7 @@ async fn main() -> Result<()> {
                 return blueprint::apply_blueprint(&r.blueprint, &r.target, &r.sets).await;
             }
             if let Some(n) = remote_name(&file, &probe) {
-                return from_repo(&n, &target, &set, !dry_run).await;
+                return from_repo(&n, &target, &set, !dry_run, offline).await;
             }
             bail!(legacy_note("apply"))
         }
@@ -1260,7 +1311,7 @@ async fn main() -> Result<()> {
             match source_of(&file, &source, &target, &set)? {
                 Some(r) => blueprint::plan_blueprint(&r.blueprint, &r.target, &r.sets).await,
                 None => match remote_name(&file, &source) {
-                    Some(n) => from_repo(&n, &target, &set, false).await,
+                    Some(n) => from_repo(&n, &target, &set, false, false).await,
                     None => bail!(legacy_note("plan")),
                 },
             }
@@ -1279,6 +1330,8 @@ async fn main() -> Result<()> {
             output,
             profile,
             set,
+            seed_inventory,
+            seed_file,
         } => {
             // `-t` = 组装成 OCI 包(像 `docker build -t`);否则 = 烤闭包文件。
             // 两条路的产物完全不同,所以**恰择其一**,不给默认 —— 猜错的表现
@@ -1290,7 +1343,8 @@ async fn main() -> Result<()> {
                 let src = path
                     .or(file)
                     .ok_or_else(|| anyhow!("`crater build -t <引用>` 还要给蓝图目录或文件"))?;
-                return pkg::build(&src, &t, &arch, &profile, &set).await;
+                return pkg::build(&src, &t, &arch, &profile, &set, &seed_inventory, &seed_file)
+                    .await;
             }
             let file = path
                 .or(file)
@@ -1349,10 +1403,16 @@ async fn main() -> Result<()> {
             set,
             yes,
             full,
+            offline,
             force,
             target,
         } => {
-            let opts = pkg::InstallOpts { yes, full, force };
+            let opts = pkg::InstallOpts {
+                yes,
+                full: full || offline,
+                offline,
+                force,
+            };
             pkg::install(
                 &source,
                 &target,
@@ -1374,12 +1434,26 @@ async fn main() -> Result<()> {
             reference,
             into,
             full,
+            offline,
+            inventory,
         } => {
             // 先按 crater 包拉(摊回文件);不是包就退回"只收进本地存储" ——
             // 闭包要用的容器镜像走的正是后一条。
-            match pkg::pull(&reference, into.as_deref(), full).await {
+            let platform = inventory
+                .as_deref()
+                .map(target::offline_platform_from_inventory)
+                .transpose()?;
+            match pkg::pull(
+                &reference,
+                into.as_deref(),
+                full,
+                platform.as_ref(),
+                offline,
+            )
+            .await
+            {
                 Ok(()) => Ok(()),
-                Err(e) if is_not_a_crater_package(&e) => {
+                Err(e) if is_not_a_crater_package(&e) && !offline => {
                     say!("{reference} 不是 crater 包 —— 只收进本地存储");
                     images::pull_image(&reference).await
                 }
@@ -1392,12 +1466,30 @@ async fn main() -> Result<()> {
             arch,
             fors,
             set,
+            seed_inventory,
+            seed_file,
         } => match arg2 {
             // 两个位置参数 = `<目录> <引用>`:组装再推(常用的那条)
-            Some(reference) => pkg::push(Path::new(&arg1), &reference, &arch, &fors, &set).await,
+            Some(reference) => {
+                pkg::push(
+                    Path::new(&arg1),
+                    &reference,
+                    &arch,
+                    &fors,
+                    &set,
+                    &seed_inventory,
+                    &seed_file,
+                )
+                .await
+            }
             // 一个 = 推本地存储里已有的那个(像 `docker push`)
             None => {
-                if !arch.is_empty() || !fors.is_empty() || !set.is_empty() {
+                if !arch.is_empty()
+                    || !fors.is_empty()
+                    || !set.is_empty()
+                    || !seed_inventory.is_empty()
+                    || !seed_file.is_empty()
+                {
                     bail!(
                         "`--arch` / `--for` / `--set` 是**组装**时用的,\n\
                          而这里只给了一个引用(= 推已有的那个)。\n\

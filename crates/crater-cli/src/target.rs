@@ -116,6 +116,20 @@ impl TargetOpts {
         apply_limit(&self.hosts()?, self.limit.as_deref())
     }
 
+    /// Read the declarative platform used for offline Seed selection. Do not
+    /// call `hosts()` here: that path resolves credentials and is deliberately
+    /// an execution concern, while `pull --offline`/`prepare` must work before
+    /// the deployment network is reachable.
+    pub(crate) fn offline_platform(&self) -> Result<crater_core::spec::Platform> {
+        let path = self.inventory.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "离线 Site Seed 需要 `-i inventory.yaml` 中的静态 platform 声明。\n\
+                 例如:\n  inventory:\n    platform: {{ os: ubuntu, version: \"24.04\", arch: amd64 }}"
+            )
+        })?;
+        offline_platform_from_inventory(path)
+    }
+
     /// inventory **显式声明**的组名(含空组)。
     ///
     /// 空组是合法拓扑(单节点的 `worker: { hosts: [] }`),必须与"拼错的组名"
@@ -147,6 +161,21 @@ impl TargetOpts {
     }
 }
 
+/// Parse only the static offline profile from an inventory. Kept separate from
+/// `target_hosts`: downloading a Seed must not resolve secrets or reach hosts.
+pub(crate) fn offline_platform_from_inventory(path: &Path) -> Result<crater_core::spec::Platform> {
+    let spec = CraterSpec::from_yaml_file(path)?;
+    let platform = spec.inventory.platform.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} 缺少 inventory.platform；离线包不能靠 SSH 探测目标画像。\n\
+             添加:\n  inventory:\n    platform: {{ os: ubuntu, version: \"24.04\", arch: amd64 }}",
+            path.display()
+        )
+    })?;
+    platform.validate()?;
+    Ok(platform)
+}
+
 /// Starter inventory written by `crater create inventory`. Comments document
 /// every field; password/key are mutually exclusive (key wins, `~` expands).
 pub(crate) const INVENTORY_TEMPLATE: &str = r#"# crater inventory —— 部署目标主机清单。
@@ -162,6 +191,9 @@ pub(crate) const INVENTORY_TEMPLATE: &str = r#"# crater inventory —— 部署�
 # 三级 vars(全局 inventory.vars < 组 groups.<g>.vars < 主机 hosts[].vars),
 # 覆盖 task 的 params 默认 —— 环境配置(vip/网段等)放这里,让 OCI 与环境无关。
 inventory:
+  # 离线 Site Seed 的静态选择键。prepare/pull --offline 不 SSH 探测目标；
+  # apply --offline 时才校验真实机器是否与它匹配。
+  # platform: { os: ubuntu, version: "24.04", arch: amd64 }
   # vars:                 # 全局(对所有主机生效)
   #   vip: "192.168.1.100"
   hosts:

@@ -2,6 +2,8 @@
 #   crater apply docker.io/willdockerhub/k8s:<tag> -i my-inventory.yaml --set ha=true
 # 拓扑由 groups 决定:controlplane 组首台 = init 节点;worker 为工作节点。
 inventory:
+  # Offline Seed 选择键。prepare/pull --offline 不 SSH 探测目标；部署时会校验。
+  platform: { os: ubuntu, version: "24.04", arch: amd64 }
   # 默认 HA 不需要 vars：每台 controlplane 的本机 Nginx 自动互相负载均衡。
   # 仅兼容旧 VIP 路径才需要：--set ha_mode=vip --set vip=192.168.1.100
   hosts:

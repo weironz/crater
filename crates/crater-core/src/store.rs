@@ -19,11 +19,22 @@ const ANN_REF: &str = "org.opencontainers.image.ref.name";
 // B 类 artifact layer typing (D-087) — kept in sync with bundle.rs, used to
 // skip `dependency` material layers on a thin pull.
 pub const MT_MATERIAL: &str = "application/vnd.crater.material.v1";
+/// A complete, target-profile-specific offline closure. It is a regular layer
+/// in the public package manifest, but a thin pull deliberately leaves it in
+/// the registry; `pull --offline -i inventory.yaml` fetches exactly one.
+pub const MT_SITE_SEED: &str = "application/vnd.crater.site-seed.v1.tar";
 pub const ANN_MATERIAL_FETCH: &str = "org.crater.material.fetch";
 /// 物料层的来源 URL —— 部署侧的 `BlobMap` 按它索引(不是按物料名:
 /// 同名物料按 `when:` 分成多个变体,各有各的 URL)。
 pub const ANN_MATERIAL_SOURCE: &str = "org.crater.material.source";
 pub const ANN_MATERIAL_NAME: &str = "org.crater.material.name";
+pub const ANN_SEED_OS: &str = "org.crater.seed.os";
+pub const ANN_SEED_VERSION: &str = "org.crater.seed.version";
+pub const ANN_SEED_ARCH: &str = "org.crater.seed.arch";
+/// Marks a local, selected projection of a public Seed matrix. Such a manifest
+/// is safe to save/load for air-gap transport but must never be pushed back as
+/// the public tag (it intentionally omits the other profiles).
+const ANN_SEED_SELECTION: &str = "org.crater.site-seed.selection";
 // 蓝图包(D-123)。刻意**不设 `artifactType`**:制品身份靠 `config.mediaType`,
 // 那是 OCI 1.0 时代的老约定,也是唯一跨得过 ACR / Docker Hub / GHCR / Harbor /
 // zot 的写法 —— `artifactType` + 空 config 描述符是 1.1 写法,ACR 会拒收。
@@ -293,6 +304,159 @@ impl ImageStore {
         self.pull_layers(reference, true).await
     }
 
+    /// Fetch exactly the Site Seed selected by a static inventory platform.
+    /// The public OCI tag remains one package; profile-specific closures are
+    /// layers addressed by digest, not an exposed tag matrix.
+    pub async fn pull_site_seed(
+        &self,
+        reference: &str,
+        platform: &crate::spec::Platform,
+    ) -> crate::Result<Option<PathBuf>> {
+        self.pull_thin(reference).await?;
+        let Some(seed) = self.site_seed_descriptor(reference, platform)? else {
+            // Back-compat for ordinary packages such as yq: they do not have a
+            // profile Seed matrix, so `--offline` means the historic complete
+            // package pull.
+            self.pull(reference).await?;
+            return Ok(None);
+        };
+        if let Some(path) = self.local_site_seed(reference, platform)? {
+            return Ok(Some(path));
+        }
+        let digest = seed["digest"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Site Seed 层缺少 digest"))?;
+        use oci_client::{Reference, RegistryOperation};
+        let r: Reference = reference
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad image ref '{reference}': {e}"))?;
+        let client = registry_client()?;
+        let auth = auth_for(reference);
+        client
+            .auth(&r, &auth, RegistryOperation::Pull)
+            .await
+            .map_err(|e| net_err(format!("向 {reference} 认证"), e))?;
+        let mut bytes = Vec::new();
+        client
+            .pull_blob(&r, digest, &mut bytes)
+            .await
+            .map_err(|e| net_err(format!("拉 {reference} 的 Site Seed {digest}"), e))?;
+        let (got, _) = self.store_raw(&bytes)?;
+        if got != strip(digest) {
+            anyhow::bail!("{reference} 的 Site Seed 摘要不符:声明 {digest},实得 sha256:{got}");
+        }
+        self.project_site_seed(reference, &got)?;
+        Ok(Some(self.blob_path(&got)))
+    }
+
+    /// True when this package has at least one profile-specific Site Seed.
+    pub fn has_site_seeds(&self, reference: &str) -> crate::Result<bool> {
+        let manifest = self.resolve_manifest(reference)?;
+        Ok(manifest["layers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|l| l["mediaType"].as_str() == Some(MT_SITE_SEED)))
+    }
+
+    /// Return the selected Seed only when its bytes are already local. `None`
+    /// means its selected blob has not been fetched yet.
+    pub fn local_site_seed(
+        &self,
+        reference: &str,
+        platform: &crate::spec::Platform,
+    ) -> crate::Result<Option<PathBuf>> {
+        let Some(seed) = self.site_seed_descriptor(reference, platform)? else {
+            return Ok(None);
+        };
+        let digest = seed["digest"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Site Seed 层缺少 digest"))?;
+        let path = self.blob_path(strip(digest));
+        if path.exists() {
+            return Ok(Some(path));
+        }
+        Ok(None)
+    }
+
+    /// Find the one Seed matching a declared `os + version + arch` profile.
+    /// The `Option` distinguishes old/general packages (no Seed at all) from a
+    /// package that has a Seed matrix but does not support this fleet.
+    fn site_seed_descriptor(
+        &self,
+        reference: &str,
+        platform: &crate::spec::Platform,
+    ) -> crate::Result<Option<serde_json::Value>> {
+        let manifest = self.resolve_manifest(reference)?;
+        let seeds: Vec<&serde_json::Value> = manifest["layers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|l| l["mediaType"].as_str() == Some(MT_SITE_SEED))
+            .collect();
+        if seeds.is_empty() {
+            return Ok(None);
+        }
+        let picked = seeds.into_iter().find(|l| {
+            let a = &l["annotations"];
+            a[ANN_SEED_OS].as_str() == Some(platform.os.as_str())
+                && a[ANN_SEED_VERSION].as_str() == Some(platform.version.as_str())
+                && a[ANN_SEED_ARCH].as_str() == Some(platform.arch.as_str())
+        });
+        if let Some(seed) = picked {
+            return Ok(Some(seed.clone()));
+        }
+        let available = manifest["layers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|l| l["mediaType"].as_str() == Some(MT_SITE_SEED))
+            .map(|l| {
+                let a = &l["annotations"];
+                format!(
+                    "{}/{}/{}",
+                    a[ANN_SEED_ARCH].as_str().unwrap_or("?"),
+                    a[ANN_SEED_OS].as_str().unwrap_or("?"),
+                    a[ANN_SEED_VERSION].as_str().unwrap_or("?")
+                )
+            })
+            .collect::<Vec<_>>();
+        anyhow::bail!(
+            "{reference} 没有 {}/{}/{} 的离线 Site Seed；可用:{}",
+            platform.arch,
+            platform.os,
+            platform.version,
+            available.join(", ")
+        );
+    }
+
+    /// Rewrite only the *local tag* to a manifest containing its selected
+    /// Seed. The public tag on the registry is untouched. This makes the local
+    /// object complete, so ordinary `save/load` transports precisely the one
+    /// requested profile rather than every distro/architecture closure.
+    fn project_site_seed(&self, reference: &str, selected: &str) -> crate::Result<()> {
+        let mut manifest = self.resolve_manifest(reference)?;
+        let layers = manifest["layers"]
+            .as_array_mut()
+            .ok_or_else(|| anyhow::anyhow!("{reference} 的 Seed 包没有 layers"))?;
+        layers.retain(|layer| {
+            layer["mediaType"].as_str() != Some(MT_SITE_SEED)
+                || strip(layer["digest"].as_str().unwrap_or_default()) == selected
+        });
+        if !manifest["annotations"].is_object() {
+            manifest["annotations"] = json!({});
+        }
+        let annotations = manifest["annotations"]
+            .as_object_mut()
+            .expect("annotations was normalized to an object");
+        annotations.insert(
+            ANN_SEED_SELECTION.to_string(),
+            serde_json::Value::String(selected.to_string()),
+        );
+        self.put_manifest(reference, &serde_json::to_vec(&manifest)?)?;
+        Ok(())
+    }
+
     /// True iff every blob this artifact's manifest **tree** references is
     /// present locally (D-087): distinguishes a full local copy from a thin
     /// pull, so an `--offline` apply can re-pull in full if needed.
@@ -460,7 +624,7 @@ impl ImageStore {
                     let fetch = l["annotations"][ANN_MATERIAL_FETCH]
                         .as_str()
                         .unwrap_or("embedded");
-                    if mt_l == MT_MATERIAL && fetch == "dependency" {
+                    if (mt_l == MT_MATERIAL && fetch == "dependency") || mt_l == MT_SITE_SEED {
                         continue;
                     }
                 }
@@ -499,6 +663,12 @@ impl ImageStore {
     pub async fn push(&self, reference: &str) -> crate::Result<()> {
         let manifest_blob = self.manifest_blob(reference)?;
         let top: serde_json::Value = serde_json::from_slice(&manifest_blob)?;
+        if top["annotations"][ANN_SEED_SELECTION].is_string() {
+            anyhow::bail!(
+                "{reference} 是本地选择后的 Site Seed 投影，只能 save/load 运输，不能 push 覆盖公开 tag。\n\
+                 回到发布机重新 `crater build/push … --seed-inventory …`。"
+            );
+        }
         if top.get("manifests").and_then(|v| v.as_array()).is_some() {
             return self.push_index(reference, &top, &manifest_blob).await;
         }
@@ -1465,6 +1635,86 @@ mod tests {
         )
         .unwrap();
         store
+    }
+
+    #[test]
+    fn site_seed_selection_uses_the_declared_platform_not_local_arch() {
+        let dir = std::env::temp_dir().join(format!("crater-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = ImageStore {
+            root: dir.to_path_buf(),
+        };
+        std::fs::create_dir_all(store.blobs_dir()).unwrap();
+        let put = |data: &[u8]| {
+            let d = crate::bundle::sha256_hex(data);
+            std::fs::write(store.blobs_dir().join(&d), data).unwrap();
+            d
+        };
+        let config = put(b"{}");
+        let ubuntu_seed = put(b"ubuntu-seed");
+        let arm_seed = crate::bundle::sha256_hex(b"arm-seed"); // deliberately absent
+        let manifest = serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "config": { "digest": format!("sha256:{config}") },
+            "layers": [
+                { "mediaType": MT_SITE_SEED, "digest": format!("sha256:{ubuntu_seed}"),
+                  "annotations": { ANN_SEED_OS: "ubuntu", ANN_SEED_VERSION: "24.04", ANN_SEED_ARCH: "amd64" } },
+                { "mediaType": MT_SITE_SEED, "digest": format!("sha256:{arm_seed}"),
+                  "annotations": { ANN_SEED_OS: "ubuntu", ANN_SEED_VERSION: "24.04", ANN_SEED_ARCH: "arm64" } }
+            ]
+        }))
+        .unwrap();
+        let md = put(&manifest);
+        std::fs::write(
+            store.root.join("index.json"),
+            serde_json::to_vec(&json!({ "schemaVersion": 2, "manifests": [{
+                "mediaType": MT_MANIFEST, "digest": format!("sha256:{md}"), "size": manifest.len(),
+                "annotations": { ANN_REF: "reg/acme/k8s:1" }
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let amd64 = crate::spec::Platform {
+            os: "ubuntu".into(),
+            version: "24.04".into(),
+            arch: "amd64".into(),
+        };
+        assert_eq!(
+            store.local_site_seed("reg/acme/k8s:1", &amd64).unwrap(),
+            Some(store.blob_path(&ubuntu_seed))
+        );
+        let arm64 = crate::spec::Platform {
+            arch: "arm64".into(),
+            ..amd64.clone()
+        };
+        assert_eq!(
+            store.local_site_seed("reg/acme/k8s:1", &arm64).unwrap(),
+            None
+        );
+        let unsupported = crate::spec::Platform {
+            version: "22.04".into(),
+            ..amd64
+        };
+        assert!(store
+            .local_site_seed("reg/acme/k8s:1", &unsupported)
+            .unwrap_err()
+            .to_string()
+            .contains("没有"));
+        store
+            .project_site_seed("reg/acme/k8s:1", &ubuntu_seed)
+            .unwrap();
+        assert!(
+            store.has_all_layers("reg/acme/k8s:1"),
+            "selected projection should be a self-contained save/load object"
+        );
+        let projected = store.resolve_manifest("reg/acme/k8s:1").unwrap();
+        assert_eq!(projected["layers"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            projected["annotations"][ANN_SEED_SELECTION].as_str(),
+            Some(ubuntu_seed.as_str())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// D-078④: concurrent index tagging must not lose entries — N parallel
